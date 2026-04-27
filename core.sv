@@ -105,6 +105,7 @@ module core(clk,
 	    got_break,
 	    got_ud,
 	    got_bad_addr,
+	    core_state,
 	    inflight,
 	    epc);
    input logic clk;
@@ -195,6 +196,8 @@ module core(clk,
    output logic 			  got_ud;
    output logic 			  got_bad_addr;
    output logic [`LG_ROB_ENTRIES:0] 	  inflight;
+   output logic [4:0]			  core_state;
+   
    output logic [31:0] 			  epc;
    
    logic [31:0] 			  r_epc, n_epc;
@@ -423,6 +426,7 @@ module core(clk,
      begin
 	core_mem_req_valid = t_mem_req_valid;
 	core_mem_req = t_mem_req;
+	core_state = r_state;
      end // always_comb
    
 

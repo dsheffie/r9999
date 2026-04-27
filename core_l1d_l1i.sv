@@ -43,6 +43,7 @@ module core_l1d_l1i(clk,
 		    got_break,
 		    got_ud,
 		    got_bad_addr,
+		    core_state,
 		    inflight,
 		    epc);
 
@@ -89,11 +90,11 @@ module core_l1d_l1i(clk,
    /* mem port */
    output logic 		 mem_req_valid;
    output logic [`M_WIDTH-1:0] 	 mem_req_addr;
-   output logic [511:0] 	 mem_req_store_data;
+   output logic [127:0] 	 mem_req_store_data;
    output logic [3:0] 		 mem_req_opcode;
    
    input logic  			  mem_rsp_valid;
-   input logic [511:0] 			  mem_rsp_load_data;
+   input logic [127:0] 			  mem_rsp_load_data;
 
    output logic [4:0] 			  retire_reg_ptr;
    output logic [31:0] 			  retire_reg_data;
@@ -126,6 +127,7 @@ module core_l1d_l1i(clk,
    output logic 			  got_bad_addr;
    
    output logic [`LG_ROB_ENTRIES:0] 	  inflight;
+   output logic [4:0]			  core_state;
    output logic [31:0] 			  epc;
       
 
@@ -584,6 +586,7 @@ module core_l1d_l1i(clk,
 	     .got_break(got_break),
 	     .got_ud(got_ud),
 	     .got_bad_addr(got_bad_addr),
+	     .core_state(core_state),
 	     .inflight(inflight),
 	     .epc(epc)
 	     );
