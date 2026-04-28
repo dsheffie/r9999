@@ -91,6 +91,8 @@ module core(clk,
 	    retire_delay_slot,
 	    retire_pc,
 	    retire_two_pc,
+	    retire_op,
+	    retire_two_op,
 	    retired_call,
 	    retired_ret,
 	    retired_rob_ptr_valid,
@@ -178,6 +180,10 @@ module core(clk,
    
    output logic [(`M_WIDTH-1):0] 	  retire_pc;
    output logic [(`M_WIDTH-1):0] 	  retire_two_pc;
+
+   output logic [6:0]			  retire_op;
+   output logic [6:0]			  retire_two_op;
+      
    output logic 			  retired_call;
    output logic 			  retired_ret;
 
@@ -204,7 +210,6 @@ module core(clk,
    
    localparam N_PRF_ENTRIES = (1<<`LG_PRF_ENTRIES);
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);
-   localparam N_BOB_ENTRIES = (1<<`LG_BOB_ENTRIES);   
    localparam N_UQ_ENTRIES = (1<<`LG_UQ_ENTRIES);
    localparam N_HILO_ENTRIES = (1<<`LG_HILO_PRF_ENTRIES);
    
@@ -230,7 +235,6 @@ module core(clk,
    
    rob_entry_t r_rob[N_ROB_ENTRIES-1:0];
    
-   bob_entry_t r_bob[N_BOB_ENTRIES-1:0];
    
    logic [N_ROB_ENTRIES-1:0] 		  r_rob_complete;
    logic [N_ROB_ENTRIES-1:0] 		  r_rob_sd_complete;
@@ -268,10 +272,6 @@ module core(clk,
    logic [`LG_ROB_ENTRIES:0] r_rob_next_tail_ptr, n_rob_next_tail_ptr;
    logic 		     t_rob_empty, t_rob_full, t_rob_next_full, t_rob_next_empty;
    
-   //bob
-   logic [`LG_BOB_ENTRIES:0] r_bob_head_ptr, n_bob_head_ptr;
-   logic [`LG_BOB_ENTRIES:0] r_bob_tail_ptr, n_bob_tail_ptr;
-   logic 		     t_bob_empty, t_bob_full;
       
          
    logic [`LG_PRF_ENTRIES-1:0] r_alloc_rat[31:0];
@@ -300,7 +300,6 @@ module core(clk,
    logic 		     n_in_delay_slot, r_in_delay_slot;
    
    logic 		     t_clr_dq;
-   logic 		     t_enough_bob;
    logic 		     t_enough_iprfs, t_enough_hlprfs;
    logic 		     t_enough_next_iprfs, t_enough_next_hlprfs;
    
@@ -621,6 +620,9 @@ module core(clk,
 	     
    	     retire_pc <= 'd0;
 	     retire_two_pc <= 'd0;
+	     retire_op <= 'd0;
+	     retire_two_op <= 'd0;
+	     
 	     retire_delay_slot <= 1'b0;
 	     retired_call <= 1'b0;
 	     retired_ret <= 1'b0;
@@ -648,6 +650,9 @@ module core(clk,
 	     retired_ret <= t_rob_head.is_ret && t_retire;
 	     retired_call <= t_rob_head.is_call && t_retire;
 
+	     retire_op <= t_rob_head.opcode;
+	     retire_two_op <= t_rob_next_head.opcode;
+	     
 	     retired_rob_ptr_valid <= t_retire;
 	     
 	     retired_rob_ptr_two_valid <= t_retire_two;
@@ -739,17 +744,9 @@ module core(clk,
 `ifdef DUMP_ROB
    always_ff@(negedge clk)
      begin
-	if(r_state == ACTIVE)
+ 	if(1)
 	  begin
-	     if(t_bob_full && t_rob_empty)
-	       begin
-		  $display("fucked up at cycle %d", r_cycle);
-		  $stop();
-	       end
-	  end
-	if(1)
-	  begin
-	     $display("cycle %d : state = %d, alu complete %b, mem complete %b,head_ptr %d, inflight %d, complete %b,  can_retire_rob_head %b, t_faulted_head_and_serializing_delay %b, head pc %x, empty %b, full %b, bob full %b", 
+	     $display("cycle %d : state = %d, alu complete %b, mem complete %b,head_ptr %d, inflight %d, complete %b,  can_retire_rob_head %b, t_faulted_head_and_serializing_delay %b, head pc %x, empty %b, full %b", 
 		      r_cycle,
 		      r_state,
 		      t_complete_valid_1,
@@ -761,8 +758,7 @@ module core(clk,
 		      t_faulted_head_and_serializing_delay,
 		      t_rob_head.pc,
 		      t_rob_empty, 
-		      t_rob_full,
-		      t_bob_full);
+		      t_rob_full);
 	     
 	     for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
 	       begin
@@ -840,7 +836,6 @@ module core(clk,
 	t_enough_iprfs = !((t_uop.dst_valid) && t_gpr_ffs_full);
 	t_enough_hlprfs = !((t_uop.hilo_dst_valid) && (r_hilo_prf_free == 'd0));
 
-	t_enough_bob = t_uop.is_br ? !t_bob_full : 1'b1;
 	
 	t_enough_next_iprfs = !((t_uop2.dst_valid) && t_gpr_ffs2_full);
 	t_enough_next_hlprfs = !((t_uop2.hilo_dst_valid) /*&& (r_hilo_prf_free == 'd0)*/);
@@ -971,7 +966,6 @@ module core(clk,
 					&& !t_dq_empty					
 					&& t_enough_iprfs
 					&& t_enough_hlprfs
-					&& t_enough_bob
 					&& (r_pending_fault ? r_in_delay_slot : 1'b1);
 
 			      
@@ -1046,7 +1040,6 @@ module core(clk,
 				   && !t_dq_empty
 				   && t_enough_iprfs
 				   && t_enough_hlprfs
-				   && t_enough_bob
 				   && (r_pending_fault ? r_in_delay_slot : 1'b1);
 
 			 //$display("r_cycle = %d, can alloc %b, r_pending %b, delay %b", r_cycle, t_alloc, r_pending_fault, r_in_delay_slot);
@@ -1057,7 +1050,6 @@ module core(clk,
 				       && !t_dq_next_empty 
 				       && !t_rob_next_full
 				       && !t_uq_next_full
-				       && t_enough_bob
 				       && t_enough_next_iprfs
 				       && t_enough_next_hlprfs;
 
@@ -1353,8 +1345,6 @@ module core(clk,
 	     r_rob_tail_ptr <= 'd0;
 	     r_rob_next_head_ptr <= 'd1;
 	     r_rob_next_tail_ptr <= 'd1;
-	     r_bob_head_ptr <= 'd0;
-	     r_bob_tail_ptr <= 'd0;
 	  end
 	else
 	  begin
@@ -1362,8 +1352,6 @@ module core(clk,
 	     r_rob_tail_ptr <= n_rob_tail_ptr;
 	     r_rob_next_head_ptr <= n_rob_next_head_ptr;
 	     r_rob_next_tail_ptr <= n_rob_next_tail_ptr;
-	     r_bob_head_ptr <= n_bob_head_ptr;
-	     r_bob_tail_ptr <= n_bob_tail_ptr;
 	  end
      end // always_ff@ (posedge clk)
 
@@ -1594,8 +1582,9 @@ module core(clk,
 	t_rob_tail.is_br = t_alloc_uop.is_br;	
 	t_rob_tail.in_delay_slot = r_in_delay_slot;
 	t_rob_tail.data = 'd0;
+	t_rob_tail.opcode = t_alloc_uop.op;
 	t_rob_tail.pht_idx = t_alloc_uop.pht_idx;
-
+	
 	t_rob_next_tail.faulted  = 1'b0;
 	t_rob_next_tail.valid_dst  = 1'b0;
 	t_rob_next_tail.valid_hilo_dst = 1'b0;
@@ -1604,7 +1593,7 @@ module core(clk,
 	t_rob_next_tail.old_pdst  = 'd0;
 	t_rob_next_tail.pc = t_alloc_uop2.pc;
 	t_rob_next_tail.target_pc = 'd0;
-
+	t_rob_next_tail.opcode = t_alloc_uop2.op;
 	t_rob_next_tail.is_call = t_alloc_uop2.op == JAL || t_alloc_uop2.op == JALR || t_alloc_uop2.op == BAL;
 	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop.srcA == 'd31);
 	t_rob_next_tail.is_break  = (t_alloc_uop2.op == BREAK);
@@ -1794,43 +1783,6 @@ module core(clk,
 	  end
      end // always_ff@ (posedge clk)
 
-   always_ff@(posedge clk)
-     begin
-	if(reset || t_clr_rob)
-	  begin
-	     for(integer i = 0; i < N_BOB_ENTRIES; i=i+1)
-	       begin
-		  r_bob[i].valid <= 1'b0;
-	       end
-	  end
-	else
-	  begin
-	     if(t_alloc && !t_alloc_two && t_uop.is_br)
-	       begin
-		  r_bob[r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]].valid <= 1'b1;
-		  r_bob[r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]].rob_ptr <= r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0];
-		  //$display("case 1 push rob entry %d to bob loc %d", r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0], r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]);
-	       end
-	     else if(t_alloc && t_alloc_two)
-	       begin
-		  if(t_uop.is_br && !t_uop2.is_br)
-		    begin
-		       r_bob[r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]].valid <= 1'b1;
-		       r_bob[r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]].rob_ptr <= r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0];		       	
-		       //$display("case 2 push rob entry %d to bob loc %d, bob full %b", 
-		       //r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0], r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0],
-		       //t_bob_full);	       
-		    end
-		  else if(!t_uop.is_br && t_uop2.is_br)
-		    begin
-		       r_bob[r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]].valid <= 1'b1;
-		       r_bob[r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]].rob_ptr <= r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0];
-		       //$display("case 3 push rob entry %d to bob loc %d", r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0], r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]);		       
-		    end
-	       end
-	  end	
-     end // always_ff@ (posedge clk)
-   
 
    
    always_ff@(posedge clk)
@@ -1917,8 +1869,6 @@ module core(clk,
 	n_rob_tail_ptr = r_rob_tail_ptr;
 	n_rob_next_head_ptr = r_rob_next_head_ptr;
 	n_rob_next_tail_ptr = r_rob_next_tail_ptr;
-	n_bob_head_ptr = r_bob_head_ptr;
-	n_bob_tail_ptr = r_bob_tail_ptr;
 	
 	//rob control 
 	if(t_clr_rob)
@@ -1951,41 +1901,6 @@ module core(clk,
 	       end
 	  end // else: !if(t_clr_rob)
 
-	//bob control
-	if(t_clr_rob)
-	  begin
-	     n_bob_head_ptr = 'd0;
-	     n_bob_tail_ptr = 'd0;
-	  end
-	else
-	  begin
-	     if(t_alloc && !t_alloc_two && t_uop.is_br)
-	       begin
-		  n_bob_tail_ptr = r_bob_tail_ptr + 'd1;
-	       end
-	     else if(t_alloc && t_alloc_two && (t_uop.is_br || t_uop2.is_br))
-	       begin
-		  n_bob_tail_ptr = r_bob_tail_ptr + 'd1;
-	       end
-
-	     //can only retire one branch per cycle
-	     if((t_retire || t_bump_rob_head) && t_rob_head.is_br)
-	       begin
-		  //$display("cycle %d popped head of bob, r_bob ptr =%d, rob ptr = %d",
-		  //r_cycle,
-		  //r_bob[r_bob_head_ptr[`LG_BOB_ENTRIES-1:0]].rob_ptr,
-		  //r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]);
-		  n_bob_head_ptr = r_bob_head_ptr + 'd1;
-	       end
-	     else if(t_retire_two && t_rob_next_head.is_br)
-	       begin
-		  // $display("cycle %d popped head of bob, r_bob ptr =%d, rob ptr = %d",
-		  //r_cycle,
-		  //r_bob[r_bob_head_ptr[`LG_BOB_ENTRIES-1:0]].rob_ptr,
-		  //r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]);
-		  n_bob_head_ptr = r_bob_head_ptr + 'd1;
-	       end
-	  end
 
 	
 	
@@ -1995,9 +1910,6 @@ module core(clk,
 	t_rob_full = (r_rob_head_ptr[`LG_ROB_ENTRIES-1:0] == r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]) && (r_rob_head_ptr != r_rob_tail_ptr);
 	t_rob_next_full = (r_rob_head_ptr[`LG_ROB_ENTRIES-1:0] == r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]) && (r_rob_head_ptr != r_rob_next_tail_ptr);
 
-
-	t_bob_empty = (r_bob_head_ptr == r_bob_tail_ptr);
-	t_bob_full = (r_bob_head_ptr[`LG_BOB_ENTRIES-1:0] == r_bob_tail_ptr[`LG_BOB_ENTRIES-1:0]) && (r_bob_head_ptr != r_bob_tail_ptr);
 
 
 	

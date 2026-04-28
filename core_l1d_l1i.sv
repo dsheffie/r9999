@@ -27,6 +27,8 @@ module core_l1d_l1i(clk,
 		    retire_two_valid,
 		    retire_pc,
 		    retire_two_pc,
+		    retire_op,
+		    retire_two_op,
 		    monitor_req_reason,
 		    monitor_req_valid,
 		    monitor_rsp_valid,
@@ -109,6 +111,9 @@ module core_l1d_l1i(clk,
    output logic [(`M_WIDTH-1):0] 	  retire_pc;
    output logic [(`M_WIDTH-1):0] 	  retire_two_pc;
 
+   output logic [6:0]			  retire_op;
+   output logic [6:0]			  retire_two_op;   
+   
    logic 				  retired_call;
    logic 				  retired_ret;
 
@@ -573,6 +578,8 @@ module core_l1d_l1i(clk,
 	     .retire_delay_slot(t_retire_delay_slot),
 	     .retire_pc(retire_pc),
 	     .retire_two_pc(retire_two_pc),
+	     .retire_op(retire_op),
+	     .retire_two_op(retire_two_op),
 	     .retired_call(retired_call),
 	     .retired_ret(retired_ret),
 	     .retired_rob_ptr_valid(retired_rob_ptr_valid),
