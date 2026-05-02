@@ -18,6 +18,11 @@ import "DPI-C" function void report_exec(input int int_valid,
 
 module exec(clk, 
 	    reset,
+	    putchar_fifo_out,
+	    putchar_fifo_empty,
+	    putchar_fifo_pop,
+	    putchar_fifo_wptr,
+	    putchar_fifo_rptr,
 `ifdef VERILATOR
 	    clear_cnt,
 `endif
@@ -55,6 +60,12 @@ module exec(clk,
 	    monitor_rsp_data);
    input logic clk;
    input logic reset;
+   output logic [7:0] putchar_fifo_out;
+   output logic       putchar_fifo_empty;
+   input logic 	      putchar_fifo_pop;
+   output logic [3:0] putchar_fifo_wptr;
+   output logic [3:0] putchar_fifo_rptr;   
+   
 `ifdef VERILATOR
    input logic [31:0] clear_cnt;
 `endif

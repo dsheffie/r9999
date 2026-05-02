@@ -595,7 +595,7 @@ module decode_mips32(insn,
 		   end
 		 5'd4: /* mtc0 */
 		   begin
-		      if(rd == 'd12)
+		      if(rd == 'd7)
 			begin
 			   uop.op = MTC0;
 			   uop.dst = rd;
@@ -606,6 +606,17 @@ module decode_mips32(insn,
 			   uop.is_int = 1'b1;
 			   uop.must_restart = 1'b1;
 			end // if (rd == 'd12)
+		      else if(rd == 'd12)
+			begin
+			   uop.op = MTC0;
+			   uop.dst = rd;
+			   uop.srcA = rt;
+			   uop.srcA_valid = 1'b1;
+			   uop.serializing_op = 1'b1;
+			   uop.has_delay_slot = 1'b0;
+			   uop.is_int = 1'b1;
+			   uop.must_restart = 1'b1;
+			end // if (rd == 'd12)		      
 		      else
 			begin
 			   uop.op = NOP;

@@ -36,6 +36,11 @@ import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 
 module core(clk, 
 	    reset,
+	    putchar_fifo_out,
+	    putchar_fifo_empty,
+	    putchar_fifo_pop,
+	    putchar_fifo_wptr,
+	    putchar_fifo_rptr,
 	    extern_irq,
 	    head_of_rob_ptr_valid,
 	    head_of_rob_ptr,
@@ -112,6 +117,12 @@ module core(clk,
 	    epc);
    input logic clk;
    input logic reset;
+   output logic [7:0] putchar_fifo_out;
+   output logic       putchar_fifo_empty;
+   input logic 	      putchar_fifo_pop;
+   output logic [3:0] putchar_fifo_wptr;
+   output logic [3:0] putchar_fifo_rptr;
+   
    input logic extern_irq;
    output logic head_of_rob_ptr_valid;
    output logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
@@ -2081,6 +2092,11 @@ module core(clk,
    exec e (
 	   .clk(clk), 
 	   .reset(reset),
+	   .putchar_fifo_out(putchar_fifo_out),
+	   .putchar_fifo_empty(putchar_fifo_empty),
+	   .putchar_fifo_pop(putchar_fifo_pop),
+	   .putchar_fifo_wptr(putchar_fifo_wptr),
+	   .putchar_fifo_rptr(putchar_fifo_rptr),
 	   .divide_ready(t_divide_ready),
 `ifdef VERILATOR
 	   .clear_cnt(r_clear_cnt),

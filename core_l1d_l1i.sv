@@ -4,6 +4,11 @@
 
 module core_l1d_l1i(clk, 
 		    reset,
+		    putchar_fifo_out,
+		    putchar_fifo_empty,
+		    putchar_fifo_pop,
+		    putchar_fifo_wptr,
+		    putchar_fifo_rptr,
 		    extern_irq,
 		    in_flush_mode,
 		    resume,
@@ -54,6 +59,12 @@ module core_l1d_l1i(clk,
    
    input logic clk;
    input logic reset;
+   output logic [7:0] putchar_fifo_out;
+   output logic       putchar_fifo_empty;
+   input logic 	      putchar_fifo_pop;
+   output logic [3:0] putchar_fifo_wptr;
+   output logic [3:0] putchar_fifo_rptr;
+   
    input logic extern_irq;
    input logic resume;
    input logic [(`M_WIDTH-1):0] resume_pc;
@@ -523,6 +534,11 @@ module core_l1d_l1i(clk,
    core cpu (
 	     .clk(clk),
 	     .reset(reset),
+	     .putchar_fifo_out(putchar_fifo_out),
+	     .putchar_fifo_empty(putchar_fifo_empty),
+	     .putchar_fifo_pop(putchar_fifo_pop),
+	     .putchar_fifo_wptr(putchar_fifo_wptr),
+	     .putchar_fifo_rptr(putchar_fifo_rptr),
 	     .extern_irq(extern_irq),
 	     .resume(resume),
 	     .memq_empty(memq_empty),
