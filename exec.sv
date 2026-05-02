@@ -74,7 +74,7 @@ module exec(clk,
    input logic mem_dq_clr;
    input logic restart_complete;
    output logic [(`M_WIDTH-1):0]     cpr0_status_reg;
-   
+      
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);   
    output logic [N_ROB_ENTRIES-1:0]  uq_wait;   
    output logic [N_ROB_ENTRIES-1:0]  mq_wait;
@@ -131,6 +131,7 @@ module exec(clk,
    logic [N_HILO_PRF_ENTRIES-1:0] r_hilo_inflight, n_hilo_inflight;
    
    logic 			  t_wr_int_prf, t_wr_cpr0;
+   logic [31:0]			  t_csr0_val;
    
    logic 	t_wr_hilo;
    logic 	t_take_br;
@@ -156,6 +157,11 @@ module exec(clk,
    logic [`LG_MQ_ENTRIES:0] r_mdq_next_tail_ptr, n_mdq_next_tail_ptr;
    logic 		    mem_mdq_full,mem_mdq_next_full, mem_mdq_empty;
    
+
+   logic [3:0]		    r_rd_pc_idx, n_rd_pc_idx;
+   logic [3:0]		    r_wr_pc_idx, n_wr_pc_idx;
+   logic [7:0]		    r_pc_buf [7:0];
+   logic t_push_putchar;
    
    
 
@@ -1466,7 +1472,7 @@ module exec(clk,
 	    end
 	  MFC0:
 	    begin	       
-	       t_result = int_uop.srcA[4:0] == 'd12 ? cpr0_status_reg : 'd0;
+	       t_result = t_csr0_val;
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	       t_pc = t_pc4;	       
@@ -1744,7 +1750,57 @@ module exec(clk,
 	  end	     
      end // always_ff@ (posedge clk)
 
+   
+   
+   always_comb
+     begin
+	n_wr_pc_idx = r_wr_pc_idx;
+	n_rd_pc_idx = r_rd_pc_idx;
+	t_push_putchar = t_wr_cpr0 & (int_uop.dst == 'd7);
+	if(t_push_putchar)
+	  begin
+	     n_wr_pc_idx = r_wr_pc_idx + 'd1;
+	  end
+	if(putchar_fifo_pop)
+	  begin
+	     n_rd_pc_idx = r_rd_pc_idx + 'd1;
+	  end
+     end // always_comb
 
+   always_ff@(posedge clk)
+     begin
+	r_wr_pc_idx <= reset ? 'd0 : n_wr_pc_idx;
+	r_rd_pc_idx <= reset ? 'd0 : n_rd_pc_idx;
+     end
+
+   always_ff@(posedge clk)
+     begin
+	if(t_push_putchar)
+	  begin
+	     r_pc_buf[r_wr_pc_idx[2:0]] <= t_srcA[7:0];
+	  end
+     end
+   
+   assign putchar_fifo_out = r_pc_buf[r_rd_pc_idx[2:0]];
+   assign putchar_fifo_empty = r_wr_pc_idx == r_rd_pc_idx;
+   wire w_putchar_fifo_full = (r_wr_pc_idx[2:0] == r_rd_pc_idx[2:0]) & (r_wr_pc_idx[3] != r_rd_pc_idx[3]);
+   assign putchar_fifo_wptr = r_wr_pc_idx;
+   assign putchar_fifo_rptr = r_rd_pc_idx;
+
+
+   always_comb
+     begin
+	t_csr0_val = cpr0_status_reg;
+	case(int_uop.srcA[4:0])
+	  'd7:
+	    begin
+	       t_csr0_val = {31'd0, w_putchar_fifo_full};
+	    end
+	endcase // UNMATCHED !!
+     end
+
+   
+   
    always_ff@(posedge clk)
      begin
 	if(reset)
@@ -1755,7 +1811,10 @@ module exec(clk,
 	  begin
 	     if(r_start_int && t_wr_cpr0)
 	       begin
-		  cpr0_status_reg <= t_srcA;
+		  if(int_uop.dst == 'd12)
+		    begin
+		       cpr0_status_reg <= t_srcA;
+		    end
 	       end
 	  end
      end
