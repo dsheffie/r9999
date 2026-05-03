@@ -420,7 +420,7 @@ int main(int argc, char **argv) {
   uint64_t last_retired_pc = 0, last_retired_fp_pc = 0;
   uint64_t mismatches = 0, n_stores = 0, n_loads = 0;
   uint64_t n_branches = 0, n_mispredicts = 0, n_checks = 0, n_flush_cycles = 0;
-  bool got_mem_req = false, got_mem_rsp = false, got_monitor = false, incorrect = false;
+  bool got_mem_req = false, got_mem_rsp = false, got_monitor = false, incorrect = false, got_putchar = false;
   //assert reset
   for(globals::cycle = 0; (globals::cycle < 4) && !Verilated::gotFinish(); ++globals::cycle) {
     contextp->timeInc(1);  // 1 timeprecision period passes...
@@ -633,6 +633,29 @@ int main(int argc, char **argv) {
       tb->clk = 0;
       tb->eval();
   }
+
+  //0:	24020061 	li	v0,97
+  //4:	40823800 	mtc0	v0,$7
+  //8:	1000fffe 	b	4 <main+0x4>
+  //c:	24420001 	addiu	v0,v0,1
+  //s->pc = 0;
+#define INSN(XX) { s->mem.set<uint32_t>(s->pc,  bswap<false>(XX)); s->pc += 4; } 
+
+  // INSN(0x24030061);
+  // INSN(0x40023800);
+  // INSN(0x00000000);
+  // INSN(0x1440fffd);
+  // INSN(0x00000000);
+  // INSN(0x40833800);
+  // INSN(0x24630001);
+  // INSN(0x40023800);
+  // INSN(0x00000000);
+  // INSN(0x1440fff7);
+  // INSN(0x00000000);
+  // INSN(0x1000fff9);
+  // INSN(0x00000000);
+
+    
   ++globals::cycle;
   tb->resume = 1;
   tb->resume_pc = s->pc;
@@ -649,8 +672,7 @@ int main(int argc, char **argv) {
   //done with initialize
   globals::cycle = 0;  
 
-  //std::cout << getAsmString(get_insn(0xa45b0, s), 0xa45b0) << "\n";
-  
+
   double t0 = timestamp();
   while(!Verilated::gotFinish() && (globals::cycle < max_cycle) && (insns_retired < max_icnt)) {
     contextp->timeInc(1);  // 1 timeprecision periodd passes...    
@@ -658,12 +680,11 @@ int main(int argc, char **argv) {
     tb->clk = 1;
     tb->eval();
 
-#ifdef LINUX_SYSCALL_EMULATION
-    got_monitor = emulate_linux_syscall(tb, s);
-    if(s->brk) {
-      break;
+    if(not(tb->putchar_fifo_empty)) {
+      std::cout << tb->putchar_fifo_out;
+      got_putchar = true;
+      tb->putchar_fifo_pop = 1;
     }
-#else
     
     if(tb->monitor_req_valid) {
       bool handled = false;
@@ -825,7 +846,6 @@ int main(int argc, char **argv) {
       // 		<< static_cast<int>(tb->retire_valid)
       // 		<< "\n";
     }
-#endif
     
     if(tb->retire_reg_valid) {
       s->gpr[tb->retire_reg_ptr] = tb->retire_reg_data;
@@ -1159,7 +1179,10 @@ int main(int argc, char **argv) {
       tb->mem_rsp_valid = 0;
       got_mem_rsp = false;
     }
-    
+    if(got_putchar) {
+      tb->putchar_fifo_pop = 0;
+      got_putchar = false;
+    }    
     if(got_monitor) {
       tb->monitor_rsp_valid = 0;
       tb->monitor_rsp_data = 0;
