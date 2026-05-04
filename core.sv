@@ -2092,6 +2092,8 @@ module core(clk,
    exec e (
 	   .clk(clk), 
 	   .reset(reset),
+	   .retire(t_retire),
+	   .retire_two(t_retire_two),
 	   .putchar_fifo_out(putchar_fifo_out),
 	   .putchar_fifo_empty(putchar_fifo_empty),
 	   .putchar_fifo_pop(putchar_fifo_pop),
