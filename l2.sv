@@ -1,6 +1,6 @@
 module l2(clk,
 	  reset,
-
+	  state,
 	  l1i_flush_req,
 	  l1d_flush_req,
 
@@ -38,6 +38,8 @@ module l2(clk,
 
    input logic clk;
    input logic reset;
+   output logic [3:0] state;
+   
    input logic l1i_flush_req;
    input logic l1d_flush_req;
    input logic l1i_flush_complete;
@@ -120,6 +122,8 @@ module l2(clk,
 				     } state_t;
 
    state_t n_state, r_state;
+
+   assign state = r_state;
    logic 		n_flush_complete, r_flush_complete;
    logic 		r_flush_req, n_flush_req;
    logic [127:0] 	r_mem_req_store_data, n_mem_req_store_data;

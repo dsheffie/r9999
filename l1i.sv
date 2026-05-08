@@ -145,6 +145,7 @@ module compute_pht_idx(pc, hist, idx);
 endmodule
 
 module l1i(clk,
+	   state,
 	   reset,
 	   flush_req,
 	   flush_complete,
@@ -186,6 +187,7 @@ module l1i(clk,
 	   );
 
    input logic clk;
+   output logic [2:0] state;
    input logic reset;
    input logic 	      flush_req;
    output logic       flush_complete;
@@ -355,6 +357,8 @@ endfunction // is_nop
    
    
    state_t n_state, r_state;
+   assign state = r_state;
+   
    logic 		  r_restart_req, n_restart_req;
    logic 		  r_restart_ack, n_restart_ack;
    logic 		  r_req, n_req;

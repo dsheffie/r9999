@@ -51,6 +51,9 @@ module core_l1d_l1i(clk,
 		    got_ud,
 		    got_bad_addr,
 		    core_state,
+		    l1i_state,
+		    l1d_state,
+		    l2_state,
 		    inflight,
 		    epc);
 
@@ -143,7 +146,11 @@ module core_l1d_l1i(clk,
    output logic 			  got_bad_addr;
    
    output logic [`LG_ROB_ENTRIES:0] 	  inflight;
-   output logic [4:0]			  core_state;
+   output logic [4:0]			  core_state; 
+   output logic [2:0]			  l1i_state;
+   output logic [3:0]			  l1d_state;
+   output logic [3:0]			  l2_state;
+   
    output logic [31:0] 			  epc;
       
 
@@ -399,7 +406,7 @@ module core_l1d_l1i(clk,
    l2 l2cache (
 	       .clk(clk),
 	       .reset(reset),
-
+	       .state(l2_state),
 	       .l1i_flush_req(flush_req_l1i),
 	       .l1d_flush_req(flush_req_l1d),
 	       .l1i_flush_complete(l1i_flush_complete),
@@ -456,6 +463,7 @@ module core_l1d_l1i(clk,
    l1d dcache (
 	       .clk(clk),
 	       .reset(reset),
+	       .state(l1d_state),
 	       .head_of_rob_ptr_valid(head_of_rob_ptr_valid),
 	       .head_of_rob_ptr(head_of_rob_ptr),
 	       .retired_rob_ptr_valid(retired_rob_ptr_valid),
@@ -497,6 +505,7 @@ module core_l1d_l1i(clk,
    l1i icache(
 	      .clk(clk),
 	      .reset(reset),
+	      .state(l1i_state),
 	      .flush_req(flush_req_l1i),
 	      .flush_complete(l1i_flush_complete),
 	      .restart_pc(restart_pc),
