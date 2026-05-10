@@ -64,7 +64,7 @@
 //number of sets in direct mapped cache
 `define LG_L1D_NUM_SETS 8
 
-`define LG_L1I_NUM_SETS 4
+`define LG_L1I_NUM_SETS 10
 
 `define LG_L2_NUM_SETS 10
 

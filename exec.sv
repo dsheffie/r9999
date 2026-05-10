@@ -1434,15 +1434,6 @@ module exec(clk,
 	       t_result = int_uop.pc + {{HI_EBITS{1'b0}},32'd8};
 	       t_wr_int_prf = 1'b1;
 	    end
-	  MONITOR:
-	    begin
-	       t_take_br = 1'b1;
-	       t_mispred_br = 1'b1;
-	       t_pc = t_srcA;
-	       t_alu_valid = 1'b1;
-	       t_result = monitor_rsp_data;
-	       t_wr_int_prf = 1'b1;
-	    end
 	  ANDI:
 	    begin
 	       t_result = t_srcA & {{E_BITS{1'b0}},int_uop.imm};

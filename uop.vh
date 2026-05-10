@@ -79,7 +79,6 @@ typedef enum logic [6:0]
    MFC1_MERGE = 'd71,
    MOVI = 'd72,
    MOV = 'd73,
-   MONITOR = 'd74,
    NOP = 'd75,
    II = 'd76 //illegal instruction
    } opcode_t;

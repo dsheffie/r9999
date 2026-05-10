@@ -403,27 +403,22 @@ module core(clk,
    logic 		     t_arch_fault;
    
    typedef enum logic [4:0] {
-			     FLUSH_FOR_HALT, //0			     
-			     HALT, //1
-			     ACTIVE, //2
-			     DRAIN, //3
-			     RAT, //4
-			     DELAY_SLOT, //5
-			     ALLOC_FOR_SERIALIZE, //6
-			     MONITOR_FLUSH_CACHE, //7
-			     HANDLE_MONITOR, //8
-			     ALLOC_FOR_MONITOR, //9
-			     WAIT_FOR_MONITOR, //10
-			     HALT_WAIT_FOR_RESTART, //11
-			     WAIT_FOR_SERIALIZE_AND_RESTART, //12
-			     ARCH_FAULT,
-			     WRITE_EPC,
-			     WRITE_CAUSE,
-			     WRITE_BADVADDR,
-			     EXCEPTION_DRAIN,
-			     SERIALIZE_IN_FAULTED_DELAY_SLOT,
-			     WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT,
-			     GET_TICKS
+			     FLUSH_FOR_HALT = 'd0, //0			     
+			     HALT = 'd1, //1
+			     ACTIVE = 'd2 , //2
+			     DRAIN = 'd3, //3
+			     RAT = 'd4, //4
+			     DELAY_SLOT = 'd5, //5
+			     ALLOC_FOR_SERIALIZE = 'd6, //6
+			     HALT_WAIT_FOR_RESTART = 'd7, //11
+			     WAIT_FOR_SERIALIZE_AND_RESTART = 'd8, //12
+			     ARCH_FAULT = 'd9,
+			     WRITE_EPC = 'd10,
+			     WRITE_CAUSE = 'd11,
+			     WRITE_BADVADDR = 'd12,
+			     EXCEPTION_DRAIN = 'd13,
+			     SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd14,
+			     WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd15
 			     } state_t;
    
    state_t r_state, n_state;
@@ -961,8 +956,7 @@ module core(clk,
 			   begin
 			      if(/*r_inflight*/t_rob_empty)
 				begin
-				   n_state = (t_uop.op == MONITOR) ? 
-					     HANDLE_MONITOR : ALLOC_FOR_SERIALIZE;
+				   n_state = ALLOC_FOR_SERIALIZE;
 				   n_monitor_reason = t_uop.imm;
 				end
 			   end
@@ -1007,37 +1001,7 @@ module core(clk,
 		 begin
 		    if(t_uop.serializing_op && t_rob_empty)
 		      begin
-			 if(t_uop.op == MONITOR)
-			   begin
-			      n_monitor_reason = t_uop.imm;
-			      case(t_uop.imm)
-				'd50: /* get cycle */
-				  begin
-				     n_state = GET_TICKS;
-				  end
-				'd52: /* flush line in data cache */
-				  begin
-				     n_state = MONITOR_FLUSH_CACHE;
-				     n_l1i_flush_complete = 1'b1;
-				     n_flush_cl_addr = r_arch_a0;
-				     n_flush_cl_req = 1'b1;
-				  end
-				'd53: /* get icnt */
-				  begin
-				     n_state = HANDLE_MONITOR;
-				  end
-				default:
-				  begin
-				     n_flush_req_l1i = 1'b0;
-				     n_flush_req_l1d = 1'b1;			      				     
-				     n_state = MONITOR_FLUSH_CACHE;
-				  end
-			      endcase // case (t_uop.imm)
-			   end // if (t_uop.op == MONITOR)
-			 else
-			   begin
-			      n_state =  ALLOC_FOR_SERIALIZE;
-			   end
+			 n_state =  ALLOC_FOR_SERIALIZE;
 		      end // if (t_uop.serializing_op)
 		    else if(!t_uop.serializing_op)
 		      begin
@@ -1162,55 +1126,6 @@ module core(clk,
 		      end
 		 end
 	    end
-	  MONITOR_FLUSH_CACHE:
-	    begin
-	       //$display("%d : %b %b %b", r_cycle, n_l1i_flush_complete, n_l1d_flush_complete, n_l2_flush_complete);
-	       if(/*n_l1i_flush_complete &&*/ n_l1d_flush_complete && n_l2_flush_complete)
-		 begin
-		    n_state = HANDLE_MONITOR;
-		    n_l1i_flush_complete = 1'b0;
-		    n_l1d_flush_complete = 1'b0;
-		    n_l2_flush_complete = 1'b0;
-		 end
-	    end
-	  GET_TICKS:
-	    begin
-	       n_state = ALLOC_FOR_MONITOR;
-	       n_monitor_rsp_data = r_cycle[31:0];
-	    end
-	  HANDLE_MONITOR:
-	    begin
-	       t_monitor_req_valid = 1'b1;
-	       if(monitor_rsp_valid)
-		 begin
-		    n_state = ALLOC_FOR_MONITOR;
-		    n_monitor_rsp_data = monitor_rsp_data;
-		 end
-	    end
-	  ALLOC_FOR_MONITOR:
-	    begin
-	       t_alloc = !t_rob_full && !t_uq_full 
-			 && (r_prf_free != 'd0) 
-			   && !t_dq_empty;			 
-	       n_state = WAIT_FOR_MONITOR;
-	    end
-	  WAIT_FOR_MONITOR:
-	    begin
-	       if(t_rob_head_complete)
-		 begin
-		    t_clr_dq = 1'b1;
-		    n_restart_pc = t_rob_head.target_pc;
-		    n_restart_src_pc = t_rob_head.pc;
-		    n_restart_src_is_indirect = 1'b0;
-		    n_restart_valid = 1'b1;
-		    n_pending_fault = 1'b0;
-		    if(n_got_restart_ack)
-		      begin
-			 t_retire = 1'b1;
-			 n_state = ACTIVE;
-		      end
-		 end
-	    end // case: WAIT_FOR_MONITOR
 	  FLUSH_FOR_HALT:
 	    begin
 	       //$display("%d : %b %b %b", r_cycle, n_l1i_flush_complete, n_l1d_flush_complete, n_l2_flush_complete);

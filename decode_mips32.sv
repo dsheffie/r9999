@@ -117,20 +117,7 @@ module decode_mips32(insn,
 		      uop.dst_valid = (rd != 'd0);
 		      uop.op = (rd == 'd0) ? NOP : SLLV;
 		      uop.is_int = 1'b1;
-		   end
-		 6'd5:
-		   begin
-		      uop.op = MONITOR;
-		      uop.serializing_op = 1'b1;
-		      uop.has_delay_slot = 1'b0;
-		      uop.must_restart = 1'b1;
-		      uop.dst = 'd2;
-		      uop.dst_valid = 1'b1;
-		      uop.srcA = 'd31;
-		      uop.srcA_valid = 1'b1;
-		      uop.imm = {1'b0, insn[21:7]};
-		      uop.is_int = 1'b1;
-		   end // case: 6'd5
+		   end // case: 6'd4
 		 6'd6: /* srlv */
 		   begin
 		      uop.srcA = rt;
