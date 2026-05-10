@@ -335,11 +335,6 @@ function logic [3:0] select_pd(logic [15:0] cl, logic[LG_WORDS_PER_CL-1:0] pos);
    return j;
 endfunction
 
-function logic is_nop(logic [31:0] insn);
-   return (insn == 32'd0);
-endfunction // is_nop
-      
-      
    
    typedef enum logic [2:0] {INITIALIZE = 'd0,
 			     IDLE = 'd1,

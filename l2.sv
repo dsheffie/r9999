@@ -1,3 +1,5 @@
+`include "machine.vh"
+
 module l2(clk,
 	  reset,
 	  state,
@@ -69,7 +71,7 @@ module l2(clk,
    output logic [63:0] cache_accesses;
    
    
-   localparam LG_L2_LINES = 9;
+   localparam LG_L2_LINES = `LG_L2_NUM_SETS;
    localparam L2_LINES = 1<<LG_L2_LINES;
    
    localparam TAG_BITS = 32 - (LG_L2_LINES + 4);
@@ -107,18 +109,18 @@ module l2(clk,
    
    
    typedef enum 	logic [3:0] {
-				     INITIALIZE,
-				     IDLE,
-				     WAIT_FOR_RAM,
-				     CHECK_VALID_AND_TAG,
-				     CLEAN_RELOAD,
-				     DIRTY_STORE,
-				     STORE_TURNAROUND,
-				     WAIT_CLEAN_RELOAD,
-				     WAIT_STORE_IDLE,
-				     FLUSH_STORE,
-				     FLUSH_WAIT,
-				     FLUSH_TRIAGE
+				     INITIALIZE = 'd0,
+				     IDLE = 'd1,
+				     WAIT_FOR_RAM = 'd2,
+				     CHECK_VALID_AND_TAG = 'd3,
+				     CLEAN_RELOAD = 'd4,
+				     DIRTY_STORE = 'd5,
+				     STORE_TURNAROUND = 'd6,
+				     WAIT_CLEAN_RELOAD = 'd7,
+				     WAIT_STORE_IDLE = 'd8,
+				     FLUSH_STORE = 'd9,
+				     FLUSH_WAIT = 'd10,
+				     FLUSH_TRIAGE = 'd11
 				     } state_t;
 
    state_t n_state, r_state;
@@ -393,8 +395,10 @@ module l2(clk,
 		      end
 		    else //invalid or clean
 		      begin
+`ifdef VERILATOR
 			 if(r_reload)
 			   $stop();
+`endif
 			 n_reload = 1'b1;
 			 n_state = CLEAN_RELOAD;
 			 n_mem_opcode = 4'd4; //load

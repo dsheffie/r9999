@@ -251,17 +251,17 @@ endfunction
    mem_req_t t_mem_tail, t_mem_head;
    logic 	mem_q_full, mem_q_empty, mem_q_almost_full;
    
-   typedef enum logic [3:0] {INITIALIZE, //0
-			     INIT_CACHE, //1
-			     ACTIVE, //2
-                             INJECT_RELOAD, //3
-			     WAIT_INJECT_RELOAD, //4
-                             FLUSH_CACHE, //5
-                             FLUSH_CACHE_WAIT, //6
-			     FLUSH_CACHE_LAST_WAIT, //6
-                             FLUSH_CL,
-                             FLUSH_CL_WAIT,
-                             HANDLE_RELOAD
+   typedef enum logic [3:0] {INITIALIZE = 'd0, //0
+			     INIT_CACHE = 'd1, //1
+			     ACTIVE = 'd2, //2
+                             INJECT_RELOAD = 'd3, //3
+			     WAIT_INJECT_RELOAD = 'd4, //4
+                             FLUSH_CACHE = 'd5, //5
+                             FLUSH_CACHE_WAIT = 'd6, //6
+			     FLUSH_CACHE_LAST_WAIT = 'd7, //6
+                             FLUSH_CL = 'd8,
+                             FLUSH_CL_WAIT = 'd9,
+                             HANDLE_RELOAD = 'd10
                              } state_t;
 
    
@@ -1544,8 +1544,10 @@ endfunction
 	       else if(r_flush_req && mem_q_empty && !(r_got_req && r_last_wr))
 		 begin
 		    n_state = FLUSH_CACHE;
+`ifdef VERILATOR
 		    if(!mem_q_empty) $stop();
 		    if(r_got_req && r_last_wr) $stop();
+`endif
 		    //$display("flush begins at cycle %d, mem_q_empty = %b", 
 		    //r_cycle, mem_q_empty);
 		    t_cache_idx = 'd0;
@@ -1553,8 +1555,10 @@ endfunction
 		 end
 	       else if(r_flush_cl_req && mem_q_empty && !(r_got_req && r_last_wr))
 		 begin
+`ifdef VERILATOR
 		    if(!mem_q_empty) $stop();
 		    if(r_got_req && r_last_wr) $stop();
+`endif
 		    t_cache_idx = flush_cl_addr[IDX_STOP-1:IDX_START];
 		    //$display("flush addr %x, maps to cl %d at cycle", flush_cl_addr, t_cache_idx, r_cycle);
 		    n_flush_cl_req = 1'b0;
@@ -1666,6 +1670,7 @@ endfunction
 	endcase // case r_state
      end // always_comb
 
+`ifdef VERILATOR
    always_ff@(negedge clk)
      begin
       if(t_push_miss && mem_q_full)
@@ -1680,7 +1685,7 @@ endfunction
 	  end
      end
 
-`ifdef VERILATOR
+
    logic [31:0] t_stall_reason;
    always_comb
      begin
