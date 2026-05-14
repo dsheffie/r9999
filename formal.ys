@@ -2,6 +2,7 @@ read_verilog -formal mipscore.v
 read_verilog -formal formal_top.v
 hierarchy -check -top formal_top
 proc
+async2sync
 opt_clean
 chformal -early
 memory_nordff
