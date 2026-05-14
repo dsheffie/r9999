@@ -1,0 +1,13 @@
+read_verilog -formal mipscore.v
+read_verilog -formal formal_top.v
+hierarchy -check -top formal_top
+proc
+opt_clean
+chformal -early
+memory_nordff
+opt -keepdc -fast
+setundef -anyseq
+opt_clean
+check
+dffunmap
+write_smt2 -wires mipscore.smt2
