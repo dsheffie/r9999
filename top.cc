@@ -425,8 +425,6 @@ int main(int argc, char **argv) {
   for(globals::cycle = 0; (globals::cycle < 4) && !Verilated::gotFinish(); ++globals::cycle) {
     contextp->timeInc(1);  // 1 timeprecision period passes...
     tb->mem_rsp_valid = 0;
-    tb->monitor_rsp_valid = 0;
-    tb->monitor_rsp_data = 0;    
     tb->reset = 1;
     tb->extern_irq = 0;
     tb->clk = 1;
@@ -686,166 +684,6 @@ int main(int argc, char **argv) {
       tb->putchar_fifo_pop = 1;
     }
     
-    if(tb->monitor_req_valid) {
-      bool handled = false;
-
-      if(globals::report_syscalls) {
-	std::cerr << "got monitor reason "
-		  << static_cast<int>(tb->monitor_req_reason)
-		  << "\n";
-      }
-      
-      
-      switch(tb->monitor_req_reason)
-	{
-	case 6: {
-	  char *path = reinterpret_cast<char*>(s->mem.get_raw_ptr(s->gpr[R_a0]));
-	  int32_t flags = remapIOFlags(s->gpr[R_a1]);
-	  tb->monitor_rsp_data = open(path, flags, S_IRUSR|S_IWUSR);	  
-	  handled = true;
-#ifdef PRINT_SYSCALL
-	  std::cout << insns_retired << " open " << path << " " << tb->monitor_rsp_data << "\n";
-#endif
-	  break;
-	}
-	case 7: {
-	  int32_t fd = s->gpr[R_a0];
-	  int32_t nr = s->gpr[R_a2];
-	  tb->monitor_rsp_data = read(fd, reinterpret_cast<char*>(s->mem.get_raw_ptr(s->gpr[R_a1])), nr);
-#ifdef PRINT_SYSCALL	  
-	  std::cout << insns_retired << " read " << fd << ","
-		    << std::hex << s->gpr[R_a1] << std::dec
-		    << "," << nr
-		    << " = "
-		    << tb->monitor_rsp_data
-		    << "\n";
-#endif
-	  handled = true;
-	  break;
-
-	}
-	case 8: { /* int write(int file, char *ptr, int len) */
-	  int32_t fd = s->gpr[R_a0];
-	  int32_t nr = s->gpr[R_a2];
-	  
-	  tb->monitor_rsp_data = write(fd, reinterpret_cast<void*>(s->mem.get_raw_ptr(s->gpr[R_a1])), nr);
-#ifdef PRINT_SYSCALL
-	  std::cout << insns_retired << " write " << fd << ","
-		    << std::hex << s->gpr[R_a1] << std::dec << "," << nr << "\n";
-#endif
-	  if(fd==1)
-	    fflush(stdout);
-	  else if(fd==2)
-	    fflush(stderr);
-
-	  handled = true;
-	  break;
-	}
-	case 9: { /* lseek */
-	  handled = true;
-	  tb->monitor_rsp_data  = lseek(s->gpr[R_a0], s->gpr[R_a1], s->gpr[R_a2]);
-	  break;
-	}
-	case 10: { /* close */
-	  int32_t fd = s->gpr[R_a0];
-	  handled = true;
-	  tb->monitor_rsp_data = 0;
-	  if(fd>2) {
-	    tb->monitor_rsp_data = (int32_t)close(fd);
-	  }
-#ifdef PRINT_SYSCALL
-	  std::cout << insns_retired << " close " << fd << "\n";
-#endif
-	  break;
-	}
-	case 33: {
-	  handled = true;	  
-	  uint32_t uptr = *(uint32_t*)(s->gpr + R_a0);
-	  s->mem.set<uint32_t>(uptr, 0);
-	  s->mem.set<uint32_t>(uptr+4, 0);
-	  tb->monitor_rsp_data = 0;
-	  break;
-	}
-	case 34: {
-	  handled = true;	  
-	  uint32_t uptr = *(uint32_t*)(s->gpr + R_a0);
-	  for(int i = 0; i < 4; i++) {
-	    s->mem.set<uint32_t>(uptr+i,0);
-	  }
-	  tb->monitor_rsp_data = 0;
-	  break;
-	}
-	case 35: {
-	  /* int getargs(char **argv) */
-	  handled = true;
-	  for(int i = 0; i < std::min(MARGS, globals::sysArgc); i++) {
-	    uint32_t arrayAddr = ((uint32_t)s->gpr[R_a0])+4*i;
-	    uint32_t ptr = bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(arrayAddr));
-	    strcpy(reinterpret_cast<char*>(s->mem.get_raw_ptr(ptr)), globals::sysArgv[i]);
-	  }
-	  tb->monitor_rsp_data = globals::sysArgc;
-	  break;
-	}
-	case 50: /* get cycle */
-	  handled = true;
-	  tb->monitor_rsp_data = globals::cycle;
-	  break;
-	case 51: /* nuke caches */
-	  handled = true;
-	  break;
-	case 52: {/* flush cacheline */
-	  handled = true;
-	  break;
-	}
-	case 53:
-	  handled = true;
-	  tb->monitor_rsp_data = insns_retired;
-	  break;	  
-	case 55: {
-	  handled = true;
-	  //std::cerr << "R_a0 = " << std::hex << s->gpr[R_a0] << std::dec << "\n";
-	  s->mem.set<uint32_t>(static_cast<uint32_t>(s->gpr[R_a0] + 0),
-			       bswap<IS_LITTLE_ENDIAN>(K1SIZE));
-	  /* No Icache */
-	  s->mem.set<uint32_t>(static_cast<uint32_t>(s->gpr[R_a0] + 4), 0);
-	  /* No Dcache */
-	  s->mem.set<uint32_t>(static_cast<uint32_t>(s->gpr[R_a0] + 8), 0);
-	  
-	  
-	  //std::cerr << "u = " << std::hex << s->mem.get<uint32_t>(s->gpr[R_a0]) << std::dec << "\n"; 	  
-	  //*((uint32_t*)(s->mem + (uint32_t)s->gpr[R_a0] + 0)) = bswap<IS_LITTLE_ENDIAN>(K1SIZE);
-
-	  //std::cerr << "u = " << std::hex << *((uint32_t*)(s->mem + (uint32_t)s->gpr[R_a0] + 0))
-	  //<< std::dec << "\n";
-	  
-	  //auto uu = *((uint32_t*)(s->mem + (uint32_t)s->gpr[R_a0] + 0));
-	  //assert(uu == u);
-	  /* No Icache */
-	  //*((uint32_t*)(s->mem + (uint32_t)s->gpr[R_a0] + 4)) = 0;
-	  /* No Dcache */
-	  //*((uint32_t*)(s->mem + (uint32_t)s->gpr[R_a0] + 8)) = 0;
-	  
-	  s->gpr[R_v0] = 0;
-	  break;
-	}
-	default:
-	  break;
-	}
-
-      touched_lines.reset();
-      if(!handled) {
-	std::cout << "didn't handled monitor reason " << tb->monitor_req_reason << "\n";
-	exit(-1);
-	break;
-      }
-      tb->monitor_rsp_valid = 1;
-      got_monitor = true;
-      // std::cout << "handled = "
-      // 		<< handled
-      // 		<< " retire valid = "
-      // 		<< static_cast<int>(tb->retire_valid)
-      // 		<< "\n";
-    }
     
     if(tb->retire_reg_valid) {
       s->gpr[tb->retire_reg_ptr] = tb->retire_reg_data;
@@ -1183,11 +1021,6 @@ int main(int argc, char **argv) {
       tb->putchar_fifo_pop = 0;
       got_putchar = false;
     }    
-    if(got_monitor) {
-      tb->monitor_rsp_valid = 0;
-      tb->monitor_rsp_data = 0;
-      got_monitor = false;
-    }
     ++globals::cycle;
   }
   tb->final();

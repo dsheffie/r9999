@@ -1811,7 +1811,11 @@ void execMips(state_t *s) {
       switch(rs) 
 	{
 	case 0x0: /*mfc0*/
-	  s->gpr[rt] = s->cpr0[rd];
+	  if(rd == 7) {
+	    s->gpr[rt] = 0;
+	  } else {
+	    s->gpr[rt] = s->cpr0[rd];
+	  }
 	  s->insn_histo[mipsInsn::MFC0]++;
 	  break;
 	case 0x4: /*mtc0*/

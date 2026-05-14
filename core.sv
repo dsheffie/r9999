@@ -110,7 +110,12 @@ module core(clk,
 	    got_bad_addr,
 	    core_state,
 	    inflight,
-	    epc);
+	    epc,
+	    cause,
+	    l1i_flush_done,
+	    l1d_flush_done,
+	    l2_flush_done);
+   
    input logic clk;
    input logic reset;
    output logic [7:0] putchar_fifo_out;
@@ -134,9 +139,11 @@ module core(clk,
    
    output logic flush_cl_req;
    output logic [(`M_WIDTH-1):0] flush_cl_addr;
-   input logic 	l1d_flush_complete;
-   input logic 	l1i_flush_complete;
-   input logic 	l2_flush_complete;
+
+   input logic			 l1d_flush_complete;
+   input logic			 l1i_flush_complete;
+   input logic			 l2_flush_complete;
+   
 	
    input 	insn_fetch_t insn;
    input logic 	insn_valid;
@@ -208,6 +215,12 @@ module core(clk,
    output logic [4:0]			  core_state;
    
    output logic [31:0] 			  epc;
+   output logic [4:0]			  cause;
+   output logic				  l1i_flush_done;
+   output logic				  l1d_flush_done;
+   output logic				  l2_flush_done;
+   
+   
    
    logic [31:0] 			  r_epc, n_epc;
    
@@ -437,6 +450,10 @@ module core(clk,
    assign got_ud = r_got_ud;
    assign got_bad_addr = r_got_bad_addr;
    assign epc = r_epc;
+   assign cause = r_cause;
+   assign l1i_flush_done = n_l1i_flush_complete;
+   assign l1d_flush_done = n_l1d_flush_complete;
+   assign l2_flush_done = n_l2_flush_complete;
    
    popcount #(`LG_ROB_ENTRIES) inflight0 (.in(r_rob_inflight), 
 					  .out(inflight));
@@ -888,16 +905,7 @@ module core(clk,
 	unique case (r_state)
 	  ACTIVE:
 	    begin
-	       if(r_extern_irq && !t_rob_empty && !t_rob_head.in_delay_slot)
-		 begin
-		    n_state = EXCEPTION_DRAIN;
-		    n_restart_pc = t_rob_head.pc;
-		    n_machine_clr = 1'b1;
-		    n_ds_done = 1'b1;
-		    t_clr_extern_irq = 1'b1;
-		    n_restart_valid = 1'b1;
-		 end
-	       else if(t_faulted_head_and_serializing_delay)
+	       if(t_faulted_head_and_serializing_delay)
 		 begin
 		    n_state = SERIALIZE_IN_FAULTED_DELAY_SLOT;
 		 end

@@ -34,10 +34,6 @@ module core_l1d_l1i(clk,
 		    retire_two_pc,
 		    retire_op,
 		    retire_two_op,
-		    monitor_req_reason,
-		    monitor_req_valid,
-		    monitor_rsp_valid,
-		    monitor_rsp_data,
 		    branch_pc,
 		    branch_pc_valid,		    
 		    branch_fault,
@@ -55,7 +51,12 @@ module core_l1d_l1i(clk,
 		    l1d_state,
 		    l2_state,
 		    inflight,
-		    epc);
+		    epc,
+		    cause,
+		    l1i_flush_done,
+		    l1d_flush_done,
+		    l2_flush_done
+		    );
 
    localparam L1D_CL_LEN = 1 << `LG_L1D_CL_LEN;
    localparam L1D_CL_LEN_BITS = 1 << (`LG_L1D_CL_LEN + 3);
@@ -137,10 +138,6 @@ module core_l1d_l1i(clk,
    logic [`LG_ROB_ENTRIES-1:0] 		  retired_rob_ptr_two;
 
    
-   output logic [15:0] 			  monitor_req_reason;
-   output logic 			  monitor_req_valid;
-   input logic 				  monitor_rsp_valid;
-   input logic [(`M_WIDTH-1):0] 	  monitor_rsp_data;
    output logic 			  got_break;
    output logic 			  got_ud;
    output logic 			  got_bad_addr;
@@ -152,6 +149,11 @@ module core_l1d_l1i(clk,
    output logic [3:0]			  l2_state;
    
    output logic [31:0] 			  epc;
+   output logic [4:0]			  cause;
+      
+   output logic			 l1d_flush_done;
+   output logic			 l1i_flush_done;
+   output logic			 l2_flush_done;
       
 
 
@@ -616,7 +618,11 @@ module core_l1d_l1i(clk,
 	     .got_bad_addr(got_bad_addr),
 	     .core_state(core_state),
 	     .inflight(inflight),
-	     .epc(epc)
+	     .epc(epc),
+	     .cause(cause),
+	     .l1i_flush_done(l1i_flush_done),
+	     .l1d_flush_done(l1d_flush_done),
+	     .l2_flush_done(l2_flush_done)
 	     );
    
 
