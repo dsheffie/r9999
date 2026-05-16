@@ -349,6 +349,14 @@ endfunction
    logic [(`M_WIDTH-1):0] r_pc, n_pc, r_miss_pc, n_miss_pc;
    logic [(`M_WIDTH-1):0] r_cache_pc, n_cache_pc;
    logic [(`M_WIDTH-1):0] r_btb_pc;
+
+   wire [31:0]		  w_la_pc;
+   logic [31:0]		  r_la_pc, r_tlb_pc;
+   wire [31:0]		  w_tlb_pc;
+   
+   
+   wire	       w_cached, w_mapped;
+   
    
    
    state_t n_state, r_state;
@@ -546,7 +554,32 @@ endfunction
 	
      end
 
-      
+
+   mipsseg seg0 (
+		 .v_addr(n_cache_pc), 
+		 .l_addr(w_la_pc), 
+		 .cache(w_cached), 
+		 .mapped(w_mapped)
+		 );
+
+   always@(posedge clk)
+     begin
+	r_tlb_pc <= reset ? 'd0 : w_la_pc;
+	r_la_pc <= reset ? 'd0 : w_la_pc;
+     end
+   assign w_tlb_pc = r_la_pc;
+   
+   wire w_hit = (r_tag_out == w_tlb_pc[31:IDX_STOP]);
+   //always@(negedge clk)
+   //begin
+   //if(r_req)
+   //begin
+   //$display("w_tlb_pc %x, hit %b, r_cache_tag %x",
+   //w_tlb_pc[31:IDX_STOP], w_hit, r_cache_tag);
+   //
+   //
+   //end
+   //end
    always_comb
      begin
 	n_pc = r_pc;
@@ -565,8 +598,13 @@ endfunction
 	n_resteer_bubble = 1'b0;
 	t_next_spec_rs_tos = r_spec_rs_tos+'d1;
 	n_restart_req = restart_valid | r_restart_req;
-	t_miss = r_req && !(r_valid_out && (r_tag_out == r_cache_tag));
-	t_hit = r_req && (r_valid_out && (r_tag_out == r_cache_tag));
+
+	t_miss = r_req && !(r_valid_out && (r_tag_out == w_tlb_pc[31:IDX_STOP]));
+	t_hit = r_req && (r_valid_out && (r_tag_out == w_tlb_pc[31:IDX_STOP]));
+
+	
+	//t_miss = r_req & !(r_valid_out & (!w_hit));
+	//t_hit = r_req & (r_valid_out & w_hit);
 
 	t_insn_idx = r_cache_pc[WORD_STOP-1:WORD_START];
 	
@@ -688,7 +726,10 @@ endfunction
 	       else if(t_miss)
 		 begin
 		    n_state = INJECT_RELOAD;
-		    n_mem_req_addr = {r_cache_pc[`M_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = {w_tlb_pc[`M_WIDTH-1:`LG_L1D_CL_LEN], 
+				      {`LG_L1D_CL_LEN{1'b0}}};
+
+		    
 		    n_mem_req_valid = 1'b1;
 		    n_miss_pc = r_cache_pc;
 		    n_pc = r_pc;
@@ -1232,6 +1273,7 @@ endfunction
      end
    
    
+
    always_ff@(posedge clk)
      begin
 	if(reset)
