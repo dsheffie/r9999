@@ -1583,18 +1583,33 @@ module exec(clk,
    
    //$stop();
    //end
+
+   wire [31:0] w_agu32_la;
+   wire	       w_cached, w_mapped;
    
+   mipsseg seg0 (.v_addr(w_agu32), .l_addr(w_agu32_la), .cache(w_cached), .mapped(w_mapped));
+
+   //always_ff@(negedge clk)
+   //begin
+   //if(r_mem_ready)
+   //begin
+   //$display("w_agu32 = %x, w_agu32_la = %x\n", w_agu32,  w_agu32_la);
+   //end
+   //end
+
    always_comb
      begin
 	t_mem_simm = {{E_BITS{mem_uq.imm[15]}},mem_uq.imm};
 	t_mem_tail.op = MEM_LW;
-	t_mem_tail.addr = w_agu32;
+	t_mem_tail.addr = w_agu32_la;
 	t_mem_tail.rob_ptr = mem_uq.rob_ptr;
 	t_mem_tail.dst_valid = 1'b0;
 	t_mem_tail.dst_ptr = mem_uq.dst;
 	t_mem_tail.is_store = 1'b0;
 	t_mem_tail.data = 32'd0;
 	t_mem_tail.bad_addr = 1'b0;
+	t_mem_tail.cached = w_cached;
+	t_mem_tail.mapped = w_mapped;
 	case(mem_uq.op)
 	  SB:
 	    begin

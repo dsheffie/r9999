@@ -422,6 +422,7 @@ int main(int argc, char **argv) {
   uint64_t n_branches = 0, n_mispredicts = 0, n_checks = 0, n_flush_cycles = 0;
   bool got_mem_req = false, got_mem_rsp = false, got_monitor = false, incorrect = false, got_putchar = false;
   //assert reset
+  tb->retire_allowed = 1;
   for(globals::cycle = 0; (globals::cycle < 4) && !Verilated::gotFinish(); ++globals::cycle) {
     contextp->timeInc(1);  // 1 timeprecision period passes...
     tb->mem_rsp_valid = 0;

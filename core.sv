@@ -420,7 +420,8 @@ module core(clk,
 			     WRITE_BADVADDR = 'd12,
 			     EXCEPTION_DRAIN = 'd13,
 			     SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd14,
-			     WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd15
+			     WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd15,
+			     DEAD = 'd16
 			     } state_t;
    
    state_t r_state, n_state;
@@ -976,14 +977,14 @@ module core(clk,
 		      end // if (!t_dq_empty)
 		    t_retire = t_rob_head_complete & !t_arch_fault;
 		    t_retire_two = !t_rob_next_empty
-		    		   && !t_rob_head.faulted
-		    		   && !t_rob_next_head.faulted 				    
-		    		   && t_rob_head_complete
-		    		   && t_rob_next_head_complete				    
-				   && !t_rob_head.is_br
-				   && !t_rob_next_head.is_ret
-				   && !t_rob_next_head.is_call
-		    		   && !t_rob_next_head.valid_hilo_dst;
+		    		   & !t_rob_head.faulted
+		    		   & !t_rob_next_head.faulted 				    
+		    		   & t_rob_head_complete
+		    		   & t_rob_next_head_complete				    
+				   & !t_rob_head.is_br
+				   & !t_rob_next_head.is_ret
+				   & !t_rob_next_head.is_call
+		    		   & !t_rob_next_head.valid_hilo_dst;
 		 end // if (t_can_retire_rob_head)
 	       else if(!t_dq_empty)
 		 begin
@@ -1231,7 +1232,7 @@ module core(clk,
 			n_state = ACTIVE;
 		     end
 		end
-	   end
+	   end // case: WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT
 	  default:
 	    begin
 	    end

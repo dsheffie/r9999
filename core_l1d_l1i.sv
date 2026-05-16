@@ -4,6 +4,7 @@
 
 module core_l1d_l1i(clk, 
 		    reset,
+		    retire_allowed,
 		    putchar_fifo_out,
 		    putchar_fifo_empty,
 		    putchar_fifo_pop,
@@ -63,6 +64,8 @@ module core_l1d_l1i(clk,
    
    input logic clk;
    input logic reset;
+   input logic retire_allowed;
+   
    output logic [7:0] putchar_fifo_out;
    output logic       putchar_fifo_empty;
    input logic 	      putchar_fifo_pop;
