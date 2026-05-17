@@ -408,6 +408,10 @@ module l2(clk,
 	    end // case: CHECK_VALID_AND_TAG
 	  DIRTY_STORE:
 	    begin
+	       if(mem_req_ack)
+		 begin
+		    n_mem_req = 1'b0;		    
+		 end
 	       if(mem_rsp_valid)
 		 begin
 		    n_addr = r_saveaddr;
@@ -424,6 +428,10 @@ module l2(clk,
 	    end
 	  CLEAN_RELOAD:
 	    begin
+	       if(mem_req_ack)
+		 begin
+		    n_mem_req = 1'b0;
+		 end
 	       if(mem_rsp_valid)
 		 begin
 		    n_mem_req = 1'b0;
@@ -480,6 +488,11 @@ module l2(clk,
 	    end // case: FLUSH_TRIAGE
 	  FLUSH_STORE:
 	    begin
+	       if(mem_req_ack)
+		 begin
+		    n_mem_req = 1'b0;		    
+		 end
+	       
 	       if(mem_rsp_valid)
 		 begin
 		    n_mem_req = 1'b0;

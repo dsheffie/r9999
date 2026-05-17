@@ -179,6 +179,7 @@ module l1i(clk,
 	   mem_req_valid, 
 	   mem_req_addr, 
 	   mem_req_opcode,
+	   mem_req_cacheable,
 	   //reply from memory system
 	   mem_rsp_valid,
 	   mem_rsp_load_data,
@@ -243,6 +244,7 @@ module l1i(clk,
 
    output logic [(`M_WIDTH-1):0] mem_req_addr;
    output logic [3:0] 			  mem_req_opcode;
+   output logic				  mem_req_cacheable;
    input logic 				  mem_rsp_valid;
    input logic [L1I_CL_LEN_BITS-1:0] 	  mem_rsp_load_data;
    output logic [63:0] 			  cache_accesses;
@@ -271,6 +273,8 @@ module l1i(clk,
    logic [L1I_CL_LEN_BITS-1:0] 		    r_array_out;   
    logic 				    r_mem_req_valid, n_mem_req_valid;
    logic [(`M_WIDTH-1):0] 		    r_mem_req_addr, n_mem_req_addr;
+   logic				    r_mem_req_cacheable,n_mem_req_cacheable;
+   
    
 
    insn_fetch_t r_fq[N_FQ_ENTRIES-1:0];
@@ -356,6 +360,7 @@ endfunction
    
    
    wire	       w_cached, w_mapped;
+   reg	       r_cached, r_mapped;
    
    
    
@@ -418,6 +423,8 @@ endfunction
    assign mem_req_valid = r_mem_req_valid;
    assign mem_req_addr = r_mem_req_addr;
    assign mem_req_opcode = MEM_LW;
+   assign mem_req_cacheable = r_mem_req_cacheable;
+   
    assign cache_hits = r_cache_hits;
    assign cache_accesses = r_cache_accesses;
    
@@ -566,6 +573,8 @@ endfunction
      begin
 	r_tlb_pc <= reset ? 'd0 : w_la_pc;
 	r_la_pc <= reset ? 'd0 : w_la_pc;
+	r_cached <= reset ? 1'b0 : w_cached;
+	r_mapped <= reset ? 1'b0 : w_mapped;
      end
    assign w_tlb_pc = r_la_pc;
    
@@ -595,6 +604,8 @@ endfunction
 	n_req = 1'b0;
 	n_mem_req_valid = 1'b0;
 	n_mem_req_addr = r_mem_req_addr;
+	n_mem_req_cacheable = r_mem_req_cacheable;
+	
 	n_resteer_bubble = 1'b0;
 	t_next_spec_rs_tos = r_spec_rs_tos+'d1;
 	n_restart_req = restart_valid | r_restart_req;
@@ -728,7 +739,7 @@ endfunction
 		    n_state = INJECT_RELOAD;
 		    n_mem_req_addr = {w_tlb_pc[`M_WIDTH-1:`LG_L1D_CL_LEN], 
 				      {`LG_L1D_CL_LEN{1'b0}}};
-
+		    n_mem_req_cacheable = r_cached;
 		    
 		    n_mem_req_valid = 1'b1;
 		    n_miss_pc = r_cache_pc;
@@ -1289,6 +1300,7 @@ endfunction
 	     r_req <= 1'b0;
 	     r_mem_req_valid <= 1'b0;
 	     r_mem_req_addr <= 'd0;
+	     r_mem_req_cacheable <= 1'b0;	     
 	     r_fq_head_ptr <= 'd0;
 	     r_fq_next_head_ptr <= 'd1;
 	     r_fq_next_tail_ptr <= 'd1;
@@ -1320,6 +1332,7 @@ endfunction
 	     r_req <= n_req;
 	     r_mem_req_valid <= n_mem_req_valid;
 	     r_mem_req_addr <= n_mem_req_addr;
+	     r_mem_req_cacheable <= n_mem_req_cacheable;
 	     r_fq_head_ptr <= t_clear_fq ? 'd0 : n_fq_head_ptr;
 	     r_fq_next_head_ptr <= t_clear_fq ? 'd1 : n_fq_next_head_ptr;
 	     r_fq_next_tail_ptr <= t_clear_fq ? 'd1 : n_fq_next_tail_ptr;
