@@ -183,7 +183,7 @@ static inline T round_to_alignment(T x, T m) {
 }
 
 static inline uint32_t get_insn(uint32_t pc, const state_t *s) {
-  return bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(pc));
+  return bswap<false>(s->mem.get<uint32_t>(pc));
 }
 
 

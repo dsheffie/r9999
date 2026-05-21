@@ -110,94 +110,6 @@ enum class branch_type {
   bc1f, bc1t, bc1fl, bc1tl
 };
 
-/* stolen from QEMU */
-struct image_info32 {
-  uint32_t       load_bias;
-  uint32_t       load_addr;
-  uint32_t       start_code;
-  uint32_t       end_code;
-  uint32_t       start_data;
-  uint32_t       end_data;
-  uint32_t       start_brk;
-  uint32_t       brk;
-  uint32_t       reserve_brk;
-  uint32_t       start_mmap;
-  uint32_t       start_stack;
-  uint32_t       stack_limit;
-  uint32_t       entry;
-  uint32_t       code_offset;
-  uint32_t       data_offset;
-  uint32_t       saved_auxv;
-  uint32_t       auxv_len;
-  uint32_t       arg_start;
-  uint32_t       arg_end;
-  uint32_t       arg_strings;
-  uint32_t       env_strings;
-  uint32_t       file_string;
-  uint32_t       elf_flags;
-  int		 personality;
-  uint32_t       alignment;
-  
-  /* The fields below are used in FDPIC mode.  */
-  uint32_t       loadmap_addr;
-  uint16_t        nsegs;
-  void           *loadsegs;
-  uint32_t       pt_dynamic_addr;
-  uint32_t       interpreter_loadmap_addr;
-  uint32_t       interpreter_pt_dynamic_addr;
-  struct image_info32 *other_info;
-  /* For target-specific processing of NT_GNU_PROPERTY_TYPE_0. */
-  uint32_t        note_flags;
-  int             fp_abi;
-  int             interp_fp_abi;
-
-  uint32_t target_brk;
-  uint32_t target_original_brk;
-  uint32_t brk_page;
-  uint32_t pgsz;
-};
-
-
-struct image_info64 {
-  uint64_t       load_bias;
-  uint64_t       load_addr;
-  uint64_t       start_code;
-  uint64_t       end_code;
-  uint64_t       start_data;
-  uint64_t       end_data;
-  uint64_t       start_brk;
-  uint64_t       brk;
-  uint64_t       reserve_brk;
-  uint64_t       start_mmap;
-  uint64_t       start_stack;
-  uint64_t       stack_limit;
-  uint64_t       entry;
-  uint64_t       code_offset;
-  uint64_t       data_offset;
-  uint64_t       saved_auxv;
-  uint64_t       auxv_len;
-  uint64_t       arg_start;
-  uint64_t       arg_end;
-  uint64_t       arg_strings;
-  uint64_t       env_strings;
-  uint64_t       file_string;
-  uint64_t        elf_flags;
-  int		personality;
-  uint64_t       alignment;
-  
-  /* The fields below are used in FDPIC mode.  */
-  uint64_t       loadmap_addr;
-  uint16_t        nsegs;
-  void           *loadsegs;
-  uint64_t       pt_dynamic_addr;
-  uint64_t       interpreter_loadmap_addr;
-  uint64_t       interpreter_pt_dynamic_addr;
-  struct image_info32 *other_info;
-  /* For target-specific processing of NT_GNU_PROPERTY_TYPE_0. */
-  uint64_t        note_flags;
-  int             fp_abi;
-  int             interp_fp_abi;
-};
 
 struct timeval32_t {
   uint32_t tv_sec;
@@ -247,12 +159,9 @@ public:
   uint8_t brk = 0;
   uint64_t maxicnt = 0;
   sparse_mem &mem;
-  image_info32 linux_image;
   fp_reg_state cpr1_state[32] = {fp_reg_state::unknown};
   std::unordered_map<mipsInsn,uint64_t> insn_histo;
-  state_t(sparse_mem &mem) : mem(mem) {
-    memset(&linux_image, 0, sizeof(linux_image));
-  }
+  state_t(sparse_mem &mem) : mem(mem) {}
   ~state_t();
 };
 

@@ -482,6 +482,16 @@ module decode_mips32(insn,
 	       uop.br_pred = insn_pred;
 	       uop.is_br = 1'b1;
 	       uop.is_int = 1'b1;
+	    end // case: 6'd7
+	  6'd8: /* ADDI */
+	    begin
+	       uop.op = (rt == 'd0) ? NOP : ADDI;
+	       uop.srcA_valid = 1'b1;
+	       uop.srcA = rs;
+	       uop.dst_valid = (rt != 'd0);
+	       uop.is_int = 1'b1;
+	       uop.dst = rt;
+	       uop.imm = insn[15:0];
 	    end
 	  6'd9: /* ADDIU */
 	    begin

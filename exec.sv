@@ -137,11 +137,10 @@ module exec(clk,
    logic [31:0]			  t_csr0_val;
    
    logic 	t_wr_hilo;
+   logic	t_overflow;
    logic 	t_take_br;
    logic 	t_mispred_br;
    logic 	t_alu_valid;
-   logic 	t_got_break;
-
       
    
    mem_req_t r_mem_q[N_MQ_ENTRIES-1:0];
@@ -1115,15 +1114,18 @@ module exec(clk,
    wire [31:0] w_s_sub32, w_c_sub32;
    
    csa #(.N(32)) csa0 (.a(t_srcA), 
-		       .b(int_uop.op == SUBU ? ~t_srcB : ((int_uop.op == ADDIU ? {{E_BITS{int_uop.imm[15]}},int_uop.imm} : t_srcB))), 
+		       .b(int_uop.op == SUBU ? ~t_srcB : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? {{E_BITS{int_uop.imm[15]}},int_uop.imm} : t_srcB))), 
 		       .cin(int_uop.op == SUBU ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
 
    wire [31:0] w_add_srcA = {w_c_sub32[30:0], 1'b0};
    wire [31:0] w_add_srcB = w_s_sub32;
-      
-   ppa32 add0 (.A(w_add_srcA), .B(w_add_srcB), .Y(w_add32));
-   
 
+   wire [32:0] w_add33 = {1'b0, w_add_srcA} + {1'b0, w_add_srcB};
+
+   wire	       w_add_overflow = w_add33[32];
+   assign w_add32 = w_add33[31:0];
+   
+   
    always_comb
      begin
 	t_pc = int_uop.pc;
@@ -1142,19 +1144,17 @@ module exec(clk,
 	t_alu_valid = 1'b0;
 	t_hilo_result = 'd0;
 	t_wr_hilo = 1'b0;
-	t_got_break = 1'b0;
 	t_signed_shift = 1'b0;
 	t_shift_amt = 5'd0;
 	t_start_mul = 1'b0;
 	t_signed_div = 1'b0;
 	t_start_div32 = 1'b0;	
-
+	t_overflow = 1'b0;
 	
 	case(int_uop.op)
 	  BREAK:
 	    begin
 	       t_alu_valid = 1'b1;
-	       t_got_break = 1'b1;
 	       t_fault = 1'b1;
 	       //t_unimp_op = 1'b1;
 	    end
@@ -1453,6 +1453,13 @@ module exec(clk,
 	  LUI:
 	    begin
 	       t_result = {{HI_EBITS{int_uop.imm[15]}},int_uop.imm, 16'd0};
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  ADDI:
+	    begin
+	       t_result = w_add32;
+	       t_overflow = w_add_overflow;
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1821,6 +1828,10 @@ module exec(clk,
 	    begin
 	       t_csr0_val = {31'd0, w_putchar_fifo_full};
 	    end
+	  'd16:
+	    begin
+	       t_csr0_val = 32'h88200;
+	    end
 	  'd23:
 	    begin
 	       t_csr0_val = r_cycle[31:0];
@@ -1876,6 +1887,7 @@ module exec(clk,
 	     complete_bundle_1.restart_pc <= 'd0;
 	     complete_bundle_1.is_ii <= 1'b0;
 	     complete_bundle_1.take_br <= 1'b0;
+	     complete_bundle_1.overflow <= 1'b0;
 	     complete_bundle_1.data <= t_mul_result[`M_WIDTH-1:0];
 	  end
 	else
@@ -1886,6 +1898,7 @@ module exec(clk,
 	     complete_bundle_1.restart_pc <= t_pc;
 	     complete_bundle_1.is_ii <= t_unimp_op;
 	     complete_bundle_1.take_br <= t_take_br;
+	     complete_bundle_1.overflow <= t_overflow;	     
 	     complete_bundle_1.data <= t_result;
 	  end
 	//(uq.rob_ptr == 'd5) ? 1'b1 : 1'b0;

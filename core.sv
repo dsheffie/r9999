@@ -1171,6 +1171,7 @@ module core(clk,
 	       else if(t_rob_head.is_ii)
 		 begin
 		    n_pending_ud = 1'b1;
+		    $display("bad pc %x", t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);	     
 		    n_cause = 5'd10;
 		 end
 	       else if(t_rob_head.is_bad_addr)
@@ -1492,6 +1493,7 @@ module core(clk,
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
 	
 	t_rob_tail.is_ii = 1'b0;
+	t_rob_tail.overflow = 1'b0;
 	t_rob_tail.is_bad_addr = 1'b0;
 	t_rob_tail.take_br = 1'b0;
 	t_rob_tail.is_br = t_alloc_uop.is_br;	
@@ -1513,6 +1515,7 @@ module core(clk,
 	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop.srcA == 'd31);
 	t_rob_next_tail.is_break  = (t_alloc_uop2.op == BREAK);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
+	t_rob_next_tail.overflow = 1'b0;
 	
 	t_rob_next_tail.is_ii = 1'b0;
 	t_rob_next_tail.is_bad_addr = 1'b0;
@@ -1682,6 +1685,7 @@ module core(clk,
 		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].is_ii <= t_complete_bundle_1.is_ii;
 		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].take_br <= t_complete_bundle_1.take_br;
 		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].data <= t_complete_bundle_1.data;
+		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].overflow <= t_complete_bundle_1.overflow;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].complete_cycle <= r_cycle;
 `endif	    

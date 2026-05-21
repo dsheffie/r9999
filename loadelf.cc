@@ -27,18 +27,6 @@
 #endif
 
 
-/* copied out of QEMUs linux-user emulation */
-#if HOST_LONG_BITS == 64 && TARGET_ABI_BITS == 64
-# define TASK_UNMAPPED_BASE  (1ul << 38)
-#else
-# define TASK_UNMAPPED_BASE  0x40000000
-#endif
-#define DLINFO_ITEMS 16
-void target_set_brk(uint32_t new_brk, uint32_t pgsize);
-void rtl_target_set_brk(uint32_t new_brk, uint32_t pgsize);
-
-/* end QEMU */
-
 #define INTEGRAL_ENABLE_IF(SZ,T) typename std::enable_if<std::is_integral<T>::value and (sizeof(T)==SZ),T>::type* = nullptr
 
 template <typename T, INTEGRAL_ENABLE_IF(1,T)>
@@ -49,28 +37,19 @@ T bswap_(T x) {
 template <typename T, INTEGRAL_ENABLE_IF(2,T)> 
 T bswap_(T x) {
   static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "must be little endian machine");
-  if(globals::isMipsEL) 
-    return x;
-  else
   return  __builtin_bswap16(x);
 }
 
 template <typename T, INTEGRAL_ENABLE_IF(4,T)>
 T bswap_(T x) {
   static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "must be little endian machine");
-  if(globals::isMipsEL)
-    return x;
-  else 
-    return  __builtin_bswap32(x);
+  return  __builtin_bswap32(x);
 }
 
 template <typename T, INTEGRAL_ENABLE_IF(8,T)> 
 T bswap_(T x) {
   static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "must be little endian machine");
-  if(globals::isMipsEL)
-    return x;
-  else 
-    return  __builtin_bswap64(x);
+  return  __builtin_bswap64(x);
 }
 
 #undef INTEGRAL_ENABLE_IF
@@ -127,16 +106,8 @@ void load_elf(const char* fn, state_t *ms) {
   }
 
   /* Check for a MIPS machine */
-  if(checkLittleEndian(eh32)) {
-    globals::isMipsEL = true;
-  }
-  else if(checkBigEndian(eh32)) {
-    globals::isMipsEL = false;
-  }
-  else {
-    std::cerr << "not big or little little endian?\n";
-    die();
-  }
+  assert(checkBigEndian(eh32));
+
   if(bswap_(eh32->e_machine) != 8) {
     printf("INTERP : non-mips binary..goodbye\n");
     exit(-1);
@@ -150,16 +121,8 @@ void load_elf(const char* fn, state_t *ms) {
   e_shnum = bswap_(eh32->e_shnum);
   sh32 = reinterpret_cast<Elf32_Shdr*>(buf + bswap_(eh32->e_shoff));
   ms->pc = lAddr;
-  ms->linux_image.entry = lAddr;
-  ms->linux_image.elf_flags = bswap_(eh32->e_flags);
-  ms->linux_image.start_code = -1;
-  ms->linux_image.end_code = 0;
-  ms->linux_image.start_data = -1;
-  ms->linux_image.end_data = 0;
-  ms->linux_image.brk = 0;
 
   uint32_t loaddr = ~0U, hiaddr = 0;
-  ms->linux_image.alignment = 0;
   /* Find instruction segments and copy to
    * the memory buffer */
   for(int32_t i = 0; i < e_phnum; i++, ph32++) {
@@ -171,13 +134,8 @@ void load_elf(const char* fn, state_t *ms) {
     /* stolen from QEMU */
     if(p_type == PT_LOAD) {
       uint32_t sz = (p_vaddr + p_memsz);
-      if(sz > ms->linux_image.brk) {
-	ms->linux_image.brk = sz;
-      }
       loaddr = std::min(loaddr, (p_vaddr - p_offset));
       hiaddr = std::max(hiaddr, sz);
-      ms->linux_image.nsegs++;
-      ms->linux_image.alignment |= bswap_(ph32->p_align);
     }
     uint32_t vaddr_ef = p_vaddr + p_filesz;
     uint32_t vaddr_em = p_vaddr + p_memsz;
@@ -196,7 +154,6 @@ void load_elf(const char* fn, state_t *ms) {
       // 		<< std::dec
       // 		<< "\n";
       
-      mem.prefault(p_vaddr, p_memsz);
       
       /* not strictly required, prefault fills with zeros */
       for(int32_t cc = 0; cc < p_memsz; cc++) {

@@ -126,19 +126,6 @@ static void setConditionCode(state_t *s, uint32_t v, uint32_t cc) {
 }
 
 
-void mkMonitorVectors(state_t *s) {
-  for (uint32_t loop = 0; (loop < IDT_MONITOR_SIZE); loop += 4) {
-      uint32_t vaddr = IDT_MONITOR_BASE + loop;
-      uint32_t insn = (RSVD_INSTRUCTION |
-		       (((loop >> 2) & RSVD_INSTRUCTION_ARG_MASK)
-			<< RSVD_INSTRUCTION_ARG_SHIFT));
-      s->mem.set<uint32_t>(vaddr, globals::isMipsEL ? bswap<true,uint32_t>(insn) : bswap<false,uint32_t>(insn));
-
-  }
-}
-
-
-
 
 static void execSpecial2(uint32_t inst,state_t *s) {
   uint32_t funct = inst & 63; 
@@ -773,145 +760,6 @@ static inline char* get_open_string(sparse_mem &mem, uint32_t offset) {
     ptr++;
   }
   return buf;
-}
-
-template <bool EL>
-void _monitorBody(uint32_t inst, state_t *s) {
- uint32_t reason = (inst >> RSVD_INSTRUCTION_ARG_SHIFT) & RSVD_INSTRUCTION_ARG_MASK;
-  reason >>= 1;
-  int32_t fd=-1,nr=-1,flags=-1;
-  char *path;
-  struct timeval tp;
-  timeval32_t tp32;
-  struct tms tms_buf;
-  tms32_t tms32_buf;
-  struct stat native_stat;
-  stat32_t *host_stat = nullptr;
-  if(globals::report_syscalls) {
-    printf("monitor reason %d\n", reason);
-  }
-  switch(reason)
-    {
-    case 6: /* int open(char *path, int flags) */
-      path = reinterpret_cast<char*>(s->mem.get_raw_ptr(s->gpr[R_a0]));
-      flags = remapIOFlags(s->gpr[R_a1]);
-      fd = open(path, flags, S_IRUSR|S_IWUSR);
-      s->gpr[R_v0] = fd;
-      break;
-    case 7: /* int read(int file,char *ptr,int len) */
-      fd = s->gpr[R_a0];
-      nr = s->gpr[R_a2];
-      s->mem.coalesce(s->gpr[R_a1], nr);
-      if(fd == STDIN_FILENO) {
-	const char* in = getenv("STDIN_FILE");
-	assert(in);
-	fd = open(in, O_RDONLY, S_IRUSR|S_IWUSR);
-	s->gpr[R_v0] = per_page_rdwr<false>(s->mem, fd, s->gpr[R_a1], nr);
-	close(fd);
-      }
-      else {
-	s->gpr[R_v0] = per_page_rdwr<false>(s->mem, fd, s->gpr[R_a1], nr);
-      }
-      break;
-    case 8: 
-      /* int write(int file, char *ptr, int len) */
-      fd = s->gpr[R_a0];
-      nr = s->gpr[R_a2];
-      s->gpr[R_v0] = per_page_rdwr<true>(s->mem, fd, s->gpr[R_a1], nr);
-      //s->gpr[R_v0] = (int32_t)write(fd, (void*)(s->mem + (uint32_t)s->gpr[R_a1]), nr);
-      if(fd==1)
-	fflush(stdout);
-      else if(fd==2)
-	fflush(stderr);
-      break;
-    case 9:
-      s->gpr[R_v0] = lseek(s->gpr[R_a0], s->gpr[R_a1], s->gpr[R_a2]);
-      break;
-    case 10:
-      fd = s->gpr[R_a0];
-      if(fd>2)
-	s->gpr[R_v0] = (int32_t)close(fd);
-      else
-	s->gpr[R_v0] = 0;
-      break;
-    case 33: {
-      uint32_t uptr = *(uint32_t*)(s->gpr + R_a0);
-      s->mem.set<uint32_t>(uptr, 0);
-      s->mem.set<uint32_t>(uptr+4, 0);
-      s->gpr[R_v0] = 0;
-      break;
-    }
-    case 34: {
-      uint32_t uptr = *(uint32_t*)(s->gpr + R_a0);
-      //if(globals::enClockFuncts) {
-      //	 = times(&tms_buf);
-      // }
-      //else {
-      //uint64_t mips = globals::icountMIPS*1000000;
-      // tms_buf.tms_utime = (s->icnt/mips)*100;
-      //tms_buf.tms_stime = 0;
-      //tms_buf.tms_cutime = 0;
-      //tms_buf.tms_cstime = 0;	
-      //}
-      //memset(&tms32_buf, 0, sizeof(tms32_buf));
-      //tms32_buf.tms_utime = bswap<EL>((uint32_t)tms_buf.tms_utime);
-      //tms32_buf.tms_stime = bswap<EL>((uint32_t)tms_buf.tms_stime);
-      //tms32_buf.tms_cutime = bswap<EL>((uint32_t)tms_buf.tms_cutime);
-      //tms32_buf.tms_cstime = bswap<EL>((uint32_t)tms_buf.tms_cstime);      
-      //*((tms32_t*)(s->mem + uptr)) = tms32_buf;
-      for(int i = 0; i < 4; i++) {
-	s->mem.set<uint32_t>(uptr+i,0);
-      }
-      *((uint32_t*)(&s->gpr[R_v0])) = 0;
-      break;
-    }
-    case 35:
-      /* int getargs(char **argv) */
-      for(int i = 0; i < std::min(MARGS, globals::sysArgc); i++) {
-	  uint32_t arrayAddr = ((uint32_t)s->gpr[R_a0])+4*i;
-	  uint32_t ptr = bswap<EL>(*((uint32_t*)(s->mem + arrayAddr)));
-	  strcpy((char*)(s->mem + ptr), globals::sysArgv[i]);
-	}
-      s->gpr[R_v0] = globals::sysArgc;
-      break;
-    case 37:
-      /*char *getcwd(char *buf, uint32_t size) */
-      path = (char*)(s->mem + (uint32_t)s->gpr[R_a0]);
-      getcwd(path, (uint32_t)s->gpr[R_a1]);
-      s->gpr[R_v0] = s->gpr[R_a0];
-      break;
-    case 38:
-      /* int chdir(const char *path); */
-      path = reinterpret_cast<char*>(s->mem.get_raw_ptr(s->gpr[R_a0]));
-      s->gpr[R_v0] = chdir(path);
-      break;
-    case 50:
-      s->gpr[R_v0] = globals::cycle;
-      break;
-    case 55: 
-      /* void get_mem_info(unsigned int *ptr) */
-      /* in:  A0 = pointer to three word memory location */
-      /* out: [A0 + 0] = size */
-      /*      [A0 + 4] = instruction cache size */
-      /*      [A0 + 8] = data cache size */
-      /* 256 MBytes of DRAM */
-      //printf("monitor writing to words %x, %x, and %x\n", s->gpr[R_a0], s->gpr[R_a0] + 4, s->gpr[R_a0] + 8);
-      s->mem.set<uint32_t>(static_cast<uint32_t>(s->gpr[R_a0] + 0),
-			   bswap<EL>(K1SIZE));
-      /* No Icache */
-      s->mem.set<uint32_t>(static_cast<uint32_t>(s->gpr[R_a0] + 4), 0);
-      /* No Dcache */
-      s->mem.set<uint32_t>(static_cast<uint32_t>(s->gpr[R_a0] + 8), 0);
-      
-      s->gpr[R_v0] = 0;
-      break;
-    default:
-      printf("unhandled monitor instruction (reason = %d)\n", reason);
-      exit(-1);
-      break;
-    }
-  s->pc = s->gpr[31];
-  s->insn_histo[mipsInsn::MONITOR]++;
 }
 
 
@@ -1564,9 +1412,6 @@ void execMips(state_t *s) {
 	s->gpr[rd] = s->gpr[rt] << (s->gpr[rs] & 0x1f);
 	s->pc += 4;
 	s->insn_histo[mipsInsn::SLLV]++;
-	break;
-      case 0x05:
-	_monitorBody<EL>(inst, s);
 	break;
       case 0x06:  
 	s->gpr[rd] = ((uint32_t)s->gpr[rt]) >> (s->gpr[rs] & 0x1f);
