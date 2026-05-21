@@ -10,6 +10,7 @@ typedef struct packed {
    logic       is_bad_addr;
    logic       is_ret;
    logic       is_call;
+   logic       is_irq;
    logic       valid_dst;
    logic       valid_hilo_dst;
    logic       has_delay_slot;

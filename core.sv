@@ -223,6 +223,8 @@ module core(clk,
    
    
    logic [31:0] 			  r_epc, n_epc;
+   logic				  r_exc_in_delay, n_exc_in_delay;
+   
    
    localparam N_PRF_ENTRIES = (1<<`LG_PRF_ENTRIES);
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);
@@ -543,6 +545,7 @@ module core(clk,
 	     r_ds_done <= 1'b0;
 	     drain_ds_complete <= 1'b0;
 	     r_epc <= 'd0;
+	     r_exc_in_delay <= 1'b0;	     
 	  end
 	else
 	  begin
@@ -576,6 +579,7 @@ module core(clk,
 	     r_ds_done <= n_ds_done;
 	     drain_ds_complete <= r_ds_done;
 	     r_epc <= n_epc;
+	     r_exc_in_delay <= n_exc_in_delay;
 	  end
      end // always_ff@ (posedge clk)
 
@@ -838,6 +842,8 @@ module core(clk,
 
 	n_pending_fault = r_pending_fault;
 	n_epc = r_epc;
+	n_exc_in_delay = r_exc_in_delay;
+	
 	
 	t_enough_iprfs = !((t_uop.dst_valid) && t_gpr_ffs_full);
 	t_enough_hlprfs = !((t_uop.hilo_dst_valid) && (r_hilo_prf_free == 'd0));
@@ -849,12 +855,14 @@ module core(clk,
 
 
 	
-	t_fold_uop = (t_uop.op == NOP || 
-		      t_uop.op == J  ||
+	t_fold_uop = (t_uop.op == NOP | 
+		      t_uop.op == J  |
+		      t_uop.op == IRQ |
 		      t_uop.op == II);
 
-	t_fold_uop2 = (t_uop2.op == NOP || 
-		       t_uop2.op == J  ||
+	t_fold_uop2 = (t_uop2.op == NOP | 
+		       t_uop2.op == J  |
+		       t_uop2.op == IRQ |
 		       t_uop2.op == II);
 	
 	n_ds_done = r_ds_done;
@@ -900,7 +908,7 @@ module core(clk,
 	  end
 	
 	t_arch_fault = t_rob_head.faulted & 
-		       (t_rob_head.is_break | t_rob_head.is_ii | t_rob_head.is_bad_addr);
+		       (t_rob_head.is_break | t_rob_head.is_ii | t_rob_head.is_bad_addr | t_rob_head.overflow | t_rob_head.is_irq);
 	
 	
 	unique case (r_state)
@@ -1179,8 +1187,17 @@ module core(clk,
 		    n_pending_bad_addr = 1'b1;
 		    n_cause = 5'd10;
 		 end
+	       else if(t_rob_head.is_irq)
+		 begin
+		    n_cause = 5'd0;
+		 end
+	       else if(t_rob_head.overflow)
+		 begin
+		    n_cause = 5'd12;
+		 end
 	       n_state = WRITE_EPC;
-	       n_epc = (t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);	       
+	       n_epc = (t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);
+	       n_exc_in_delay = t_rob_head.in_delay_slot;
 	    end
 	  WRITE_EPC:
 	    begin
@@ -1488,6 +1505,7 @@ module core(clk,
 	t_rob_tail.target_pc = 'd0;
 	
 	t_rob_tail.is_call = t_alloc_uop.op == JAL || t_alloc_uop.op == JALR || t_alloc_uop.op == BAL;
+	t_rob_tail.is_irq = t_alloc_uop.op == IRQ;
 	t_rob_tail.is_ret = (t_alloc_uop.op == JR) && (t_uop.srcA == 'd31);
 	t_rob_tail.is_break  = (t_alloc_uop.op == BREAK);
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
@@ -1512,6 +1530,8 @@ module core(clk,
 	t_rob_next_tail.target_pc = 'd0;
 	t_rob_next_tail.opcode = t_alloc_uop2.op;
 	t_rob_next_tail.is_call = t_alloc_uop2.op == JAL || t_alloc_uop2.op == JALR || t_alloc_uop2.op == BAL;
+	t_rob_next_tail.is_irq = t_alloc_uop2.op == IRQ;
+	
 	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop.srcA == 'd31);
 	t_rob_next_tail.is_break  = (t_alloc_uop2.op == BREAK);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
@@ -1563,6 +1583,10 @@ module core(clk,
 		       t_rob_tail.faulted = 1'b1;
 		       t_rob_tail.is_ii = 1'b1;
 		    end
+		  else if(t_uop.op == IRQ)
+		    begin
+		       t_rob_tail.faulted = 1'b1;
+		    end
 		  else if(t_uop.op == J)
 		    begin
 		       t_rob_tail.take_br = 1'b1;
@@ -1605,6 +1629,10 @@ module core(clk,
 		    begin
 		       t_rob_next_tail.faulted = 1'b1;
 		       t_rob_next_tail.is_ii = 1'b1;
+		    end
+		  else if(t_uop2.op == IRQ)
+		    begin
+		       t_rob_next_tail.faulted = 1'b1;
 		    end
 		  else if(t_uop2.op == J)
 		    begin
@@ -2002,6 +2030,8 @@ module core(clk,
 	   .reset(reset),
 	   .retire(t_retire),
 	   .retire_two(t_retire_two),
+	   .epc(r_epc),
+	   .exc_in_delay(r_exc_in_delay),
 	   .putchar_fifo_out(putchar_fifo_out),
 	   .putchar_fifo_empty(putchar_fifo_empty),
 	   .putchar_fifo_pop(putchar_fifo_pop),

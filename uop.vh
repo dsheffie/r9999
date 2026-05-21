@@ -80,7 +80,8 @@ typedef enum logic [6:0]
    MOVI = 'd72,
    MOV = 'd73,
    NOP = 'd75,
-   II = 'd76 //illegal instruction
+   II = 'd76, //illegal instruction
+   IRQ = 'd77
    } opcode_t;
 
 function logic is_mult(opcode_t op);

@@ -20,6 +20,8 @@ module exec(clk,
 	    reset,
 	    retire,
 	    retire_two,
+	    epc,
+	    exc_in_delay,
 	    putchar_fifo_out,
 	    putchar_fifo_empty,
 	    putchar_fifo_pop,
@@ -63,8 +65,9 @@ module exec(clk,
    input logic reset;
    input logic retire;
    input logic retire_two;
-   
-   output logic [7:0] putchar_fifo_out;
+   input logic [(`M_WIDTH-1):0]	epc;
+   input logic			exc_in_delay;
+   output logic [7:0]		putchar_fifo_out;
    output logic       putchar_fifo_empty;
    input logic 	      putchar_fifo_pop;
    output logic [3:0] putchar_fifo_wptr;
@@ -1460,6 +1463,7 @@ module exec(clk,
 	    begin
 	       t_result = w_add32;
 	       t_overflow = w_add_overflow;
+	       t_fault = w_add_overflow;	       
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
