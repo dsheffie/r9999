@@ -4,8 +4,6 @@
 #define CACHE_STATS 1
 
 
-char **globals::sysArgv = nullptr;
-int globals::sysArgc = 0;
 bool globals::enClockFuncts = false;
 uint64_t globals::icountMIPS = 0;
 uint64_t globals::cycle = 0;
@@ -244,38 +242,6 @@ void record_retirement(long long pc, long long fetch_cycle, long long alloc_cycl
 }
 
 
-static int buildArgcArgv(const char *filename, const char *sysArgs, char ***argv) {
-  int cnt = 0;
-  std::vector<std::string> args;
-  char **largs = 0;
-  args.push_back(std::string(filename));
-
-  char *ptr = nullptr, *sa = nullptr;
-  if(sysArgs) {
-    sa = strdup(sysArgs);
-    ptr = strtok(sa, " ");
-  }
-
-  while(ptr && (cnt<MARGS)) {
-    args.push_back(std::string(ptr));
-    ptr = strtok(nullptr, " ");
-    cnt++;
-  }
-  largs = new char*[args.size()];
-  for(size_t i = 0; i < args.size(); i++) {
-    std::string s = args[i];
-    size_t l = strlen(s.c_str());
-    largs[i] = new char[l+1];
-    memset(largs[i],0,sizeof(char)*(l+1));
-    memcpy(largs[i],s.c_str(),sizeof(char)*l);
-  }
-  *argv = largs;
-  if(sysArgs) {
-    free(sa);
-  }
-  return (int)args.size();
-}
-
 
 int main(int argc, char **argv) {
   static_assert(sizeof(itype) == 4, "itype must be 4 bytes");
@@ -283,7 +249,7 @@ int main(int argc, char **argv) {
   namespace po = boost::program_options; 
   // Initialize Verilators variables
   bool enable_checker = true;
-  std::string sysArgs, pipelog;
+  std::string pipelog;
   std::string mips_binary = "dhrystone3";
   std::string log_name = "log.txt";
   std::string pushout_name = "pushout.txt";
@@ -299,7 +265,6 @@ int main(int argc, char **argv) {
     po::options_description desc("Options");
     desc.add_options() 
       ("help", "Print help messages")
-      ("args,a", po::value<std::string>(&sysArgs), "arguments to mips binary")
       ("checker,c", po::value<bool>(&enable_checker)->default_value(true), "use checker")
       ("file,f", po::value<std::string>(&mips_binary), "mips binary")
       ("heartbeat,h", po::value<uint64_t>(&heartbeat)->default_value(1<<24), "heartbeat for stats")
@@ -351,13 +316,12 @@ int main(int argc, char **argv) {
   ss = new state_t(*sm1);
   initState(s);
   initState(ss);
-  globals::sysArgc = buildArgcArgv(mips_binary.c_str(),sysArgs.c_str(),&globals::sysArgv);
   initCapstone();
   
   load_elf(mips_binary.c_str(), s);
   load_elf(mips_binary.c_str(), ss);
 
-  #if 0
+  #if 1
   {
     struct stat st;
     int rc;
@@ -774,6 +738,12 @@ int main(int argc, char **argv) {
       if(tb->mem_req_opcode == 4) {/*load word */
 	for(int i = 0; i < 4; i++) {
 	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
+	  if(compute_mem_range_type(ea) != mem_range_t::boot_rom) {
+	    std::cout << "attempting to access " << compute_mem_range_type(ea)
+		      << " : "
+		      << std::hex <<  ea << std::dec << "\n";
+	    exit(-1);
+	  }
 	  tb->mem_rsp_load_data[i] = s->mem.get<uint32_t>(ea);
 	  //std::cout << "\tloading " << std::hex << ea << " with data "
 	  //<< bswap<false>(s->mem.get<uint32_t>(ea))

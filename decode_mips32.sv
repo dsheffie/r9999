@@ -485,7 +485,7 @@ module decode_mips32(insn,
 	    end // case: 6'd7
 	  6'd8: /* ADDI */
 	    begin
-	       uop.op = (rt == 'd0) ? NOP : ADDI;
+	       uop.op = ADDI;
 	       uop.srcA_valid = 1'b1;
 	       uop.srcA = rs;
 	       uop.dst_valid = (rt != 'd0);
