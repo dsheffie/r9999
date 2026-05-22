@@ -166,6 +166,8 @@ module core_l1d_l1i(clk,
    logic 				  head_of_rob_ptr_valid;   
    logic [`LG_ROB_ENTRIES-1:0] 		  head_of_rob_ptr;
 
+   wire					  w_in_kernel_mode, w_in_supervisor_mode, 
+					  w_in_user_mode;   
    wire 				  flush_req_l1i, flush_req_l1d;
    logic 				  flush_cl_req;
    logic [`M_WIDTH-1:0] 		  flush_cl_addr;
@@ -483,6 +485,9 @@ module core_l1d_l1i(clk,
 	       .clk(clk),
 	       .reset(reset),
 	       .state(l1d_state),
+	       .in_kernel_mode(w_in_kernel_mode),
+	       .in_supervisor_mode(w_in_supervisor_mode),
+	       .in_user_mode(w_in_user_mode),
 	       .head_of_rob_ptr_valid(head_of_rob_ptr_valid),
 	       .head_of_rob_ptr(head_of_rob_ptr),
 	       .retired_rob_ptr_valid(retired_rob_ptr_valid),
@@ -528,6 +533,9 @@ module core_l1d_l1i(clk,
 	      .clk(clk),
 	      .reset(reset),
 	      .state(l1i_state),
+	      .in_kernel_mode(w_in_kernel_mode),
+	      .in_supervisor_mode(w_in_supervisor_mode),
+	      .in_user_mode(w_in_user_mode),	      
 	      .flush_req(flush_req_l1i),
 	      .flush_complete(l1i_flush_complete),
 	      .restart_pc(restart_pc),
@@ -562,10 +570,13 @@ module core_l1d_l1i(clk,
 	      .cache_accesses(l1i_cache_accesses),
 	      .cache_hits(l1i_cache_hits)	      
 	      );
-   	      
+   
    core cpu (
 	     .clk(clk),
 	     .reset(reset),
+	     .in_kernel_mode(w_in_kernel_mode),
+	     .in_supervisor_mode(w_in_supervisor_mode),
+	     .in_user_mode(w_in_user_mode),
 	     .putchar_fifo_out(putchar_fifo_out),
 	     .putchar_fifo_empty(putchar_fifo_empty),
 	     .putchar_fifo_pop(putchar_fifo_pop),

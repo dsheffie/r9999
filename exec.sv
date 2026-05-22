@@ -22,6 +22,9 @@ module exec(clk,
 	    retire_two,
 	    epc,
 	    exc_in_delay,
+	    in_kernel_mode,
+	    in_supervisor_mode,
+	    in_user_mode,
 	    putchar_fifo_out,
 	    putchar_fifo_empty,
 	    putchar_fifo_pop,
@@ -67,6 +70,10 @@ module exec(clk,
    input logic retire_two;
    input logic [(`M_WIDTH-1):0]	epc;
    input logic			exc_in_delay;
+   output logic			in_kernel_mode;
+   output logic			in_supervisor_mode;
+   output logic			in_user_mode;
+   
    output logic [7:0]		putchar_fifo_out;
    output logic       putchar_fifo_empty;
    input logic 	      putchar_fifo_pop;
@@ -1619,7 +1626,7 @@ module exec(clk,
 	t_mem_tail.is_store = 1'b0;
 	t_mem_tail.data = 32'd0;
 	t_mem_tail.bad_addr = 1'b0;
-	t_mem_tail.cached = 1'b0 & w_cached;
+	t_mem_tail.cached = w_cached & 1'b0;
 	t_mem_tail.mapped = w_mapped;
 `ifdef VERILATOR
 	t_mem_tail.pc = mem_uq.pc;
@@ -1826,11 +1833,55 @@ module exec(clk,
    assign putchar_fifo_wptr = r_wr_pc_idx;
    assign putchar_fifo_rptr = r_rd_pc_idx;
 
+   /* interrupt enable */
+   logic r_sr_ie, n_sr_ie;
+   /* exception level */
+   logic r_sr_exl, n_sr_exl;
+   /* error level */
+   logic r_sr_erl, n_sr_erl;
+   /* kernel - 00, supervisor - 01, user - 10 */
+   logic [1:0] r_sr_ksu, n_sr_ksu;
+   /* 64b user */
+   logic       r_sr_ux, n_sr_ux;
+   /* 64b supervisor */
+   logic       r_sr_sx, n_sr_sx;
+   /* 64b kernel */
+   logic       r_sr_kx, n_sr_kx;
+   /* exception vector */
+   logic       r_sr_bev, n_sr_bev;
 
+   always_ff@(posedge clk)
+     begin
+	n_sr_ie = r_sr_ie;
+	n_sr_exl = r_sr_exl;
+	n_sr_erl = r_sr_erl;
+	n_sr_ksu = r_sr_ksu;
+	n_sr_ux = r_sr_ux;
+	n_sr_sx = r_sr_sx;
+	n_sr_kx = r_sr_kx;	
+	n_sr_bev = r_sr_bev;
+     end // always_ff@ (posedge clk)
+
+   always@(posedge clk)
+     begin
+	r_sr_ie = reset ? 'd0 : n_sr_ie;
+	r_sr_exl <= reset ? 'd0 : n_sr_exl;
+	r_sr_erl <= reset ? 'd0 : n_sr_erl;
+	r_sr_ksu <= reset ? 'd0 : n_sr_ksu;
+	r_sr_ux <= reset ? 'd0 : n_sr_ux;
+	r_sr_sx <= reset ? 'd0 : n_sr_sx;
+	r_sr_kx <= reset ? 'd0 : n_sr_kx;	
+	r_sr_bev <= reset ? 'd0 : n_sr_bev;
+     end
+
+   assign in_kernel_mode = (r_sr_ksu=='d0) | r_sr_exl | r_sr_erl;
+   assign in_supervisor_mode = (r_sr_ksu=='d1) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
+   assign in_user_mode = (r_sr_ksu=='d2) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);   
+   
    always_comb
      begin
 	t_csr0_val = cpr0_status_reg;
-	case(int_uop.srcA[4:0])
+	case(int_uop.srcA[4:0] )
 	  'd7:
 	    begin
 	       t_csr0_val = {31'd0, w_putchar_fifo_full};

@@ -752,7 +752,7 @@ int main(int argc, char **argv) {
 	    if( ((m >> k) & 1) ) {
 	      uint32_t by = s->mem.get<uint8_t>(ea+j);
 	      d |= (by << (j*8));
-	      printf("read byte %lx : %x\n", ea+j, by);
+	      // printf("read byte %lx : %x\n", ea+j, by);
 	    }
 	    k++;
 	  }
@@ -775,14 +775,14 @@ int main(int argc, char **argv) {
       }
       else if(tb->mem_req_opcode == 7) { /* store word */
 	uint16_t m = tb->mem_req_mask;
-	printf("store mask %x\n", m);
+	//printf("store mask %x\n", m);
 	for(int i = 0, k = 0; i < 4; i++) {
 	  uint32_t d = tb->mem_req_store_data[i];
 	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
 	  for(int j = 0; j < 4; j++) {
 	    if(((m >> k) & 1)) {
 	      uint32_t by = (d>>(8*j)) & 0xff;	      
-	      printf("write byte %x to address %lx\n", by, ea+j);
+	      //printf("write byte %x to address %lx\n", by, ea+j);
 	      s->mem.set<uint8_t>(ea+j, by);
 	    }
 	    k++;

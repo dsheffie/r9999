@@ -147,6 +147,9 @@ endmodule
 module l1i(clk,
 	   state,
 	   reset,
+	   in_kernel_mode,
+	   in_supervisor_mode,
+	   in_user_mode,
 	   flush_req,
 	   flush_complete,
 	   restart_pc,
@@ -190,6 +193,10 @@ module l1i(clk,
    input logic clk;
    output logic [2:0] state;
    input logic reset;
+   input logic			in_kernel_mode;
+   input logic			in_supervisor_mode;
+   input logic			in_user_mode;
+   
    input logic 	      flush_req;
    output logic       flush_complete;
    //restart signals

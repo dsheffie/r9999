@@ -15,6 +15,9 @@ import "DPI-C" function void record_l1d(input int req,
 module l1d(clk, 
 	   reset,
 	   state,
+	   in_kernel_mode,
+	   in_supervisor_mode,
+	   in_user_mode,
 	   head_of_rob_ptr,
 	   head_of_rob_ptr_valid,
 	   retired_rob_ptr_valid,
@@ -62,6 +65,10 @@ module l1d(clk,
    input logic clk;
    input logic reset;
    output logic [3:0] state;
+   input logic			in_kernel_mode;
+   input logic			in_supervisor_mode;
+   input logic			in_user_mode;
+   
 
    input logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
    input logic 			     head_of_rob_ptr_valid;
@@ -133,10 +140,10 @@ module l1d(clk,
 	    r.addr[1:0] == 'd2 ? 4'b0111 :
 	    4'b1111;
 
-      swl = r.addr[1:0] == 'd3 ? 4'b1111 :
-	    r.addr[1:0] == 'd2 ? 4'b0111 :
-	    r.addr[1:0] == 'd1 ? 4'b0011 :
-	    4'b0001;
+      swl = r.addr[1:0] == 'd3 ? 4'b1000 :
+	    r.addr[1:0] == 'd2 ? 4'b1100 :
+	    r.addr[1:0] == 'd1 ? 4'b1110 :
+	    4'b0000;
             
       
       swl_swr = (r.op == MEM_SWR | r.op == MEM_SWL);
@@ -1412,9 +1419,9 @@ endfunction
 		      begin
 			 n_mem_req_cacheable = 1'b0;
 			 n_mem_req_mask = t_mem_req_mask;
-			 if(r_req.op == MEM_SWR | r_req.op == MEM_SWL)
+			 if(r_req.op == MEM_SWR)
 			   begin
-			      $display("addr[3:0] = %x, {addr[3:2],2'd0} = %x, bits %x, mask = %b", 
+			      $display("SWR addr[3:0] = %x, {addr[3:2],2'd0} = %x, bits %x, mask = %b", 
 				       r_req.addr[3:0],
 				       {r_req.addr[3:2], 2'd0},
 				       r_req.addr[1:0],
@@ -1422,6 +1429,16 @@ endfunction
 			      //$stop();
 			      
 			   end
+			 if(r_req.op == MEM_SWL)
+			   begin
+			      $display("SWL addr[3:0] = %x, {addr[3:2],2'd0} = %x, bits %x, mask = %b", 
+				       r_req.addr[3:0],
+				       {r_req.addr[3:2], 2'd0},
+				       r_req.addr[1:0],
+				       n_mem_req_mask);
+			      //$stop();
+			      
+			   end			 
 			 n_state = r_req.is_store ? INJECT_UNCACHE_STORE : INJECT_UNCACHE_LOAD;
 			 n_mem_req_valid = 1'b1;
 			 n_mem_req_opcode = r_req.is_store ? MEM_SW : MEM_LW;
@@ -1433,9 +1450,9 @@ endfunction
 			      t_reset_graduated = 1'b1;				   
 			   end
 			 
-			 $display("uncachable req at pc %x to addr %x, is store %b, data %x, mask %b, rob ptr %x\n", 
-				  r_req.pc, {r_req.addr[31:4], 4'd0}, r_req.is_store, r_req.data,
-				  t_mem_req_mask, r_req.rob_ptr);
+			 //$display("uncachable req at pc %x to addr %x, is store %b, data %x, mask %b, rob ptr %x\n", 
+			 //r_req.pc, {r_req.addr[31:4], 4'd0}, r_req.is_store, r_req.data,
+			 //t_mem_req_mask, r_req.rob_ptr);
 			 
 		      end
 		    else if(r_valid_out && (r_tag_out == r_cache_tag))
@@ -1693,7 +1710,7 @@ endfunction
 	    begin
 	       if(mem_rsp_valid)
 		 begin
-		    $display("data returns for uncached load, got %x, old data %x", t_rsp_data[31:0], r_req.data);
+		    //$display("data returns for uncached load, got %x, old data %x", t_rsp_data[31:0], r_req.data);
 		    n_core_mem_rsp.data = t_rsp_data[31:0];
                     n_core_mem_rsp.dst_valid = r_req.dst_valid;
 		    n_core_mem_rsp.bad_addr = r_req.bad_addr;		    

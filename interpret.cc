@@ -630,12 +630,12 @@ void _swl(uint32_t inst, state_t *s) {
   uint32_t xs = x >> (8*ma);
   uint32_t m = ~((1U << (8*(4 - ma))) - 1);
   xx = (r & m) | xs;
-  std::cout << "SIM SWL EA " << std::hex << ea
-	    << ", MA = " << ma
-	    << ", X = " << x
-	    << ", R = " << r
-	    << ", M = " << m
-   	    << ", XX = " << xx << std::dec << "\n";
+  //std::cout << "SIM SWL EA " << std::hex << ea
+  //<< ", MA = " << ma
+  //<< ", X = " << x
+  //<< ", R = " << r
+  //<< ", M = " << m
+  //	    << ", XX = " << xx << std::dec << "\n";
   
   s->mem.set<uint32_t>(ea, bswap<EL>(xx));
   s->pc += 4;
