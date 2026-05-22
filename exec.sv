@@ -1619,8 +1619,11 @@ module exec(clk,
 	t_mem_tail.is_store = 1'b0;
 	t_mem_tail.data = 32'd0;
 	t_mem_tail.bad_addr = 1'b0;
-	t_mem_tail.cached = w_cached;
+	t_mem_tail.cached = 1'b0 & w_cached;
 	t_mem_tail.mapped = w_mapped;
+`ifdef VERILATOR
+	t_mem_tail.pc = mem_uq.pc;
+`endif	
 	case(mem_uq.op)
 	  SB:
 	    begin

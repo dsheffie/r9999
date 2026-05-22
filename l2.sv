@@ -15,6 +15,8 @@ module l2(clk,
 	  l1_mem_req_valid,
 	  l1_mem_req_ack,
 	  l1_mem_req_addr,
+	  l1_mem_req_cacheable,
+	  l1_mem_req_mask,
 	  l1_mem_req_store_data,
 	  l1_mem_req_opcode,
 
@@ -28,6 +30,7 @@ module l2(clk,
 	  mem_req_addr, 
 	  mem_req_store_data, 
 	  mem_req_opcode,
+	  mem_req_mask,
 	  
 	  //mem -> l2
 	  mem_rsp_valid,
@@ -52,6 +55,9 @@ module l2(clk,
    input logic 	l1_mem_req_valid;
    output logic l1_mem_req_ack;
    input logic [31:0] l1_mem_req_addr;
+   input logic	      l1_mem_req_cacheable;
+   input logic [15:0] l1_mem_req_mask;
+   
    input logic [127:0] l1_mem_req_store_data;
    input logic [3:0]   l1_mem_req_opcode;
 
@@ -63,6 +69,7 @@ module l2(clk,
    output logic [31:0] mem_req_addr;
    output logic [127:0] mem_req_store_data;
    output logic [3:0] 	mem_req_opcode;
+   output logic [15:0]	mem_req_mask;
    
    input logic 		mem_rsp_valid;
    input logic [127:0] 	mem_rsp_load_data;
@@ -94,6 +101,8 @@ module l2(clk,
    logic 		   r_rsp_valid, n_rsp_valid;
    logic [127:0] 	   r_rsp_data, n_rsp_data;
    logic [127:0] 	   r_store_data, n_store_data;
+   logic [15:0]		   r_store_mask, n_store_mask;
+   
    
    logic 		   r_reload, n_reload;
    
@@ -120,7 +129,9 @@ module l2(clk,
 				     WAIT_STORE_IDLE = 'd8,
 				     FLUSH_STORE = 'd9,
 				     FLUSH_WAIT = 'd10,
-				     FLUSH_TRIAGE = 'd11
+				     FLUSH_TRIAGE = 'd11,
+				     UNCACHE_STORE = 'd12,
+				     UNCACHE_LOAD = 'd13
 				     } state_t;
 
    state_t n_state, r_state;
@@ -136,6 +147,7 @@ module l2(clk,
    assign mem_req_valid = r_mem_req;
    assign mem_req_opcode = r_mem_opcode;
    assign mem_req_store_data = r_mem_req_store_data;
+   assign mem_req_mask = r_store_mask;
    
    assign l1_mem_rsp_valid = r_rsp_valid;
    assign l1_mem_load_data = r_rsp_data;
@@ -186,6 +198,7 @@ module l2(clk,
 	     r_reload <= 1'b0;
 	     r_req_ack <= 1'b0;
 	     r_store_data <= 'd0;
+	     r_store_mask <= 'd0;	     
 	     r_flush_req <= 1'b0;
 	     r_need_l1d <= 1'b0;
 	     r_need_l1i <= 1'b0;
@@ -209,6 +222,7 @@ module l2(clk,
 	     r_reload <= n_reload;
 	     r_req_ack <= n_req_ack;
 	     r_store_data <= n_store_data;
+	     r_store_mask <= n_store_mask;
 	     r_flush_req <= n_flush_req;
 	     r_need_l1i <= n_need_l1i;
 	     r_need_l1d <= n_need_l1d;
@@ -306,6 +320,7 @@ module l2(clk,
 
 	n_reload = r_reload;
 	n_store_data = r_store_data;
+	n_store_mask = r_store_mask;
 	n_flush_req = r_flush_req | t_l2_flush_req;
 	n_mem_req_store_data = r_mem_req_store_data;
 
@@ -336,6 +351,7 @@ module l2(clk,
 	       n_saveaddr = {l1_mem_req_addr[31:4], 4'd0};
 	       n_opcode = l1_mem_req_opcode;
 	       n_store_data = l1_mem_req_store_data;
+	       n_store_mask = 16'h0;
 	       
 	       if(n_flush_req)
 		 begin
@@ -345,13 +361,28 @@ module l2(clk,
 		 end
 	       else if(l1_mem_req_valid)
 		 begin
-		    //$display("accept request for addr %x at cycle %d, type %d", 
-		    //l1_mem_req_addr, r_cycle, n_opcode);
-		    n_req_ack = 1'b1;
-		    n_state = WAIT_FOR_RAM;
-		    n_rsp_valid = (l1_mem_req_opcode == 4'd7);
-		    n_cache_accesses = r_cache_accesses + 64'd1;
-		    n_cache_hits = r_cache_hits + 64'd1;
+		    if(l1_mem_req_cacheable == 1'b0)
+		      begin
+			 n_store_mask = l1_mem_req_mask;
+			 n_req_ack = 1'b1;
+			 n_state = (l1_mem_req_opcode == 4'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+			 n_mem_opcode = l1_mem_req_opcode;
+			 n_mem_req_store_data = l1_mem_req_store_data;
+			 if(l1_mem_req_opcode == 7 & (&n_store_mask))
+			   begin
+			      $stop();
+			   end
+			 //$display("l1_mem_req_opcode = %d", l1_mem_req_opcode);
+			 n_mem_req = 1'b1;			 
+		      end
+		    else
+		      begin
+			 n_req_ack = 1'b1;
+			 n_state = WAIT_FOR_RAM;
+			 n_rsp_valid = (l1_mem_req_opcode == 4'd7);
+			 n_cache_accesses = r_cache_accesses + 64'd1;
+			 n_cache_hits = r_cache_hits + 64'd1;
+		      end
 		 end
 	    end
 	  WAIT_FOR_RAM:
@@ -389,7 +420,9 @@ module l2(clk,
 		      begin
 			 n_mem_req_store_data = w_d0;
 			 n_addr = {w_tag, t_idx, 4'd0};
-			 n_mem_opcode = 4'd7; 
+			 n_mem_opcode = 4'd7;
+			 n_store_mask = 16'hffff;
+			 
 			 n_mem_req = 1'b1;
 			 n_state = DIRTY_STORE;			 
 		      end
@@ -402,6 +435,7 @@ module l2(clk,
 			 n_reload = 1'b1;
 			 n_state = CLEAN_RELOAD;
 			 n_mem_opcode = 4'd4; //load
+			 n_store_mask = 16'hffff;			 
 			 n_mem_req = 1'b1;
 		      end
 		 end
@@ -416,6 +450,7 @@ module l2(clk,
 		 begin
 		    n_addr = r_saveaddr;
 		    n_mem_opcode = 4'd4; //load
+		    n_store_mask = 16'hfff;
 		    n_state = STORE_TURNAROUND;
 		    n_mem_req = 1'b0;		    
 		 end
@@ -508,6 +543,27 @@ module l2(clk,
 		      begin
 			 n_state = FLUSH_WAIT;
 		      end		    
+		 end
+	    end // case: FLUSH_STORE
+	  UNCACHE_STORE:
+	    begin
+	       if(mem_req_ack)
+		 begin
+		    n_mem_req = 1'b0;
+		 end	       
+	       if(mem_rsp_valid)
+		 begin
+		    n_state = IDLE;
+		    n_rsp_valid = 1'b1;		    
+		 end
+	    end
+	  UNCACHE_LOAD:
+	    begin
+	       if(mem_rsp_valid)
+		 begin
+		    n_rsp_valid = 1'b1;
+		    n_rsp_data = mem_rsp_load_data;
+		    n_state = IDLE;
 		 end
 	    end
 	  default:

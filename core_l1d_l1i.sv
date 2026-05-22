@@ -20,6 +20,7 @@ module core_l1d_l1i(clk,
 		    mem_req_addr, 
 		    mem_req_store_data,
 		    mem_req_opcode,
+		    mem_req_mask,
 		    mem_rsp_valid,
 		    mem_rsp_load_data,
 		    
@@ -112,6 +113,8 @@ module core_l1d_l1i(clk,
    output logic [`M_WIDTH-1:0] 	 mem_req_addr;
    output logic [127:0] 	 mem_req_store_data;
    output logic [3:0] 		 mem_req_opcode;
+   output logic [15:0]		 mem_req_mask;
+   
    
    input logic  			  mem_rsp_valid;
    input logic [127:0] 			  mem_rsp_load_data;
@@ -301,11 +304,13 @@ module core_l1d_l1i(clk,
    logic [(`M_WIDTH-1):0] 		  l1d_mem_req_addr;
    logic [L1D_CL_LEN_BITS-1:0] 		  l1d_mem_req_store_data;
    logic [3:0] 				  l1d_mem_req_opcode;
-
+   logic				  l1d_mem_req_cacheable;
+   logic [15:0]				  l1d_mem_req_mask;
+   
    logic 				  l1i_mem_req_ack;   
    logic 				  l1i_mem_req_valid;
    logic				  l1i_mem_req_cacheable;
-   logic [(`M_WIDTH-1):0] 		  l1i_mem_req_addr;
+   logic [(`M_WIDTH-1):0]		  l1i_mem_req_addr;
    logic [L1D_CL_LEN_BITS-1:0] 		  l1i_mem_req_store_data;
    logic [3:0] 				  l1i_mem_req_opcode;
    logic 				  l1d_mem_rsp_valid, l1i_mem_rsp_valid;
@@ -323,6 +328,9 @@ module core_l1d_l1i(clk,
 
    logic [31:0] 			  t_l2_req_addr;
    logic [3:0] 				  t_l2_req_opcode;
+   logic				  t_l2_req_cacheable;
+   logic [15:0]				  t_l2_req_mask;
+   
    wire w_l1_mem_req_ack;
    
 
@@ -340,6 +348,8 @@ module core_l1d_l1i(clk,
 	t_l2_req_addr = (r_state == GNT_L1I) ? l1i_mem_req_addr: l1d_mem_req_addr;
 	//mem_req_store_data = l1d_mem_req_store_data;
 	t_l2_req_opcode = (r_state == GNT_L1I) ? l1i_mem_req_opcode : l1d_mem_req_opcode;
+	t_l2_req_cacheable = (r_state == GNT_L1I) ? 1'b1 : l1d_mem_req_cacheable;
+	t_l2_req_mask = l1d_mem_req_mask;
 	
 	l1d_mem_rsp_valid = 1'b0;
 	l1i_mem_rsp_valid = 1'b0;
@@ -423,6 +433,8 @@ module core_l1d_l1i(clk,
 	       .l1_mem_req_valid(r_req),
 	       .l1_mem_req_ack(w_l1_mem_req_ack),
 	       .l1_mem_req_addr(t_l2_req_addr),
+	       .l1_mem_req_cacheable(t_l2_req_cacheable),
+	       .l1_mem_req_mask(t_l2_req_mask),
 	       .l1_mem_req_store_data(l1d_mem_req_store_data),
 	       .l1_mem_req_opcode(t_l2_req_opcode),
 	       
@@ -434,7 +446,8 @@ module core_l1d_l1i(clk,
 	       .mem_req_addr(mem_req_addr),
 	       .mem_req_store_data(mem_req_store_data),
 	       .mem_req_opcode(mem_req_opcode),
-
+	       .mem_req_mask(mem_req_mask),
+	       
 	       .mem_rsp_valid(mem_rsp_valid),
 	       .mem_rsp_load_data(mem_rsp_load_data),
 	       .cache_accesses(l2_cache_accesses),
@@ -500,6 +513,9 @@ module core_l1d_l1i(clk,
 	       .mem_req_addr(l1d_mem_req_addr),
 	       .mem_req_store_data(l1d_mem_req_store_data),
 	       .mem_req_opcode(l1d_mem_req_opcode),
+	       .mem_req_cacheable(l1d_mem_req_cacheable),
+	       .mem_req_mask(l1d_mem_req_mask),
+
 	       
 	       .mem_rsp_valid(l1d_mem_rsp_valid),
 	       .mem_rsp_load_data(w_l1_mem_load_data),

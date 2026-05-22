@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
   std::string log_name = "log.txt";
   std::string pushout_name = "pushout.txt";
   std::string branch_name = "branch_info.txt";
-  
+  bool sgi_indy = false;
   uint64_t heartbeat = 1UL<<36, start_trace_at = ~0UL;
   uint64_t max_cycle = 0, max_icnt = 0, mem_lat = 2;
   uint64_t last_store_addr = 0, last_load_addr = 0, last_addr = 0;
@@ -280,6 +280,7 @@ int main(int argc, char **argv) {
       ("tracefp", po::value<bool>(&globals::trace_fp)->default_value(false), "trace fp instructions")
       ("trace,t", po::value<bool>(&globals::trace_retirement)->default_value(false), "trace retired instruction stream")
       ("starttrace,s", po::value<uint64_t>(&start_trace_at)->default_value(~0UL), "start tracing retired instructions")
+      ("indy", po::value<bool>(&sgi_indy)->default_value(false), "sgi indy")
       ; 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -317,12 +318,18 @@ int main(int argc, char **argv) {
   initState(s);
   initState(ss);
   initCapstone();
-  
-  load_elf(mips_binary.c_str(), s);
-  load_elf(mips_binary.c_str(), ss);
 
-  #if 1
-  {
+  if(not(sgi_indy)) {
+    if(mips_binary.empty()) {
+      std::cout << "no elf binary\n";
+      exit(-1);
+    }
+    load_elf(mips_binary.c_str(), s);
+    load_elf(mips_binary.c_str(), ss);
+  }
+
+
+  if(sgi_indy){
     struct stat st;
     int rc;
     int fd = open("ip24prom.070-9101-005.bin", O_RDONLY);
@@ -345,7 +352,6 @@ int main(int argc, char **argv) {
 
     close(fd);
   }
-#endif
 
   
   // Create an instance of our module under test
@@ -736,15 +742,29 @@ int main(int argc, char **argv) {
 
       
       if(tb->mem_req_opcode == 4) {/*load word */
-	for(int i = 0; i < 4; i++) {
+	//printf("--> ld mask %x\n", tb->mem_req_mask);
+	
+	for(int i = 0, k = 0; i < 4; i++) {
 	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
-	  if(compute_mem_range_type(ea) != mem_range_t::boot_rom) {
-	    std::cout << "attempting to access " << compute_mem_range_type(ea)
-		      << " : "
-		      << std::hex <<  ea << std::dec << "\n";
-	    exit(-1);
+	  uint16_t m = tb->mem_req_mask;
+	  uint32_t d = 0;
+	  for(int j = 0; j < 4; j++) {
+	    if( ((m >> k) & 1) ) {
+	      uint32_t by = s->mem.get<uint8_t>(ea+j);
+	      d |= (by << (j*8));
+	      printf("read byte %lx : %x\n", ea+j, by);
+	    }
+	    k++;
 	  }
-	  tb->mem_rsp_load_data[i] = s->mem.get<uint32_t>(ea);
+	  if(sgi_indy) {
+	    if(compute_mem_range_type(ea) != mem_range_t::boot_rom) {
+	      //std::cout << "attempting to access " << compute_mem_range_type(ea)
+	      //<< " : "
+	      //<< std::hex <<  ea << std::dec << "\n";
+	      //exit(-1);
+	    }
+	  }
+	  tb->mem_rsp_load_data[i] = d;//s->mem.get<uint32_t>(ea);
 	  //std::cout << "\tloading " << std::hex << ea << " with data "
 	  //<< bswap<false>(s->mem.get<uint32_t>(ea))
 	  //<< std::dec << "\n";
@@ -754,9 +774,19 @@ int main(int argc, char **argv) {
 	++n_loads;
       }
       else if(tb->mem_req_opcode == 7) { /* store word */
-	for(int i = 0; i < 4; i++) {
+	uint16_t m = tb->mem_req_mask;
+	printf("store mask %x\n", m);
+	for(int i = 0, k = 0; i < 4; i++) {
+	  uint32_t d = tb->mem_req_store_data[i];
 	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
-	  s->mem.set<uint32_t>(ea, tb->mem_req_store_data[i]);
+	  for(int j = 0; j < 4; j++) {
+	    if(((m >> k) & 1)) {
+	      uint32_t by = (d>>(8*j)) & 0xff;	      
+	      printf("write byte %x to address %lx\n", by, ea+j);
+	      s->mem.set<uint8_t>(ea+j, by);
+	    }
+	    k++;
+	  }
 	}
 	last_store_addr = tb->mem_req_addr;
 	++n_stores;
