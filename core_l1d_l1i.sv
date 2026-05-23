@@ -170,6 +170,8 @@ module core_l1d_l1i(clk,
 
    logic 				  head_of_rob_ptr_valid;   
    logic [`LG_ROB_ENTRIES-1:0] 		  head_of_rob_ptr;
+   logic				  head_of_rob_has_delay_slot;
+   
 
    wire					  w_in_kernel_mode, w_in_supervisor_mode, 
 					  w_in_user_mode;   
@@ -500,6 +502,7 @@ module core_l1d_l1i(clk,
 	       .in_user_mode(w_in_user_mode),
 	       .head_of_rob_ptr_valid(head_of_rob_ptr_valid),
 	       .head_of_rob_ptr(head_of_rob_ptr),
+	       .head_of_rob_has_delay_slot(head_of_rob_has_delay_slot),	       
 	       .retired_rob_ptr_valid(retired_rob_ptr_valid),
 	       .retired_rob_ptr_two_valid(retired_rob_ptr_two_valid),
 	       .retired_rob_ptr(retired_rob_ptr),
@@ -600,6 +603,7 @@ module core_l1d_l1i(clk,
 	     .dead_rob_mask(dead_rob_mask),	     
 	     .head_of_rob_ptr_valid(head_of_rob_ptr_valid),	     
 	     .head_of_rob_ptr(head_of_rob_ptr),
+	     .head_of_rob_has_delay_slot(head_of_rob_has_delay_slot),	       	     
 	     .resume_pc(resume_pc),
 	     .ready_for_resume(ready_for_resume),  
 	     .flush_req_l1d(flush_req_l1d),

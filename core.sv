@@ -47,6 +47,7 @@ module core(clk,
 	    extern_irq,
 	    head_of_rob_ptr_valid,
 	    head_of_rob_ptr,
+	    head_of_rob_has_delay_slot,
 	    resume,
 	    memq_empty,
 	    drain_ds_complete,
@@ -134,6 +135,7 @@ module core(clk,
    input logic extern_irq;
    output logic head_of_rob_ptr_valid;
    output logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
+   output logic			      head_of_rob_has_delay_slot;
    input logic resume;
    input logic memq_empty;
    output logic drain_ds_complete;
@@ -448,8 +450,10 @@ module core(clk,
    
 
    assign ready_for_resume = r_ready_for_resume;
-   assign head_of_rob_ptr_valid = (r_state == ACTIVE) || (r_state==DRAIN) && !r_ds_done;
+   assign head_of_rob_ptr_valid = (r_state == ACTIVE) | ( (r_state==DRAIN) && !r_ds_done);
    assign head_of_rob_ptr = r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
+   assign head_of_rob_has_delay_slot = t_rob_head.has_delay_slot | t_rob_head.has_nullifying_delay_slot;
+				      
    assign flush_req_l1d = r_flush_req_l1d;
    assign flush_req_l1i = r_flush_req_l1i;
    assign flush_cl_req = r_flush_cl_req;

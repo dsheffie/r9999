@@ -19,7 +19,8 @@ module l1d(clk,
 	   in_supervisor_mode,
 	   in_user_mode,
 	   head_of_rob_ptr,
-	   head_of_rob_ptr_valid,
+	   head_of_rob_ptr_valid,	
+	   head_of_rob_has_delay_slot,   
 	   retired_rob_ptr_valid,
 	   retired_rob_ptr_two_valid,
 	   retired_rob_ptr,
@@ -72,6 +73,8 @@ module l1d(clk,
 
    input logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
    input logic 			     head_of_rob_ptr_valid;
+   input logic			     head_of_rob_has_delay_slot;
+   
    input logic retired_rob_ptr_valid;
    input logic retired_rob_ptr_two_valid;
    input logic [`LG_ROB_ENTRIES-1:0] retired_rob_ptr;
@@ -1236,8 +1239,18 @@ endfunction
 
    /* memory system should be idle before dealing with an uncachable req */
    wire w_memq_empty = mem_q_empty & (r_n_inflight == 'd0) & (r_state == ACTIVE);
-   wire	w_uncachable_req = core_mem_req_valid & (core_mem_req.cached==1'b0) ? w_memq_empty : 1'b1;
+   wire	w_uncachable_req = core_mem_req_valid & (core_mem_req.cached==1'b0) ? 
+	(/*w_memq_empty &*/ ((head_of_rob_ptr_valid ? (head_of_rob_ptr == core_mem_req.rob_ptr) : 1'b0) | drain_ds_complete)): 1'b1;
 
+   //always@(negedge clk)
+   //begin
+   //if(core_mem_req_valid & (core_mem_req.cached==1'b0))
+   //begin
+   //$display("uncachable with rob ptr %d, head of rob %d, drain_ds_complete = %b", 
+   //core_mem_req.rob_ptr, head_of_rob_ptr, drain_ds_complete);
+   //end
+   //end
+   
    // always_ff@(negedge clk)
    //   begin
    // 	if(core_mem_req_valid)
