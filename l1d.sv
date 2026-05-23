@@ -1394,7 +1394,8 @@ endfunction
 		    else if(t_port2_hit_cache && !r_hit_busy_addr2)
 		      begin
 `ifdef VERBOSE_L1D
-			 $display("cycle %d port2 hit for uuid %d, addr %x, data %x", r_cycle, r_req2.uuid, r_req2.addr, t_rsp_data2);
+			 $display("cycle %d port2 hit for uuid %d, addr %x, data %x", 
+				  r_cycle, r_req2.uuid, r_req2.addr, t_rsp_data2);
 `endif
 			 n_core_mem_rsp.data = t_rsp_data2[31:0];
                          n_core_mem_rsp.dst_valid = t_rsp_dst_valid2;
@@ -1482,6 +1483,8 @@ endfunction
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_opcode = MEM_SW;
 			      n_mem_req_store_data = t_data;
+			      n_mem_req_mask = 16'hffff;
+			      
 			      n_inhibit_write = 1'b1;
 			      t_miss_idx = r_cache_idx;
 			      t_miss_addr = r_req.addr;
@@ -1521,6 +1524,7 @@ endfunction
 			    t_miss_idx = r_cache_idx;
 			    t_miss_addr = r_req.addr;		       
 			    n_mem_req_cacheable = 1'b1;
+			    n_mem_req_mask = 16'hffff;
 			    t_cache_idx = r_cache_idx;
 			    
 			    if((rr_cache_idx == r_cache_idx) && rr_last_wr)
@@ -1660,6 +1664,8 @@ endfunction
 	       else if(r_flush_req && mem_q_empty && !(r_got_req && r_last_wr))
 		 begin
 		    n_state = FLUSH_CACHE;
+		    n_mem_req_mask = 16'hffff;
+		    n_mem_req_cacheable = 1'b1;
 `ifdef VERILATOR
 		    if(!mem_q_empty) $stop();
 		    if(r_got_req && r_last_wr) $stop();

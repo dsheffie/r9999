@@ -1604,16 +1604,19 @@ module exec(clk,
 
    wire [31:0] w_agu32_la;
    wire	       w_cached, w_mapped;
+   wire [1:0]  w_seg;
    
-   mipsseg seg0 (.v_addr(w_agu32), .l_addr(w_agu32_la), .cache(w_cached), .mapped(w_mapped));
+   mipsseg seg0 (.v_addr(w_agu32), .l_addr(w_agu32_la), .cache(w_cached), .mapped(w_mapped), .seg(w_seg));
 
-   //always_ff@(negedge clk)
-   //begin
-   //if(r_mem_ready)
-   //begin
-   //$display("w_agu32 = %x, w_agu32_la = %x\n", w_agu32,  w_agu32_la);
-   //end
-   //end
+   wire w_bad_seg_perms = (w_seg != 2'd3) & in_user_mode;
+ 
+   always_ff@(negedge clk)
+     begin
+	if(w_bad_seg_perms)
+	  begin
+	     $display("trying to access segment %d in bad mode", w_seg);
+	  end
+     end
 
    always_comb
      begin
@@ -1626,7 +1629,7 @@ module exec(clk,
 	t_mem_tail.is_store = 1'b0;
 	t_mem_tail.data = 32'd0;
 	t_mem_tail.bad_addr = 1'b0;
-	t_mem_tail.cached = w_cached & 1'b0;
+	t_mem_tail.cached = w_cached;
 	t_mem_tail.mapped = w_mapped;
 `ifdef VERILATOR
 	t_mem_tail.pc = mem_uq.pc;
@@ -1637,20 +1640,21 @@ module exec(clk,
 	       t_mem_tail.op = MEM_SB;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;	       
 	    end // case: SB
 	  SH:
 	    begin
 	       t_mem_tail.op = MEM_SH;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b0;
-	       t_mem_tail.bad_addr = w_agu32[0];
+	       t_mem_tail.bad_addr = w_agu32[0] | w_bad_seg_perms;
 	    end // case: SW
 	  SW:
 	    begin
 	       t_mem_tail.op = MEM_SW;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b0;
-	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0);
+	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0) | w_bad_seg_perms;
 	    end // case: SW
 	  SC:
 	    begin
@@ -1658,59 +1662,65 @@ module exec(clk,
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
-	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0);		    
+	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0) | w_bad_seg_perms;		    
 	    end // case: SW
 	  SWR:
 	    begin
 	       t_mem_tail.op = MEM_SWR;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;	       
 	    end // case: SW
 	  SWL:
 	    begin
 	       t_mem_tail.op = MEM_SWL;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;	       
 	    end // case: SW	  
 	  LW:
 	    begin
 	       t_mem_tail.op = MEM_LW;
 	       t_mem_tail.dst_valid = 1'b1;
-	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0);
+	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0) | w_bad_seg_perms;
 	    end // case: LW
 	  LWL:
 	    begin
 	       t_mem_tail.op = MEM_LWL;
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
 	    end // case: LWL
 	  LWR:
 	    begin
 	       t_mem_tail.op = MEM_LWR;
 	       t_mem_tail.rob_ptr = mem_uq.rob_ptr;
 	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;	       
 	    end // case: LWR
 	  LB:
 	    begin
 	       t_mem_tail.op = MEM_LB;
 	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;	       
 	    end
 	  LBU:
 	    begin
 	       t_mem_tail.op = MEM_LBU;
 	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
 	    end // case: LBU
 	  LHU:
 	    begin
 	       t_mem_tail.op = MEM_LHU;
 	       t_mem_tail.dst_valid = 1'b1;
-	       t_mem_tail.bad_addr = w_agu32[0];
+	       t_mem_tail.bad_addr = w_agu32[0] | w_bad_seg_perms;
 	    end // case: LBU
 	  LH:
 	    begin
 	       t_mem_tail.op = MEM_LH;
 	       t_mem_tail.dst_valid = 1'b1;
-	       t_mem_tail.bad_addr = w_agu32[0];
+	       t_mem_tail.bad_addr = w_agu32[0] | w_bad_seg_perms;
 	    end // case: LH
 	  default:
 	    begin

@@ -365,6 +365,7 @@ int main(int argc, char **argv) {
   bool got_mem_req = false, got_mem_rsp = false, incorrect = false, got_putchar = false;
   //assert reset
   tb->retire_allowed = 1;
+  tb->mem_rsp_bad = 0;
   for(globals::cycle = 0; (globals::cycle < 4) && !Verilated::gotFinish(); ++globals::cycle) {
     contextp->timeInc(1);  // 1 timeprecision period passes...
     tb->mem_rsp_valid = 0;
@@ -743,16 +744,22 @@ int main(int argc, char **argv) {
       
       if(tb->mem_req_opcode == 4) {/*load word */
 	//printf("--> ld mask %x\n", tb->mem_req_mask);
+	uint16_t m = tb->mem_req_mask;
+	//if(m != static_cast<uint16_t>(~0)) {
+	//printf("ld req for address %x has a mask of %x\n", tb->mem_req_addr, m);
+	//assert(false);
+	//}
+	//m = ~0;
 	
 	for(int i = 0, k = 0; i < 4; i++) {
 	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
-	  uint16_t m = tb->mem_req_mask;
+
 	  uint32_t d = 0;
 	  for(int j = 0; j < 4; j++) {
 	    if( ((m >> k) & 1) ) {
 	      uint32_t by = s->mem.get<uint8_t>(ea+j);
 	      d |= (by << (j*8));
-	      // printf("read byte %lx : %x\n", ea+j, by);
+	      //printf("read byte %lx : %x\n", ea+j, by);
 	    }
 	    k++;
 	  }
@@ -775,6 +782,9 @@ int main(int argc, char **argv) {
       }
       else if(tb->mem_req_opcode == 7) { /* store word */
 	uint16_t m = tb->mem_req_mask;
+	//if(m != static_cast<uint16_t>(~0)) {
+	//printf("store for address %x has mask %x\n", tb->mem_req_addr, tb->mem_req_mask);
+	//}
 	//printf("store mask %x\n", m);
 	for(int i = 0, k = 0; i < 4; i++) {
 	  uint32_t d = tb->mem_req_store_data[i];

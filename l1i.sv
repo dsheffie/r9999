@@ -183,6 +183,7 @@ module l1i(clk,
 	   mem_req_addr, 
 	   mem_req_opcode,
 	   mem_req_cacheable,
+	   mem_req_mask,	   
 	   //reply from memory system
 	   mem_rsp_valid,
 	   mem_rsp_load_data,
@@ -252,6 +253,8 @@ module l1i(clk,
    output logic [(`M_WIDTH-1):0] mem_req_addr;
    output logic [3:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
+   output logic [15:0]			  mem_req_mask;
+   
    input logic 				  mem_rsp_valid;
    input logic [L1I_CL_LEN_BITS-1:0] 	  mem_rsp_load_data;
    output logic [63:0] 			  cache_accesses;
@@ -364,6 +367,7 @@ endfunction
    wire [31:0]		  w_la_pc;
    logic [31:0]		  r_la_pc, r_tlb_pc;
    wire [31:0]		  w_tlb_pc;
+   wire [1:0]		  w_seg;
    
    
    wire	       w_cached, w_mapped;
@@ -431,6 +435,7 @@ endfunction
    assign mem_req_addr = r_mem_req_addr;
    assign mem_req_opcode = MEM_LW;
    assign mem_req_cacheable = r_mem_req_cacheable;
+   assign mem_req_mask = 16'hffff;
    
    assign cache_hits = r_cache_hits;
    assign cache_accesses = r_cache_accesses;
@@ -573,7 +578,8 @@ endfunction
 		 .v_addr(n_cache_pc), 
 		 .l_addr(w_la_pc), 
 		 .cache(w_cached), 
-		 .mapped(w_mapped)
+		 .mapped(w_mapped),
+		 .seg(w_seg)
 		 );
 
    always@(posedge clk)

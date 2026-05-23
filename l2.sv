@@ -34,6 +34,7 @@ module l2(clk,
 	  
 	  //mem -> l2
 	  mem_rsp_valid,
+	  mem_rsp_bad,
 	  mem_rsp_load_data,
 
 	  cache_hits,
@@ -72,6 +73,8 @@ module l2(clk,
    output logic [15:0]	mem_req_mask;
    
    input logic 		mem_rsp_valid;
+   input logic		mem_rsp_bad;
+   
    input logic [127:0] 	mem_rsp_load_data;
 
    output logic [63:0] cache_hits;
@@ -131,7 +134,8 @@ module l2(clk,
 				     FLUSH_WAIT = 'd10,
 				     FLUSH_TRIAGE = 'd11,
 				     UNCACHE_STORE = 'd12,
-				     UNCACHE_LOAD = 'd13
+				     UNCACHE_LOAD = 'd13,
+				     GAMEOVER = 'd14
 				     } state_t;
 
    state_t n_state, r_state;
@@ -357,12 +361,14 @@ module l2(clk,
 		 begin
 		    t_idx = 'd0;
 		    n_state = FLUSH_WAIT;
+		    n_store_mask = 16'hffff;
 		    //$display("GOT FLUSH REQUEST at cycle %d", r_cycle);
 		 end
 	       else if(l1_mem_req_valid)
 		 begin
 		    if(l1_mem_req_cacheable == 1'b0)
 		      begin
+			 //$display("uncachable req at l2 for address %x", n_addr);
 			 n_store_mask = l1_mem_req_mask;
 			 n_req_ack = 1'b1;
 			 n_state = (l1_mem_req_opcode == 4'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
@@ -450,7 +456,7 @@ module l2(clk,
 		 begin
 		    n_addr = r_saveaddr;
 		    n_mem_opcode = 4'd4; //load
-		    n_store_mask = 16'hfff;
+		    n_store_mask = 16'hffff;
 		    n_state = STORE_TURNAROUND;
 		    n_mem_req = 1'b0;		    
 		 end
