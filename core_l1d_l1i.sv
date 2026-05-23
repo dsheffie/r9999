@@ -53,6 +53,7 @@ module core_l1d_l1i(clk,
 		    l1i_state,
 		    l1d_state,
 		    l2_state,
+		    l2_rsp_state,
 		    inflight,
 		    epc,
 		    cause,
@@ -156,6 +157,7 @@ module core_l1d_l1i(clk,
    output logic [2:0]			  l1i_state;
    output logic [3:0]			  l1d_state;
    output logic [3:0]			  l2_state;
+   output logic [3:0]			  l2_rsp_state;
    
    output logic [31:0] 			  epc;
    output logic [4:0]			  cause;
@@ -431,6 +433,7 @@ module core_l1d_l1i(clk,
 	       .clk(clk),
 	       .reset(reset),
 	       .state(l2_state),
+	       .rsp_state(l2_rsp_state),
 	       .l1i_flush_req(flush_req_l1i),
 	       .l1d_flush_req(flush_req_l1d),
 	       .l1i_flush_complete(l1i_flush_complete),

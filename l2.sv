@@ -3,6 +3,7 @@
 module l2(clk,
 	  reset,
 	  state,
+	  rsp_state,
 	  l1i_flush_req,
 	  l1d_flush_req,
 
@@ -45,6 +46,7 @@ module l2(clk,
    input logic clk;
    input logic reset;
    output logic [3:0] state;
+   output logic [3:0] rsp_state;
    
    input logic l1i_flush_req;
    input logic l1d_flush_req;
@@ -140,11 +142,27 @@ module l2(clk,
 
    state_t n_state, r_state;
 
-   assign state = r_state;
+
    logic 		n_flush_complete, r_flush_complete;
    logic 		r_flush_req, n_flush_req;
    logic [127:0] 	r_mem_req_store_data, n_mem_req_store_data;
    logic [63:0] 	r_cache_hits, n_cache_hits, r_cache_accesses, n_cache_accesses;
+
+   logic		n_got_mem_rsp_valid,r_got_mem_rsp_valid;
+
+   state_t r_rsp_state;
+   assign state = r_state;
+   assign rsp_state = r_rsp_state;
+   
+   always@(posedge clk)
+     begin
+	if(n_got_mem_rsp_valid & (r_got_mem_rsp_valid==1'b0))
+	  begin
+	     r_rsp_state <= r_state;
+	  end
+     end
+
+   
    
    assign flush_complete = r_flush_complete;
    assign mem_req_addr = r_addr;
@@ -206,6 +224,7 @@ module l2(clk,
 	     r_flush_req <= 1'b0;
 	     r_need_l1d <= 1'b0;
 	     r_need_l1i <= 1'b0;
+	     r_got_mem_rsp_valid <= 1'b0;
 	     r_cache_hits <= 'd0;
 	     r_cache_accesses <= 'd0;
 	  end
@@ -230,6 +249,7 @@ module l2(clk,
 	     r_flush_req <= n_flush_req;
 	     r_need_l1i <= n_need_l1i;
 	     r_need_l1d <= n_need_l1d;
+	     r_got_mem_rsp_valid <= n_got_mem_rsp_valid;	     
 	     r_cache_hits <= n_cache_hits;
 	     r_cache_accesses <= n_cache_accesses;	     
 	  end
@@ -294,6 +314,20 @@ module l2(clk,
 	r_cycle <= reset ? 'd0 : (r_cycle + 'd1);
      end
 
+   state_t r_last_state;
+   always_ff@(posedge clk)
+     begin
+	r_last_state <= r_state;
+     end
+   always_ff@(negedge clk)
+     begin
+	if((r_state == IDLE) & (r_mem_req))
+	  begin
+	     $display("l2 protocol busted, last state %d", r_last_state);
+	     $stop();
+	  end
+     end
+   
 
    always_comb
      begin
@@ -330,6 +364,9 @@ module l2(clk,
 
 	n_cache_hits = r_cache_hits;
 	n_cache_accesses = r_cache_accesses;
+
+	n_got_mem_rsp_valid = r_got_mem_rsp_valid | mem_rsp_valid;
+	
 	
 	case(r_state)
 	  INITIALIZE:
@@ -356,6 +393,11 @@ module l2(clk,
 	       n_opcode = l1_mem_req_opcode;
 	       n_store_data = l1_mem_req_store_data;
 	       n_store_mask = 16'h0;
+
+	       //if(r_mem_req)
+	       ///begin
+	       //    $stop();
+	       //end
 	       
 	       if(n_flush_req)
 		 begin
@@ -379,7 +421,8 @@ module l2(clk,
 			      $stop();
 			   end
 			 //$display("l1_mem_req_opcode = %d", l1_mem_req_opcode);
-			 n_mem_req = 1'b1;			 
+			 n_mem_req = 1'b1;
+			 n_got_mem_rsp_valid = 1'b0;	     
 		      end
 		    else
 		      begin
@@ -430,6 +473,7 @@ module l2(clk,
 			 n_store_mask = 16'hffff;
 			 
 			 n_mem_req = 1'b1;
+			 n_got_mem_rsp_valid = 1'b0;			 
 			 n_state = DIRTY_STORE;			 
 		      end
 		    else //invalid or clean
@@ -443,6 +487,7 @@ module l2(clk,
 			 n_mem_opcode = 4'd4; //load
 			 n_store_mask = 16'hffff;			 
 			 n_mem_req = 1'b1;
+			 n_got_mem_rsp_valid = 1'b0;			 
 		      end
 		 end
 	    end // case: CHECK_VALID_AND_TAG
@@ -465,7 +510,8 @@ module l2(clk,
 	    begin
 	       n_state = CLEAN_RELOAD;
 	       n_reload = 1'b1;
-	       n_mem_req = 1'b1;		    
+	       n_mem_req = 1'b1;
+	       n_got_mem_rsp_valid = 1'b0;		       
 	    end
 	  CLEAN_RELOAD:
 	    begin
@@ -509,6 +555,7 @@ module l2(clk,
 		    n_addr = {w_tag, t_idx, 4'd0};
 		    n_mem_opcode = 4'd7; 
 		    n_mem_req = 1'b1;
+		    n_got_mem_rsp_valid = 1'b0;			 
 		    n_state = FLUSH_STORE;
 		 end
 	       else
@@ -560,16 +607,22 @@ module l2(clk,
 	       if(mem_rsp_valid)
 		 begin
 		    n_state = IDLE;
-		    n_rsp_valid = 1'b1;		    
+		    n_rsp_valid = 1'b1;
+		    n_mem_req = 1'b0;		    
 		 end
 	    end
 	  UNCACHE_LOAD:
 	    begin
+	       if(mem_req_ack)
+		 begin
+		    n_mem_req = 1'b0;
+		 end	       
 	       if(mem_rsp_valid)
 		 begin
 		    n_rsp_valid = 1'b1;
 		    n_rsp_data = mem_rsp_load_data;
 		    n_state = IDLE;
+		    n_mem_req = 1'b0;
 		 end
 	    end
 	  default:
