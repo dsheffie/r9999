@@ -232,6 +232,8 @@ module core(clk,
    
    
    logic [31:0] 			  r_epc, n_epc;
+   wire [31:0]				  w_exec_epc;
+   
    logic				  r_exc_in_delay, n_exc_in_delay;
    
    
@@ -795,7 +797,8 @@ module core(clk,
 	  end
      end // always_ff@ (negedge clk)
 `endif
-
+   logic t_wr_epc, t_wr_cause;
+   
    logic t_restart_complete;
    logic t_clr_extern_irq;
    logic r_extern_irq;
@@ -820,6 +823,9 @@ module core(clk,
    
    always_comb
      begin
+	t_wr_epc = 1'b0;
+	t_wr_cause = 1'b0;
+	
 	t_clr_extern_irq = 1'b0;
 	t_restart_complete = 1'b0;
 	
@@ -1212,18 +1218,20 @@ module core(clk,
 	    end
 	  WRITE_EPC:
 	    begin
-	       t_exception_wr_cpr0_val = 1'b1;
-	       t_exception_wr_cpr0_ptr = 5'd14;
-	       t_exception_wr_cpr0_data = {32'd0, r_epc};
-	       n_state = WRITE_CAUSE;
+	       t_wr_epc = 1'b1;
+	       t_wr_cause = 1'b1;	       
+	       t_bump_rob_head = 1'b1;
+	       
+	       n_state = FLUSH_FOR_HALT;
 	    end
 	  WRITE_CAUSE:
 	    begin
+	       t_wr_cause = 1'b1;
 	       t_exception_wr_cpr0_val = 1'b1;
 	       t_exception_wr_cpr0_ptr = 5'd13;
 	       t_exception_wr_cpr0_data = {32'd0, t_rob_head.in_delay_slot, 15'd0, 8'd0, 1'b0, r_cause, 2'b0};
 	       n_state = FLUSH_FOR_HALT;
-	       t_bump_rob_head = 1'b1;
+
 	    end
 	  WRITE_BADVADDR:
 	    begin
@@ -2041,7 +2049,11 @@ module core(clk,
 	   .reset(reset),
 	   .retire(t_retire),
 	   .retire_two(t_retire_two),
-	   .epc(r_epc),
+	   .core_epc(r_epc),
+	   .core_wr_epc(t_wr_epc),
+	   .core_cause(r_cause),
+	   .exec_epc(w_exec_epc),
+	   .core_wr_cause(t_wr_cause),
 	   .exc_in_delay(r_exc_in_delay),
 	   .in_kernel_mode(in_kernel_mode),
 	   .in_supervisor_mode(in_supervisor_mode),

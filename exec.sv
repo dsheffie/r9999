@@ -20,7 +20,11 @@ module exec(clk,
 	    reset,
 	    retire,
 	    retire_two,
-	    epc,
+	    core_epc,
+	    core_wr_epc,
+	    core_cause,
+	    core_wr_cause,
+	    exec_epc,	    
 	    exc_in_delay,
 	    in_kernel_mode,
 	    in_supervisor_mode,
@@ -68,7 +72,12 @@ module exec(clk,
    input logic reset;
    input logic retire;
    input logic retire_two;
-   input logic [(`M_WIDTH-1):0]	epc;
+   input logic [`M_WIDTH-1:0] core_epc;
+   input logic		      core_wr_epc;
+   input logic [4:0]	      core_cause;
+   input logic		      core_wr_cause;
+   output logic [`M_WIDTH-1:0] exec_epc;
+   
    input logic			exc_in_delay;
    output logic			in_kernel_mode;
    output logic			in_supervisor_mode;
@@ -1861,6 +1870,44 @@ module exec(clk,
    logic       r_sr_bev, n_sr_bev;
    /* tlb shutdown */
    logic       r_sr_ts, n_sr_ts;
+
+   logic [`M_WIDTH-1:0]	n_epc, r_epc;
+   assign exec_epc = r_epc;
+
+   logic		r_exc_in_ds, n_exc_in_ds;
+   logic [4:0]		r_cause, n_cause;
+   always_comb
+     begin
+	n_exc_in_ds = r_exc_in_ds;
+	n_cause = r_cause;
+	if(core_wr_cause)
+	  begin
+	     n_cause = core_cause;
+	     n_exc_in_ds = exc_in_delay;
+	  end	
+     end
+
+   
+   always_comb
+     begin
+	n_epc = r_epc;
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd14)
+	  begin
+	     n_epc = t_srcA;
+	  end
+	else if(core_wr_epc)
+	  begin
+	     n_epc = core_epc;
+	  end
+     end // always_comb
+   
+   
+   always_ff@(posedge clk)
+     begin
+	r_epc <= reset ? 'd0 : n_epc;
+	r_cause <= reset ? 'd0 : n_cause;
+	r_exc_in_ds <= reset ? 1'b0 : n_exc_in_ds;
+     end
    
    
    always_ff@(posedge clk)
@@ -1943,6 +1990,21 @@ module exec(clk,
 	  'd12:
 	    begin
 	       t_csr0_val = cpr0_status_reg;
+	    end
+	  'd13: /* cause */
+	    begin
+	       t_csr0_val = {r_exc_in_ds,
+			     1'b0, /* must be zero */ 
+			     2'd0, /* coproc field */
+			     12'd0, /* must be zero */
+			     8'd0, /* interrupt */
+			     1'b0, /* must be zero */
+			     r_cause,
+			     2'd0 /* must be zero */};
+	    end
+	  'd14:
+	    begin
+	       t_csr0_val = r_epc;
 	    end
 	  'd16:
 	    begin
