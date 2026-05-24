@@ -1859,7 +1859,10 @@ module exec(clk,
    logic       r_sr_kx, n_sr_kx;
    /* exception vector */
    logic       r_sr_bev, n_sr_bev;
-
+   /* tlb shutdown */
+   logic       r_sr_ts, n_sr_ts;
+   
+   
    always_ff@(posedge clk)
      begin
 	n_sr_ie = r_sr_ie;
@@ -1870,23 +1873,64 @@ module exec(clk,
 	n_sr_sx = r_sr_sx;
 	n_sr_kx = r_sr_kx;	
 	n_sr_bev = r_sr_bev;
+	n_sr_ts = r_sr_ts;
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd12)
+	  begin
+	     n_sr_ie = t_srcA[0];
+	     n_sr_exl = t_srcA[1];
+	     n_sr_erl = t_srcA[2];
+	     n_sr_ksu = t_srcA[4:3];
+	     n_sr_ux = t_srcA[5];
+	     n_sr_sx = t_srcA[6];
+	     n_sr_kx = t_srcA[7];
+	     n_sr_bev = t_srcA[22];
+	     n_sr_ts = t_srcA[21];
+	  end
+	
      end // always_ff@ (posedge clk)
 
    always@(posedge clk)
      begin
 	r_sr_ie = reset ? 'd0 : n_sr_ie;
 	r_sr_exl <= reset ? 'd0 : n_sr_exl;
-	r_sr_erl <= reset ? 'd0 : n_sr_erl;
+	r_sr_erl <= reset ? 1'b1 : n_sr_erl;
 	r_sr_ksu <= reset ? 'd0 : n_sr_ksu;
 	r_sr_ux <= reset ? 'd0 : n_sr_ux;
 	r_sr_sx <= reset ? 'd0 : n_sr_sx;
 	r_sr_kx <= reset ? 'd0 : n_sr_kx;	
-	r_sr_bev <= reset ? 'd0 : n_sr_bev;
+	r_sr_bev <= reset ? 1'b1 : n_sr_bev;
+	r_sr_ts <= reset ? 1'b1 : n_sr_ts;
      end
 
    assign in_kernel_mode = (r_sr_ksu=='d0) | r_sr_exl | r_sr_erl;
    assign in_supervisor_mode = (r_sr_ksu=='d1) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
    assign in_user_mode = (r_sr_ksu=='d2) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);   
+
+   always_comb
+     begin
+	cpr0_status_reg = {
+			     1'b0, /* XX */
+			     1'b1, /* cu2 */
+			     1'b1, /* cu1 */
+			     1'b1, /* cu0 */
+			     1'b0, /* reduced power */
+			     1'b0, /* floating-point registers */
+			     1'b0, /* reverse endian */
+			     1'b0,  /* bit24 - must be zero */
+			     1'b0,  /* bit23 - must be zero */
+			     r_sr_bev,
+			     r_sr_ts,
+			     5'd0, /* other diagnostic bits */
+			     8'd0, /* im field */
+			     r_sr_kx, /* bit 7 */
+			     r_sr_sx,
+			     r_sr_ux,
+			     r_sr_ksu,
+			     r_sr_erl,
+			     r_sr_exl,
+			     r_sr_ie /* bit 0 */
+			   };
+     end
    
    always_comb
      begin
@@ -1895,6 +1939,10 @@ module exec(clk,
 	  'd7:
 	    begin
 	       t_csr0_val = {31'd0, w_putchar_fifo_full};
+	    end
+	  'd12:
+	    begin
+	       t_csr0_val = cpr0_status_reg;
 	    end
 	  'd16:
 	    begin
@@ -1912,24 +1960,8 @@ module exec(clk,
      end
 
    
+  
    
-   always_ff@(posedge clk)
-     begin
-	if(reset)
-	  begin
-	     cpr0_status_reg <= 'd4194308; 
-	  end
-	else
-	  begin
-	     if(r_start_int && t_wr_cpr0)
-	       begin
-		  if(int_uop.dst == 'd12)
-		    begin
-		       cpr0_status_reg <= t_srcA;
-		    end
-	       end
-	  end
-     end
 
    
    always_ff@(posedge clk)
