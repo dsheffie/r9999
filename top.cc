@@ -51,6 +51,9 @@ static std::map<int,uint64_t> branch_distribution;
 static std::map<int,uint64_t> fault_to_restart_distribution;
 
 static bool sgi_indy = false;
+static sgi_mc *mc = nullptr;
+static sgi_hpc *hpc = nullptr;
+
 
 static const char* l1d_stall_str[8] =
   {
@@ -247,12 +250,29 @@ void record_retirement(long long pc, long long fetch_cycle, long long alloc_cycl
 static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
   uint32_t d = 0;
   uint32_t k = addr & 15;
+  uint32_t w = (addr>>2) & 3;
   mem_range_t mr = mem_range_t::low_local;
   if(sgi_indy) {
     mr = compute_mem_range_type(addr);
   }
+  uint16_t wm = (m >> (4*w)) & 15;
+  
   switch(mr)
     {
+    case mem_range_t::hpc_regs:
+      //printf("hpc load addr %x, offs %u, mask %x\n", addr, w, wm);
+      if(wm == 15) {
+	//std::cout << "hpc : " << std::hex << addr << std::dec  << "\n";
+	d = hpc->read(addr & 0x7ffff, 4);
+      }
+      break;
+    case mem_range_t::mc_regs:
+      //printf("mc  load addr %x, offs %u, mask %x\n", addr, w, wm);      
+      if(wm == 15) {
+	//std::cout << "mc  : " << std::hex << addr << std::dec  << "\n";      
+	d = mc->read(addr & 0x1ffff, 4);
+      }
+      break;
     case mem_range_t::low_local:
     case mem_range_t::boot_rom:
       for(int j = 0; j < 4; j++) {
@@ -269,6 +289,49 @@ static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
       assert(false);
     }
   return d;
+}
+
+
+static void perform_word_store(state_t *s, uint32_t addr, uint16_t m, uint32_t d) {
+  uint32_t k = addr & 15;
+  uint32_t w = (addr >> 2) & 0x3;
+  mem_range_t mr = mem_range_t::low_local;
+  if(sgi_indy) {
+    mr = compute_mem_range_type(addr);
+  }
+  uint16_t wm = (m >> (4*w)) & 15;
+  //if(wm == 0) {
+  //return 0;
+  //}
+  //printf("wm = %x\n", wm);
+  
+  switch(mr)
+    {
+      //case mem_range_t::hpc_regs:
+      // std::cout << "hpc : " << std::hex << addr << std::dec  << "\n";      
+      // d = hpc->read(addr & 0x7ffff, 4);
+      // break;
+      case mem_range_t::mc_regs:
+	///printf("mc  store addr %x, offs %u, mask %x\n", addr, w, wm);	
+	if(wm == 15) {
+	  mc->write(addr & 0x1ffff, d, 4);
+	}
+	break;
+    case mem_range_t::low_local:
+      for(int j = 0; j < 4; j++) {
+	if(((m >> k) & 1)) {
+	  uint32_t by = (d>>(8*j)) & 0xff;	      
+	  //printf("write byte %x to address %lx\n", by, ea+j);
+	  s->mem.set<uint8_t>(addr+j, by);
+	}
+	k++;
+      }
+      break;
+    default:
+      std::cout << std::hex << addr << std::dec << " in "
+		<< mr << " not handled in " << __PRETTY_FUNCTION__ << "\n";
+      assert(false);
+    }
 }
 
 
@@ -377,8 +440,10 @@ int main(int argc, char **argv) {
 
     s->pc = 0xbfc00000;
     close(fd);
+    mc = new sgi_mc(s);
+    hpc = new sgi_hpc(s);    
   }
-
+  
   
   // Create an instance of our module under test
    //Vcore_l1d_l1i *tb = new Vcore_l1d_l1i;
@@ -737,16 +802,20 @@ int main(int argc, char **argv) {
     }
     
     if(/*tb->mem_req_valid*/mem_reply_cycle ==globals::cycle) {
-      //std::cout << "got memory request for address "
-      //<< std::hex << tb->mem_req_addr << std::dec <<"\n";
+      uint16_t m = tb->mem_req_mask;      
+      //std::cout << "got " << (tb->mem_req_opcode==4 ? "load" : "store") << " request for address "
+      //		<< std::hex << tb->mem_req_addr
+      //<< " mask " << m
+      //<< std::dec
+      //	<<"\n";
       last_retire = 0;
       mem_reply_cycle = -1;
       assert(tb->mem_req_valid);
 
       if(tb->mem_req_opcode == 4) {/*load word */
-	uint16_t m = tb->mem_req_mask;
+
 	for(int i = 0; i < 4; i++) {
-	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
+	  uint32_t ea = (tb->mem_req_addr + 4*i) & (~0U);
 	  uint32_t d = perform_word_load(s, ea, m);
 	  tb->mem_rsp_load_data[i] = d;
 	}
@@ -755,22 +824,11 @@ int main(int argc, char **argv) {
 	++n_loads;
       }
       else if(tb->mem_req_opcode == 7) { /* store word */
-	uint16_t m = tb->mem_req_mask;
-	//if(m != static_cast<uint16_t>(~0)) {
-	//printf("store for address %x has mask %x\n", tb->mem_req_addr, tb->mem_req_mask);
-	//}
-	//printf("store mask %x\n", m);
-	for(int i = 0, k = 0; i < 4; i++) {
+
+	for(int i = 0; i < 4; i++) {
 	  uint32_t d = tb->mem_req_store_data[i];
-	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
-	  for(int j = 0; j < 4; j++) {
-	    if(((m >> k) & 1)) {
-	      uint32_t by = (d>>(8*j)) & 0xff;	      
-	      //printf("write byte %x to address %lx\n", by, ea+j);
-	      s->mem.set<uint8_t>(ea+j, by);
-	    }
-	    k++;
-	  }
+	  uint32_t ea = (tb->mem_req_addr + 4*i) & (~0U);
+	  perform_word_store(s, ea, m, d);	  
 	}
 	last_store_addr = tb->mem_req_addr;
 	++n_stores;
@@ -1014,7 +1072,13 @@ int main(int argc, char **argv) {
   if(pl) {
     delete pl;
   }
-  //delete tb;
+  if(mc) {
+    delete mc;
+  }
+  if(hpc) {
+    delete hpc;
+  }
+
   stopCapstone();
   exit(EXIT_SUCCESS);
 }

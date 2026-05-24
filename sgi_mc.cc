@@ -67,7 +67,7 @@ static uint8_t byte = 0;
 static uint32_t cbyte = 0;
 
 void sgi_mc::write(uint32_t offs, uint32_t x, size_t sz) {
-  //printf("write access to MC, reg %x, value %x, size %lu\n", offs, x, sz);
+  printf("write access to MC, reg %x, value %x, size %lu\n", offs, x, sz);
   
   switch(offs)
     {
@@ -120,6 +120,7 @@ void sgi_mc::write(uint32_t offs, uint32_t x, size_t sz) {
       }
       break;
     default:
+      printf("write to garbage address %x\n", offs);
       exit(-1);
       break;
     }
