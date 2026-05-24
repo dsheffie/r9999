@@ -50,6 +50,8 @@ static std::map<int,uint64_t> fault_distribution;
 static std::map<int,uint64_t> branch_distribution;
 static std::map<int,uint64_t> fault_to_restart_distribution;
 
+static bool sgi_indy = false;
+
 static const char* l1d_stall_str[8] =
   {
    "no stall", //0
@@ -242,6 +244,32 @@ void record_retirement(long long pc, long long fetch_cycle, long long alloc_cycl
   ++record_insns_retired;
 }
 
+static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
+  uint32_t d = 0;
+  uint32_t k = addr & 15;
+  mem_range_t mr = mem_range_t::low_local;
+  if(sgi_indy) {
+    mr = compute_mem_range_type(addr);
+  }
+  switch(mr)
+    {
+    case mem_range_t::low_local:
+    case mem_range_t::boot_rom:
+      for(int j = 0; j < 4; j++) {
+	if( ((m >> k) & 1) ) {
+	  uint32_t by = s->mem.get<uint8_t>(addr+j);
+	  d |= (by << (j*8));
+	}
+	k++;
+      }
+      break;
+    default:
+      std::cout << std::hex << addr << std::dec << " in "
+		<< mr << " not handled in " << __PRETTY_FUNCTION__ << "\n";
+      assert(false);
+    }
+  return d;
+}
 
 
 int main(int argc, char **argv) {
@@ -255,7 +283,6 @@ int main(int argc, char **argv) {
   std::string log_name = "log.txt";
   std::string pushout_name = "pushout.txt";
   std::string branch_name = "branch_info.txt";
-  bool sgi_indy = false;
   uint64_t heartbeat = 1UL<<36, start_trace_at = ~0UL;
   uint64_t max_cycle = 0, max_icnt = 0, mem_lat = 2;
   uint64_t last_store_addr = 0, last_load_addr = 0, last_addr = 0;
@@ -328,9 +355,8 @@ int main(int argc, char **argv) {
     load_elf(mips_binary.c_str(), s);
     load_elf(mips_binary.c_str(), ss);
   }
-
-
-  if(sgi_indy){
+  else {
+    enable_checker = false;    
     struct stat st;
     int rc;
     int fd = open("ip24prom.070-9101-005.bin", O_RDONLY);
@@ -350,7 +376,6 @@ int main(int argc, char **argv) {
     memcpy(ss->mem.mem +(0xbfc00000 & 0x1fffffff), buf, st.st_size);    
 
     s->pc = 0xbfc00000;
-
     close(fd);
   }
 
@@ -450,21 +475,8 @@ int main(int argc, char **argv) {
     
     if(tb->retire_reg_valid) {
       s->gpr[tb->retire_reg_ptr] = tb->retire_reg_data;
-      //if(tb->retire_reg_ptr == R_a0) {
-      //std::cout << std::hex << "insn with pc " << tb->retire_pc << " updates a0 \n"
-      //<< std::dec;
-      //}      
     }
-
-    // if(tb->retire_valid) {
-    //   std::cout << std::hex
-    // 		<< tb->retire_pc
-    // 		<< std::dec
-    // 		<< "\n";
-    // }
     
-    
-#ifdef BRANCH_DEBUG
     if(tb->branch_pc_valid) {
       ++n_branches;
     }
@@ -474,20 +486,9 @@ int main(int argc, char **argv) {
     if(tb->branch_fault) {
       ++n_mispredicts;
     }
-#endif
     if(tb->in_flush_mode) {
       ++n_flush_cycles;
     }
-
-    //if(tb->extern_irq) {
-    //tb->extern_irq = 0;
-    //}
-    
-    //if((globals::cycle & ((1UL<<8)-1)) == 0) {
-    //std::cout << "firing irq at cycle " << globals::cycle << "\n";
-    //tb->extern_irq = 1;
-    //}
-    
     
     if(tb->retire_valid) {
       ++insns_retired;
@@ -742,40 +743,12 @@ int main(int argc, char **argv) {
       mem_reply_cycle = -1;
       assert(tb->mem_req_valid);
 
-      if(sgi_indy) {
-	mem_range_t mr = compute_mem_range_type(tb->mem_req_addr);
-	std::cout << "fetch to " << mr << "\n";
-      }
-      
       if(tb->mem_req_opcode == 4) {/*load word */
-	//printf("--> ld mask %x\n", tb->mem_req_mask);
 	uint16_t m = tb->mem_req_mask;
-
-	
-	for(int i = 0, k = 0; i < 4; i++) {
+	for(int i = 0; i < 4; i++) {
 	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
-
-	  uint32_t d = 0;
-	  for(int j = 0; j < 4; j++) {
-	    if( ((m >> k) & 1) ) {
-	      uint32_t by = s->mem.get<uint8_t>(ea+j);
-	      d |= (by << (j*8));
-	      //printf("read byte %lx : %x\n", ea+j, by);
-	    }
-	    k++;
-	  }
-	  if(sgi_indy) {
-	    if(compute_mem_range_type(ea) != mem_range_t::boot_rom) {
-	      //std::cout << "attempting to access " << compute_mem_range_type(ea)
-	      //<< " : "
-	      //<< std::hex <<  ea << std::dec << "\n";
-	      //exit(-1);
-	    }
-	  }
-	  tb->mem_rsp_load_data[i] = d;//s->mem.get<uint32_t>(ea);
-	  //std::cout << "\tloading " << std::hex << ea << " with data "
-	  //<< bswap<false>(s->mem.get<uint32_t>(ea))
-	  //<< std::dec << "\n";
+	  uint32_t d = perform_word_load(s, ea, m);
+	  tb->mem_rsp_load_data[i] = d;
 	}
 	last_load_addr = tb->mem_req_addr;
 	assert((tb->mem_req_addr & 0xf) == 0);

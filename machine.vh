@@ -39,9 +39,9 @@
 /* non-uop queue */
 `define LG_UQ_ENTRIES 3
 /* mem uop queue */
-`define LG_MEM_UQ_ENTRIES 3
+`define LG_MEM_UQ_ENTRIES 2
 /* mem data queue */
-`define LG_MEM_DQ_ENTRIES 4
+`define LG_MEM_DQ_ENTRIES 2
 /* mem uop queue */
 `define LG_MQ_ENTRIES 2
 
@@ -61,7 +61,7 @@
 //number of sets in direct mapped cache
 `define LG_L1D_NUM_SETS 8
 
-`define LG_L1I_NUM_SETS 10
+`define LG_L1I_NUM_SETS 8
 
 `define LG_L2_NUM_SETS 10
 
