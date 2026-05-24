@@ -157,6 +157,7 @@ module exec(clk,
    
    logic 	t_wr_hilo;
    logic	t_overflow;
+   logic	t_clr_erl;
    logic 	t_take_br;
    logic 	t_mispred_br;
    logic 	t_alu_valid;
@@ -1169,6 +1170,7 @@ module exec(clk,
 	t_signed_div = 1'b0;
 	t_start_div32 = 1'b0;	
 	t_overflow = 1'b0;
+	t_clr_erl = 1'b0;
 	
 	case(int_uop.op)
 	  BREAK:
@@ -1520,6 +1522,12 @@ module exec(clk,
 	       t_alu_valid = 1'b1;
 	       t_pc = t_pc4;
 	    end // case: MTC0
+	  ERET:
+	    begin
+	       t_clr_erl = 1'b1;
+	       t_alu_valid = 1'b1;
+	       t_pc = r_epc;
+	    end
 	  II:
 	    begin
 	       t_unimp_op = 1'b1;
@@ -1933,7 +1941,14 @@ module exec(clk,
 	     n_sr_bev = t_srcA[22];
 	     n_sr_ts = t_srcA[21];
 	  end
-	
+	else if(core_wr_cause)
+	  begin
+	     n_sr_erl = 1'b1;
+	  end
+	else if(t_clr_erl)
+	  begin
+	     n_sr_erl = 1'b0;
+	  end
      end // always_ff@ (posedge clk)
 
    always@(posedge clk)

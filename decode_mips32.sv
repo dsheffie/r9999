@@ -576,32 +576,35 @@ module decode_mips32(insn,
 	    end
 	  6'd16: /* coproc0 */
 	    begin
-	       case(insn[25:21]) /* switch on RS */
-		 5'd0: /* mfc0 */
-		   begin
-		      uop.op = MFC0;
-		      uop.dst = rt;
-		      uop.dst_valid = 1'b1;
-		      uop.srcA = rd;
-		      uop.is_int = 1'b1;
-		      uop.serializing_op = 1'b1;
-		      uop.must_restart = 1'b1;
-		   end
-		 5'd4: /* mtc0 */
-		   begin
-		      uop.op = MTC0;
-		      uop.dst = rd;
-		      uop.srcA = rt;
-		      uop.srcA_valid = 1'b1;
-		      uop.serializing_op = 1'b1;
-		      uop.has_delay_slot = 1'b0;
-		      uop.is_int = 1'b1;
-		      uop.must_restart = 1'b1;
-		   end // case: 5'd4
-		 default:
-		   begin
-		   end
-	       endcase // case (insn[25:21])
+	       if((insn[25:21] == 5'd0) & (insn[10:0] == 'd0)) /* switch on RS */
+		 begin /* mfc0 */
+		    uop.op = MFC0;
+		    uop.dst = rt;
+		    uop.dst_valid = 1'b1;
+		    uop.srcA = rd;
+		    uop.is_int = 1'b1;
+		    uop.serializing_op = 1'b1;
+		    uop.must_restart = 1'b1;
+		 end
+	       else if((insn[25:21] == 5'd4) & (insn[10:0] == 'd0)) /* switch on RS */	       
+		 begin
+		    uop.op = MTC0;
+		    uop.dst = rd;
+		    uop.srcA = rt;
+		    uop.srcA_valid = 1'b1;
+		    uop.serializing_op = 1'b1;
+		    uop.has_delay_slot = 1'b0;
+		    uop.is_int = 1'b1;
+		    uop.must_restart = 1'b1;
+		 end // case: 5'd4
+	       else if(insn[25:0] == 26'b10000000000000000000011000)
+		 begin
+		    uop.op = ERET;
+		    uop.serializing_op = 1'b1;
+		    uop.has_delay_slot = 1'b0;
+		    uop.is_int = 1'b1;
+		    uop.must_restart = 1'b1;
+		 end
 	    end // case: 6'd16
 	  6'd17: /* coproc1 */
 	    begin

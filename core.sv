@@ -1222,7 +1222,16 @@ module core(clk,
 	       t_wr_cause = 1'b1;	       
 	       t_bump_rob_head = 1'b1;
 	       
-	       n_state = FLUSH_FOR_HALT;
+	       n_restart_pc = 32'hbfc0380;
+	       n_restart_src_pc = t_rob_head.pc;
+	       n_restart_src_is_indirect = 1'b0;
+	       n_restart_valid = 1'b1;
+
+	       n_got_break = 1'b0;
+	       n_got_ud = 1'b0;
+	       t_clr_dq = 1'b1;			    
+	       n_state = HALT_WAIT_FOR_RESTART;
+	       
 	    end
 	  WRITE_CAUSE:
 	    begin
