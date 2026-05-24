@@ -1895,7 +1895,7 @@ module exec(clk,
 	  begin
 	     n_epc = t_srcA;
 	  end
-	else if(core_wr_epc)
+	else if(core_wr_epc & (r_sr_exl == 1'b0))
 	  begin
 	     n_epc = core_epc;
 	  end
