@@ -1,4 +1,5 @@
 #include "top.hh"
+#include "sgi_indy.hh"
 
 #define BRANCH_DEBUG 1
 #define CACHE_STATS 1
@@ -741,15 +742,15 @@ int main(int argc, char **argv) {
       mem_reply_cycle = -1;
       assert(tb->mem_req_valid);
 
+      if(sgi_indy) {
+	mem_range_t mr = compute_mem_range_type(tb->mem_req_addr);
+	std::cout << "fetch to " << mr << "\n";
+      }
       
       if(tb->mem_req_opcode == 4) {/*load word */
 	//printf("--> ld mask %x\n", tb->mem_req_mask);
 	uint16_t m = tb->mem_req_mask;
-	//if(m != static_cast<uint16_t>(~0)) {
-	//printf("ld req for address %x has a mask of %x\n", tb->mem_req_addr, m);
-	//assert(false);
-	//}
-	//m = ~0;
+
 	
 	for(int i = 0, k = 0; i < 4; i++) {
 	  uint64_t ea = (tb->mem_req_addr + 4*i) & ((1UL<<32)-1);
