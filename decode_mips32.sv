@@ -351,7 +351,11 @@ module decode_mips32(insn,
 		   end
 		 6'd52: /* teq */
 		   begin
-		      uop.op = NOP;
+		      uop.op = TEQ;
+		      uop.srcA = rt;
+		      uop.srcA_valid = 1'b1;
+		      uop.srcB = rs;
+		      uop.srcB_valid = 1'b1;
 		      uop.is_int = 1'b1;
 		   end
 		 default:

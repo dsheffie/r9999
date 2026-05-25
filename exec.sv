@@ -157,6 +157,8 @@ module exec(clk,
    
    logic 	t_wr_hilo;
    logic	t_overflow;
+   logic	t_trap;
+   
    logic	t_clr_erl;
    logic 	t_take_br;
    logic 	t_mispred_br;
@@ -1170,6 +1172,8 @@ module exec(clk,
 	t_signed_div = 1'b0;
 	t_start_div32 = 1'b0;	
 	t_overflow = 1'b0;
+	t_trap = 1'b0;
+	
 	t_clr_erl = 1'b0;
 	
 	case(int_uop.op)
@@ -1528,6 +1532,12 @@ module exec(clk,
 	       t_alu_valid = 1'b1;
 	       t_pc = r_epc;
 	    end
+	  TEQ:
+	    begin
+	       t_trap = (t_srcA == t_srcB);
+	       t_fault = (t_srcA == t_srcB);	       	       
+	       t_alu_valid = 1'b1;
+	    end
 	  II:
 	    begin
 	       t_unimp_op = 1'b1;
@@ -1542,8 +1552,6 @@ module exec(clk,
 
 	
      end // always_comb
-
-
 
 
    wire [31:0] w_agu32;
@@ -2065,6 +2073,7 @@ module exec(clk,
 	     complete_bundle_1.is_ii <= 1'b0;
 	     complete_bundle_1.take_br <= 1'b0;
 	     complete_bundle_1.overflow <= 1'b0;
+	     complete_bundle_1.trap <= 1'b0;
 	     complete_bundle_1.data <= t_mul_result[`M_WIDTH-1:0];
 	  end
 	else
@@ -2075,7 +2084,8 @@ module exec(clk,
 	     complete_bundle_1.restart_pc <= t_pc;
 	     complete_bundle_1.is_ii <= t_unimp_op;
 	     complete_bundle_1.take_br <= t_take_br;
-	     complete_bundle_1.overflow <= t_overflow;	     
+	     complete_bundle_1.overflow <= t_overflow;
+	     complete_bundle_1.trap <= t_trap;	     
 	     complete_bundle_1.data <= t_result;
 	  end
 	//(uq.rob_ptr == 'd5) ? 1'b1 : 1'b0;

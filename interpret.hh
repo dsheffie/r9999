@@ -282,4 +282,11 @@ bool is_store_insn(state_t *s);
 
 #define VA2PA(x) ((x & 0x1fffffff))
 
+static uint32_t va2pa(uint32_t va) {
+  if((va >> 31) & 1) {
+    return va & 0x1fffffff;
+  }
+  return va;
+}
+
 #endif

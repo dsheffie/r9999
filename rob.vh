@@ -7,6 +7,7 @@ typedef struct packed {
    logic       faulted;
    logic       is_ii;
    logic       overflow;
+   logic       trap;
    logic       is_bad_addr;
    logic       is_ret;
    logic       is_call;
@@ -45,7 +46,8 @@ typedef struct packed {
    logic [`M_WIDTH-1:0]        restart_pc;
    logic 		       take_br;
    logic 		       is_ii;
-   logic		       overflow;   
+   logic		       overflow;
+   logic		       trap;
    logic [31:0] 	       data;
 } complete_t;
 

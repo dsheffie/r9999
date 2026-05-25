@@ -161,7 +161,9 @@ void load_elf(const char* fn, state_t *ms) {
       }
       
       for(int32_t cc = 0; cc < p_filesz; cc++) {
-	mem.set<uint8_t>(cc+p_vaddr, reinterpret_cast<uint8_t*>(buf + p_offset)[cc]);
+	uint32_t v_addr = cc+p_vaddr;
+	mem.set<uint8_t>(va2pa(v_addr),
+			 reinterpret_cast<uint8_t*>(buf + p_offset)[cc]);
       }
     }
     

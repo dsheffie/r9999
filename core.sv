@@ -925,7 +925,8 @@ module core(clk,
 	  end
 	
 	t_arch_fault = t_rob_head.faulted & 
-		       (t_rob_head.is_break | t_rob_head.is_ii | t_rob_head.is_bad_addr | t_rob_head.overflow | t_rob_head.is_irq);
+		       (t_rob_head.is_break | t_rob_head.is_ii | t_rob_head.is_bad_addr | 
+			t_rob_head.overflow | t_rob_head.trap | t_rob_head.is_irq );
 	
 	
 	unique case (r_state)
@@ -1095,6 +1096,8 @@ module core(clk,
 	    end // case: DRAIN
 	  EXCEPTION_DRAIN:
 	    begin
+	       //$display("memq_empty = %b, r_rob_inflight = %d",
+	       //memq_empty, r_rob_inflight);
 	       if(r_rob_inflight == 'd0 && memq_empty && t_divide_ready)
 		 begin
 		    n_state = RAT;
@@ -1186,8 +1189,8 @@ module core(clk,
 	    end
 	  ARCH_FAULT:
 	    begin
-	       n_flush_req_l1i = 1'b1;
-	       n_flush_req_l1d = 1'b1;
+	       //n_flush_req_l1i = 1'b1;
+	       //n_flush_req_l1d = 1'b1;
 	       if(t_rob_head.is_break)
 		 begin
 		    n_pending_break = 1'b1;
@@ -1212,6 +1215,12 @@ module core(clk,
 		 begin
 		    n_cause = 5'd12;
 		 end
+	       else if(t_rob_head.trap)
+		 begin
+		    //$display("taking trap exception");
+		    n_cause = 5'd13;
+		 end
+	       t_bump_rob_head = 1'b1;	       
 	       n_state = WRITE_EPC;
 	       n_epc = (t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);
 	       n_exc_in_delay = t_rob_head.in_delay_slot;
@@ -1220,18 +1229,19 @@ module core(clk,
 	    begin
 	       t_wr_epc = 1'b1;
 	       t_wr_cause = 1'b1;	       
-	       t_bump_rob_head = 1'b1;
+	       n_machine_clr = 1'b1;
 	       
-	       n_restart_pc = 32'hbfc0380;
-	       n_restart_src_pc = t_rob_head.pc;
+	       
+	       n_restart_pc = 32'hbfc00380;
+	       n_restart_src_pc = 32'hbfc00380;
 	       n_restart_src_is_indirect = 1'b0;
 	       n_restart_valid = 1'b1;
 
 	       n_got_break = 1'b0;
 	       n_got_ud = 1'b0;
-	       t_clr_dq = 1'b1;			    
-	       n_state = HALT_WAIT_FOR_RESTART;
-	       
+	       t_clr_dq = 1'b1;
+	       n_ds_done = 1'b1;	       
+	       n_state = EXCEPTION_DRAIN;
 	    end
 	  WRITE_CAUSE:
 	    begin
@@ -1540,6 +1550,8 @@ module core(clk,
 	
 	t_rob_tail.is_ii = 1'b0;
 	t_rob_tail.overflow = 1'b0;
+	t_rob_tail.trap = 1'b0;
+
 	t_rob_tail.is_bad_addr = 1'b0;
 	t_rob_tail.take_br = 1'b0;
 	t_rob_tail.is_br = t_alloc_uop.is_br;	
@@ -1564,6 +1576,7 @@ module core(clk,
 	t_rob_next_tail.is_break  = (t_alloc_uop2.op == BREAK);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.overflow = 1'b0;
+	t_rob_next_tail.trap = 1'b0;
 	
 	t_rob_next_tail.is_ii = 1'b0;
 	t_rob_next_tail.is_bad_addr = 1'b0;
@@ -1742,6 +1755,7 @@ module core(clk,
 		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].take_br <= t_complete_bundle_1.take_br;
 		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].data <= t_complete_bundle_1.data;
 		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].overflow <= t_complete_bundle_1.overflow;
+		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].trap <= t_complete_bundle_1.trap;		  
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].complete_cycle <= r_cycle;
 `endif	    
