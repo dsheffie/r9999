@@ -163,6 +163,12 @@ module decode_mips32(insn,
 		      uop.jmp_imm = insn_pred_target[`M_WIDTH-1:16];
 		      uop.is_br = 1'b1;
 		      uop.is_int = 1'b1;
+		   end // case: 6'd9
+		 6'd12:
+		   begin
+		      uop.op = SYSCALL;
+		      uop.serializing_op = 1'b1;
+		      uop.is_int = 1'b1;
 		   end
 		 6'd13:
 		   begin

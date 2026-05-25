@@ -432,12 +432,10 @@ module core(clk,
 			     WAIT_FOR_SERIALIZE_AND_RESTART = 'd8, //12
 			     ARCH_FAULT = 'd9,
 			     WRITE_EPC = 'd10,
-			     WRITE_CAUSE = 'd11,
-			     WRITE_BADVADDR = 'd12,
-			     EXCEPTION_DRAIN = 'd13,
-			     SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd14,
-			     WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd15,
-			     DEAD = 'd16
+			     EXCEPTION_DRAIN = 'd11,
+			     SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd12,
+			     WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd13,
+			     DEAD = 'd15
 			     } state_t;
    
    state_t r_state, n_state;
@@ -931,7 +929,7 @@ module core(clk,
 	  end
 	
 	t_arch_fault = t_rob_head.faulted & 
-		       (t_rob_head.is_break | t_rob_head.is_ii | t_rob_head.is_bad_addr | 
+		       (t_rob_head.is_break | t_rob_head.is_syscall | t_rob_head.is_ii | t_rob_head.is_bad_addr | 
 			t_rob_head.overflow | t_rob_head.trap | t_rob_head.is_irq );
 	
 	
@@ -1203,6 +1201,10 @@ module core(clk,
 		    n_pending_break = 1'b1;
 		    n_cause = 5'd9;
 		 end
+	       else if(t_rob_head.is_syscall)
+		 begin
+		    n_cause = 5'd8;		    
+		 end
 	       else if(t_rob_head.is_ii)
 		 begin
 		    n_pending_ud = 1'b1;
@@ -1249,22 +1251,6 @@ module core(clk,
 	       n_ds_done = 1'b1;	       
 	       n_state = EXCEPTION_DRAIN;
 	    end
-	  WRITE_CAUSE:
-	    begin
-	       t_wr_cause = 1'b1;
-	       t_exception_wr_cpr0_val = 1'b1;
-	       t_exception_wr_cpr0_ptr = 5'd13;
-	       t_exception_wr_cpr0_data = {32'd0, t_rob_head.in_delay_slot, 15'd0, 8'd0, 1'b0, r_cause, 2'b0};
-	       n_state = FLUSH_FOR_HALT;
-
-	    end
-	  WRITE_BADVADDR:
-	    begin
-	       t_exception_wr_cpr0_val = 1'b1;
-	       t_exception_wr_cpr0_ptr = 5'd8;
-	       t_exception_wr_cpr0_data = {32'd0, t_rob_head.data};
-	       n_state = WRITE_EPC;
-	    end
 	  SERIALIZE_IN_FAULTED_DELAY_SLOT:
 	    begin
 	       t_alloc = !t_rob_full && !t_uq_full 
@@ -1279,14 +1265,28 @@ module core(clk,
 		begin
 		   if(t_rob_next_head.faulted)
 		     begin
+			$display("hello???");
 			 if(t_rob_next_head.is_break)
 			   begin
-			      n_pending_break = 1'b1;
-			      n_flush_req_l1i = 1'b1;
-			      n_flush_req_l1d = 1'b1;
 			      n_cause = 5'd9;
 			      n_state = WRITE_EPC;
 			   end
+			 else if(t_rob_head.is_syscall)
+			   begin
+			      n_cause = 5'd8;	
+			      n_state = WRITE_EPC;	    
+			   end
+			 else if(t_rob_head.trap)
+			   begin
+			      n_cause = 5'd13;
+			      n_state = WRITE_EPC; 
+			   end
+			 else
+			   begin
+`ifdef VERILATOR
+			      $stop();
+`endif
+			   end			
 		     end
 		   else
 		     begin
@@ -1552,6 +1552,7 @@ module core(clk,
 	t_rob_tail.is_irq = t_alloc_uop.op == IRQ;
 	t_rob_tail.is_ret = (t_alloc_uop.op == JR) && (t_uop.srcA == 'd31);
 	t_rob_tail.is_break  = (t_alloc_uop.op == BREAK);
+	t_rob_tail.is_syscall  = (t_alloc_uop.op == SYSCALL);	
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
 	
 	t_rob_tail.is_ii = 1'b0;
@@ -1579,7 +1580,8 @@ module core(clk,
 	t_rob_next_tail.is_irq = t_alloc_uop2.op == IRQ;
 	
 	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop.srcA == 'd31);
-	t_rob_next_tail.is_break  = (t_alloc_uop2.op == BREAK);
+	t_rob_next_tail.is_break = (t_alloc_uop2.op == BREAK);
+	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);	
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.overflow = 1'b0;
 	t_rob_next_tail.trap = 1'b0;

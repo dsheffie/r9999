@@ -1183,7 +1183,11 @@ module exec(clk,
 	    begin
 	       t_alu_valid = 1'b1;
 	       t_fault = 1'b1;
-	       //t_unimp_op = 1'b1;
+	    end
+	  SYSCALL:
+	    begin
+	       t_alu_valid = 1'b1;
+	       t_fault = 1'b1;
 	    end
 	  SLL:
 	    begin
@@ -1977,7 +1981,7 @@ module exec(clk,
 	r_sr_sx <= reset ? 'd0 : n_sr_sx;
 	r_sr_kx <= reset ? 'd0 : n_sr_kx;	
 	r_sr_bev <= reset ? 1'b1 : n_sr_bev;
-	r_sr_ts <= reset ? 1'b1 : n_sr_ts;
+	r_sr_ts <= reset ? 1'b0 : n_sr_ts;
 	r_wired <= reset ? 'd0 :  n_wired;
 	r_random <= reset ? 'd47 : n_random;   
      end

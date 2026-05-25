@@ -27,6 +27,7 @@ typedef struct packed {
    logic 			 is_indirect;
    logic 			 take_br;
    logic 			 is_break;
+   logic			 is_syscall;
    logic [31:0] 		 data;
    logic [6:0]			 opcode;
    logic [`LG_PHT_SZ-1:0] 	 pht_idx;
