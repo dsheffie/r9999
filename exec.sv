@@ -24,7 +24,8 @@ module exec(clk,
 	    core_wr_epc,
 	    core_cause,
 	    core_wr_cause,
-	    exec_epc,	    
+	    exec_epc,
+	    sr_bev,
 	    exc_in_delay,
 	    in_kernel_mode,
 	    in_supervisor_mode,
@@ -77,6 +78,7 @@ module exec(clk,
    input logic [4:0]	      core_cause;
    input logic		      core_wr_cause;
    output logic [`M_WIDTH-1:0] exec_epc;
+   output logic		       sr_bev;
    
    input logic			exc_in_delay;
    output logic			in_kernel_mode;
@@ -1893,6 +1895,8 @@ module exec(clk,
    
    logic [`M_WIDTH-1:0]	n_epc, r_epc;
    assign exec_epc = r_epc;
+   assign sr_bev = r_sr_bev;
+   
 
    logic		r_exc_in_ds, n_exc_in_ds;
    logic [4:0]		r_cause, n_cause;

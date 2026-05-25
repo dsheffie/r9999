@@ -233,6 +233,8 @@ module core(clk,
    
    logic [31:0] 			  r_epc, n_epc;
    wire [31:0]				  w_exec_epc;
+   wire					  w_sr_bev;
+   
    
    logic				  r_exc_in_delay, n_exc_in_delay;
    
@@ -368,6 +370,7 @@ module core(clk,
    logic [31:0] 	     r_arch_a0;
 
    logic [4:0] 		     n_cause, r_cause;
+   logic		     r_tlb_refill, n_tlb_refill;
    
    
    complete_t t_complete_bundle_1;
@@ -606,6 +609,7 @@ module core(clk,
 	     r_machine_clr <= 1'b0;
 	     r_got_restart_ack <= 1'b0;
 	     r_cause <= 5'd0;
+	     r_tlb_refill <= 1'b0;
 	     r_pending_fault <= 1'b0;
 	  end
 	else
@@ -615,6 +619,7 @@ module core(clk,
 	     r_machine_clr <= n_machine_clr;
 	     r_got_restart_ack <= n_got_restart_ack;
 	     r_cause <= n_cause;
+	     r_tlb_refill <= n_tlb_refill;
 	     r_pending_fault <= n_pending_fault;
 	  end
      end
@@ -833,7 +838,8 @@ module core(clk,
 	t_exception_wr_cpr0_ptr = 5'd0;
 	t_exception_wr_cpr0_data = 'd0;
 	n_cause = r_cause;
-
+	n_tlb_refill = r_tlb_refill;
+       
 	n_machine_clr = r_machine_clr;
 	t_alloc = 1'b0;
 	t_alloc_two = 1'b0;
@@ -1189,6 +1195,7 @@ module core(clk,
 	    end
 	  ARCH_FAULT:
 	    begin
+	       n_tlb_refill = 1'b0;
 	       //n_flush_req_l1i = 1'b1;
 	       //n_flush_req_l1d = 1'b1;
 	       if(t_rob_head.is_break)
@@ -1231,9 +1238,8 @@ module core(clk,
 	       t_wr_cause = 1'b1;	       
 	       n_machine_clr = 1'b1;
 	       
-	       
-	       n_restart_pc = 32'hbfc00380;
-	       n_restart_src_pc = 32'hbfc00380;
+	       n_restart_pc = (w_sr_bev ? 32'hbfc00000 : 32'h80000000) | (r_tlb_refill ? 32'h0 : 32'h380);
+	       n_restart_src_pc = 'd0;
 	       n_restart_src_is_indirect = 1'b0;
 	       n_restart_valid = 1'b1;
 
@@ -2076,6 +2082,7 @@ module core(clk,
 	   .core_wr_epc(t_wr_epc),
 	   .core_cause(r_cause),
 	   .exec_epc(w_exec_epc),
+	   .sr_bev(w_sr_bev),	   
 	   .core_wr_cause(t_wr_cause),
 	   .exc_in_delay(r_exc_in_delay),
 	   .in_kernel_mode(in_kernel_mode),
