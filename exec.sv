@@ -1886,7 +1886,11 @@ module exec(clk,
    logic       r_sr_bev, n_sr_bev;
    /* tlb shutdown */
    logic       r_sr_ts, n_sr_ts;
+   /* wired and random */
+   logic [5:0] r_wired, n_wired, r_random, n_random;
+   
 
+   
    logic [`M_WIDTH-1:0]	n_epc, r_epc;
    assign exec_epc = r_epc;
 
@@ -1970,6 +1974,8 @@ module exec(clk,
 	r_sr_kx <= reset ? 'd0 : n_sr_kx;	
 	r_sr_bev <= reset ? 1'b1 : n_sr_bev;
 	r_sr_ts <= reset ? 1'b1 : n_sr_ts;
+	r_wired <= reset ? 'd0 :  n_wired;
+	r_random <= reset ? 'd47 : n_random;   
      end
 
    assign in_kernel_mode = (r_sr_ksu=='d0) | r_sr_exl | r_sr_erl;
@@ -2006,6 +2012,14 @@ module exec(clk,
      begin
 	t_csr0_val = cpr0_status_reg;
 	case(int_uop.srcA[4:0] )
+	  'd1:
+	    begin
+	       t_csr0_val = {26'd0, r_random};
+	    end
+	  'd6:
+	    begin
+	       t_csr0_val = {26'd0, r_wired};
+	    end	  
 	  'd7:
 	    begin
 	       t_csr0_val = {31'd0, w_putchar_fifo_full};
@@ -2046,7 +2060,21 @@ module exec(clk,
 
    
   
-   
+   always_comb
+     begin
+	n_random = r_random;
+	n_wired = r_wired;
+	/* write wired */
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd6)
+	  begin
+	     n_wired = t_srcA[5:0];
+	     n_random = 'd47;
+	  end
+	else if(retire)
+	  begin
+	     n_random = (r_random==r_wired) ? 'd47 : (r_random-'d1);
+	  end
+     end
 
    
    always_ff@(posedge clk)
