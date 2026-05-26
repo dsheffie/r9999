@@ -223,7 +223,7 @@ module core(clk,
    output logic [`LG_ROB_ENTRIES:0] 	  inflight;
    output logic [4:0]			  core_state;
    
-   output logic [31:0] 			  epc;
+   output logic [`M_WIDTH-1:0]		  epc;
    output logic [4:0]			  cause;
    output logic				  l1i_flush_done;
    output logic				  l1d_flush_done;
@@ -231,8 +231,10 @@ module core(clk,
    
    
    
-   logic [31:0] 			  r_epc, n_epc;
-   wire [31:0]				  w_exec_epc;
+   logic [`M_WIDTH-1:0]			  r_epc, n_epc;
+   logic [`M_WIDTH-1:0]			  r_badvaddr, n_badvaddr;   
+   wire [`M_WIDTH-1:0]			  w_exec_epc;
+   
    wire					  w_sr_bev;
    
    
@@ -371,6 +373,8 @@ module core(clk,
 
    logic [4:0] 		     n_cause, r_cause;
    logic		     r_tlb_refill, n_tlb_refill;
+   logic		     n_has_badvaddr,r_has_badvaddr;
+   
    
    
    complete_t t_complete_bundle_1;
@@ -559,6 +563,7 @@ module core(clk,
 	     r_ds_done <= 1'b0;
 	     drain_ds_complete <= 1'b0;
 	     r_epc <= 'd0;
+	     r_badvaddr <= 'd0;
 	     r_exc_in_delay <= 1'b0;	     
 	  end
 	else
@@ -593,6 +598,7 @@ module core(clk,
 	     r_ds_done <= n_ds_done;
 	     drain_ds_complete <= r_ds_done;
 	     r_epc <= n_epc;
+	     r_badvaddr <= n_badvaddr;	     
 	     r_exc_in_delay <= n_exc_in_delay;
 	  end
      end // always_ff@ (posedge clk)
@@ -608,6 +614,7 @@ module core(clk,
 	     r_got_restart_ack <= 1'b0;
 	     r_cause <= 5'd0;
 	     r_tlb_refill <= 1'b0;
+	     r_has_badvaddr <= 1'b0;
 	     r_pending_fault <= 1'b0;
 	  end
 	else
@@ -618,6 +625,7 @@ module core(clk,
 	     r_got_restart_ack <= n_got_restart_ack;
 	     r_cause <= n_cause;
 	     r_tlb_refill <= n_tlb_refill;
+	     r_has_badvaddr <= n_has_badvaddr;
 	     r_pending_fault <= n_pending_fault;
 	  end
      end
@@ -800,7 +808,7 @@ module core(clk,
 	  end
      end // always_ff@ (negedge clk)
 `endif
-   logic t_wr_epc, t_wr_cause;
+   logic t_wr_epc, t_wr_cause, t_wr_badvaddr;
    
    logic t_restart_complete;
    logic t_clr_extern_irq;
@@ -828,6 +836,8 @@ module core(clk,
      begin
 	t_wr_epc = 1'b0;
 	t_wr_cause = 1'b0;
+	t_wr_badvaddr = 1'b0;
+	n_has_badvaddr = r_has_badvaddr;
 	
 	t_clr_extern_irq = 1'b0;
 	t_restart_complete = 1'b0;
@@ -863,6 +873,7 @@ module core(clk,
 
 	n_pending_fault = r_pending_fault;
 	n_epc = r_epc;
+	n_badvaddr = r_badvaddr;
 	n_exc_in_delay = r_exc_in_delay;
 	
 	
@@ -1194,8 +1205,8 @@ module core(clk,
 	  ARCH_FAULT:
 	    begin
 	       n_tlb_refill = 1'b0;
-	       //n_flush_req_l1i = 1'b1;
-	       //n_flush_req_l1d = 1'b1;
+	       n_has_badvaddr = 1'b0;
+	       n_badvaddr = 'd0;
 	       if(t_rob_head.is_break)
 		 begin
 		    n_pending_break = 1'b1;
@@ -1237,7 +1248,9 @@ module core(clk,
 	  WRITE_EPC:
 	    begin
 	       t_wr_epc = 1'b1;
-	       t_wr_cause = 1'b1;	       
+	       t_wr_cause = 1'b1;
+	       t_wr_badvaddr = r_has_badvaddr;
+	       
 	       n_machine_clr = 1'b1;
 	       
 	       n_restart_pc = (w_sr_bev ? 32'hbfc00000 : 32'h80000000) | (r_tlb_refill ? 32'h0 : 32'h380);
@@ -2086,6 +2099,8 @@ module core(clk,
 	   .exec_epc(w_exec_epc),
 	   .sr_bev(w_sr_bev),	   
 	   .core_wr_cause(t_wr_cause),
+	   .core_wr_badvaddr(t_wr_badvaddr),
+	   .core_badvaddr(r_badvaddr),
 	   .exc_in_delay(r_exc_in_delay),
 	   .in_kernel_mode(in_kernel_mode),
 	   .in_supervisor_mode(in_supervisor_mode),

@@ -24,6 +24,8 @@ module exec(clk,
 	    core_wr_epc,
 	    core_cause,
 	    core_wr_cause,
+	    core_wr_badvaddr,
+	    core_badvaddr,
 	    exec_epc,
 	    sr_bev,
 	    exc_in_delay,
@@ -74,9 +76,13 @@ module exec(clk,
    input logic retire;
    input logic retire_two;
    input logic [`M_WIDTH-1:0] core_epc;
+       
    input logic		      core_wr_epc;
    input logic [4:0]	      core_cause;
    input logic		      core_wr_cause;
+   input logic		      core_wr_badvaddr;
+   input logic [`M_WIDTH-1:0] core_badvaddr;
+   
    output logic [`M_WIDTH-1:0] exec_epc;
    output logic		       sr_bev;
    
@@ -1897,7 +1903,7 @@ module exec(clk,
    
 
    
-   logic [`M_WIDTH-1:0]	n_epc, r_epc;
+   logic [`M_WIDTH-1:0]	n_epc, r_epc, n_badvaddr, r_badvaddr;
    assign exec_epc = r_epc;
    assign sr_bev = r_sr_bev;
    
@@ -1915,6 +1921,14 @@ module exec(clk,
 	  end	
      end
 
+   always_comb
+     begin
+	n_badvaddr = r_badvaddr;
+	if(core_wr_badvaddr)
+	  begin
+	     n_badvaddr = core_badvaddr;
+	  end
+     end
    
    always_comb
      begin
@@ -1933,6 +1947,7 @@ module exec(clk,
    always_ff@(posedge clk)
      begin
 	r_epc <= reset ? 'd0 : n_epc;
+	r_badvaddr <= reset ? 'd0 : n_badvaddr;
 	r_cause <= reset ? 'd0 : n_cause;
 	r_exc_in_ds <= reset ? 1'b0 : n_exc_in_ds;
      end
@@ -2031,6 +2046,10 @@ module exec(clk,
 	  'd7:
 	    begin
 	       t_csr0_val = {31'd0, w_putchar_fifo_full};
+	    end
+	  'd8:
+	    begin
+	       t_csr0_val = r_badvaddr;
 	    end
 	  'd12:
 	    begin
