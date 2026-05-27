@@ -266,6 +266,7 @@ module core(clk,
    logic 				  r_got_restart_ack, n_got_restart_ack;
    
    rob_entry_t r_rob[N_ROB_ENTRIES-1:0];
+   logic [`M_WIDTH-1:0 ] r_addrs[N_ROB_ENTRIES-1:0];
    
    
    logic [N_ROB_ENTRIES-1:0] 		  r_rob_complete;
@@ -1206,7 +1207,7 @@ module core(clk,
 	    begin
 	       n_tlb_refill = 1'b0;
 	       n_has_badvaddr = 1'b0;
-	       n_badvaddr = 'd0;
+	       n_badvaddr = r_addrs[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
 	       if(t_rob_head.is_break)
 		 begin
 		    n_pending_break = 1'b1;
@@ -1219,13 +1220,14 @@ module core(clk,
 	       else if(t_rob_head.is_ii)
 		 begin
 		    n_pending_ud = 1'b1;
-		    $display("bad pc %x", t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);	     
+		    //$display("bad pc %x", t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);	     
 		    n_cause = 5'd10;
 		 end
 	       else if(t_rob_head.is_bad_addr)
 		 begin
 		    n_pending_bad_addr = 1'b1;
-		    n_cause = 5'd10;
+		    n_has_badvaddr = 1'b1;
+		    n_cause = t_rob_head.is_store ? 5'd5 : 5'd4;
 		 end
 	       else if(t_rob_head.is_irq)
 		 begin
@@ -1574,7 +1576,8 @@ module core(clk,
 
 	t_rob_tail.is_bad_addr = 1'b0;
 	t_rob_tail.take_br = 1'b0;
-	t_rob_tail.is_br = t_alloc_uop.is_br;	
+	t_rob_tail.is_br = t_alloc_uop.is_br;
+	t_rob_tail.is_store = is_store(t_alloc_uop.op);
 	t_rob_tail.in_delay_slot = r_in_delay_slot;
 	t_rob_tail.data = 'd0;
 	t_rob_tail.opcode = t_alloc_uop.op;
@@ -1602,7 +1605,9 @@ module core(clk,
 	t_rob_next_tail.is_ii = 1'b0;
 	t_rob_next_tail.is_bad_addr = 1'b0;
 	t_rob_next_tail.take_br = 1'b0;
-	t_rob_next_tail.is_br = t_alloc_uop2.is_br;
+	t_rob_next_tail.is_br = t_alloc_uop2.is_br;	
+	t_rob_next_tail.is_store = is_store(t_alloc_uop2.op);
+	
 	t_rob_next_tail.in_delay_slot = r_in_delay_slot;
 	t_rob_next_tail.data = 'd0;
 	t_rob_next_tail.pht_idx = t_alloc_uop2.pht_idx;
@@ -1786,6 +1791,7 @@ module core(clk,
 		  r_rob[core_mem_rsp.rob_ptr].data <= core_mem_rsp.data;
 		  r_rob[core_mem_rsp.rob_ptr].faulted <= core_mem_rsp.bad_addr;
 		  r_rob[core_mem_rsp.rob_ptr].is_bad_addr <= core_mem_rsp.bad_addr;
+		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		  r_rob[core_mem_rsp.rob_ptr].complete_cycle <= r_cycle;
 `endif	    	     	     

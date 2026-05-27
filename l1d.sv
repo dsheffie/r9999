@@ -1385,6 +1385,14 @@ endfunction
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 			 n_core_mem_rsp_valid = 1'b1;
 		      end
+		    else if(r_req2.bad_addr)
+		      begin
+			 n_core_mem_rsp.data = r_req2.addr;
+			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
+			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
+			 n_core_mem_rsp_valid = 1'b1;
+			 
+		      end
 		    else if(r_req2.is_store)
 		      begin
 			 t_push_miss = 1'b1;
