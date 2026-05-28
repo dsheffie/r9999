@@ -1148,6 +1148,9 @@ module exec(clk,
 
    wire [31:0] w_add32;
    wire [31:0] w_s_sub32, w_c_sub32;
+
+   
+
    
    csa #(.N(32)) csa0 (.a(t_srcA), 
 		       .b(int_uop.op == SUBU ? ~t_srcB : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? {{E_BITS{int_uop.imm[15]}},int_uop.imm} : t_srcB))), 
@@ -1157,9 +1160,18 @@ module exec(clk,
    wire [31:0] w_add_srcB = w_s_sub32;
 
    wire [32:0] w_add32 = w_add_srcA + w_add_srcB;
-   wire	       w_add_overflow = (w_add32[31] != w_add_srcB[31]) & (w_add_srcA[31] == w_add_srcB[31]);
-   wire	       w_sub_overflow = (w_add32[31] != w_add_srcB[31]) & (w_add_srcA[31] != w_add_srcB[31]);   
-   
+   wire	       w_add_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] == w_srcB[31]);
+   wire	       w_sub_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] != w_srcB[31]);   
+
+   // always_ff@(negedge clk)
+   //   begin
+   // 	if(int_uop.op == ADD & t_alu_valid)
+   // 	  begin
+   // 	     $display("A=%x, B=%x, overflow = %b",
+   // 		      w_srcA, w_srcB,
+   // 		      w_add_overflow);
+   // 	  end
+   //   end
    
    always_comb
      begin
@@ -1265,6 +1277,14 @@ module exec(clk,
 	  MFHI:
 	    begin
 	       t_result = {{HI_EBITS{1'b0}},t_src_hilo[63:32]};
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  ADD:
+	    begin
+	       t_result = w_add32;
+	       t_overflow = w_add_overflow;
+	       t_fault = w_add_overflow;	       	       
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end

@@ -254,6 +254,17 @@ module decode_mips32(insn,
 		      uop.hilo_dst_valid = 1'b1;
 		      uop.op = DIVU;
 		      uop.is_int = 1'b1;
+		   end
+		 6'd32: /* add */
+		   begin
+		      uop.srcA = rt;
+		      uop.srcA_valid = 1'b1;
+		      uop.srcB = rs;
+		      uop.srcB_valid = 1'b1;
+		      uop.dst = rd;
+		      uop.dst_valid = (rd != 'd0);
+		      uop.op = ADD;
+		      uop.is_int = 1'b1;
 		   end		 
 		 6'd33: /* addu */
 		   begin
