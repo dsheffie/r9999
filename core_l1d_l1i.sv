@@ -161,6 +161,8 @@ module core_l1d_l1i(clk,
    
    output logic [31:0] 			  epc;
    output logic [4:0]			  cause;
+
+   
       
    output logic			 l1d_flush_done;
    output logic			 l1i_flush_done;
@@ -207,7 +209,7 @@ module core_l1d_l1i(clk,
    wire 	w_l1_mem_rsp_valid;   
    logic 	memq_empty;   
    assign in_flush_mode = r_flush;
-
+   wire [7:0] w_asid;
 
  
    always_ff@(posedge clk)
@@ -496,6 +498,7 @@ module core_l1d_l1i(clk,
    l1d dcache (
 	       .clk(clk),
 	       .reset(reset),
+	       .asid(w_asid),	       
 	       .state(l1d_state),
 	       .in_kernel_mode(w_in_kernel_mode),
 	       .in_supervisor_mode(w_in_supervisor_mode),
@@ -545,6 +548,7 @@ module core_l1d_l1i(clk,
    l1i icache(
 	      .clk(clk),
 	      .reset(reset),
+	      .asid(w_asid),	      
 	      .state(l1i_state),
 	      .in_kernel_mode(w_in_kernel_mode),
 	      .in_supervisor_mode(w_in_supervisor_mode),
@@ -667,6 +671,7 @@ module core_l1d_l1i(clk,
 	     .inflight(inflight),
 	     .epc(epc),
 	     .cause(cause),
+	     .asid(w_asid),
 	     .l1i_flush_done(l1i_flush_done),
 	     .l1d_flush_done(l1d_flush_done),
 	     .l2_flush_done(l2_flush_done)

@@ -14,6 +14,7 @@ import "DPI-C" function void record_l1d(input int req,
 
 module l1d(clk, 
 	   reset,
+	   asid,
 	   state,
 	   in_kernel_mode,
 	   in_supervisor_mode,
@@ -65,6 +66,7 @@ module l1d(clk,
    
    input logic clk;
    input logic reset;
+   input logic [7:0] asid;   
    output logic [3:0] state;
    input logic			in_kernel_mode;
    input logic			in_supervisor_mode;
@@ -1314,6 +1316,11 @@ endfunction
 	n_core_mem_rsp.dst_ptr = r_req.dst_ptr;
 	n_core_mem_rsp.dst_valid = 1'b0;
 	n_core_mem_rsp.bad_addr = 1'b0;
+	
+	n_core_mem_rsp.tlb_refill = 1'b0;
+	n_core_mem_rsp.tlb_invalid = 1'b0;
+	n_core_mem_rsp.tlb_modified = 1'b0;
+	
 	
 	n_cache_accesses = r_cache_accesses;
 	n_cache_hits = r_cache_hits;

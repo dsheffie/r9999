@@ -540,6 +540,11 @@ int main(int argc, char **argv) {
     
     if(tb->retire_reg_valid) {
       s->gpr[tb->retire_reg_ptr] = tb->retire_reg_data;
+      //std::cout << "register " << getGPRName(tb->retire_reg_ptr)
+      //	<< std::hex
+      //<< " : " 	
+      //<< tb->retire_reg_data
+      //<< std::dec << "\n";
     }
     
     if(tb->branch_pc_valid) {
@@ -736,6 +741,12 @@ int main(int argc, char **argv) {
     
     if(tb->retire_reg_two_valid) {
       s->gpr[tb->retire_reg_two_ptr] = tb->retire_reg_two_data;
+      //std::cout << "register " << getGPRName(tb->retire_reg_two_ptr)
+      //<< std::hex
+      //<< " : " 
+      //	<< tb->retire_reg_two_data
+      //<< std::dec << "\n";
+      
       //if(tb->retire_reg_two_ptr == R_a0) {
       //std::cout << std::hex << "insn two with pc " << tb->retire_two_pc << " updates a0 \n"
       //<< std::dec;

@@ -13,6 +13,9 @@ typedef struct packed {
    logic       is_call;
    logic       is_irq;
    logic       is_store;
+   logic       tlb_refill;
+   logic       tlb_invalid;
+   logic       tlb_modified;   
    logic       valid_dst;
    logic       valid_hilo_dst;
    logic       has_delay_slot;
@@ -68,7 +71,7 @@ typedef struct packed {
    logic [31:0] addr;
    logic 	is_store;
    mem_op_t op;
-   logic 	bad_addr;
+   logic 	bad_addr;   
    logic	mapped;
    logic	cached;
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
@@ -96,6 +99,9 @@ typedef struct packed {
    logic [`LG_PRF_ENTRIES-1:0] dst_ptr;
    logic 		       dst_valid;
    logic 		       bad_addr;
+   logic		       tlb_refill;
+   logic		       tlb_invalid;
+   logic		       tlb_modified;
 } mem_rsp_t;
 
 typedef struct packed {

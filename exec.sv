@@ -27,6 +27,8 @@ module exec(clk,
 	    core_wr_badvaddr,
 	    core_badvaddr,
 	    exec_epc,
+	    save_to_tlb_regs,
+	    asid,
 	    sr_bev,
 	    exc_in_delay,
 	    in_kernel_mode,
@@ -84,6 +86,10 @@ module exec(clk,
    input logic [`M_WIDTH-1:0] core_badvaddr;
    
    output logic [`M_WIDTH-1:0] exec_epc;
+   output logic		       save_to_tlb_regs;
+   
+   output logic [7:0]	       asid;
+   
    output logic		       sr_bev;
    
    input logic			exc_in_delay;
@@ -1150,10 +1156,9 @@ module exec(clk,
    wire [31:0] w_add_srcA = {w_c_sub32[30:0], 1'b0};
    wire [31:0] w_add_srcB = w_s_sub32;
 
-   wire [32:0] w_add33 = {1'b0, w_add_srcA} + {1'b0, w_add_srcB};
-
-   wire	       w_add_overflow = w_add33[32];
-   assign w_add32 = w_add33[31:0];
+   wire [32:0] w_add32 = w_add_srcA + w_add_srcB;
+   wire	       w_add_overflow = (w_add32[31] != w_add_srcB[31]) & (w_add_srcA[31] == w_add_srcB[31]);
+   wire	       w_sub_overflow = (w_add32[31] != w_add_srcB[31]) & (w_add_srcA[31] != w_add_srcB[31]);   
    
    
    always_comb
@@ -1880,6 +1885,9 @@ module exec(clk,
    assign putchar_fifo_wptr = r_wr_pc_idx;
    assign putchar_fifo_rptr = r_rd_pc_idx;
 
+   logic [7:0] r_entryhi_asid, n_entryhi_asid;
+   assign asid = r_entryhi_asid;
+   
    /* interrupt enable */
    logic r_sr_ie, n_sr_ie;
    /* exception level */
@@ -1951,7 +1959,21 @@ module exec(clk,
 	r_cause <= reset ? 'd0 : n_cause;
 	r_exc_in_ds <= reset ? 1'b0 : n_exc_in_ds;
      end
-   
+
+   always_ff@(posedge clk)
+     begin
+	r_entryhi_asid <= reset ? 'd0 : n_entryhi_asid;
+	//if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd12)
+     end
+
+   always_comb
+     begin
+	n_entryhi_asid = r_entryhi_asid;
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd10)
+	  begin
+	     n_entryhi_asid = t_srcA[7:0];
+	  end
+     end
    
    always_ff@(posedge clk)
      begin
@@ -2054,6 +2076,7 @@ module exec(clk,
 	  'd12:
 	    begin
 	       t_csr0_val = cpr0_status_reg;
+	       //$display("reading cpr status reg %x", cpr0_status_reg);
 	    end
 	  'd13: /* cause */
 	    begin

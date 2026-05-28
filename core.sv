@@ -116,6 +116,7 @@ module core(clk,
 	    inflight,
 	    epc,
 	    cause,
+	    asid,
 	    l1i_flush_done,
 	    l1d_flush_done,
 	    l2_flush_done);
@@ -225,6 +226,8 @@ module core(clk,
    
    output logic [`M_WIDTH-1:0]		  epc;
    output logic [4:0]			  cause;
+   output logic [7:0]			  asid;
+   
    output logic				  l1i_flush_done;
    output logic				  l1d_flush_done;
    output logic				  l2_flush_done;
@@ -374,6 +377,7 @@ module core(clk,
 
    logic [4:0] 		     n_cause, r_cause;
    logic		     r_tlb_refill, n_tlb_refill;
+   logic		     n_save_to_tlb_regs, r_save_to_tlb_regs;   
    logic		     n_has_badvaddr,r_has_badvaddr;
    
    
@@ -615,6 +619,7 @@ module core(clk,
 	     r_got_restart_ack <= 1'b0;
 	     r_cause <= 5'd0;
 	     r_tlb_refill <= 1'b0;
+	     r_save_to_tlb_regs <= 1'b0;
 	     r_has_badvaddr <= 1'b0;
 	     r_pending_fault <= 1'b0;
 	  end
@@ -626,6 +631,7 @@ module core(clk,
 	     r_got_restart_ack <= n_got_restart_ack;
 	     r_cause <= n_cause;
 	     r_tlb_refill <= n_tlb_refill;
+	     r_save_to_tlb_regs <= n_save_to_tlb_regs;
 	     r_has_badvaddr <= n_has_badvaddr;
 	     r_pending_fault <= n_pending_fault;
 	  end
@@ -853,7 +859,7 @@ module core(clk,
 	t_alloc = 1'b0;
 	t_alloc_two = 1'b0;
 	t_possible_to_alloc = 1'b0;
-
+	n_save_to_tlb_regs = r_save_to_tlb_regs;
 	
 	n_in_delay_slot = r_in_delay_slot;
 	t_retire = 1'b0;
@@ -1207,6 +1213,7 @@ module core(clk,
 	    begin
 	       n_tlb_refill = 1'b0;
 	       n_has_badvaddr = 1'b0;
+	       n_save_to_tlb_regs = 1'b0;
 	       n_badvaddr = r_addrs[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
 	       if(t_rob_head.is_break)
 		 begin
@@ -1241,6 +1248,21 @@ module core(clk,
 		 begin
 		    //$display("taking trap exception");
 		    n_cause = 5'd13;
+		 end
+	       else if(t_rob_head.tlb_refill | t_rob_head.tlb_invalid)
+		 begin
+		    n_tlb_refill = (t_rob_head.tlb_refill);
+		    n_save_to_tlb_regs = 1'b1;
+		    n_cause = t_rob_head.is_store ? 5'd3 : 5'd2;
+		    n_pending_bad_addr = 1'b1;
+		    n_has_badvaddr = 1'b1;		    
+		 end
+	       else if(t_rob_head.tlb_modified)
+		 begin
+		    n_cause = 5'd1;
+		    n_save_to_tlb_regs = 1'b1;		    
+		    n_pending_bad_addr = 1'b1;
+		    n_has_badvaddr = 1'b1;		    
 		 end
 	       t_bump_rob_head = 1'b1;	       
 	       n_state = WRITE_EPC;
@@ -1573,7 +1595,11 @@ module core(clk,
 	t_rob_tail.is_ii = 1'b0;
 	t_rob_tail.overflow = 1'b0;
 	t_rob_tail.trap = 1'b0;
-
+	t_rob_tail.tlb_refill = 1'b0;
+	t_rob_tail.tlb_invalid = 1'b0;
+	t_rob_tail.tlb_modified = 1'b0;
+	
+	
 	t_rob_tail.is_bad_addr = 1'b0;
 	t_rob_tail.take_br = 1'b0;
 	t_rob_tail.is_br = t_alloc_uop.is_br;
@@ -1601,6 +1627,9 @@ module core(clk,
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.overflow = 1'b0;
 	t_rob_next_tail.trap = 1'b0;
+	t_rob_next_tail.tlb_refill = 1'b0;
+	t_rob_next_tail.tlb_invalid = 1'b0;
+	t_rob_next_tail.tlb_modified = 1'b0;
 	
 	t_rob_next_tail.is_ii = 1'b0;
 	t_rob_next_tail.is_bad_addr = 1'b0;
@@ -1789,7 +1818,12 @@ module core(clk,
 	     if(core_mem_rsp_valid)
 	       begin
 		  r_rob[core_mem_rsp.rob_ptr].data <= core_mem_rsp.data;
-		  r_rob[core_mem_rsp.rob_ptr].faulted <= core_mem_rsp.bad_addr;
+		  r_rob[core_mem_rsp.rob_ptr].faulted <= core_mem_rsp.bad_addr | core_mem_rsp.tlb_refill | core_mem_rsp.tlb_invalid | core_mem_rsp.tlb_modified;
+		  
+		  r_rob[core_mem_rsp.rob_ptr].tlb_refill <= core_mem_rsp.tlb_refill;
+		  r_rob[core_mem_rsp.rob_ptr].tlb_invalid <= core_mem_rsp.tlb_invalid;
+		  r_rob[core_mem_rsp.rob_ptr].tlb_modified <= core_mem_rsp.tlb_modified;		  
+		  
 		  r_rob[core_mem_rsp.rob_ptr].is_bad_addr <= core_mem_rsp.bad_addr;
 		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
 `ifdef ENABLE_CYCLE_ACCOUNTING
@@ -2103,10 +2137,12 @@ module core(clk,
 	   .core_wr_epc(t_wr_epc),
 	   .core_cause(r_cause),
 	   .exec_epc(w_exec_epc),
+	   .asid(asid),
 	   .sr_bev(w_sr_bev),	   
 	   .core_wr_cause(t_wr_cause),
 	   .core_wr_badvaddr(t_wr_badvaddr),
 	   .core_badvaddr(r_badvaddr),
+	   .save_to_tlb_regs(r_save_to_tlb_regs),
 	   .exc_in_delay(r_exc_in_delay),
 	   .in_kernel_mode(in_kernel_mode),
 	   .in_supervisor_mode(in_supervisor_mode),

@@ -146,6 +146,7 @@ endmodule
 
 module l1i(clk,
 	   state,
+	   asid,
 	   reset,
 	   in_kernel_mode,
 	   in_supervisor_mode,
@@ -193,6 +194,8 @@ module l1i(clk,
 
    input logic clk;
    output logic [2:0] state;
+   input logic [7:0]  asid;
+   
    input logic reset;
    input logic			in_kernel_mode;
    input logic			in_supervisor_mode;
