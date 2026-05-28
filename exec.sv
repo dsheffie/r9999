@@ -1906,6 +1906,24 @@ module exec(clk,
    assign putchar_fifo_rptr = r_rd_pc_idx;
 
    logic [7:0] r_entryhi_asid, n_entryhi_asid;
+   logic [18:0] n_entryhi_vpn2, r_entryhi_vpn2;
+   logic [23:0]	n_entrylo0_pfn, r_entrylo0_pfn;
+   logic [2:0]	n_entrylo0_c, r_entrylo0_c;
+   logic n_entrylo0_d, r_entrylo0_d;
+   logic n_entrylo0_v, r_entrylo0_v;
+   logic n_entrylo0_g, r_entrylo0_g;   
+   
+   logic [23:0]	n_entrylo1_pfn, r_entrylo1_pfn;   
+   logic [2:0]	n_entrylo1_c, r_entrylo1_c;
+   logic n_entrylo1_d, r_entrylo1_d;
+   logic n_entrylo1_v, r_entrylo1_v;
+   logic n_entrylo1_g, r_entrylo1_g;   
+
+   logic [8:0] r_ptebase, n_ptebase;
+   logic [18:0]	r_badvpn2, n_badvpn2;
+      
+   logic [11:0]	n_pagemask, r_pagemask;
+   
    assign asid = r_entryhi_asid;
    
    /* interrupt enable */
@@ -1978,20 +1996,90 @@ module exec(clk,
 	r_badvaddr <= reset ? 'd0 : n_badvaddr;
 	r_cause <= reset ? 'd0 : n_cause;
 	r_exc_in_ds <= reset ? 1'b0 : n_exc_in_ds;
-     end
-
-   always_ff@(posedge clk)
-     begin
 	r_entryhi_asid <= reset ? 'd0 : n_entryhi_asid;
-	//if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd12)
+	r_entryhi_vpn2 <= reset ? 'd0 : n_entryhi_vpn2;
+	r_pagemask <= reset ? 'd0 : n_pagemask;
+	r_entrylo0_pfn <= reset ? 'd0 : n_entrylo0_pfn;
+	r_entrylo0_c <= reset ? 'd0 : n_entrylo0_c;
+	r_entrylo0_d <= reset ? 'd0 : n_entrylo0_d;
+	r_entrylo0_v <= reset ? 'd0 : n_entrylo0_v;
+	r_entrylo0_g <= reset ? 'd0 : n_entrylo0_g;
+	r_entrylo1_pfn <= reset ? 'd0 : n_entrylo1_pfn;
+	r_entrylo1_c <= reset ? 'd0 : n_entrylo1_c;
+	r_entrylo1_d <= reset ? 'd0 : n_entrylo1_d;
+	r_entrylo1_v <= reset ? 'd0 : n_entrylo1_v;
+	r_entrylo1_g <= reset ? 'd0 : n_entrylo1_g;
+	r_ptebase <= reset ? 'd0 : n_ptebase;
+	r_badvpn2 <= reset ? 'd0 : n_badvpn2;
      end
 
    always_comb
      begin
+	n_entrylo0_pfn = r_entrylo0_pfn;
+	n_entrylo0_c = r_entrylo0_c;
+	n_entrylo0_d = r_entrylo0_d;
+	n_entrylo0_v = r_entrylo0_v;
+	n_entrylo0_g = r_entrylo0_g;
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd2)
+	  begin
+	     n_entrylo0_g = t_srcA[0];
+	     n_entrylo0_v = t_srcA[1];
+	     n_entrylo0_d = t_srcA[2];
+	     n_entrylo0_c = t_srcA[5:3];	     
+	     n_entrylo0_pfn = t_srcA[29:6];
+	  end	
+     end
+
+   always_comb
+     begin
+	n_entrylo1_pfn = r_entrylo1_pfn;
+	n_entrylo1_c = r_entrylo1_c;
+	n_entrylo1_d = r_entrylo1_d;
+	n_entrylo1_v = r_entrylo1_v;
+	n_entrylo1_g = r_entrylo1_g;
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd3)
+	  begin
+	     n_entrylo1_g = t_srcA[0];
+	     n_entrylo1_v = t_srcA[1];
+	     n_entrylo1_d = t_srcA[2];
+	     n_entrylo1_c = t_srcA[5:3];	     
+	     n_entrylo1_pfn = t_srcA[29:6];	     
+	  end		
+     end
+
+   always_comb
+     begin
+	n_badvpn2 = r_badvpn2;
+	n_ptebase = r_ptebase;
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd4)
+	  begin
+	     n_ptebase = t_srcA[31:23];
+	  end
+	else if(save_to_tlb_regs)
+	  begin
+	     n_badvpn2 = core_badvaddr[31:13];
+	  end
+     end
+   
+   
+   always_comb
+     begin
+	n_pagemask = r_pagemask;
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd5)
+	  begin
+	     n_pagemask = t_srcA[24:13];
+	  end
+     end
+   
+   always_comb
+     begin
 	n_entryhi_asid = r_entryhi_asid;
+	n_entryhi_vpn2 = r_entryhi_vpn2;
+	
 	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd10)
 	  begin
 	     n_entryhi_asid = t_srcA[7:0];
+	     n_entryhi_vpn2 = t_srcA[31:13];
 	  end
      end
    
@@ -2081,6 +2169,34 @@ module exec(clk,
 	    begin
 	       t_csr0_val = {26'd0, r_random};
 	    end
+	  'd2:
+	    begin
+	       t_csr0_val = {2'd0,
+			     r_entrylo0_pfn,
+			     r_entrylo0_c,
+			     r_entrylo0_d,
+			     r_entrylo0_v,
+			     r_entrylo0_g};
+	    end
+	  'd3:
+	    begin
+	       t_csr0_val = {2'd0,
+			     r_entrylo1_pfn,
+			     r_entrylo1_c,
+			     r_entrylo1_d,
+			     r_entrylo1_v,
+			     r_entrylo1_g};
+	    end
+	  'd4:
+	    begin
+	       t_csr0_val = {r_ptebase,
+			     r_badvpn2,
+			     4'd0};
+	    end
+	  'd5:
+	    begin
+	       t_csr0_val = {7'd0, r_pagemask, 13'd0};
+	    end
 	  'd6:
 	    begin
 	       t_csr0_val = {26'd0, r_wired};
@@ -2092,6 +2208,10 @@ module exec(clk,
 	  'd8:
 	    begin
 	       t_csr0_val = r_badvaddr;
+	    end
+	  'd10:
+	    begin
+	       t_csr0_val = {r_entryhi_vpn2, 5'd0, r_entryhi_asid};
 	    end
 	  'd12:
 	    begin
