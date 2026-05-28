@@ -86,7 +86,7 @@ module exec(clk,
    input logic [`M_WIDTH-1:0] core_badvaddr;
    
    output logic [`M_WIDTH-1:0] exec_epc;
-   output logic		       save_to_tlb_regs;
+   input logic		       save_to_tlb_regs;
    
    output logic [7:0]	       asid;
    
