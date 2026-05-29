@@ -621,9 +621,7 @@ module decode_mips32(insn,
 	       else if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd8))
 		 begin
 		    uop.op = TLBP;
-		    uop.is_int = 1'b1;
-		    uop.serializing_op = 1'b1;
-		    uop.must_restart = 1'b1;
+		    uop.is_mem = 1'b1;
 		 end	       
 	       else if((insn[25:21] == 5'd0) & (insn[10:0] == 'd0)) /* switch on RS */
 		 begin /* mfc0 */
