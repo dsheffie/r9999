@@ -156,6 +156,9 @@ module exec(clk,
 
    output tlb_data_t	             tlb_entry_out;
    output logic			     tlb_entry_out_valid;
+
+   tlb_data_t r_shadow_tlb[47:0];
+   
    
    localparam N_INT_SCHED_ENTRIES = 1<<`LG_INT_SCHED_ENTRIES;
    
@@ -1167,6 +1170,16 @@ module exec(clk,
    wire	       w_add_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] == w_srcB[31]);
    wire	       w_sub_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] != w_srcB[31]);   
 
+   logic [5:0] r_tlb_index, n_tlb_index;
+   logic n_tlb_entry_out_valid, r_tlb_entry_out_valid;
+   
+   always_ff@(posedge clk)
+     begin
+	r_tlb_index <= reset ? 'd0 : n_tlb_index;
+	r_tlb_entry_out_valid <= reset ? 1'b0 : n_tlb_entry_out_valid;
+     end
+   
+   
    // always_ff@(negedge clk)
    //   begin
    // 	if(int_uop.op == ADD & t_alu_valid)
@@ -1202,6 +1215,8 @@ module exec(clk,
 	t_start_div32 = 1'b0;	
 	t_overflow = 1'b0;
 	t_trap = 1'b0;
+	n_tlb_index = r_tlb_index;
+	n_tlb_entry_out_valid = 1'b0;
 	
 	t_clr_erl = 1'b0;
 	
@@ -1579,6 +1594,20 @@ module exec(clk,
 	       t_fault = (t_srcA == t_srcB);	       	       
 	       t_alu_valid = 1'b1;
 	    end
+	  TLBWI:
+	    begin
+	       t_alu_valid = 1'b1;
+	       t_fault = 1'b1;
+	       n_tlb_index = r_index;
+	       n_tlb_entry_out_valid = 1'b1;
+	    end
+	  TLBWR:
+	    begin
+	       t_alu_valid = 1'b1;
+	       t_fault = 1'b1;
+	       n_tlb_index = r_random;
+	       n_tlb_entry_out_valid = 1'b1;
+	    end
 	  II:
 	    begin
 	       t_unimp_op = 1'b1;
@@ -1951,7 +1980,9 @@ module exec(clk,
    /* wired and random */
    logic [5:0] r_wired, n_wired, r_random, n_random;
    
-
+   logic       r_index_probe_failed, n_index_probe_failed;
+   logic [5:0] r_index, n_index;
+   
    
    logic [`M_WIDTH-1:0]	n_epc, r_epc, n_badvaddr, r_badvaddr;
    assign exec_epc = r_epc;
@@ -2020,8 +2051,8 @@ module exec(clk,
    
    always_comb
      begin
-	tlb_entry_out.entry = 'd0;
-	
+	tlb_entry_out_valid = r_tlb_entry_out_valid;	
+	tlb_entry_out.entry = r_tlb_index;
 	tlb_entry_out.pfn0 = r_entrylo0_pfn;
 	tlb_entry_out.pfn1 = r_entrylo1_pfn;
 	tlb_entry_out.pagemask = r_pagemask;
@@ -2034,9 +2065,34 @@ module exec(clk,
 	tlb_entry_out.d1 = r_entrylo1_d;
 	tlb_entry_out.g0 = r_entrylo0_g;
 	tlb_entry_out.g1 = r_entrylo1_g;			
-	
      end
 
+   always_ff@(posedge clk)
+     begin
+	if(r_tlb_entry_out_valid)
+	  begin
+	     r_shadow_tlb[r_tlb_index] <= tlb_entry_out;
+	  end
+     end
+
+
+   always_comb
+     begin
+	n_index = r_index;
+	n_index_probe_failed = r_index_probe_failed;
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd0)
+	  begin
+	     n_index = t_srcA[5:0];
+	     n_index_probe_failed = t_srcA[31];
+	  end
+     end
+
+   always_ff@(posedge clk)
+     begin
+	r_index <= reset ? 'd0 : n_index;
+	r_index_probe_failed <= reset ? 1'b0 : n_index_probe_failed;
+     end
+   
    always_comb
      begin
 	n_entrylo0_pfn = r_entrylo0_pfn;
@@ -2189,6 +2245,12 @@ module exec(clk,
      begin
 	t_csr0_val = cpr0_status_reg;
 	case(int_uop.srcA[4:0] )
+	  'd0:
+	    begin
+	       t_csr0_val = {r_index_probe_failed,
+			     25'd0,
+			     r_index};
+	    end
 	  'd1:
 	    begin
 	       t_csr0_val = {26'd0, r_random};
