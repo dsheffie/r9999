@@ -117,6 +117,9 @@ module core(clk,
 	    epc,
 	    cause,
 	    asid,
+	    tlb_entry_out,
+	    tlb_entry_out_valid,
+	    
 	    l1i_flush_done,
 	    l1d_flush_done,
 	    l2_flush_done);
@@ -227,6 +230,9 @@ module core(clk,
    output logic [`M_WIDTH-1:0]		  epc;
    output logic [4:0]			  cause;
    output logic [7:0]			  asid;
+   output tlb_data_t		          tlb_entry_out;
+   output logic				  tlb_entry_out_valid;
+   
    
    output logic				  l1i_flush_done;
    output logic				  l1d_flush_done;
@@ -2138,6 +2144,8 @@ module core(clk,
 	   .core_cause(r_cause),
 	   .exec_epc(w_exec_epc),
 	   .asid(asid),
+	   .tlb_entry_out_valid(tlb_entry_out_valid),
+	   .tlb_entry_out(tlb_entry_out),	   
 	   .sr_bev(w_sr_bev),	   
 	   .core_wr_cause(t_wr_cause),
 	   .core_wr_badvaddr(t_wr_badvaddr),

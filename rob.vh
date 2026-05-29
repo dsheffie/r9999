@@ -109,6 +109,24 @@ typedef struct packed {
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
 } bob_entry_t;
 
+typedef struct packed {
 
+   logic [5:0] entry;
+   logic [11:0]	pagemask;
+   logic [7:0]	asid;
+   logic [19:0]	vpn;
+   
+   logic [23:0]	pfn0;
+   logic	d0;
+   logic	v0;
+   logic	g0;
+   logic [2:0]	c0;
+   
+   logic [23:0]	pfn1;
+   logic	d1;
+   logic	v1;
+   logic	g1;
+   logic [2:0]	c1;
+} tlb_data_t;
 
 `endif

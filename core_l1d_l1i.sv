@@ -343,6 +343,10 @@ module core_l1d_l1i(clk,
    logic [3:0] 				  t_l2_req_opcode;
    logic				  t_l2_req_cacheable;
    logic [15:0]				  t_l2_req_mask;
+
+
+   tlb_data_t tlb_entry_out;
+   logic			    tlb_entry_out_valid;
    
    wire w_l1_mem_req_ack;
    
@@ -498,7 +502,9 @@ module core_l1d_l1i(clk,
    l1d dcache (
 	       .clk(clk),
 	       .reset(reset),
-	       .asid(w_asid),	       
+	       .asid(w_asid),	
+	       .tlb_entry_in(tlb_entry_out),
+	       .tlb_entry_in_valid(tlb_entry_out_valid),
 	       .state(l1d_state),
 	       .in_kernel_mode(w_in_kernel_mode),
 	       .in_supervisor_mode(w_in_supervisor_mode),
@@ -672,10 +678,13 @@ module core_l1d_l1i(clk,
 	     .epc(epc),
 	     .cause(cause),
 	     .asid(w_asid),
+	     .tlb_entry_out_valid(tlb_entry_out_valid),
+	     .tlb_entry_out(tlb_entry_out),	   	     
 	     .l1i_flush_done(l1i_flush_done),
 	     .l1d_flush_done(l1d_flush_done),
 	     .l2_flush_done(l2_flush_done)
 	     );
+
    
 
 endmodule // core_l1d_l1i

@@ -72,7 +72,10 @@ module exec(clk,
 	    mem_rsp_dst_ptr,
 	    mem_rsp_dst_valid,
 	    mem_rsp_rob_ptr,
-	    mem_rsp_load_data);
+	    mem_rsp_load_data,
+	    tlb_entry_out,
+	    tlb_entry_out_valid
+	    );
    input logic clk;
    input logic reset;
    input logic retire;
@@ -150,6 +153,9 @@ module exec(clk,
    input logic [31:0] 		     mem_rsp_load_data;
    input logic [`LG_ROB_ENTRIES-1:0] mem_rsp_rob_ptr;
    
+
+   output tlb_data_t	             tlb_entry_out;
+   output logic			     tlb_entry_out_valid;
    
    localparam N_INT_SCHED_ENTRIES = 1<<`LG_INT_SCHED_ENTRIES;
    
@@ -310,7 +316,6 @@ module exec(clk,
    logic [`LG_MEM_DQ_ENTRIES:0]  r_mem_dq_tail_ptr, n_mem_dq_tail_ptr;
    logic [`LG_MEM_DQ_ENTRIES:0] r_mem_dq_next_head_ptr, n_mem_dq_next_head_ptr;
    logic [`LG_MEM_DQ_ENTRIES:0] r_mem_dq_next_tail_ptr, n_mem_dq_next_tail_ptr;
-
 
    
    logic             t_push_two_mem,  t_push_two_int;
@@ -1146,7 +1151,6 @@ module exec(clk,
      end
 `endif //  `ifdef VERILATOR
 
-   wire [31:0] w_add32;
    wire [31:0] w_s_sub32, w_c_sub32;
 
    
@@ -1159,7 +1163,7 @@ module exec(clk,
    wire [31:0] w_add_srcA = {w_c_sub32[30:0], 1'b0};
    wire [31:0] w_add_srcB = w_s_sub32;
 
-   wire [32:0] w_add32 = w_add_srcA + w_add_srcB;
+   wire [31:0] w_add32 = w_add_srcA + w_add_srcB;
    wire	       w_add_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] == w_srcB[31]);
    wire	       w_sub_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] != w_srcB[31]);   
 
@@ -2011,6 +2015,26 @@ module exec(clk,
 	r_entrylo1_g <= reset ? 'd0 : n_entrylo1_g;
 	r_ptebase <= reset ? 'd0 : n_ptebase;
 	r_badvpn2 <= reset ? 'd0 : n_badvpn2;
+     end // always_ff@ (posedge clk)
+
+   
+   always_comb
+     begin
+	tlb_entry_out.entry = 'd0;
+	
+	tlb_entry_out.pfn0 = r_entrylo0_pfn;
+	tlb_entry_out.pfn1 = r_entrylo1_pfn;
+	tlb_entry_out.pagemask = r_pagemask;
+	tlb_entry_out.asid = r_entryhi_asid;
+	tlb_entry_out.c0 = r_entrylo0_c;
+	tlb_entry_out.c1 = r_entrylo1_c;
+	tlb_entry_out.v0 = r_entrylo0_v;
+	tlb_entry_out.v1 = r_entrylo1_v;	
+	tlb_entry_out.d0 = r_entrylo0_d;
+	tlb_entry_out.d1 = r_entrylo1_d;
+	tlb_entry_out.g0 = r_entrylo0_g;
+	tlb_entry_out.g1 = r_entrylo1_g;			
+	
      end
 
    always_comb

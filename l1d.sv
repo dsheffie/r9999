@@ -15,6 +15,8 @@ import "DPI-C" function void record_l1d(input int req,
 module l1d(clk, 
 	   reset,
 	   asid,
+	   tlb_entry_in,
+	   tlb_entry_in_valid,
 	   state,
 	   in_kernel_mode,
 	   in_supervisor_mode,
@@ -66,7 +68,10 @@ module l1d(clk,
    
    input logic clk;
    input logic reset;
-   input logic [7:0] asid;   
+   input logic [7:0] asid;
+   input	     tlb_data_t tlb_entry_in;
+   input logic	     tlb_entry_in_valid;
+   
    output logic [3:0] state;
    input logic			in_kernel_mode;
    input logic			in_supervisor_mode;
