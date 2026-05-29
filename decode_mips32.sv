@@ -596,8 +596,36 @@ module decode_mips32(insn,
 	       uop.imm = insn[15:0];
 	    end
 	  6'd16: /* coproc0 */
-	    begin
-	       if((insn[25:21] == 5'd0) & (insn[10:0] == 'd0)) /* switch on RS */
+	    begin	
+	       if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd1))
+		 begin
+		    uop.op = TLBR;
+		    uop.is_int = 1'b1;
+		    uop.serializing_op = 1'b1;
+		    uop.must_restart = 1'b1;
+		 end       
+	       else if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd2))
+		 begin
+		    uop.op = TLBWI;
+		    uop.is_int = 1'b1;
+		    uop.serializing_op = 1'b1;
+		    uop.must_restart = 1'b1;
+		 end
+	       else if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd6))
+		 begin
+		    uop.op = TLBWR;
+		    uop.is_int = 1'b1;
+		    uop.serializing_op = 1'b1;
+		    uop.must_restart = 1'b1;
+		 end
+	       else if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd8))
+		 begin
+		    uop.op = TLBP;
+		    uop.is_int = 1'b1;
+		    uop.serializing_op = 1'b1;
+		    uop.must_restart = 1'b1;
+		 end	       
+	       else if((insn[25:21] == 5'd0) & (insn[10:0] == 'd0)) /* switch on RS */
 		 begin /* mfc0 */
 		    uop.op = MFC0;
 		    uop.dst = rt;
