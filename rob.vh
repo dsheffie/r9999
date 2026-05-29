@@ -114,7 +114,7 @@ typedef struct packed {
    logic [5:0] entry;
    logic [11:0]	pagemask;
    logic [7:0]	asid;
-   logic [19:0]	vpn;
+   logic [18:0]	vpn;
    
    logic [23:0]	pfn0;
    logic	d0;

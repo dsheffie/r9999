@@ -1172,11 +1172,13 @@ module exec(clk,
 
    logic [5:0] r_tlb_index, n_tlb_index;
    logic n_tlb_entry_out_valid, r_tlb_entry_out_valid;
+   logic n_tlbr, r_tlbr;
    
    always_ff@(posedge clk)
      begin
 	r_tlb_index <= reset ? 'd0 : n_tlb_index;
 	r_tlb_entry_out_valid <= reset ? 1'b0 : n_tlb_entry_out_valid;
+	r_tlbr <= reset ? 1'b0 : n_tlbr;
      end
    
    
@@ -1217,7 +1219,7 @@ module exec(clk,
 	t_trap = 1'b0;
 	n_tlb_index = r_tlb_index;
 	n_tlb_entry_out_valid = 1'b0;
-	
+	n_tlbr = 1'b0;
 	t_clr_erl = 1'b0;
 	
 	case(int_uop.op)
@@ -1600,6 +1602,7 @@ module exec(clk,
 	       t_fault = 1'b1;
 	       n_tlb_index = r_index;
 	       n_tlb_entry_out_valid = 1'b1;
+	       t_pc = t_pc4;
 	    end
 	  TLBWR:
 	    begin
@@ -1607,6 +1610,14 @@ module exec(clk,
 	       t_fault = 1'b1;
 	       n_tlb_index = r_random;
 	       n_tlb_entry_out_valid = 1'b1;
+	       t_pc = t_pc4;	       
+	    end
+	  TLBR:
+	    begin
+	       t_alu_valid = 1'b1;
+	       t_fault = 1'b1;
+	       n_tlbr = 1'b1;
+	       t_pc = t_pc4;	       
 	    end
 	  II:
 	    begin
@@ -1982,6 +1993,7 @@ module exec(clk,
    
    logic       r_index_probe_failed, n_index_probe_failed;
    logic [5:0] r_index, n_index;
+   tlb_data_t r_tlb_entry;
    
    
    logic [`M_WIDTH-1:0]	n_epc, r_epc, n_badvaddr, r_badvaddr;
@@ -2057,6 +2069,8 @@ module exec(clk,
 	tlb_entry_out.pfn1 = r_entrylo1_pfn;
 	tlb_entry_out.pagemask = r_pagemask;
 	tlb_entry_out.asid = r_entryhi_asid;
+	tlb_entry_out.vpn = r_entryhi_vpn2;
+	
 	tlb_entry_out.c0 = r_entrylo0_c;
 	tlb_entry_out.c1 = r_entrylo1_c;
 	tlb_entry_out.v0 = r_entrylo0_v;
@@ -2069,6 +2083,7 @@ module exec(clk,
 
    always_ff@(posedge clk)
      begin
+	r_tlb_entry <= r_shadow_tlb[r_index];
 	if(r_tlb_entry_out_valid)
 	  begin
 	     r_shadow_tlb[r_tlb_index] <= tlb_entry_out;
@@ -2100,7 +2115,15 @@ module exec(clk,
 	n_entrylo0_d = r_entrylo0_d;
 	n_entrylo0_v = r_entrylo0_v;
 	n_entrylo0_g = r_entrylo0_g;
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd2)
+	if(r_tlbr)
+	  begin
+	     n_entrylo0_g = r_tlb_entry.g0;
+	     n_entrylo0_v = r_tlb_entry.v0;
+	     n_entrylo0_d = r_tlb_entry.d0;
+	     n_entrylo0_c = r_tlb_entry.c0;	     
+	     n_entrylo0_pfn = r_tlb_entry.pfn0;	     
+	  end
+	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd2)
 	  begin
 	     n_entrylo0_g = t_srcA[0];
 	     n_entrylo0_v = t_srcA[1];
@@ -2117,7 +2140,15 @@ module exec(clk,
 	n_entrylo1_d = r_entrylo1_d;
 	n_entrylo1_v = r_entrylo1_v;
 	n_entrylo1_g = r_entrylo1_g;
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd3)
+	if(r_tlbr)
+	  begin
+	     n_entrylo1_g = r_tlb_entry.g1;
+	     n_entrylo1_v = r_tlb_entry.v1;
+	     n_entrylo1_d = r_tlb_entry.d1;
+	     n_entrylo1_c = r_tlb_entry.c1;	     
+	     n_entrylo1_pfn = r_tlb_entry.pfn1;	     
+	  end	
+	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd3)
 	  begin
 	     n_entrylo1_g = t_srcA[0];
 	     n_entrylo1_v = t_srcA[1];
@@ -2145,7 +2176,11 @@ module exec(clk,
    always_comb
      begin
 	n_pagemask = r_pagemask;
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd5)
+	if(r_tlbr)
+	  begin
+	     n_pagemask = r_tlb_entry.pagemask;
+	  end
+	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd5)
 	  begin
 	     n_pagemask = t_srcA[24:13];
 	  end
@@ -2155,8 +2190,12 @@ module exec(clk,
      begin
 	n_entryhi_asid = r_entryhi_asid;
 	n_entryhi_vpn2 = r_entryhi_vpn2;
-	
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd10)
+	if(r_tlbr)
+	  begin
+	     n_entryhi_asid = r_tlb_entry.asid;
+	     n_entryhi_vpn2 = r_tlb_entry.vpn;
+	  end
+	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd10)
 	  begin
 	     n_entryhi_asid = t_srcA[7:0];
 	     n_entryhi_vpn2 = t_srcA[31:13];
