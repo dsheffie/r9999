@@ -377,7 +377,7 @@ module core(clk,
    logic 		     n_l1d_flush_complete, r_l1d_flush_complete;
    logic 		     n_l2_flush_complete, r_l2_flush_complete;
    
-   logic [(`M_WIDTH-1):0]    t_cpr0_status_reg;
+   logic [31:0]    t_cpr0_status_reg;
    
    logic [31:0] 	     r_arch_a0;
 
@@ -416,9 +416,6 @@ module core(clk,
    logic 		     t_uq_read;
    logic 		     n_ready_for_resume, r_ready_for_resume;
    
-   logic 		     t_exception_wr_cpr0_val;
-   logic [4:0] 		     t_exception_wr_cpr0_ptr;
-   logic [63:0] 	     t_exception_wr_cpr0_data;
    
    mem_req_t t_mem_req;
    logic 		     t_mem_req_valid;
@@ -712,6 +709,7 @@ module core(clk,
 `ifdef ENABLE_CYCLE_ACCOUNTING
    always_ff@(negedge clk)
      begin
+	localparam ZP = (64-`M_WIDTH);	
 	record_alloc(t_rob_full ? 32'd1 : 32'd0,
 		     t_alloc ? 32'd1 : 32'd0,
 		     t_alloc_two ? 32'd1 : 32'd0,
@@ -726,7 +724,7 @@ module core(clk,
 			    
    	if(t_retire)
    	  begin
-	     record_retirement({32'd0,t_rob_head.pc}, 
+	     record_retirement({{ZP{1'b0}},t_rob_head.pc}, 
    			       t_rob_head.fetch_cycle,
    			       t_rob_head.alloc_cycle,
    			       t_rob_head.complete_cycle,
@@ -738,7 +736,7 @@ module core(clk,
    	  end
    	if(t_retire_two)
    	  begin
-	     record_retirement({32'd0, t_rob_next_head.pc}, 
+	     record_retirement({{ZP{1'b0}},t_rob_next_head.pc},
    			       t_rob_next_head.fetch_cycle,
    			       t_rob_next_head.alloc_cycle,
    			       t_rob_next_head.complete_cycle,
@@ -855,9 +853,6 @@ module core(clk,
 	t_clr_extern_irq = 1'b0;
 	t_restart_complete = 1'b0;
 	
-	t_exception_wr_cpr0_val = 1'b0;
-	t_exception_wr_cpr0_ptr = 5'd0;
-	t_exception_wr_cpr0_data = 'd0;
 	n_cause = r_cause;
 	n_tlb_refill = r_tlb_refill;
        
@@ -2221,9 +2216,7 @@ module core(clk,
 	   	   
 	   .complete_bundle_1(t_complete_bundle_1),
 	   .complete_valid_1(t_complete_valid_1),
-	   .exception_wr_cpr0_val(t_exception_wr_cpr0_val),
-	   .exception_wr_cpr0_ptr(t_exception_wr_cpr0_ptr),
-	   .exception_wr_cpr0_data(t_exception_wr_cpr0_data[31:0]),
+
 	   .mem_req(t_mem_req),
 	   .mem_req_valid(t_mem_req_valid),
 	   .mem_req_ack(core_mem_req_ack),

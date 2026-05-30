@@ -60,9 +60,6 @@ module exec(clk,
 	    uq_push_two,
 	    complete_bundle_1,
 	    complete_valid_1,
-	    exception_wr_cpr0_val,
-	    exception_wr_cpr0_ptr,
-	    exception_wr_cpr0_data,
 	    mem_req, 
 	    mem_req_valid, 
 	    mem_req_ack,
@@ -119,7 +116,7 @@ module exec(clk,
    input logic ds_done;
    input logic mem_dq_clr;
    input logic restart_complete;
-   output logic [(`M_WIDTH-1):0]     cpr0_status_reg;
+   output logic [31:0]     cpr0_status_reg;
       
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);   
    output logic [N_ROB_ENTRIES-1:0]  uq_wait;   
@@ -138,10 +135,6 @@ module exec(clk,
    output logic complete_valid_1;
 
 
-   input logic 	exception_wr_cpr0_val;
-   input logic [4:0] exception_wr_cpr0_ptr;
-   input logic [`M_WIDTH-1:0] exception_wr_cpr0_data;
-   
    output 	mem_req_t mem_req;
    output 	logic mem_req_valid;
    input logic 	      mem_req_ack;
@@ -156,7 +149,7 @@ module exec(clk,
    
    input logic [`LG_PRF_ENTRIES-1:0] mem_rsp_dst_ptr;
    input logic 			     mem_rsp_dst_valid;
-   input logic [31:0] 		     mem_rsp_load_data;
+   input logic [`M_WIDTH-1:0]	     mem_rsp_load_data;
    input logic [`LG_ROB_ENTRIES-1:0] mem_rsp_rob_ptr;
    
 
@@ -182,7 +175,7 @@ module exec(clk,
    logic [N_HILO_PRF_ENTRIES-1:0] r_hilo_inflight, n_hilo_inflight;
    
    logic 			  t_wr_int_prf, t_wr_cpr0;
-   logic [31:0]			  t_csr0_val;
+   logic [`M_WIDTH-1:0]		  t_csr0_val;
    
    logic 	t_wr_hilo;
    logic	t_overflow;
@@ -230,17 +223,17 @@ module exec(clk,
    logic [`M_WIDTH-1:0] t_cpr0_result;
 
    
-   logic [63:0] t_hilo_result;
+   logic [(`M_WIDTH*2)-1:0] t_hilo_result;
    
    logic [`M_WIDTH-1:0] t_pc, t_pc4, t_pc8;
    logic [27:0] t_jaddr;
    logic 	t_srcs_rdy;
 
    
-   wire [31:0] w_srcA, w_srcB;
-   wire [31:0] w_mem_srcA, w_mem_srcB;
+   wire [`M_WIDTH-1:0] w_srcA, w_srcB;
+   wire [`M_WIDTH-1:0] w_mem_srcA, w_mem_srcB;
    
-   logic [31:0] r_mem_result, r_int_result;
+   logic [`M_WIDTH-1:0] r_mem_result, r_int_result;
    logic 	r_fwd_int_srcA, r_fwd_int_srcB;
    logic 	r_fwd_mem_srcA, r_fwd_mem_srcB;
 
@@ -251,8 +244,8 @@ module exec(clk,
    logic [63:0] r_src_hilo;
    logic 	r_fwd_hilo_int, r_fwd_hilo_mul, r_fwd_hilo_div;
       
-   logic [31:0] t_srcA, t_srcB;
-   logic [31:0] t_mem_srcA, t_mem_srcB;
+   logic [`M_WIDTH-1:0] t_srcA, t_srcB;
+   logic [`M_WIDTH-1:0] t_mem_srcA, t_mem_srcB;
    
    
    logic [63:0] t_src_hilo;
@@ -1161,12 +1154,9 @@ module exec(clk,
 `endif //  `ifdef VERILATOR
 
    wire [31:0] w_s_sub32, w_c_sub32;
-
    
-
-   
-   csa #(.N(32)) csa0 (.a(t_srcA), 
-		       .b(int_uop.op == SUBU ? ~t_srcB : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? {{E_BITS{int_uop.imm[15]}},int_uop.imm} : t_srcB))), 
+   csa #(.N(32)) csa0 (.a(t_srcA[31:0]), 
+		       .b(int_uop.op == SUBU ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? {{E_BITS{int_uop.imm[15]}},int_uop.imm} : t_srcB))), 
 		       .cin(int_uop.op == SUBU ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
 
    wire [31:0] w_add_srcA = {w_c_sub32[30:0], 1'b0};
@@ -1201,10 +1191,10 @@ module exec(clk,
    always_comb
      begin
 	t_pc = int_uop.pc;
-	t_pc4 = int_uop.pc + 32'd4;
-	t_pc8 = int_uop.pc + 32'd8;
-	t_result = 32'd0;
-	t_cpr0_result = 32'd0;
+	t_pc4 = int_uop.pc + zero_extend32(32'd4);
+	t_pc8 = int_uop.pc + zero_extend32(32'd8);
+	t_result = zero_extend32(32'd0);
+	t_cpr0_result = zero_extend32(32'd0);
 	t_unimp_op = 1'b0;
 	t_fault = 1'b0;
 	t_simm = {{E_BITS{int_uop.imm[15]}},int_uop.imm};
@@ -1241,7 +1231,7 @@ module exec(clk,
 	    end
 	  SLL:
 	    begin
-	       t_result = t_srcA << int_uop.srcB;
+	       t_result = sign_extend32(t_srcA[31:0] << int_uop.srcB);
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 
@@ -1250,10 +1240,7 @@ module exec(clk,
 	    begin
 	       t_signed_shift = 1'b1;
 	       t_shift_amt = int_uop.srcB[4:0];
-	       //t_result = $signed(t_srcA) >> $signed(int_uop.srcB[4:0]);
-	       //$display("t_result = %b, t_shift_right = %b", t_result, t_shift_right);
-	       
-	       t_result = {{HI_EBITS{t_shift_right[31]}}, t_shift_right};
+	       t_result = sign_extend32({{HI_EBITS{t_shift_right[31]}}, t_shift_right});
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end // case: SRA
@@ -1261,25 +1248,25 @@ module exec(clk,
 	    begin
 	       t_signed_shift = 1'b1;
 	       t_shift_amt = t_srcB[4:0];
-	       t_result = {{HI_EBITS{t_shift_right[31]}}, t_shift_right};	       
+	       t_result = sign_extend32({{HI_EBITS{t_shift_right[31]}}, t_shift_right});	       
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  SRL:
 	    begin
-	       t_result = t_srcA >> int_uop.srcB;	       
+	       t_result = sign_extend32(t_srcA[31:0] >> int_uop.srcB);	       
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  SLLV:
 	    begin
-	       t_result = t_srcA << (t_srcB[4:0]);
+	       t_result = sign_extend32(t_srcA[31:0] << (t_srcB[4:0]));
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  SRLV:
 	    begin
-	       t_result = t_srcA >> (t_srcB[4:0]);
+	       t_result = sign_extend32(t_srcA[31:0] >> (t_srcB[4:0]));
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1309,7 +1296,7 @@ module exec(clk,
 	    end
 	  ADD:
 	    begin
-	       t_result = w_add32;
+	       t_result = sign_extend32(w_add32);
 	       t_overflow = w_add32_overflow;
 	       t_fault = w_add32_overflow;	       	       
 	       t_wr_int_prf = 1'b1;
@@ -1317,7 +1304,7 @@ module exec(clk,
 	    end
 	  ADDU:
 	    begin
-	       t_result = w_add32;
+	       t_result = sign_extend32(w_add32);
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1340,7 +1327,7 @@ module exec(clk,
 	    end
 	  SUBU:
 	    begin
-	       t_result = w_add32;
+	       t_result = sign_extend32(w_add32);
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1541,7 +1528,7 @@ module exec(clk,
 	    end
 	  LUI:
 	    begin
-	       t_result = sign_extend32({{HI_EBITS{int_uop.imm[15]}},int_uop.imm, 16'd0});
+	       t_result = sign_extend32({int_uop.imm, 16'd0});
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1884,7 +1871,7 @@ module exec(clk,
      end
 
 
-   rf4r2w #(.WIDTH(32), .LG_DEPTH(`LG_PRF_ENTRIES)) 
+   rf4r2w #(.WIDTH(`M_WIDTH), .LG_DEPTH(`LG_PRF_ENTRIES)) 
    intprf (.clk(clk),
 	   .rdptr0(t_picked_uop.srcA),
 	   .rdptr1(t_picked_uop.srcB),
@@ -1895,7 +1882,7 @@ module exec(clk,
 	   .wen0(r_start_int && t_wr_int_prf),
 	   .wen1(mem_rsp_dst_valid),
 	   .wr0(t_result),
-	   .wr1(mem_rsp_load_data[31:0]),
+	   .wr1(mem_rsp_load_data),
 	   .rd0(w_srcA),
 	   .rd1(w_srcB),
 	   .rd2(w_mem_srcA),
@@ -2297,53 +2284,49 @@ module exec(clk,
    
    always_comb
      begin
-	t_csr0_val = cpr0_status_reg;
+	t_csr0_val = zero_extend32(cpr0_status_reg);
 	case(int_uop.srcA[4:0] )
 	  'd0:
 	    begin
-	       t_csr0_val = {r_index_probe_failed,
-			     25'd0,
-			     r_index};
+	       t_csr0_val = zero_extend32({r_index_probe_failed,25'd0, r_index});
 	    end
 	  'd1:
 	    begin
-	       t_csr0_val = {26'd0, r_random};
+	       t_csr0_val = zero_extend32({26'd0, r_random});
 	    end
 	  'd2:
 	    begin
-	       t_csr0_val = {2'd0,
-			     r_entrylo0_pfn,
-			     r_entrylo0_c,
-			     r_entrylo0_d,
-			     r_entrylo0_v,
-			     r_entrylo0_g};
+	       t_csr0_val = zero_extend32({2'd0,
+					   r_entrylo0_pfn,
+					   r_entrylo0_c,
+					   r_entrylo0_d,
+					   r_entrylo0_v,
+					   r_entrylo0_g});
 	    end
 	  'd3:
 	    begin
-	       t_csr0_val = {2'd0,
-			     r_entrylo1_pfn,
-			     r_entrylo1_c,
-			     r_entrylo1_d,
-			     r_entrylo1_v,
-			     r_entrylo1_g};
+	       t_csr0_val = zero_extend32({2'd0,
+					   r_entrylo1_pfn,
+					   r_entrylo1_c,
+					   r_entrylo1_d,
+					   r_entrylo1_v,
+					   r_entrylo1_g});
 	    end
 	  'd4:
 	    begin
-	       t_csr0_val = {r_ptebase,
-			     r_badvpn2,
-			     4'd0};
+	       t_csr0_val = zero_extend32({r_ptebase,r_badvpn2,4'd0});
 	    end
 	  'd5:
 	    begin
-	       t_csr0_val = {7'd0, r_pagemask, 13'd0};
+	       t_csr0_val = zero_extend32({7'd0, r_pagemask, 13'd0});
 	    end
 	  'd6:
 	    begin
-	       t_csr0_val = {26'd0, r_wired};
+	       t_csr0_val = zero_extend32({26'd0, r_wired});
 	    end	  
 	  'd7:
 	    begin
-	       t_csr0_val = {31'd0, w_putchar_fifo_full};
+	       t_csr0_val = zero_extend32({31'd0, w_putchar_fifo_full});
 	    end
 	  'd8:
 	    begin
@@ -2360,14 +2343,14 @@ module exec(clk,
 	    end
 	  'd13: /* cause */
 	    begin
-	       t_csr0_val = {r_exc_in_ds,
-			     1'b0, /* must be zero */ 
-			     2'd0, /* coproc field */
-			     12'd0, /* must be zero */
-			     8'd0, /* interrupt */
-			     1'b0, /* must be zero */
-			     r_cause,
-			     2'd0 /* must be zero */};
+	       t_csr0_val = zero_extend32({r_exc_in_ds,
+					   1'b0, /* must be zero */ 
+					   2'd0, /* coproc field */
+					   12'd0, /* must be zero */
+					   8'd0, /* interrupt */
+					   1'b0, /* must be zero */
+					   r_cause,
+					   2'd0 /* must be zero */});
 	    end
 	  'd14:
 	    begin
@@ -2375,15 +2358,15 @@ module exec(clk,
 	    end
 	  'd16:
 	    begin
-	       t_csr0_val = 32'h88200;
+	       t_csr0_val = 'h88200;
 	    end
 	  'd23:
 	    begin
-	       t_csr0_val = r_cycle[31:0];
+	       t_csr0_val = zero_extend32(r_cycle[31:0]);
 	    end
 	  'd24:
 	    begin
-	       t_csr0_val = r_retired_insns[31:0];
+	       t_csr0_val = zero_extend32(r_retired_insns[31:0]);
 	    end
 	endcase
      end

@@ -98,6 +98,7 @@ module core_l1d_l1i(clk,
    output logic [(`M_WIDTH-1):0] branch_pc;
    output logic 		 branch_pc_valid;
    output logic 		 branch_fault;
+   
    assign branch_pc = t_branch_pc;
    assign branch_pc_valid = t_branch_pc_valid;   
    assign branch_fault = t_branch_fault;
@@ -159,7 +160,7 @@ module core_l1d_l1i(clk,
    output logic [3:0]			  l2_state;
    output logic [3:0]			  l2_rsp_state;
    
-   output logic [31:0] 			  epc;
+   output logic [`M_WIDTH-1:0]		  epc;
    output logic [4:0]			  cause;
 
    
@@ -594,7 +595,7 @@ module core_l1d_l1i(clk,
 	      .cache_accesses(l1i_cache_accesses),
 	      .cache_hits(l1i_cache_hits)	      
 	      );
-   
+
    core cpu (
 	     .clk(clk),
 	     .reset(reset),

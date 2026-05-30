@@ -168,4 +168,10 @@ function logic [`M_WIDTH-1:0] sign_extend32(logic [31:0] in);
    return x;
 endfunction // is_mult
 
+function logic [`M_WIDTH-1:0] zero_extend32(logic [31:0] in);
+   logic [`M_WIDTH-1:0]	x;
+   x = {   {(`M_WIDTH-32){1'b0}}, in};
+   return x;
+endfunction // is_mult
+
 `endif

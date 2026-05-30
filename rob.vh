@@ -30,7 +30,7 @@ typedef struct packed {
    logic 			 take_br;
    logic 			 is_break;
    logic			 is_syscall;
-   logic [31:0] 		 data;
+   logic [(`M_WIDTH-1):0]	 data;
    logic [6:0]			 opcode;
    logic [`LG_PHT_SZ-1:0] 	 pht_idx;
 
@@ -56,7 +56,7 @@ typedef struct packed {
    logic 		       is_ii;
    logic		       overflow;
    logic		       trap;
-   logic [31:0] 	       data;
+   logic [(`M_WIDTH-1):0]      data;
 } complete_t;
 
 typedef struct packed {
@@ -71,7 +71,7 @@ typedef struct packed {
 } insn_fetch_t;
 
 typedef struct packed {
-   logic [31:0] addr;
+   logic [(`M_WIDTH-1):0] addr;
    logic 	is_store;
    mem_op_t op;
    logic 	bad_addr;   
@@ -80,7 +80,7 @@ typedef struct packed {
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic [`LG_PRF_ENTRIES-1:0] dst_ptr;
    logic 		       dst_valid;
-   logic [31:0] 	       data;
+   logic [(`M_WIDTH-1):0]      data;
 `ifdef VERILATOR
    logic [(`M_WIDTH-1):0]      pc;
 `endif
@@ -92,12 +92,12 @@ typedef struct packed {
 } dq_t;
 
 typedef struct packed {
-   logic [31:0] data;
+   logic [(`M_WIDTH-1):0] data;
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
 } mem_data_t;
 
 typedef struct packed {
-   logic [31:0] data;
+   logic [(`M_WIDTH-1):0] data;
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic [`LG_PRF_ENTRIES-1:0] dst_ptr;
    logic 		       dst_valid;
