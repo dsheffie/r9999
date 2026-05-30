@@ -1173,8 +1173,8 @@ module exec(clk,
    wire [31:0] w_add_srcB = w_s_sub32;
 
    wire [31:0] w_add32 = w_add_srcA + w_add_srcB;
-   wire	       w_add_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] == w_srcB[31]);
-   wire	       w_sub_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] != w_srcB[31]);   
+   wire	       w_add32_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] == w_srcB[31]);
+   wire	       w_sub32_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] != w_srcB[31]);   
 
    logic [5:0] r_tlb_index, n_tlb_index;
    logic n_tlb_entry_out_valid, r_tlb_entry_out_valid;
@@ -1310,8 +1310,8 @@ module exec(clk,
 	  ADD:
 	    begin
 	       t_result = w_add32;
-	       t_overflow = w_add_overflow;
-	       t_fault = w_add_overflow;	       	       
+	       t_overflow = w_add32_overflow;
+	       t_fault = w_add32_overflow;	       	       
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1541,21 +1541,21 @@ module exec(clk,
 	    end
 	  LUI:
 	    begin
-	       t_result = {{HI_EBITS{int_uop.imm[15]}},int_uop.imm, 16'd0};
+	       t_result = sign_extend32({{HI_EBITS{int_uop.imm[15]}},int_uop.imm, 16'd0});
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  ADDI:
 	    begin
-	       t_result = w_add32;
-	       t_overflow = w_add_overflow;
-	       t_fault = w_add_overflow;	       
+	       t_result = sign_extend32(w_add32);
+	       t_overflow = w_add32_overflow;
+	       t_fault = w_add32_overflow;	       
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  ADDIU:
 	    begin
-	       t_result = w_add32;
+	       t_result = sign_extend32(w_add32);
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end

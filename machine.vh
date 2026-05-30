@@ -162,4 +162,10 @@ function logic sext16(logic [15:0] in);
 `endif
 endfunction
 
+function logic [`M_WIDTH-1:0] sign_extend32(logic [31:0] in);
+   logic [`M_WIDTH-1:0]	x;
+   x = {   {(`M_WIDTH-32){in[31]}}, in};
+   return x;
+endfunction // is_mult
+
 `endif
