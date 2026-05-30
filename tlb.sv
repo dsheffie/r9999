@@ -25,7 +25,7 @@ module tlb(clk,
    input logic req;
    
    input logic [`M_WIDTH-1:0] va;
-   output logic [`PA_WIDTH-1:0] pa;
+   output logic [`M_WIDTH-1:0] pa;
    
    output logic	       hit;
    output logic [5:0]  hit_index;

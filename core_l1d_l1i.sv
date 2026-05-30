@@ -125,11 +125,11 @@ module core_l1d_l1i(clk,
    input logic [127:0] 			  mem_rsp_load_data;
 
    output logic [4:0] 			  retire_reg_ptr;
-   output logic [31:0] 			  retire_reg_data;
+   output logic [`M_WIDTH-1:0]		  retire_reg_data;
    output logic 			  retire_reg_valid;
 
    output logic [4:0] 			  retire_reg_two_ptr;
-   output logic [31:0] 			  retire_reg_two_data;
+   output logic [`M_WIDTH-1:0]		  retire_reg_two_data;
    output logic 			  retire_reg_two_valid;
    
    output logic 			  retire_valid;
@@ -340,7 +340,7 @@ module core_l1d_l1i(clk,
    insn_fetch_t insn, insn2;
 
 
-   logic [31:0] 			  t_l2_req_addr;
+   logic [`M_WIDTH-1:0]			  t_l2_req_addr;
    logic [3:0] 				  t_l2_req_opcode;
    logic				  t_l2_req_cacheable;
    logic [15:0]				  t_l2_req_mask;

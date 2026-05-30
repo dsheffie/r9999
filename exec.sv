@@ -169,7 +169,7 @@ module exec(clk,
    localparam N_MEM_UQ_ENTRIES = (1<<`LG_MEM_UQ_ENTRIES);
    localparam N_MEM_DQ_ENTRIES = (1<<`LG_MEM_DQ_ENTRIES);
    
-   logic [63:0] r_hilo_prf[N_HILO_PRF_ENTRIES-1:0];
+   logic [(`M_WIDTH*2)-1:0] r_hilo_prf[N_HILO_PRF_ENTRIES-1:0];
       
    logic [N_INT_PRF_ENTRIES-1:0]  r_prf_inflight, n_prf_inflight;
    logic [N_HILO_PRF_ENTRIES-1:0] r_hilo_inflight, n_hilo_inflight;
@@ -240,8 +240,8 @@ module exec(clk,
    logic t_fwd_int_mem_srcA,t_fwd_int_mem_srcB,t_fwd_mem_mem_srcA,t_fwd_mem_mem_srcB;
    logic r_fwd_int_mem_srcA,r_fwd_int_mem_srcB,r_fwd_mem_mem_srcA,r_fwd_mem_mem_srcB;
    
-   logic [63:0] r_int_hilo, r_mul_hilo, r_div_hilo;
-   logic [63:0] r_src_hilo;
+   logic [(`M_WIDTH*2)-1:0] r_int_hilo, r_mul_hilo, r_div_hilo;
+   logic [(`M_WIDTH*2)-1:0] r_src_hilo;
    logic 	r_fwd_hilo_int, r_fwd_hilo_mul, r_fwd_hilo_div;
       
    logic [`M_WIDTH-1:0] t_srcA, t_srcB;
@@ -1154,9 +1154,11 @@ module exec(clk,
 `endif //  `ifdef VERILATOR
 
    wire [31:0] w_s_sub32, w_c_sub32;
+
+   wire [31:0] w_imm32 = { {16{int_uop.imm[15]}},int_uop.imm};
    
-   csa #(.N(32)) csa0 (.a(t_srcA[31:0]), 
-		       .b(int_uop.op == SUBU ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? {{E_BITS{int_uop.imm[15]}},int_uop.imm} : t_srcB))), 
+   csa #(.N(32)) csa0 (.a(t_srcA[31:0]),
+		       .b(int_uop.op == SUBU ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? w_imm32 : t_srcB[31:0]))), 
 		       .cin(int_uop.op == SUBU ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
 
    wire [31:0] w_add_srcA = {w_c_sub32[30:0], 1'b0};
@@ -1240,7 +1242,7 @@ module exec(clk,
 	    begin
 	       t_signed_shift = 1'b1;
 	       t_shift_amt = int_uop.srcB[4:0];
-	       t_result = sign_extend32({{HI_EBITS{t_shift_right[31]}}, t_shift_right});
+	       t_result = {{HI_EBITS{t_shift_right[31]}}, t_shift_right};
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end // case: SRA
@@ -1248,7 +1250,7 @@ module exec(clk,
 	    begin
 	       t_signed_shift = 1'b1;
 	       t_shift_amt = t_srcB[4:0];
-	       t_result = sign_extend32({{HI_EBITS{t_shift_right[31]}}, t_shift_right});	       
+	       t_result = {{HI_EBITS{t_shift_right[31]}}, t_shift_right};	       
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1628,8 +1630,7 @@ module exec(clk,
      end // always_comb
 
 
-   wire [31:0] w_agu32;
-   ppa32 agu (.A(t_mem_srcA), .B({{E_BITS{mem_uq.imm[15]}},mem_uq.imm}), .Y(w_agu32));
+   wire [`M_WIDTH-1:0] w_agu = t_mem_srcA + {{E_BITS{mem_uq.imm[15]}},mem_uq.imm};
 
    wire w_mem_srcA_ready = t_mem_uq.srcA_valid ? (!r_prf_inflight[t_mem_uq.srcA] | t_fwd_int_mem_srcA | t_fwd_mem_mem_srcA) : 1'b1;
 
@@ -1701,11 +1702,15 @@ module exec(clk,
    //$stop();
    //end
 
-   wire [31:0] w_agu32_la;
-   wire	       w_cached, w_mapped;
-   wire [1:0]  w_seg;
+   wire [`M_WIDTH-1:0] w_agu_la;
+   wire		       w_cached, w_mapped;
+   wire [1:0]	       w_seg;
    
-   mipsseg seg0 (.v_addr(w_agu32), .l_addr(w_agu32_la), .cache(w_cached), .mapped(w_mapped), .seg(w_seg));
+   mipsseg seg0 (.v_addr(w_agu), 
+		 .l_addr(w_agu_la), 
+		 .cache(w_cached), 
+		 .mapped(w_mapped), 
+		 .seg(w_seg));
 
    wire w_bad_seg_perms = (w_seg != 2'd3) & in_user_mode;
  
@@ -1721,12 +1726,12 @@ module exec(clk,
      begin
 	t_mem_simm = {{E_BITS{mem_uq.imm[15]}},mem_uq.imm};
 	t_mem_tail.op = MEM_LW;
-	t_mem_tail.addr = w_agu32_la;
+	t_mem_tail.addr = w_agu_la;
 	t_mem_tail.rob_ptr = mem_uq.rob_ptr;
 	t_mem_tail.dst_valid = 1'b0;
 	t_mem_tail.dst_ptr = mem_uq.dst;
 	t_mem_tail.is_store = 1'b0;
-	t_mem_tail.data = 32'd0;
+	t_mem_tail.data = zero_extend32(32'd0);
 	t_mem_tail.bad_addr = 1'b0;
 	t_mem_tail.cached = w_cached;
 	t_mem_tail.mapped = w_mapped;
@@ -1746,14 +1751,14 @@ module exec(clk,
 	       t_mem_tail.op = MEM_SH;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b0;
-	       t_mem_tail.bad_addr = w_agu32[0] | w_bad_seg_perms;
+	       t_mem_tail.bad_addr = w_agu[0] | w_bad_seg_perms;
 	    end // case: SW
 	  SW:
 	    begin
 	       t_mem_tail.op = MEM_SW;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b0;
-	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0) | w_bad_seg_perms;
+	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
 	    end // case: SW
 	  SC:
 	    begin
@@ -1761,7 +1766,7 @@ module exec(clk,
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
-	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0) | w_bad_seg_perms;		    
+	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;		    
 	    end // case: SW
 	  SWR:
 	    begin
@@ -1781,7 +1786,7 @@ module exec(clk,
 	    begin
 	       t_mem_tail.op = MEM_LW;
 	       t_mem_tail.dst_valid = 1'b1;
-	       t_mem_tail.bad_addr = (w_agu32[1:0] != 2'd0) | w_bad_seg_perms;
+	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
 	    end // case: LW
 	  LWL:
 	    begin
@@ -1813,13 +1818,13 @@ module exec(clk,
 	    begin
 	       t_mem_tail.op = MEM_LHU;
 	       t_mem_tail.dst_valid = 1'b1;
-	       t_mem_tail.bad_addr = w_agu32[0] | w_bad_seg_perms;
+	       t_mem_tail.bad_addr = w_agu[0] | w_bad_seg_perms;
 	    end // case: LBU
 	  LH:
 	    begin
 	       t_mem_tail.op = MEM_LH;
 	       t_mem_tail.dst_valid = 1'b1;
-	       t_mem_tail.bad_addr = w_agu32[0] | w_bad_seg_perms;
+	       t_mem_tail.bad_addr = w_agu[0] | w_bad_seg_perms;
 	    end // case: LH
 	  TLBP:
 	    begin
@@ -2334,11 +2339,11 @@ module exec(clk,
 	    end
 	  'd10:
 	    begin
-	       t_csr0_val = {r_entryhi_vpn2, 5'd0, r_entryhi_asid};
+	       t_csr0_val = zero_extend32({r_entryhi_vpn2, 5'd0, r_entryhi_asid});
 	    end
 	  'd12:
 	    begin
-	       t_csr0_val = cpr0_status_reg;
+	       t_csr0_val = zero_extend32(cpr0_status_reg);
 	       //$display("reading cpr status reg %x", cpr0_status_reg);
 	    end
 	  'd13: /* cause */

@@ -133,7 +133,7 @@ endmodule // predecode
 
 
 module compute_pht_idx(pc, hist, idx);
-   input logic [31:0] pc;
+   input logic [`M_WIDTH-1:0] pc;
    input logic [`GBL_HIST_LEN-1:0] hist;
    output logic [`LG_PHT_SZ-1:0]   idx;
 
@@ -367,9 +367,9 @@ endfunction
    logic [(`M_WIDTH-1):0] r_cache_pc, n_cache_pc;
    logic [(`M_WIDTH-1):0] r_btb_pc;
 
-   wire [31:0]		  w_la_pc;
-   logic [31:0]		  r_la_pc, r_tlb_pc;
-   wire [31:0]		  w_tlb_pc;
+   wire [`M_WIDTH-1:0]		  w_la_pc;
+   logic [`M_WIDTH-1:0]		  r_la_pc, r_tlb_pc;
+   wire [`M_WIDTH-1:0]		  w_tlb_pc;
    wire [1:0]		  w_seg;
    
    

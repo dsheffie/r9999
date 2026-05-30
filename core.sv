@@ -193,11 +193,11 @@ module core(clk,
    input logic 	 core_mem_rsp_valid;
 
    output logic [4:0] 			  retire_reg_ptr;
-   output logic [31:0] 			  retire_reg_data;
+   output logic [`M_WIDTH-1:0]		  retire_reg_data;
    output logic 			  retire_reg_valid;
 
    output logic [4:0] 			  retire_reg_two_ptr;
-   output logic [31:0] 			  retire_reg_two_data;
+   output logic [`M_WIDTH-1:0]		  retire_reg_two_data;
    output logic 			  retire_reg_two_valid;
    
    output logic 			  retire_valid;
@@ -1284,7 +1284,7 @@ module core(clk,
 	       
 	       n_machine_clr = 1'b1;
 	       
-	       n_restart_pc = (w_sr_bev ? 32'hbfc00000 : 32'h80000000) | (r_tlb_refill ? 32'h0 : 32'h180);
+	       n_restart_pc = sign_extend32((w_sr_bev ? 32'hbfc00000 : 32'h80000000) | (r_tlb_refill ? 32'h0 : 32'h180));
 	       n_restart_src_pc = 'd0;
 	       n_restart_src_is_indirect = 1'b0;
 	       n_restart_valid = 1'b1;

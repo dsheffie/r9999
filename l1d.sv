@@ -1443,6 +1443,7 @@ endfunction
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 			 n_core_mem_rsp_valid = 1'b1;			 
 		      end
+`ifdef RESPECT_MAPPED
 		    else if(w_tlb_hit==1'b0)
 		       begin
 		     	 n_core_mem_rsp.data = w_mapped_addr;
@@ -1451,6 +1452,7 @@ endfunction
 		     	 n_core_mem_rsp.tlb_refill = 1'b1;
 		     	 n_core_mem_rsp_valid = 1'b1;			 
 		       end
+`endif
 		    else if(r_req2.is_store)
 		      begin
 			 t_push_miss = 1'b1;
@@ -1480,7 +1482,7 @@ endfunction
 			 $display("cycle %d port2 hit for uuid %d, addr %x, data %x", 
 				  r_cycle, r_req2.uuid, r_req2.addr, t_rsp_data2);
 `endif
-			 n_core_mem_rsp.data = t_rsp_data2[31:0];
+			 n_core_mem_rsp.data = t_rsp_data2[`M_WIDTH-1:0];
                          n_core_mem_rsp.dst_valid = t_rsp_dst_valid2;
                          n_cache_hits = r_cache_hits + 'd1;
                          n_core_mem_rsp_valid = 1'b1;
@@ -1549,7 +1551,7 @@ endfunction
 			   end
 			 else
 			   begin
-			      n_core_mem_rsp.data = t_rsp_data[31:0];
+			      n_core_mem_rsp.data = t_rsp_data[`M_WIDTH-1:0];
 			      n_core_mem_rsp.dst_valid = t_rsp_dst_valid;
 			      n_core_mem_rsp_valid = 1'b1;
 			      n_core_mem_rsp.bad_addr = r_req.bad_addr;
@@ -1802,7 +1804,7 @@ endfunction
 	       if(mem_rsp_valid)
 		 begin
 		    //$display("data returns for uncached load, got %x, old data %x", t_rsp_data[31:0], r_req.data);
-		    n_core_mem_rsp.data = t_rsp_data[31:0];
+		    n_core_mem_rsp.data = t_rsp_data[`M_WIDTH-1:0];
                     n_core_mem_rsp.dst_valid = r_req.dst_valid;
 		    n_core_mem_rsp.bad_addr = r_req.bad_addr;		    
                     n_core_mem_rsp_valid = 1'b1;

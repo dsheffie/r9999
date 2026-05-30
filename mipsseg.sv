@@ -1,7 +1,9 @@
+`include "machine.vh"
+
 module mipsseg(v_addr, l_addr, cache, mapped, seg);
-   input logic [31:0] v_addr;
-   output logic [31:0] l_addr;
-   output logic	       cache;
+   input logic [`M_WIDTH-1:0] v_addr;
+   output logic [`M_WIDTH-1:0] l_addr;
+   output logic		       cache;
    output logic	       mapped;
    output logic [1:0]  seg;
    
