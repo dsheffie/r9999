@@ -248,7 +248,7 @@ module exec(clk,
    logic [`M_WIDTH-1:0] t_mem_srcA, t_mem_srcB;
    
    
-   logic [63:0] t_src_hilo;
+   logic [(`M_WIDTH*2)-1:0] t_src_hilo;
    logic [`M_WIDTH-1:0] t_cpr0_srcA;
    
    
@@ -262,7 +262,7 @@ module exec(clk,
 
    logic 	t_start_mul;
    logic 	t_mul_complete;
-   logic [63:0] t_mul_result;
+   logic [(`M_WIDTH*2)-1:0] t_mul_result;
    
    logic 	t_hilo_prf_ptr_val_out;
    logic [`LG_ROB_ENTRIES-1:0] t_rob_ptr_out;
@@ -275,7 +275,7 @@ module exec(clk,
    /* divider */
    logic 	t_div_ready, t_signed_div, t_start_div32;
    logic [`LG_ROB_ENTRIES-1:0] t_div_rob_ptr_out;
-   logic [63:0] 	       t_div_result;
+   logic [(`M_WIDTH*2)-1:0] 	       t_div_result;
    logic [`LG_HILO_PRF_ENTRIES-1:0] t_div_hilo_prf_ptr_out;
    logic 			    t_div_complete;
 
@@ -934,19 +934,20 @@ module exec(clk,
    shift_right #(.LG_W(5)) s0(.is_signed(t_signed_shift), .data(t_srcA[31:0]), 
 			      .distance(t_shift_amt), .y(t_shift_right));
    
-   mul m(.clk(clk), 
-	 .reset(reset), 
-	 .is_signed(int_uop.op != MULTU), 
-	 .go(t_start_mul&r_start_int),
-	 .src_A(t_srcA[31:0]),
-	 .src_B(t_srcB[31:0]),
-	 .rob_ptr_in(int_uop.rob_ptr),
-	 .hilo_prf_ptr_in(int_uop.hilo_dst),
-	 .y(t_mul_result),
-	 .complete(t_mul_complete),
-	 .rob_ptr_out(t_rob_ptr_out),
-	 .hilo_prf_ptr_val_out(t_hilo_prf_ptr_val_out),
-	 .hilo_prf_ptr_out(t_hilo_prf_ptr_out)
+   mul #(.W(`M_WIDTH)) m(
+			 .clk(clk), 
+			 .reset(reset), 
+			 .is_signed(int_uop.op != MULTU), 
+			 .go(t_start_mul&r_start_int),
+			 .src_A(t_srcA),
+			 .src_B(t_srcB),
+			 .rob_ptr_in(int_uop.rob_ptr),
+			 .hilo_prf_ptr_in(int_uop.hilo_dst),
+			 .y(t_mul_result),
+			 .complete(t_mul_complete),
+			 .rob_ptr_out(t_rob_ptr_out),
+			 .hilo_prf_ptr_val_out(t_hilo_prf_ptr_val_out),
+			 .hilo_prf_ptr_out(t_hilo_prf_ptr_out)
 	 );
 
    divider #(.LG_W(5)) d32 (
@@ -1274,25 +1275,25 @@ module exec(clk,
 	    end
 	  MTLO:
 	    begin
-	       t_hilo_result = {t_src_hilo[63:32], t_srcA[31:0]};
+	       t_hilo_result = {t_src_hilo[(2*`M_WIDTH)-1:`M_WIDTH], t_srcA[`M_WIDTH-1:0]};
 	       t_wr_hilo = 1'b1;
 	       t_alu_valid = 1'b1;	       
 	    end
 	  MTHI:
 	    begin
-	       t_hilo_result = {t_srcA[31:0], t_src_hilo[31:0] };
+	       t_hilo_result = {t_srcA[`M_WIDTH-1:0], t_src_hilo[`M_WIDTH-1:0] };
 	       t_wr_hilo = 1'b1;
 	       t_alu_valid = 1'b1;	       
 	    end
 	  MFLO:
 	    begin
-	       t_result = {{HI_EBITS{1'b0}}, t_src_hilo[31:0]};
+	       t_result = t_src_hilo[`M_WIDTH-1:0];
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  MFHI:
 	    begin
-	       t_result = {{HI_EBITS{1'b0}},t_src_hilo[63:32]};
+	       t_result = t_src_hilo[(`M_WIDTH*2)-1:`M_WIDTH];
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1843,7 +1844,7 @@ module exec(clk,
    always_ff@(posedge clk)
      begin
 	r_int_result <= t_result;
-	r_mem_result <= mem_rsp_load_data[31:0];
+	r_mem_result <= mem_rsp_load_data;
 	r_int_hilo <= t_hilo_result;
 	r_mul_hilo <= t_mul_result;
 	r_div_hilo <= t_div_result;

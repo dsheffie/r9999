@@ -572,7 +572,7 @@ endfunction
    always_ff@(posedge clk)
      begin
 	r_btb_pc <= reset ? 'd0 : 
-		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : 32'd0;
+		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : 'd0;
 	
      end
 
