@@ -27,6 +27,9 @@ module exec(clk,
 	    core_wr_badvaddr,
 	    core_badvaddr,
 	    exec_epc,
+	    core_wr_tlbp,
+	    core_tlbp_hit,
+	    core_tlbp_index,
 	    save_to_tlb_regs,
 	    asid,
 	    sr_bev,
@@ -90,6 +93,9 @@ module exec(clk,
    
    output logic [`M_WIDTH-1:0] exec_epc;
    input logic		       save_to_tlb_regs;
+   input logic		       core_wr_tlbp;
+   input logic		       core_tlbp_hit;
+   input logic [5:0]	       core_tlbp_index;
    
    output logic [7:0]	       asid;
    
@@ -1828,6 +1834,11 @@ module exec(clk,
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.bad_addr = w_agu32[0] | w_bad_seg_perms;
 	    end // case: LH
+	  TLBP:
+	    begin
+	       t_mem_tail.op = MEM_TLBP;
+	       t_mem_tail.addr = {r_entryhi_vpn2, 13'd0};
+	    end
 	  default:
 	    begin
 	    end
@@ -2090,12 +2101,16 @@ module exec(clk,
 	  end
      end
 
-
    always_comb
      begin
 	n_index = r_index;
 	n_index_probe_failed = r_index_probe_failed;
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd0)
+	if(core_wr_tlbp)
+	  begin
+	     n_index_probe_failed = (core_tlbp_hit==1'b0);
+	     n_index = core_tlbp_index;
+	  end
+	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd0)
 	  begin
 	     n_index = t_srcA[5:0];
 	     n_index_probe_failed = t_srcA[31];

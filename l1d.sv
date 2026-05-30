@@ -91,6 +91,7 @@ module l1d(clk,
    input logic 			     drain_ds_complete;
    input logic [(1<<`LG_ROB_ENTRIES)-1:0] dead_rob_mask;
    
+   logic [`M_WIDTH-1:0]			  r_tlb_addr, n_tlb_addr;
    
    input logic flush_cl_req;
    input logic [`M_WIDTH-1:0] flush_cl_addr;
@@ -289,6 +290,10 @@ endfunction
    
    logic 				  n_core_mem_rsp_valid, r_core_mem_rsp_valid;
    mem_rsp_t n_core_mem_rsp, r_core_mem_rsp;
+
+   wire [5:0] w_tlb_index;
+   wire	      w_tlb_hit;
+   
       
    mem_req_t n_req, r_req, t_req;
    mem_req_t n_req2, r_req2;
@@ -629,6 +634,7 @@ endfunction
 	     r_flush_complete <= 1'b0;
 	     r_flush_req <= 1'b0;
 	     r_flush_cl_req <= 1'b0;
+	     r_tlb_addr <= 'd0;
 	     r_cache_idx <= 'd0;
 	     r_cache_tag <= 'd0;
 	     r_cache_idx2 <= 'd0;
@@ -679,6 +685,7 @@ endfunction
 	     r_flush_req <= n_flush_req;
 	     r_flush_cl_req <= n_flush_cl_req;
 	     r_cache_idx <= t_cache_idx;
+	     r_tlb_addr <= n_tlb_addr;
 	     r_cache_tag <= t_cache_tag;
 	     
 	     r_cache_idx2 <= t_cache_idx2;
@@ -1275,6 +1282,25 @@ endfunction
    // 	  end
    //   end
 
+   
+   tlb dtlb (
+	     .clk(clk),
+	     .reset(reset),
+	     .asid(asid),
+	     .active(1'b1),
+	     .req(t_got_req2),
+	     .va(n_tlb_addr),
+	     .pa(),
+	     .hit(w_tlb_hit),
+	     .hit_index(w_tlb_index),
+	     .dirty(),
+	     .writable(),
+	     .tlb_entry_in_valid(tlb_entry_in_valid),
+	     .tlb_entry_in(tlb_entry_in)
+	     );
+   
+
+   
    always_comb
      begin
 	t_got_rd_retry = 1'b0;
@@ -1288,6 +1314,8 @@ endfunction
 	
 	t_cache_idx2 = 'd0;
 	t_cache_tag2 = 'd0;	
+
+	n_tlb_addr = r_tlb_addr;
 	
 	t_got_req = 1'b0;
 	t_got_req2 = 1'b0;
@@ -1325,7 +1353,8 @@ endfunction
 	n_core_mem_rsp.tlb_refill = 1'b0;
 	n_core_mem_rsp.tlb_invalid = 1'b0;
 	n_core_mem_rsp.tlb_modified = 1'b0;
-	
+	n_core_mem_rsp.tlb_hit = 1'b0;
+	n_core_mem_rsp.tlb_index = 6'd0;
 	
 	n_cache_accesses = r_cache_accesses;
 	n_cache_hits = r_cache_hits;
@@ -1397,6 +1426,13 @@ endfunction
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 			 n_core_mem_rsp_valid = 1'b1;
 		      end
+		    else if(r_req2.op == MEM_TLBP)
+		      begin
+			 n_core_mem_rsp.dst_valid = 1'b0;
+			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			 n_core_mem_rsp.tlb_index = w_tlb_index;
+			 n_core_mem_rsp_valid = 1'b1;			 
+		      end
 		    else if(r_req2.bad_addr)
 		      begin
 			 n_core_mem_rsp.data = r_req2.addr;
@@ -1412,6 +1448,8 @@ endfunction
 			 n_stall_store = 1'b1;
 			 //ack early
 			 n_core_mem_rsp.dst_valid = 1'b0;
+			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			 n_core_mem_rsp.tlb_index = w_tlb_index;
 			 if(t_port2_hit_cache)
 			   begin
 			      n_cache_hits = r_cache_hits + 'd1;
@@ -1423,7 +1461,9 @@ endfunction
 		      begin
 			 t_push_miss = 1'b1;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
-		      end
+			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			 n_core_mem_rsp.tlb_index = w_tlb_index;
+		      end		    
 		    else if(t_port2_hit_cache && !r_hit_busy_addr2)
 		      begin
 `ifdef VERBOSE_L1D
@@ -1435,6 +1475,8 @@ endfunction
                          n_cache_hits = r_cache_hits + 'd1;
                          n_core_mem_rsp_valid = 1'b1;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
+			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			 n_core_mem_rsp.tlb_index = w_tlb_index;			 
 		      end
 		    else
 		      begin
@@ -1673,7 +1715,7 @@ endfunction
 		  //use 2nd read port
 		  t_cache_idx2 = core_mem_req.addr[IDX_STOP-1:IDX_START];
 		  t_cache_tag2 = core_mem_req.addr[`M_WIDTH-1:IDX_STOP];
-		  
+		  n_tlb_addr = core_mem_req.addr;
 		  n_req2 = core_mem_req;
 		  core_mem_req_ack = 1'b1;
 		  t_got_req2 = 1'b1;

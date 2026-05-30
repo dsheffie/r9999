@@ -1597,6 +1597,7 @@ module core(clk,
 	t_rob_tail.is_break  = (t_alloc_uop.op == BREAK);
 	t_rob_tail.is_syscall  = (t_alloc_uop.op == SYSCALL);	
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
+	t_rob_tail.is_tlbp = (t_alloc_uop.op == TLBP);
 	
 	t_rob_tail.is_ii = 1'b0;
 	t_rob_tail.overflow = 1'b0;
@@ -1604,12 +1605,15 @@ module core(clk,
 	t_rob_tail.tlb_refill = 1'b0;
 	t_rob_tail.tlb_invalid = 1'b0;
 	t_rob_tail.tlb_modified = 1'b0;
-	
+	t_rob_tail.tlb_hit = 1'b0;
+	t_rob_tail.tlb_index = 6'd0;
 	
 	t_rob_tail.is_bad_addr = 1'b0;
 	t_rob_tail.take_br = 1'b0;
 	t_rob_tail.is_br = t_alloc_uop.is_br;
 	t_rob_tail.is_store = is_store(t_alloc_uop.op);
+
+	
 	t_rob_tail.in_delay_slot = r_in_delay_slot;
 	t_rob_tail.data = 'd0;
 	t_rob_tail.opcode = t_alloc_uop.op;
@@ -1629,13 +1633,16 @@ module core(clk,
 	
 	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop.srcA == 'd31);
 	t_rob_next_tail.is_break = (t_alloc_uop2.op == BREAK);
-	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);	
+	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);
+	t_rob_next_tail.is_tlbp = (t_alloc_uop2.op == TLBP);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.overflow = 1'b0;
 	t_rob_next_tail.trap = 1'b0;
 	t_rob_next_tail.tlb_refill = 1'b0;
 	t_rob_next_tail.tlb_invalid = 1'b0;
 	t_rob_next_tail.tlb_modified = 1'b0;
+	t_rob_next_tail.tlb_hit = 1'b0;
+	t_rob_next_tail.tlb_index = 6'd0;
 	
 	t_rob_next_tail.is_ii = 1'b0;
 	t_rob_next_tail.is_bad_addr = 1'b0;
@@ -1829,6 +1836,9 @@ module core(clk,
 		  r_rob[core_mem_rsp.rob_ptr].tlb_refill <= core_mem_rsp.tlb_refill;
 		  r_rob[core_mem_rsp.rob_ptr].tlb_invalid <= core_mem_rsp.tlb_invalid;
 		  r_rob[core_mem_rsp.rob_ptr].tlb_modified <= core_mem_rsp.tlb_modified;		  
+
+		  r_rob[core_mem_rsp.rob_ptr].tlb_hit <= core_mem_rsp.tlb_hit;
+		  r_rob[core_mem_rsp.rob_ptr].tlb_index <= core_mem_rsp.tlb_index;
 		  
 		  r_rob[core_mem_rsp.rob_ptr].is_bad_addr <= core_mem_rsp.bad_addr;
 		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
@@ -2132,7 +2142,29 @@ module core(clk,
 	t_push_2 = t_alloc_two && !t_fold_uop2;
      end
 
+   logic t_wr_tlbp;
+   logic t_tlbp_hit;
+   logic [5:0] t_tlbp_index;
 
+   always_comb
+     begin
+	t_wr_tlbp = 1'b0;
+	t_tlbp_hit = 1'b0;
+	t_tlbp_index = 6'd0;
+	if(t_retire_two & t_rob_next_head.is_tlbp)
+	  begin
+	     t_wr_tlbp = 1'b1;
+	     t_tlbp_hit = t_rob_next_head.tlb_hit;
+	     t_tlbp_index = t_rob_next_head.tlb_index;	     
+	  end
+	else if (t_retire & t_rob_head.is_tlbp)
+	  begin
+	     t_wr_tlbp = 1'b1;	     
+	     t_tlbp_hit = t_rob_head.tlb_hit;
+	     t_tlbp_index = t_rob_head.tlb_index;
+	  end
+     end // always_comb
+   
    
    exec e (
 	   .clk(clk), 
@@ -2143,6 +2175,9 @@ module core(clk,
 	   .core_wr_epc(t_wr_epc),
 	   .core_cause(r_cause),
 	   .exec_epc(w_exec_epc),
+	   .core_wr_tlbp(t_wr_tlbp),
+	   .core_tlbp_hit(t_tlbp_hit),
+	   .core_tlbp_index(t_tlbp_index),
 	   .asid(asid),
 	   .tlb_entry_out_valid(tlb_entry_out_valid),
 	   .tlb_entry_out(tlb_entry_out),	   

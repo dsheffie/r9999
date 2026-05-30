@@ -13,9 +13,7 @@ typedef struct packed {
    logic       is_call;
    logic       is_irq;
    logic       is_store;
-   logic       tlb_refill;
-   logic       tlb_invalid;
-   logic       tlb_modified;   
+   logic       is_tlbp;
    logic       valid_dst;
    logic       valid_hilo_dst;
    logic       has_delay_slot;
@@ -36,6 +34,11 @@ typedef struct packed {
    logic [6:0]			 opcode;
    logic [`LG_PHT_SZ-1:0] 	 pht_idx;
 
+   logic       tlb_refill;
+   logic       tlb_invalid;
+   logic       tlb_modified;   
+   logic       tlb_hit;
+   logic [5:0] tlb_index;
 `ifdef ENABLE_CYCLE_ACCOUNTING
    logic [63:0] 	    fetch_cycle;
    logic [63:0] 	    alloc_cycle;
@@ -102,12 +105,10 @@ typedef struct packed {
    logic		       tlb_refill;
    logic		       tlb_invalid;
    logic		       tlb_modified;
+   logic		       tlb_hit;
+   logic [5:0]		       tlb_index;
 } mem_rsp_t;
 
-typedef struct packed {
-   logic       valid;
-   logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
-} bob_entry_t;
 
 typedef struct packed {
 
