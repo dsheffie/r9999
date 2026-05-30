@@ -954,7 +954,8 @@ module core(clk,
 	
 	t_arch_fault = t_rob_head.faulted & 
 		       (t_rob_head.is_break | t_rob_head.is_syscall | t_rob_head.is_ii | t_rob_head.is_bad_addr | 
-			t_rob_head.overflow | t_rob_head.trap | t_rob_head.is_irq );
+			t_rob_head.overflow | t_rob_head.trap | t_rob_head.is_irq | t_rob_head.tlb_refill |
+			t_rob_head.tlb_invalid | t_rob_head.tlb_modified);
 	
 	
 	unique case (r_state)
@@ -966,6 +967,11 @@ module core(clk,
 		 end
 	       else if(t_can_retire_rob_head)
 		 begin
+		    //if(t_rob_head.pc == 32'hbfc00094)
+		    //begin
+		    //$display("t_rob_head.faulted = %b", t_rob_head.faulted);
+		    //$stop();
+		    //end
 		    if(t_rob_head.faulted)
 		      begin
 			 if(t_arch_fault)
@@ -1261,7 +1267,7 @@ module core(clk,
 		    n_save_to_tlb_regs = 1'b1;
 		    n_cause = t_rob_head.is_store ? 5'd3 : 5'd2;
 		    n_pending_bad_addr = 1'b1;
-		    n_has_badvaddr = 1'b1;		    
+		    n_has_badvaddr = 1'b1;
 		 end
 	       else if(t_rob_head.tlb_modified)
 		 begin
@@ -1283,7 +1289,7 @@ module core(clk,
 	       
 	       n_machine_clr = 1'b1;
 	       
-	       n_restart_pc = (w_sr_bev ? 32'hbfc00000 : 32'h80000000) | (r_tlb_refill ? 32'h0 : 32'h380);
+	       n_restart_pc = (w_sr_bev ? 32'hbfc00000 : 32'h80000000) | (r_tlb_refill ? 32'h0 : 32'h180);
 	       n_restart_src_pc = 'd0;
 	       n_restart_src_is_indirect = 1'b0;
 	       n_restart_valid = 1'b1;
@@ -1842,6 +1848,7 @@ module core(clk,
 		  
 		  r_rob[core_mem_rsp.rob_ptr].is_bad_addr <= core_mem_rsp.bad_addr;
 		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
+
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		  r_rob[core_mem_rsp.rob_ptr].complete_cycle <= r_cycle;
 `endif	    	     	     

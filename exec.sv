@@ -1838,6 +1838,7 @@ module exec(clk,
 	    begin
 	       t_mem_tail.op = MEM_TLBP;
 	       t_mem_tail.addr = {r_entryhi_vpn2, 13'd0};
+	       t_mem_tail.mapped = 1'b1;
 	    end
 	  default:
 	    begin
@@ -1845,7 +1846,6 @@ module exec(clk,
 	endcase // case (mem_uq.op)
 
      end // always_comb
-
    
 
    always_ff@(posedge clk)

@@ -344,8 +344,8 @@ endfunction
    logic [3:0] 		       r_mem_req_opcode, n_mem_req_opcode;
    logic [63:0] 	       n_cache_accesses, r_cache_accesses;
    logic [63:0] 	       n_cache_hits, r_cache_hits;
-   
-   logic [63:0] 	       r_store_stalls, n_store_stalls;
+
+   wire [`M_WIDTH-1:0]	       w_mapped_addr;   
    
    
    logic [31:0] 			 r_cycle;
@@ -537,14 +537,20 @@ endfunction
 	       end
 	  end
      end
-   
+
+   mem_req_t t_remapped_req2;
+   always_comb
+     begin
+	t_remapped_req2 = r_req2;
+	t_remapped_req2.addr = w_mapped_addr;
+     end
    
    always_ff@(posedge clk)
      begin
 	if(t_push_miss)
 	  begin
 	     r_mem_q[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0] ] <= r_req2;
-	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= r_req2.addr[IDX_STOP-1:IDX_START];
+	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_remapped_req2.addr[IDX_STOP-1:IDX_START];
 	  end
      end
 
@@ -668,7 +674,6 @@ endfunction
 	     r_core_mem_rsp_valid <= 1'b0;
 	     r_cache_hits <= 'd0;
 	     r_cache_accesses <= 'd0;
-	     r_store_stalls <= 'd0;
 	     r_inhibit_write <= 1'b0;
 	     memq_empty <= 1'b1;
 	     r_q_priority <= 1'b0;
@@ -719,7 +724,6 @@ endfunction
 	     r_core_mem_rsp_valid <= n_core_mem_rsp_valid;
 	     r_cache_hits <= n_cache_hits;
 	     r_cache_accesses <= n_cache_accesses;
-	     r_store_stalls <= n_store_stalls;
 	     r_inhibit_write <= n_inhibit_write;
 	     memq_empty <= mem_q_empty 
 			   && drain_ds_complete 
@@ -1282,15 +1286,16 @@ endfunction
    // 	  end
    //   end
 
+
    
    tlb dtlb (
 	     .clk(clk),
 	     .reset(reset),
 	     .asid(asid),
-	     .active(1'b1),
+	     .active(core_mem_req.mapped),
 	     .req(t_got_req2),
 	     .va(n_tlb_addr),
-	     .pa(),
+	     .pa(w_mapped_addr),
 	     .hit(w_tlb_hit),
 	     .hit_index(w_tlb_index),
 	     .dirty(),
@@ -1358,8 +1363,6 @@ endfunction
 	
 	n_cache_accesses = r_cache_accesses;
 	n_cache_hits = r_cache_hits;
-	
-	n_store_stalls = r_store_stalls;
 	
 	n_flush_req = r_flush_req | flush_req;
 	n_flush_cl_req = r_flush_cl_req | flush_cl_req;
@@ -1438,8 +1441,15 @@ endfunction
 			 n_core_mem_rsp.data = r_req2.addr;
 			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
-			 n_core_mem_rsp_valid = 1'b1;
-			 
+			 n_core_mem_rsp_valid = 1'b1;			 
+		      end
+		    else if(w_tlb_hit==1'b0)
+		      begin
+			 n_core_mem_rsp.data = w_mapped_addr;
+			 n_core_mem_rsp.dst_valid = 1'b0;
+			 n_core_mem_rsp.bad_addr = 1'b0;
+			 n_core_mem_rsp.tlb_refill = 1'b1;
+			 n_core_mem_rsp_valid = 1'b1;			 
 		      end
 		    else if(r_req2.is_store)
 		      begin
