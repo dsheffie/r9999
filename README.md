@@ -1,6 +1,11 @@
 # r9999
 Pedagogical SystemVerilog model for a decoupled MIPS CPU. Aspires to be used in either a FPGA implementation of a SGI workstation or N64.
 
+Build on Ultra96v2 at commit 532a2908b643f1afe89b9709720c63d941bd0680
+64b supported - 43194 LUTs & 28711 FFs
+32b only - 30278 LUTs & 19975 FFs
+64b RF, pipeline - 
+
 Implements most of user-level MIPS-2, some of MIPS-3, some of MIPS-4, and some of MIPS32/MIPS64
 
 Only 32b code has been tested, plumbed for 64b but incomplete. FPU needs to be pulled in from other projects.
