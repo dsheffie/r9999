@@ -92,8 +92,10 @@ typedef enum logic [6:0]
    DSUBU = 'd85,
    DADDIU = 'd86,
    DADDI = 'd87,
-   II = 'd88, //illegal instruction
-   IRQ = 'd89
+   FETCH_MISALIGNED,   
+   FETCH_TLB_MISS,
+   II,
+   IRQ 
    } opcode_t;
 
 function logic is_mult(opcode_t op);

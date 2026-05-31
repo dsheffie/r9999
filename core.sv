@@ -901,11 +901,15 @@ module core(clk,
 	t_fold_uop = (t_uop.op == NOP | 
 		      t_uop.op == J  |
 		      t_uop.op == IRQ |
+		      t_uop.op == FETCH_MISALIGNED |
+		      t_uop.op == FETCH_TLB_MISS |
 		      t_uop.op == II);
 
 	t_fold_uop2 = (t_uop2.op == NOP | 
 		       t_uop2.op == J  |
 		       t_uop2.op == IRQ |
+		       t_uop2.op == FETCH_MISALIGNED |
+		       t_uop2.op == FETCH_TLB_MISS |		       
 		       t_uop2.op == II);
 	
 	n_ds_done = r_ds_done;
@@ -951,9 +955,18 @@ module core(clk,
 	  end
 	
 	t_arch_fault = t_rob_head.faulted & 
-		       (t_rob_head.is_break | t_rob_head.is_syscall | t_rob_head.is_ii | t_rob_head.is_bad_addr | 
-			t_rob_head.overflow | t_rob_head.trap | t_rob_head.is_irq | t_rob_head.tlb_refill |
-			t_rob_head.tlb_invalid | t_rob_head.tlb_modified);
+		       (t_rob_head.is_break | 
+			t_rob_head.is_syscall | 
+			t_rob_head.is_ii | 
+			t_rob_head.is_bad_addr | 
+			t_rob_head.overflow | 
+			t_rob_head.trap | 
+			t_rob_head.is_irq |
+			(t_rob_head.opcode == FETCH_TLB_MISS) |
+			(t_rob_head.opcode == FETCH_MISALIGNED) |			
+			t_rob_head.tlb_refill |
+			t_rob_head.tlb_invalid |
+			t_rob_head.tlb_modified);
 	
 	
 	unique case (r_state)
@@ -1697,6 +1710,14 @@ module core(clk,
 		       t_rob_tail.faulted = 1'b1;
 		       t_rob_tail.is_ii = 1'b1;
 		    end
+		  else if(t_uop.op == FETCH_TLB_MISS)
+		    begin
+		       t_rob_tail.faulted = 1'b1;
+		    end
+		  else if(t_uop.op == FETCH_MISALIGNED)
+		    begin
+		       t_rob_tail.faulted = 1'b1;
+		    end		  
 		  else if(t_uop.op == IRQ)
 		    begin
 		       t_rob_tail.faulted = 1'b1;
@@ -1744,10 +1765,18 @@ module core(clk,
 		       t_rob_next_tail.faulted = 1'b1;
 		       t_rob_next_tail.is_ii = 1'b1;
 		    end
-		  else if(t_uop2.op == IRQ)
+		  else if(t_uop2.op == FETCH_TLB_MISS)
 		    begin
 		       t_rob_next_tail.faulted = 1'b1;
 		    end
+		  else if(t_uop2.op == FETCH_MISALIGNED)
+		    begin
+		       t_rob_next_tail.faulted = 1'b1;
+		    end
+		  else if(t_uop2.op == IRQ)
+		    begin
+		       t_rob_next_tail.faulted = 1'b1;
+		    end		  
 		  else if(t_uop2.op == J)
 		    begin
 		       t_rob_next_tail.take_br = 1'b1;
@@ -2123,7 +2152,9 @@ module core(clk,
 		     .in_user_mode(in_user_mode),
 		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
-		     .in_64b_user_mode(w_in_64b_user_mode),		     
+		     .in_64b_user_mode(w_in_64b_user_mode),
+		     .tlb_miss(insn.tlb_miss),
+		     .misaligned(insn.misaligned),
 		     .insn(insn.data), 
 		     .pc(insn.pc), 
 		     .insn_pred(insn.pred), 
@@ -2141,6 +2172,8 @@ module core(clk,
 		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
+		     .tlb_miss(insn_two.tlb_miss),
+		     .misaligned(insn_two.misaligned),		     
 		     .insn(insn_two.data), 
 		     .pc(insn_two.pc), 
 		     .insn_pred(insn_two.pred), 
