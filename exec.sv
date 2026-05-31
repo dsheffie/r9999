@@ -37,6 +37,9 @@ module exec(clk,
 	    in_kernel_mode,
 	    in_supervisor_mode,
 	    in_user_mode,
+	    in_64b_user_mode,
+	    in_64b_supervisor_mode,
+	    in_64b_kernel_mode,
 	    putchar_fifo_out,
 	    putchar_fifo_empty,
 	    putchar_fifo_pop,
@@ -102,6 +105,11 @@ module exec(clk,
    output logic			in_kernel_mode;
    output logic			in_supervisor_mode;
    output logic			in_user_mode;
+
+   output logic			in_64b_kernel_mode;
+   output logic			in_64b_supervisor_mode;
+   output logic			in_64b_user_mode;
+
    
    output logic [7:0]		putchar_fifo_out;
    output logic       putchar_fifo_empty;
@@ -1151,10 +1159,9 @@ module exec(clk,
    wire [31:0] w_s_sub32, w_c_sub32;
 
    wire [31:0] w_imm32 = { {16{int_uop.imm[15]}},int_uop.imm};
-   
    csa #(.N(32)) csa0 (.a(t_srcA[31:0]),
-		       .b(int_uop.op == SUBU ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? w_imm32 : t_srcB[31:0]))), 
-		       .cin(int_uop.op == SUBU ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
+		       .b((int_uop.op == SUBU|int_uop.op==SUB) ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? w_imm32 : t_srcB[31:0]))), 
+		       .cin((int_uop.op == SUBU|int_uop.op==SUB) ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
 
    wire [31:0] w_add_srcA = {w_c_sub32[30:0], 1'b0};
    wire [31:0] w_add_srcB = w_s_sub32;
@@ -1162,6 +1169,32 @@ module exec(clk,
    wire [31:0] w_add32 = w_add_srcA + w_add_srcB;
    wire	       w_add32_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] == w_srcB[31]);
    wire	       w_sub32_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] != w_srcB[31]);   
+
+   wire [`M_WIDTH-1:0] w_add64;
+   wire	       w_add64_overflow, w_sub64_overflow;
+
+   generate
+      if(`M_WIDTH==64)
+	begin
+	   wire [63:0] w_s_sub64, w_c_sub64;
+	   wire [63:0] w_imm64 = { {48{int_uop.imm[15]}},int_uop.imm};
+	   csa #(.N(64)) csa0 (.a(t_srcA),
+			       .b((int_uop.op == DSUBU|int_uop.op==DSUB) ? ~t_srcB : (((int_uop.op == DADDIU | int_uop.op == DADDI) ? w_imm64 : t_srcB))), 
+			       .cin((int_uop.op == DSUBU|int_uop.op==DSUB) ? 64'd1 : 64'd0), .s(w_s_sub64), .cout(w_c_sub64) );
+	   
+	   wire [63:0] w_add64_srcA = {w_c_sub64[62:0], 1'b0};
+	   wire [63:0] w_add64_srcB = w_s_sub64;
+	   assign w_add64 = w_add64_srcA + w_add64_srcB;
+	   assign w_add64_overflow = (w_add64[63] != w_srcB[63]) & (w_srcA[63] == w_srcB[63]);
+	   assign w_sub64_overflow = (w_add64[63] != w_srcB[63]) & (w_srcA[63] != w_srcB[63]);   	   
+	end
+      else
+	begin
+	   assign w_add64 = 'd0;
+	   assign w_add64_overflow = 1'b0;
+	   assign w_sub64_overflow = 1'b0;
+	end
+   endgenerate
 
    logic [5:0] r_tlb_index, n_tlb_index;
    logic n_tlb_entry_out_valid, r_tlb_entry_out_valid;
@@ -1294,6 +1327,20 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
+	  DADD:
+	    begin
+	       t_result = w_add64;
+	       t_overflow = w_add64_overflow;
+	       t_fault = w_add64_overflow;	       	       
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DADDU:
+	    begin
+	       t_result = w_add64;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end	  
 	  MULT:
 	    begin
 	       t_start_mul = r_start_int&!ds_done;
@@ -1314,6 +1361,12 @@ module exec(clk,
 	  SUBU:
 	    begin
 	       t_result = sign_extend32(w_add32);
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSUBU:
+	    begin
+	       t_result = w_add64;
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1529,6 +1582,20 @@ module exec(clk,
 	  ADDIU:
 	    begin
 	       t_result = sign_extend32(w_add32);
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DADDI:
+	    begin
+	       t_result = w_add64;
+	       t_overflow = w_add64_overflow;
+	       t_fault = w_add64_overflow;	       
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DADDIU:
+	    begin
+	       t_result = w_add64;
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -2246,6 +2313,10 @@ module exec(clk,
    assign in_supervisor_mode = (r_sr_ksu=='d1) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
    assign in_user_mode = (r_sr_ksu=='d2) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);   
 
+   assign in_64b_user_mode = (in_user_mode) & r_sr_ux;
+   assign in_64b_kernel_mode = in_kernel_mode & r_sr_kx;
+   assign in_64b_supervisor_mode = in_supervisor_mode & r_sr_sx;
+   
    always_comb
      begin
 	cpr0_status_reg = {

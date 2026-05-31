@@ -2,13 +2,25 @@
 `include "rob.vh"
 `include "uop.vh"
 
-module decode_mips32(insn, 
-		     pc, insn_pred, pht_idx, insn_pred_target,
+module decode_mips(
+		   in_kernel_mode,
+		   in_supervisor_mode,
+		   in_user_mode,
+		   in_64b_kernel_mode,
+		   in_64b_supervisor_mode,
+		   in_64b_user_mode,
+		   insn, 
+		   pc, insn_pred, pht_idx, insn_pred_target,
 `ifdef ENABLE_CYCLE_ACCOUNTING   		     
-		     fetch_cycle,
+		   fetch_cycle,
 `endif
-		     uop);
-   
+		   uop);
+   output logic			in_kernel_mode;
+   output logic			in_supervisor_mode;
+   output logic			in_user_mode;
+   output logic			in_64b_kernel_mode;
+   output logic			in_64b_supervisor_mode;
+   output logic			in_64b_user_mode;
    input logic [31:0] insn;
    input logic [`M_WIDTH-1:0] pc;
    input logic 	      insn_pred;
@@ -26,6 +38,21 @@ module decode_mips32(insn,
    
    /* how many zero pad bits for reg specifiers */
    localparam ZP = (`LG_PRF_ENTRIES-5);
+
+   wire	      w_in_64b_mode;
+   generate
+      if(`M_WIDTH==64)
+	begin
+	   assign w_in_64b_mode = in_64b_kernel_mode | 
+				  in_64b_user_mode | 
+				  in_64b_supervisor_mode;
+	end
+      else
+	begin
+	   assign w_in_64b_mode =1'b0;
+	end
+   endgenerate
+   
    
    wire [`LG_PRF_ENTRIES-1:0]	rs = {{ZP{1'b0}},insn[25:21]};
    wire [`LG_PRF_ENTRIES-1:0] 	rt = {{ZP{1'b0}},insn[20:16]};
@@ -365,7 +392,21 @@ module decode_mips32(insn,
 		      uop.dst_valid = (rd != 'd0);
 		      uop.op = (rd == 'd0) ? NOP : SLTU;
 		      uop.is_int = 1'b1;
-		   end
+		   end // case: 6'd43
+		 6'd45: /* daddu */
+		   begin
+		      if(w_in_64b_mode)
+			begin		      
+			   uop.srcA = rt;
+			   uop.srcA_valid = 1'b1;
+			   uop.srcB = rs;
+			   uop.srcB_valid = 1'b1;
+			   uop.dst = rd;
+			   uop.dst_valid = (rd != 'd0);
+			   uop.op = (rd == 'd0) ? NOP : DADDU;
+			   uop.is_int = 1'b1;
+			end
+		   end		 
 		 6'd52: /* teq */
 		   begin
 		      uop.op = TEQ;

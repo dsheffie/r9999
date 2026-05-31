@@ -238,6 +238,9 @@ module core(clk,
    output logic				  l1d_flush_done;
    output logic				  l2_flush_done;
    
+   wire					  w_in_64b_kernel_mode;
+   wire					  w_in_64b_supervisor_mode;
+   wire					  w_in_64b_user_mode;
    
    
    logic [`M_WIDTH-1:0]			  r_epc, n_epc;
@@ -2114,23 +2117,37 @@ module core(clk,
      end // always_comb
 
    
-   decode_mips32 dec0 (.insn(insn.data), 
-		      .pc(insn.pc), 
-		      .insn_pred(insn.pred), 
-		      .pht_idx(insn.pht_idx),
-		      .insn_pred_target(insn.pred_target),
+   decode_mips dec0 (
+		     .in_kernel_mode(in_kernel_mode),
+		     .in_supervisor_mode(in_supervisor_mode),
+		     .in_user_mode(in_user_mode),
+		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
+		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
+		     .in_64b_user_mode(w_in_64b_user_mode),		     
+		     .insn(insn.data), 
+		     .pc(insn.pc), 
+		     .insn_pred(insn.pred), 
+		     .pht_idx(insn.pht_idx),
+		     .insn_pred_target(insn.pred_target),
 `ifdef ENABLE_CYCLE_ACCOUNTING
-		      .fetch_cycle(insn.fetch_cycle),
+		     .fetch_cycle(insn.fetch_cycle),
 `endif		      
-		      .uop(t_dec_uop));
+		     .uop(t_dec_uop));
 
-   decode_mips32 dec1 (.insn(insn_two.data), 
-		      .pc(insn_two.pc), 
-		      .insn_pred(insn_two.pred), 
-		      .pht_idx(insn_two.pht_idx),
-		      .insn_pred_target(insn_two.pred_target),
+   decode_mips dec1 (
+		     .in_kernel_mode(in_kernel_mode),
+		     .in_supervisor_mode(in_supervisor_mode),
+		     .in_user_mode(in_user_mode),
+		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
+		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
+		     .in_64b_user_mode(w_in_64b_user_mode),
+		     .insn(insn_two.data), 
+		     .pc(insn_two.pc), 
+		     .insn_pred(insn_two.pred), 
+		     .pht_idx(insn_two.pht_idx),
+		     .insn_pred_target(insn_two.pred_target),
 `ifdef ENABLE_CYCLE_ACCOUNTING
-		      .fetch_cycle(insn_two.fetch_cycle),
+		     .fetch_cycle(insn_two.fetch_cycle),
 `endif		      
 		      .uop(t_dec_uop2));
 
@@ -2193,6 +2210,10 @@ module core(clk,
 	   .in_kernel_mode(in_kernel_mode),
 	   .in_supervisor_mode(in_supervisor_mode),
 	   .in_user_mode(in_user_mode),
+	   .in_64b_kernel_mode(w_in_64b_kernel_mode),
+	   .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
+	   .in_64b_user_mode(w_in_64b_user_mode),
+	   
 	   .putchar_fifo_out(putchar_fifo_out),
 	   .putchar_fifo_empty(putchar_fifo_empty),
 	   .putchar_fifo_pop(putchar_fifo_pop),

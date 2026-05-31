@@ -61,12 +61,40 @@ module mul(clk,
    logic [(2*W)-1:0] 			   t_mul;
    logic [(2*W)-1:0]			   r_mul[`MUL_LAT:0];
 
-   wire [127:0]				   w_mul32b = {{64{r_mul[`MUL_LAT][63]}}, r_mul[`MUL_LAT][63:0]};
+   wire [63:0]				   w_mul32b_lo = {{32{r_mul[`MUL_LAT][31]}}, r_mul[`MUL_LAT][31:0]};
+   wire [63:0]				   w_mul32b_hi = {{32{r_mul[`MUL_LAT][63]}}, r_mul[`MUL_LAT][63:32]};
+
+   wire [`M_WIDTH-1:0]			   w_src_A, w_src_B;
+   generate
+      if(`M_WIDTH == 64)
+	begin
+	   assign   w_src_A = is_32b ? {32'd0, src_A[31:0]} : src_A;
+	   assign   w_src_B = is_32b ? {32'd0, src_B[31:0]} : src_B;   
+	end
+      else
+	begin
+	   assign w_src_A = src_A;
+	   assign w_src_B = src_B;
+	end
+   endgenerate
+   
+   wire [127:0]				   w_mul32b = {w_mul32b_hi, w_mul32b_lo};
    always_comb
      begin
-	t_mul = is_signed ? ($signed(src_A) * $signed(src_B)) 
-	  : src_A * src_B;	
+	t_mul = is_signed ? ($signed(src_A) * $signed(src_B)) : w_src_A * w_src_B;	
      end
+
+   // always_ff@(negedge clk)
+   //   begin
+   // 	if(go)
+   // 	  begin
+   // 	     $display("%x : %x * %x", t_mul, src_A, src_B);
+   // 	  end
+   // 	if(complete)
+   // 	  begin
+   // 	     $display("w_mul32b_lo = %x, w_mul32b_hi = %x, w_mul64 = %x", w_mul32b_lo, w_mul32b_hi, r_mul[`MUL_LAT][63:0]);
+   // 	  end
+   //   end
 
    generate
       if(`M_WIDTH == 64)

@@ -86,8 +86,14 @@ typedef enum logic [6:0]
    TLBWI = 'd79,
    TLBWR = 'd80,
    TLBP = 'd81,
-   II = 'd82, //illegal instruction
-   IRQ = 'd83
+   DADD = 'd82,
+   DADDU = 'd83,
+   DSUB = 'd84,
+   DSUBU = 'd85,
+   DADDIU = 'd86,
+   DADDI = 'd87,
+   II = 'd88, //illegal instruction
+   IRQ = 'd89
    } opcode_t;
 
 function logic is_mult(opcode_t op);
