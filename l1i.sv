@@ -594,7 +594,7 @@ endfunction
      end
    assign w_tlb_pc = r_la_pc;
    
-   wire w_hit = (r_tag_out == w_tlb_pc[31:IDX_STOP]);
+   wire w_hit = (r_tag_out == w_tlb_pc[(`M_WIDTH-1):IDX_STOP]);
    //always@(negedge clk)
    //begin
    //if(r_req)
@@ -626,8 +626,8 @@ endfunction
 	t_next_spec_rs_tos = r_spec_rs_tos+'d1;
 	n_restart_req = restart_valid | r_restart_req;
 
-	t_miss = r_req && !(r_valid_out && (r_tag_out == w_tlb_pc[31:IDX_STOP]));
-	t_hit = r_req && (r_valid_out && (r_tag_out == w_tlb_pc[31:IDX_STOP]));
+	t_miss = r_req & !(r_valid_out & (r_tag_out == w_tlb_pc[`M_WIDTH-1:IDX_STOP]));
+	t_hit = r_req & (r_valid_out & (r_tag_out == w_tlb_pc[`M_WIDTH-1:IDX_STOP]));
 
 	
 	//t_miss = r_req & !(r_valid_out & (!w_hit));

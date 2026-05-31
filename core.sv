@@ -1112,6 +1112,9 @@ module core(clk,
 			 t_retire = 1'b1;			 
 		      end
 		 end // if (r_has_delay_slot && t_rob_head_complete && !r_ds_done)
+
+	       //$display("t_divide_ready = %b", t_divide_ready);
+	       
 	       if(r_rob_inflight == 'd0 && r_ds_done && memq_empty && t_divide_ready)
 		 begin
 		    //$display("%d : wait for drain and memq_empty  took  %d cycles",r_cycle, r_restart_cycles);		    
