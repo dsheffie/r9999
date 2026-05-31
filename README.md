@@ -1,11 +1,9 @@
-# mipscore
+# r9999
 Pedagogical SystemVerilog model for a decoupled MIPS CPU. Aspires to be used in either a FPGA implementation of a SGI workstation or N64.
 
 Implements most of user-level MIPS-2, some of MIPS-3, some of MIPS-4, and some of MIPS32/MIPS64
 
-Only 32b code has been tested.  Correctness checking infrastructure only really supports 32b MIPS too.
-
-Floating-point implementation is correctness challenged.  Correct implementation of floating-point algorithms tricker than previously believed ;)
+Only 32b code has been tested, plumbed for 64b but incomplete. FPU needs to be pulled in from other projects.
 
 Relatively simple uarch - scalar renamed, decoupled microarchitecture. 1 mem FU, 1 int FU, and FPU.  Each FU is backed by an in order FIFO scheduler. E.g., within
 each FU, instructions are scheduled in order but only true dependences prevent execution across execution classes. 
