@@ -52,7 +52,7 @@
 
 `define MUL_LAT 3
 
-`define DIV32_LAT 33
+`define DIV32_LAT (`M_WIDTH+1)
 
 `define MAX_LAT (`DIV32_LAT)
 

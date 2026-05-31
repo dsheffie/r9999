@@ -773,6 +773,8 @@ int main(int argc, char **argv) {
     		<< std::dec
     		<< " "
     		<< getAsmString(get_insn(last_retired_pc+0, s), last_retired_pc+0)
+		<< "\ncore state "
+		<< static_cast<int>(tb->core_state)
     		<< "\n";
       break;
     }

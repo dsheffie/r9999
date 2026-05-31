@@ -962,11 +962,9 @@ module core(clk,
 		 end
 	       else if(t_can_retire_rob_head)
 		 begin
-		    //if(t_rob_head.pc == 32'hbfc00094)
-		    //begin
-		    //$display("t_rob_head.faulted = %b", t_rob_head.faulted);
-		    //$stop();
-		    //end
+		    //$display("t_rob_head.faulted = %b, pc =%x", 
+		    //t_rob_head.faulted, t_rob_head.pc);
+		    
 		    if(t_rob_head.faulted)
 		      begin
 			 if(t_arch_fault)

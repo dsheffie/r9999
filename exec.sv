@@ -898,15 +898,6 @@ module exec(clk,
      begin
 	t_pop_uq = 1'b0;
 	t_alu_sched_full = (&r_alu_sched_valid);
-	
-	//t_pop_uq = t_flash_clear ? 1'b0 :
-	//t_uq_empty ? 1'b0 : 
-	//!t_srcs_rdy ? 1'b0 : 
-	//(r_wb_bitvec[0]) ? 1'b0 :
-	//	   t_start_mul & r_wb_bitvec[`MUL_LAT] ? 1'b0 : 
-	//(t_start_div32 & (!t_div_ready || r_wb_bitvec[`DIV32_LAT])) ? 1'b0 :
-	//1'b1;
-
 	t_pop_uq = !(t_flash_clear || t_uq_empty ||t_alu_sched_full);
      end
    
@@ -1179,17 +1170,6 @@ module exec(clk,
 	r_tlb_entry_out_valid <= reset ? 1'b0 : n_tlb_entry_out_valid;
 	r_tlbr <= reset ? 1'b0 : n_tlbr;
      end
-   
-   
-   // always_ff@(negedge clk)
-   //   begin
-   // 	if(int_uop.op == ADD & t_alu_valid)
-   // 	  begin
-   // 	     $display("A=%x, B=%x, overflow = %b",
-   // 		      w_srcA, w_srcB,
-   // 		      w_add_overflow);
-   // 	  end
-   //   end
    
    always_comb
      begin
