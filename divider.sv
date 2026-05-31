@@ -4,6 +4,7 @@ module divider(clk,
 	       reset,
 	       srcA,
 	       srcB,
+	       is_32b,
 	       rob_ptr_in,
 	       hilo_prf_ptr_in,	     
 	       is_signed_div,
@@ -22,7 +23,8 @@ module divider(clk,
    input logic reset;
    input logic [W-1:0] srcA;
    input logic [W-1:0] srcB;
-
+   input logic	       is_32b;
+   
    input logic [`LG_ROB_ENTRIES-1:0] rob_ptr_in;
    input logic [`LG_HILO_PRF_ENTRIES-1:0] hilo_prf_ptr_in;
    
@@ -56,6 +58,7 @@ module divider(clk,
    logic [W2-1:0] 		    r_Y, n_Y;
    logic [W2-1:0] 		    r_D, n_D, r_R, n_R;
    logic [W-1:0] 		    t_ss;
+   logic			    r_is_32b, n_is_32b;
    
    logic [LG_W-1:0] 		    r_idx, n_idx;
    logic 			    t_bit,t_valid;
@@ -77,6 +80,7 @@ module divider(clk,
 	     r_D <= 'd0;
 	     r_R <= 'd0;
 	     r_idx <= 'd0;
+	     r_is_32b <= 1'b0;
 	  end
 	else
 	  begin
@@ -92,12 +96,22 @@ module divider(clk,
 	     r_D <= n_D;
 	     r_R <= n_R;
 	     r_idx <= n_idx;
+	     r_is_32b <= n_is_32b;
 	  end
      end
 
    shiftregbit #(.W(W)) ss
      (.clk(clk), .reset(reset), .b(t_bit), .valid(t_valid), .out(t_ss));
-  
+
+   // always_ff@(negedge clk)
+   //   begin
+   // 	if(start_div)
+   // 	  $display("srcA = %x, srcB = %x, expected %x, is_32b = %b, signed %b",
+   // 		   srcA[31:0],
+   // 		   srcB[31:0],
+   // 		   srcA[31:0]/srcB[31:0],
+   // 		   is_32b, is_signed_div);
+   // 	end
 			     
    always_comb
      begin
@@ -115,6 +129,7 @@ module divider(clk,
 	n_idx = r_idx;
 	t_bit = 1'b0;
 	t_valid = 1'b0;
+	n_is_32b = r_is_32b;
 	
 	//output signals
 	ready = (r_state == IDLE) & !start_div;
@@ -132,9 +147,20 @@ module divider(clk,
 	       n_state = start_div ? DIVIDE : IDLE;
 	       n_idx = W-1;
 	       n_sign = srcA[W-1] ^ srcB[W-1];
+	       n_is_32b = is_32b;
 	       n_rem_sign = srcA[W-1];
-	       n_A = is_signed_div & srcA[W-1] ? ((~srcA) + 'd1) : srcA;
-	       n_B = is_signed_div & srcB[W-1] ? ((~srcB) + 'd1) : srcB;
+	       n_A = srcA;
+	       n_B = srcB;
+	       
+	       if(is_32b)
+		 begin
+		    n_A = { {(`M_WIDTH-32){is_signed_div ? srcA[31] : 1'b0}}, srcA[31:0]};
+		    n_B = { {(`M_WIDTH-32){is_signed_div ? srcB[31] : 1'b0}}, srcB[31:0]};
+		 end
+	       
+	       n_A = is_signed_div & srcA[W-1] ? ((~srcA) + 'd1) : n_A;
+	       n_B = is_signed_div & srcB[W-1] ? ((~srcB) + 'd1) : n_B;
+
 	       n_D = {n_B, {W{1'b0}}};
 	       n_R = {{W{1'b0}}, n_A};
 	    end
@@ -169,9 +195,14 @@ module divider(clk,
 		 begin
 		    n_Y[W2-1:W] = (~n_R[W2-1:W]) + 'd1;
 		 end
+	       if(r_is_32b & (`M_WIDTH == 64))
+		 begin
+		    n_Y[63:0] = { {32{n_Y[31]}}, n_Y[31:0]};
+		 end
 	    end
 	  WAIT_FOR_WB:
 	    begin
+	       //$display("\ndivide out %x\n", r_Y[W-1:0]);
 	       complete =1'b1;
 	       n_state = IDLE;
 	    end

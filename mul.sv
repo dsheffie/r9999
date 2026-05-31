@@ -17,6 +17,7 @@ module mul(clk,
 	   go,
 	   src_A,
 	   src_B,
+	   is_32b,
 	   rob_ptr_in,
 	   hilo_prf_ptr_in,
 	   y,
@@ -33,7 +34,7 @@ module mul(clk,
    
    input logic [W-1:0] src_A;
    input logic [W-1:0] src_B;
-   
+   input logic	       is_32b;
    input logic [`LG_ROB_ENTRIES-1:0] rob_ptr_in;
    input logic [`LG_HILO_PRF_ENTRIES-1:0] hilo_prf_ptr_in;
    
@@ -45,6 +46,7 @@ module mul(clk,
    output logic [`LG_HILO_PRF_ENTRIES-1:0] hilo_prf_ptr_out;
    
    logic [`MUL_LAT:0] 			   r_complete;
+   logic [`MUL_LAT:0]			   r_is_32b;
    logic [`MUL_LAT:0] 			   r_hilo_val;
    logic [`LG_HILO_PRF_ENTRIES-1:0] 	   r_hilo_ptr[`MUL_LAT:0];
    logic [`LG_ROB_ENTRIES-1:0] 		   r_rob_ptr[`MUL_LAT:0];
@@ -58,12 +60,25 @@ module mul(clk,
 
    logic [(2*W)-1:0] 			   t_mul;
    logic [(2*W)-1:0]			   r_mul[`MUL_LAT:0];
+
+   wire [127:0]				   w_mul32b = {{64{r_mul[`MUL_LAT][63]}}, r_mul[`MUL_LAT][63:0]};
    always_comb
      begin
 	t_mul = is_signed ? ($signed(src_A) * $signed(src_B)) 
-	  : src_A * src_B;
-	y = r_mul[`MUL_LAT];
+	  : src_A * src_B;	
      end
+
+   generate
+      if(`M_WIDTH == 64)
+	begin
+	   assign y = r_is_32b[`MUL_LAT] ? w_mul32b : r_mul[`MUL_LAT];
+	end
+      else
+	begin
+	   assign y = r_mul[`MUL_LAT];
+	end
+   endgenerate
+   
 
    always_ff@(posedge clk)
      begin
@@ -88,9 +103,11 @@ module mul(clk,
 	       begin
 		  r_rob_ptr[i] <= 'd0;
 		  r_hilo_ptr[i] <= 'd0;
+
 	       end
 	     r_complete <= 'd0;
 	     r_hilo_val <= 'd0;
+	     r_is_32b <= 'd0;
 	  end
 	else
 	  begin
@@ -102,6 +119,7 @@ module mul(clk,
 		       r_rob_ptr[0] <= rob_ptr_in;
 		       r_hilo_val[0] <= go;
 		       r_hilo_ptr[0] <= hilo_prf_ptr_in;
+		       r_is_32b[0] <= is_32b;
 		    end
 		  else
 		    begin
@@ -109,6 +127,7 @@ module mul(clk,
 		       r_rob_ptr[i] <= r_rob_ptr[i-1];
 		       r_hilo_val[i] <= r_hilo_val[i-1];
 		       r_hilo_ptr[i] <= r_hilo_ptr[i-1];
+		       r_is_32b[i] <= r_is_32b[i-1];
 		    end
 	       end
 	  end

@@ -930,6 +930,7 @@ module exec(clk,
 			 .reset(reset), 
 			 .is_signed(int_uop.op != MULTU), 
 			 .go(t_start_mul&r_start_int),
+			 .is_32b(1'b1),
 			 .src_A(t_srcA),
 			 .src_B(t_srcB),
 			 .rob_ptr_in(int_uop.rob_ptr),
@@ -941,22 +942,24 @@ module exec(clk,
 			 .hilo_prf_ptr_out(t_hilo_prf_ptr_out)
 	 );
 
-   divider #(.LG_W(`LG_M_WIDTH)) d0 (
-	   .clk(clk), 
-	   .reset(reset),
-	   .srcA(t_srcA),
-	   .srcB(t_srcB),
-	   .rob_ptr_in(int_uop.rob_ptr),
-	   .hilo_prf_ptr_in(int_uop.hilo_dst),
-	   .is_signed_div(t_signed_div),
-	   .start_div(t_start_div32),
-	   .y(t_div_result),
-	   .rob_ptr_out(t_div_rob_ptr_out),
-	   .hilo_prf_ptr_out(t_div_hilo_prf_ptr_out),
-	   .complete(t_div_complete),
-	   .ready(t_div_ready)
-	   );
-
+   divider #(.LG_W(`LG_M_WIDTH)) 
+   d0 (
+       .clk(clk), 
+       .reset(reset),
+       .is_32b(t_start_div32),
+       .srcA(t_srcA),
+       .srcB(t_srcB),
+       .rob_ptr_in(int_uop.rob_ptr),
+       .hilo_prf_ptr_in(int_uop.hilo_dst),
+       .is_signed_div(t_signed_div),
+       .start_div(t_start_div32),
+       .y(t_div_result),
+       .rob_ptr_out(t_div_rob_ptr_out),
+       .hilo_prf_ptr_out(t_div_hilo_prf_ptr_out),
+       .complete(t_div_complete),
+       .ready(t_div_ready)
+       );
+   
    assign divide_ready = t_div_ready;
 
 
