@@ -950,11 +950,11 @@ module exec(clk,
 			 .hilo_prf_ptr_out(t_hilo_prf_ptr_out)
 	 );
 
-   divider #(.LG_W(5)) d32 (
+   divider #(.LG_W(`LG_M_WIDTH)) d0 (
 	   .clk(clk), 
 	   .reset(reset),
-	   .srcA(t_srcA[31:0]),
-	   .srcB(t_srcB[31:0]),
+	   .srcA(t_srcA),
+	   .srcB(t_srcB),
 	   .rob_ptr_in(int_uop.rob_ptr),
 	   .hilo_prf_ptr_in(int_uop.hilo_dst),
 	   .is_signed_div(t_signed_div),
@@ -1251,7 +1251,7 @@ module exec(clk,
 	    begin
 	       t_signed_shift = 1'b1;
 	       t_shift_amt = t_srcB[4:0];
-	       t_result = {{HI_EBITS{t_shift_right[31]}}, t_shift_right};	       
+	       t_result = {{HI_EBITS{t_shift_right[31]}}, t_shift_right}; 
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1830,7 +1830,8 @@ module exec(clk,
 	  TLBP:
 	    begin
 	       t_mem_tail.op = MEM_TLBP;
-	       t_mem_tail.addr = {r_entryhi_vpn2, 13'd0};
+	       t_mem_tail.addr = {{HI_EBITS{1'b0}},
+				  r_entryhi_vpn2, 13'd0};
 	       t_mem_tail.mapped = 1'b1;
 	    end
 	  default:

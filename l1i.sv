@@ -1127,6 +1127,7 @@ endfunction
      end // always_ff@
 
 `ifdef VERILATOR
+   localparam ZP = (64-`M_WIDTH);   
    always_ff@(negedge clk)
      begin
 	//$display("%b %b %b %b", t_push_insn, t_push_insn2, t_push_insn3, t_push_insn4);
@@ -1134,10 +1135,10 @@ endfunction
 		     t_push_insn2 ? 32'd1 : 32'd0,
 		     t_push_insn3 ? 32'd1 : 32'd0,
 		     t_push_insn4 ? 32'd1 : 32'd0,
-		     {32'd0, t_insn.pc},
-		     {32'd0, t_insn2.pc},
-		     {32'd0, t_insn3.pc},
-		     {32'd0, t_insn4.pc},
+		     {{ZP{1'b0}}, t_insn.pc},
+		     {{ZP{1'b0}}, t_insn2.pc},
+		     {{ZP{1'b0}}, t_insn3.pc},
+		     {{ZP{1'b0}}, t_insn4.pc},
 		     r_resteer_bubble ? 32'd1 : 32'd0,
 		     fq_full ? 32'd1 : 32'd0);
 	
