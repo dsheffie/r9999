@@ -54,7 +54,6 @@ module tlb(clk,
 
    wire [NN-1:0]	       w_addr_space_match;
    wire [NN-1:0]	       w_hit8k;
-   wire [NN-1:0]	       w_hits;
    
    always_ff@(posedge clk)
      begin
