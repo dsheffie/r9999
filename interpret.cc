@@ -278,7 +278,7 @@ struct c1xExec {
 template <bool EL, typename T>
 void lxc1(uint32_t inst, state_t *s) {
   mips_t mi(inst);
-  uint32_t ea = s->gpr[mi.lc1x.base] + s->gpr[mi.lc1x.index];
+  uint32_t ea = va2pa(s->gpr[mi.lc1x.base] + s->gpr[mi.lc1x.index]);
   *reinterpret_cast<T*>(s->cpr1 + mi.lc1x.fd) = bswap<EL>(s->mem.get<T>(ea));
   s->pc += 4;
 }
@@ -468,7 +468,7 @@ void _lw(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = (uint32_t)s->gpr[rs] + imm;
+  uint32_t ea = va2pa((uint32_t)s->gpr[rs] + imm);
   s->gpr[rt] = bswap<EL>(s->mem.get<int32_t>(ea));
   //#define TRACE_MEM
 #ifdef TRACE_MEM
@@ -486,7 +486,7 @@ void _lh(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   int16_t mem = bswap<EL>(s->mem.get<int16_t>(ea));
   
   s->gpr[rt] = static_cast<int32_t>(mem);
@@ -504,7 +504,7 @@ static void _lb(uint32_t inst, state_t *s){
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   s->gpr[rt] = static_cast<int32_t>(s->mem.get<int8_t>(ea));
 #ifdef TRACE_MEM
   printf("_lb from %x = %x\n", ea, s->gpr[rt]);
@@ -519,7 +519,7 @@ static void _lbu(uint32_t inst, state_t *s){
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
 
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   uint32_t zExt = s->mem.get<uint8_t>(ea);
   *((uint32_t*)&(s->gpr[rt])) = zExt;
   s->pc += 4;
@@ -534,7 +534,7 @@ void _lhu(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   uint32_t zExt = bswap<EL>(s->mem.get<uint16_t>(ea));
   *((uint32_t*)&(s->gpr[rt])) = zExt;
   //printf("_lhu from %x = %x\n", ea, s->gpr[rt]);  
@@ -549,7 +549,7 @@ void _sw(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   s->mem.set<int32_t>(ea,  bswap<EL>(s->gpr[rt]));
   s->pc += 4;
   s->insn_histo[mipsInsn::SW]++;
@@ -561,7 +561,7 @@ void _sc(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   s->mem.set<int32_t>(ea,  bswap<EL>(s->gpr[rt]));
   s->gpr[rt] = 1;
   s->pc += 4;
@@ -576,7 +576,7 @@ void _sh(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
     
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   s->mem.set<int16_t>(ea,  bswap<EL>(((int16_t)s->gpr[rt])));
   s->pc += 4;
   s->insn_histo[mipsInsn::SH]++;  
@@ -588,7 +588,7 @@ static void _sb(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
     
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   s->mem.set<uint8_t>(ea, static_cast<uint8_t>(s->gpr[rt]));
   
   s->pc +=4;
@@ -618,8 +618,7 @@ void _swl(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   uint32_t ma = ea & 3;
   ea &= 0xfffffffc;
   if(EL)
@@ -648,8 +647,7 @@ void _swr(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-   
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   uint32_t ma = ea & 3;
   if(EL)
     ma = 3 - ma;
@@ -673,7 +671,7 @@ void _lwl(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   
-  uint32_t ea = ((uint32_t)s->gpr[rs] + imm);
+  uint32_t ea = va2pa((uint32_t)s->gpr[rs] + imm);
   uint32_t u_ea = ea;
   uint32_t ma = ea & 3;
   ea &= 0xfffffffc;
@@ -711,7 +709,7 @@ void _lwr(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
  
-  uint32_t ea = ((uint32_t)s->gpr[rs] + imm);
+  uint32_t ea = va2pa((uint32_t)s->gpr[rs] + imm);
   uint32_t u_ea = ea;
   uint32_t ma = ea & 3;
   ea &= 0xfffffffc;
@@ -771,7 +769,7 @@ void _ldc1(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   *reinterpret_cast<int64_t*>(s->cpr1 + ft) = bswap<EL>(s->mem.get<int64_t>(ea));
   s->pc += 4;
   s->insn_histo[mipsInsn::LDC1]++;
@@ -783,7 +781,7 @@ void _sdc1(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   s->mem.set<int64_t>(ea,  bswap<EL>((*(int64_t*)(s->cpr1 + ft))));
   s->pc += 4;
   s->insn_histo[mipsInsn::SDC1]++;  
@@ -795,7 +793,7 @@ void _lwc1(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   uint32_t v = bswap<EL>(s->mem.get<uint32_t>(ea)); 
   *((float*)(s->cpr1 + ft)) = *((float*)&v);
   s->pc += 4;
@@ -808,7 +806,7 @@ void _swc1(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = s->gpr[rs] + imm;
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
   uint32_t v = *((uint32_t*)(s->cpr1+ft));
   s->mem.set<uint32_t>(ea, bswap<EL>(v));
   s->pc += 4;
@@ -1327,7 +1325,7 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 template <bool EL>
 bool is_store_insn(state_t *s) {
   sparse_mem &mem = s->mem;
-  uint32_t inst = bswap<EL>(mem.get<uint32_t>(s->pc));
+  uint32_t inst = bswap<EL>(mem.get<uint32_t>(va2pa(s->pc)));
   uint32_t opcode = inst>>26;
   switch(opcode)
     {
@@ -1355,7 +1353,7 @@ bool is_store_insn(state_t *s) {
 template <bool EL>
 void execMips(state_t *s) {
   sparse_mem &mem = s->mem;
-  uint32_t inst = bswap<EL>(mem.get<uint32_t>(s->pc));
+  uint32_t inst = bswap<EL>(mem.get<uint32_t>(va2pa(s->pc)));
   if(globals::trace_retirement and false) {
     std::cout << std::hex
 	      << "cosim "
