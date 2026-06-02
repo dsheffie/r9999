@@ -115,6 +115,7 @@ module core(clk,
 	    core_state,
 	    inflight,
 	    epc,
+	    badvaddr,
 	    cause,
 	    asid,
 	    tlb_entry_out,
@@ -228,6 +229,8 @@ module core(clk,
    output logic [4:0]			  core_state;
    
    output logic [`M_WIDTH-1:0]		  epc;
+   output logic [`M_WIDTH-1:0]		  badvaddr;
+   
    output logic [4:0]			  cause;
    output logic [7:0]			  asid;
    output tlb_data_t		          tlb_entry_out;
@@ -482,6 +485,7 @@ module core(clk,
    assign got_ud = r_got_ud;
    assign got_bad_addr = r_got_bad_addr;
    assign epc = r_epc;
+   assign badvaddr = r_badvaddr;
    assign cause = r_cause;
    assign l1i_flush_done = n_l1i_flush_complete;
    assign l1d_flush_done = n_l1d_flush_complete;

@@ -56,6 +56,7 @@ module core_l1d_l1i(clk,
 		    l2_rsp_state,
 		    inflight,
 		    epc,
+		    badvaddr,
 		    cause,
 		    l1i_flush_done,
 		    l1d_flush_done,
@@ -161,6 +162,7 @@ module core_l1d_l1i(clk,
    output logic [3:0]			  l2_rsp_state;
    
    output logic [`M_WIDTH-1:0]		  epc;
+   output logic [`M_WIDTH-1:0]		  badvaddr;
    output logic [4:0]			  cause;
 
    
@@ -677,6 +679,7 @@ module core_l1d_l1i(clk,
 	     .core_state(core_state),
 	     .inflight(inflight),
 	     .epc(epc),
+	     .badvaddr(badvaddr),
 	     .cause(cause),
 	     .asid(w_asid),
 	     .tlb_entry_out_valid(tlb_entry_out_valid),
