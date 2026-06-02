@@ -104,10 +104,11 @@ enum class fp_reg_state { unknown, sp, dp };
 
 class state_t{
 public:
-  uint32_t pc = 0;
-  int32_t gpr[32] = {0};
-  int32_t lo = 0;
-  int32_t hi = 0;
+  typedef int64_t reg_t;
+  reg_t pc = 0;
+  reg_t gpr[32] = {0};
+  reg_t lo = 0;
+  reg_t hi = 0;
   uint32_t cpr0[32] = {0};
   uint32_t cpr1[32] = {0};
   uint32_t fcr1[5] = {0};

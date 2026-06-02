@@ -9,7 +9,7 @@
 
 //`define RESPECT_MAPPED 1
 
-`define LG_M_WIDTH 5
+`define LG_M_WIDTH 6
 
 `define BIG_ENDIAN 1
 

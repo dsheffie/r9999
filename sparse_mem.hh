@@ -61,6 +61,7 @@ public:
   }
   template<typename T>
   void set(uint64_t byte_addr, T v) {
+    //static_assert(sizeof(T) != 8);
     assert(byte_addr < 1UL<<32);
     *reinterpret_cast<T*>(mem+byte_addr) = v;
   }
