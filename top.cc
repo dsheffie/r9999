@@ -350,7 +350,7 @@ int main(int argc, char **argv) {
   uint64_t max_cycle = 0, max_icnt = 0, mem_lat = 2;
   uint64_t last_store_addr = 0, last_load_addr = 0, last_addr = 0;
   int misses_inflight = 0;
-  std::map<uint64_t, uint64_t> pushout_histo;
+  std::map<uint32_t, uint64_t> pushout_histo;
   int64_t mem_reply_cycle = -1L;
   try {
     po::options_description desc("Options");
@@ -408,6 +408,7 @@ int main(int argc, char **argv) {
   ss = new state_t(*sm1);
   initState(s);
   initState(ss);
+  ss->silent = true;  /* checker: suppress putchar side-effects */
   initCapstone();
 
   if(not(sgi_indy)) {
@@ -532,7 +533,12 @@ int main(int argc, char **argv) {
     tb->eval();
 
     if(not(tb->putchar_fifo_empty)) {
-      std::cout << tb->putchar_fifo_out;
+      char putch = (char)tb->putchar_fifo_out;
+      std::cout << putch;
+      /* Flush after each newline so output is visible even if the
+       * process is killed by a timeout (stdout may be fully-buffered
+       * when connected to a pipe). */
+      if(putch == '\n') std::cout.flush();
       got_putchar = true;
       tb->putchar_fifo_pop = 1;
     }
@@ -618,17 +624,21 @@ int main(int argc, char **argv) {
        
       
       if( enable_checker) {
-	//std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";	  	
-	if(tb->retire_pc == ss->pc) {
-	  //std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";	  	
+	//std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";
+	if((uint32_t)tb->retire_pc == (uint32_t)ss->pc) {
+	  //std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";
 	  execMips(ss);
+	  /* If checker just executed BREAK or SYSCALL, stop gracefully */
+	  if(ss->brk) {
+	    break;
+	  }
 	  // if(static_cast<uint32_t>(ss->mem.at(0x4cadc)) == 3) {
 	  //   std::cout << "changed memory at " << std::hex << ss->pc << std::dec << "\n";
 	  //   exit(-1);
 	  // }
-	  
+
 	  bool diverged = false;
-	  if(ss->pc == (tb->retire_pc + 4)) {
+	  if((uint32_t)ss->pc == ((uint32_t)tb->retire_pc + 4)) {
 	    for(int i = 0; i < 32; i++) {
 	      if((ss->gpr[i] != s->gpr[i])) {
 		int wrong_bits = __builtin_popcount(ss->gpr[i] ^ s->gpr[i]);
@@ -645,30 +655,32 @@ int main(int argc, char **argv) {
 			  << "\n";
 		//globals::trace_retirement |= (wrong_bits != 0);
 		diverged = true;//(wrong_bits > 16);
-		uint32_t r_inst = s->mem.get<uint32_t>(ss->pc);
+		/* Mask PC to 32 bits before accessing memory */
+		uint32_t r_inst = s->mem.get<uint32_t>((uint32_t)ss->pc & 0x1fffffffu);
 		r_inst = bswap<IS_LITTLE_ENDIAN>(r_inst);
 		std::cout << "incorrect "
 			  << std::hex
-			  << ss->pc 
+			  << (uint32_t)ss->pc
 			  << std::dec
-			  << " : " << getAsmString(r_inst, ss->pc )
+			  << " : " << getAsmString(r_inst, (uint32_t)ss->pc)
 			  << "\n";
-		
+
 	      }
 	    }
 
-	    
+
 	  }
-	  
+
 	  if(diverged) {
 	    incorrect = true;
-	    uint32_t r_inst = s->mem.get<uint32_t>(tb->retire_pc);
+	    /* Mask retire_pc to 32 bits before accessing memory */
+	    uint32_t r_inst = s->mem.get<uint32_t>((uint32_t)tb->retire_pc & 0x1fffffffu);
 	    r_inst = bswap<IS_LITTLE_ENDIAN>(r_inst);
 	    std::cout << "incorrect "
 		      << std::hex
-		      << tb->retire_pc
+		      << (uint32_t)tb->retire_pc
 		      << std::dec
-		      << " : " << getAsmString(r_inst, tb->retire_pc)
+		      << " : " << getAsmString(r_inst, (uint32_t)tb->retire_pc)
 		      << "\n";
 	    for(int i = 0; i < 32; i+=4) {
 	      std::cout << "reg "
@@ -701,6 +713,19 @@ int main(int argc, char **argv) {
 	}
 	else {
 	  ++last_check;
+	  /* Peek at the pending checker instruction.  If it is BREAK or
+	   * SYSCALL the RTL has entered exception/halt mode and the
+	   * simulation is effectively over -- terminate cleanly. */
+	  {
+	    uint32_t pending = bswap<IS_LITTLE_ENDIAN>(
+	      ss->mem.get<uint32_t>(va2pa((uint32_t)ss->pc)));
+	    uint32_t pend_op   = pending >> 26;
+	    uint32_t pend_func = pending & 63;
+	    if(pend_op == 0 && (pend_func == 0x0C || pend_func == 0x0D)) {
+	      /* BREAK or SYSCALL is the next checker instruction */
+	      break;
+	    }
+	  }
 	  if(last_check > 2) {
 	    uint32_t linsn = bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(last_match_pc));
 	    std::cerr << "no match in a while, last match : "
@@ -708,8 +733,8 @@ int main(int argc, char **argv) {
 		      << last_match_pc
 		      << " "
 		      << getAsmString(linsn, last_match_pc)
-		      << ", rtl pc =" << tb->retire_pc
-		      << ", sim pc =" << ss->pc
+		      << ", rtl pc =" << std::hex << (uint32_t)tb->retire_pc
+		      << ", sim pc =" << std::hex << (uint32_t)ss->pc
 		      << std::dec
 		      <<"\n";
 	    for(int i = 0; i < 32; i+=4) {

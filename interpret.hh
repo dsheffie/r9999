@@ -118,6 +118,22 @@ public:
   sparse_mem &mem;
   fp_reg_state cpr1_state[32] = {fp_reg_state::unknown};
   std::unordered_map<mipsInsn,uint64_t> insn_histo;
+
+  /* Software TLB -- mirrors the 48-entry fully-associative RTL TLB */
+  static const int NUM_TLB_ENTRIES = 48;
+  struct tlb_entry_t {
+    uint32_t entry_hi  = 0;   /* VPN2[31:13] + ASID[7:0] */
+    uint32_t entry_lo0 = 0;   /* PFN[29:6] + C[5:3] + D[2] + V[1] + G[0] */
+    uint32_t entry_lo1 = 0;
+    uint32_t page_mask = 0;   /* variable page size bits [24:13] */
+  } tlb[NUM_TLB_ENTRIES];
+
+  /*
+   * When true, MMIO side-effects (MTC0 $7 putchar) are suppressed.
+   * Set on the checker state so RTL output appears exactly once.
+   */
+  bool silent = false;
+
   state_t(sparse_mem &mem) : mem(mem) {}
   ~state_t();
 };
@@ -279,7 +295,25 @@ std::ostream &operator<<(std::ostream &out, const state_t & s);
 
 bool is_store_insn(state_t *s);
 
-#define CPR0_SR 12
+/* CP0 register indices */
+#define CPR0_INDEX    0
+#define CPR0_RANDOM   1
+#define CPR0_ENTRYLO0 2
+#define CPR0_ENTRYLO1 3
+#define CPR0_CONTEXT  4
+#define CPR0_PAGEMASK 5
+#define CPR0_WIRED    6
+/* 7 = simulator putchar port (MTC0 $rt, $7 outputs rt[7:0]) */
+#define CPR0_BADVADDR 8
+#define CPR0_COUNT    9
+#define CPR0_ENTRYHI  10
+#define CPR0_COMPARE  11
+#define CPR0_SR       12
+#define CPR0_CAUSE    13
+#define CPR0_EPC      14
+#define CPR0_PRID     15
+#define CPR0_CONFIG   16
+#define CPR0_ERROREPC 30
 
 #define VA2PA(x) ((x & 0x1fffffff))
 

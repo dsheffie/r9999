@@ -113,9 +113,14 @@ static void _movzd(uint32_t inst, state_t *s);
 static void _movzs(uint32_t inst, state_t *s);
 
 void initState(state_t *s) {
-  /* setup the status register */
-  s->cpr0[12] |= 1<<2;
-  s->cpr0[12] |= 1<<22;
+  /* Status: KUo (bit 2) + BEV=1 (bit 22, bootstrap exception vectors) */
+  s->cpr0[CPR0_SR] |= (1<<2) | (1<<22);
+  /* Random starts at max TLB index; it cycles downward to Wired */
+  s->cpr0[CPR0_RANDOM] = state_t::NUM_TLB_ENTRIES - 1;
+  /* PRId: R4000 compatible (Company=0, Product=0x04, Rev=0x00) */
+  s->cpr0[CPR0_PRID] = 0x00000400;
+  /* Config: return the same constant as the RTL (cache geometry) */
+  s->cpr0[CPR0_CONFIG] = 0x00088200;
 }
 
 static uint32_t getConditionCode(state_t *s, uint32_t cc) {
@@ -1447,6 +1452,10 @@ void execMips(state_t *s) {
       case 0x0C: /* syscall */
       case 0x0D: /* break */
 	s->brk = 1;
+	s->pc += 4;    /* advance so the checker stays in sync */
+	if(!s->silent) {
+	  std::cout << "got break or syscall\n";
+	}
 	s->insn_histo[mipsInsn::BREAK]++;
 	break;
       case 0x0f: /* sync */
@@ -1622,10 +1631,86 @@ void execMips(state_t *s) {
   }
   else if(isCoproc0) {
     if( ((inst >> 25)&1) ) {
+      /* CO=1 instructions: TLB ops, ERET, WAIT */
       switch(inst & 63)
 	{
-	case 24: //ERETU
-	  exit(-1);
+	case 0x1: { /* TLBR -- read TLB[Index] into staging regs */
+	  uint32_t idx = s->cpr0[CPR0_INDEX] & 63;
+	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
+	    s->cpr0[CPR0_ENTRYHI]  = s->tlb[idx].entry_hi;
+	    s->cpr0[CPR0_ENTRYLO0] = s->tlb[idx].entry_lo0;
+	    s->cpr0[CPR0_ENTRYLO1] = s->tlb[idx].entry_lo1;
+	    s->cpr0[CPR0_PAGEMASK] = s->tlb[idx].page_mask;
+	  }
+	  s->insn_histo[mipsInsn::TLBR]++;
+	  break;
+	}
+	case 0x2: { /* TLBWI -- write staging regs to TLB[Index] */
+	  uint32_t idx = s->cpr0[CPR0_INDEX] & 63;
+	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
+	    s->tlb[idx].entry_hi  = s->cpr0[CPR0_ENTRYHI];
+	    s->tlb[idx].entry_lo0 = s->cpr0[CPR0_ENTRYLO0];
+	    s->tlb[idx].entry_lo1 = s->cpr0[CPR0_ENTRYLO1];
+	    s->tlb[idx].page_mask = s->cpr0[CPR0_PAGEMASK];
+	  }
+	  s->insn_histo[mipsInsn::TLBWI]++;
+	  break;
+	}
+	case 0x6: { /* TLBWR -- write staging regs to TLB[Random] */
+	  uint32_t idx = s->cpr0[CPR0_RANDOM] & 63;
+	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
+	    s->tlb[idx].entry_hi  = s->cpr0[CPR0_ENTRYHI];
+	    s->tlb[idx].entry_lo0 = s->cpr0[CPR0_ENTRYLO0];
+	    s->tlb[idx].entry_lo1 = s->cpr0[CPR0_ENTRYLO1];
+	    s->tlb[idx].page_mask = s->cpr0[CPR0_PAGEMASK];
+	  }
+	  /* Decrement Random, wrap to NUM_TLB_ENTRIES-1 when it reaches Wired */
+	  {
+	    uint32_t wired  = s->cpr0[CPR0_WIRED] & 63;
+	    uint32_t random = s->cpr0[CPR0_RANDOM] & 63;
+	    s->cpr0[CPR0_RANDOM] = (random <= wired)
+	      ? (uint32_t)(state_t::NUM_TLB_ENTRIES - 1) : (random - 1);
+	  }
+	  s->insn_histo[mipsInsn::TLBWR]++;
+	  break;
+	}
+	case 0x8: { /* TLBP -- probe TLB for matching entry */
+	  uint32_t probe_hi   = s->cpr0[CPR0_ENTRYHI];
+	  uint32_t probe_asid = probe_hi & 0xffu;
+	  bool found = false;
+	  for(int i = 0; i < state_t::NUM_TLB_ENTRIES; i++) {
+	    /* Apply page-mask to get the significant VPN2 bits */
+	    uint32_t mask    = ~(s->tlb[i].page_mask | 0x1fffu);
+	    bool global      = (s->tlb[i].entry_lo0 & 1u) &&
+	                       (s->tlb[i].entry_lo1 & 1u);
+	    bool vpn_match   = (probe_hi & mask) == (s->tlb[i].entry_hi & mask);
+	    bool asid_match  = global ||
+	                       (probe_asid == (s->tlb[i].entry_hi & 0xffu));
+	    if(vpn_match && asid_match) {
+	      s->cpr0[CPR0_INDEX] = (uint32_t)i; /* P=0, index=i */
+	      found = true;
+	      break;
+	    }
+	  }
+	  if(!found) {
+	    s->cpr0[CPR0_INDEX] |= (1u << 31); /* P=1 (probe failed) */
+	  }
+	  s->insn_histo[mipsInsn::TLBP]++;
+	  break;
+	}
+	case 24: { /* ERET -- exception return */
+	  if(s->cpr0[CPR0_SR] & (1u << 2)) { /* ERL=1 */
+	    /* Return from error: EPC = ErrorEPC, clear ERL */
+	    s->pc = (int32_t)s->cpr0[CPR0_ERROREPC] - 4;
+	    s->cpr0[CPR0_SR] &= ~(1u << 2);
+	  } else {
+	    /* Return from exception: PC = EPC, clear EXL */
+	    s->pc = (int32_t)s->cpr0[CPR0_EPC] - 4;
+	    s->cpr0[CPR0_SR] &= ~(1u << 1);
+	  }
+	  s->insn_histo[mipsInsn::ERET]++;
+	  break;
+	}
 	case 32: //WAIT
 	  if((s->cpr0[CPR0_SR] & 1) == 0) {
 	    printf("attempting to wait with interrupts disabled @ VA %x, PA %x\n",
@@ -1658,10 +1743,11 @@ void execMips(state_t *s) {
     }
 
     else {
-      switch(rs) 
+      switch(rs)
 	{
 	case 0x0: /*mfc0*/
 	  if(rd == 7) {
+	    /* putchar FIFO full status -- always empty in interpreter */
 	    s->gpr[rt] = 0;
 	  } else {
 	    s->gpr[rt] = s->cpr0[rd];
@@ -1670,7 +1756,11 @@ void execMips(state_t *s) {
 	  break;
 	case 0x4: /*mtc0*/
 	  s->cpr0[rd] = s->gpr[rt];
-	  //std::cout << "writing cpr0[" << rd << "] = " << std::hex << s->gpr[rt] << std::dec << "\n";
+	  /* CP0 reg 7 is the simulator putchar port */
+	  if(rd == 7 && !s->silent) {
+	    fputc((int)(s->gpr[rt] & 0xff), stdout);
+	    fflush(stdout);
+	  }
 	  s->insn_histo[mipsInsn::MTC0]++;
 	  break;
 	default:

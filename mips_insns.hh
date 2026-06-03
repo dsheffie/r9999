@@ -154,6 +154,10 @@
   X(FP_MOVF)					\
   X(FP_MOVT)					\
   X(ERET)					\
+  X(TLBR)					\
+  X(TLBWI)					\
+  X(TLBWR)					\
+  X(TLBP)					\
   X(DI)						\
   X(EI)						\
   X(WAIT)					\
