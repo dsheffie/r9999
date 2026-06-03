@@ -264,7 +264,7 @@ module exec(clk,
    logic 	t_fault;
    
    logic 	t_signed_shift;
-   logic [4:0] 	t_shift_amt;
+   logic [`LG_M_WIDTH-1:0] t_shift_amt;
    
    logic [31:0] t_shift_right;
 
@@ -928,10 +928,43 @@ module exec(clk,
 	       end
 	  end // else: !if(reset)
      end
+
+   logic t_32b_shift, t_shift_left;
+
+   wire [`M_WIDTH-1:0] w_shifter_out;   
+   generate
+      if(`M_WIDTH == 64)
+	begin
+	   wire [63:0] w_shift_src = t_32b_shift ? 
+				     {{32{(t_signed_shift ? t_srcA[31] : 1'b0)}}, t_srcA[31:0]} : 
+				     t_srcA;   
+
+	   shift_right #(.LG_W(6)) 
+	   s0(
+	      .is_left(t_shift_left),
+	      .is_signed(t_signed_shift),
+	      .is_circular(1'b0),
+	      .data(w_shift_src), 
+	      .distance(t_shift_amt),
+	      .y(w_shifter_out)
+	      );
+	   
+	end
+      else
+	begin
+	   shift_right #(.LG_W(5)) 
+	   s0(
+	      .is_left(t_shift_left),
+	      .is_signed(t_signed_shift),
+	      .is_circular(1'b0),
+	      .data(t_srcA[31:0]), 
+	      .distance(t_shift_amt),
+	      .y(w_shifter_out)
+	      );
+
+	end // UNMATCHED !!
+   endgenerate
    
-   
-   shift_right #(.LG_W(5)) s0(.is_signed(t_signed_shift), .data(t_srcA[31:0]), 
-			      .distance(t_shift_amt), .y(t_shift_right));
    
    mul #(.W(`M_WIDTH)) m(
 			 .clk(clk), 
@@ -1226,7 +1259,7 @@ module exec(clk,
 	t_hilo_result = 'd0;
 	t_wr_hilo = 1'b0;
 	t_signed_shift = 1'b0;
-	t_shift_amt = 5'd0;
+	t_shift_amt = 'd0;
 	t_start_mul = 1'b0;
 	t_signed_div = 1'b0;
 	t_start_div32 = 1'b0;	
@@ -1236,6 +1269,8 @@ module exec(clk,
 	n_tlb_entry_out_valid = 1'b0;
 	n_tlbr = 1'b0;
 	t_clr_erl = 1'b0;
+	t_32b_shift = 1'b0;
+	t_shift_left = 1'b0;
 	
 	case(int_uop.op)
 	  BREAK:
@@ -1250,30 +1285,36 @@ module exec(clk,
 	    end
 	  SLL:
 	    begin
-	       t_result = sign_extend32(t_srcA[31:0] << int_uop.srcB);
+	       //t_result = sign_extend32(t_srcA[31:0] << int_uop.imm[4:0]);
+	       t_shift_left = 1'b1;
+	       t_32b_shift = 1'b1;	       	       
+	       t_shift_amt = {{(`LG_M_WIDTH-5) {1'b0}}, int_uop.imm[4:0]};	       
+	       t_result = {{HI_EBITS{w_shifter_out[31]}}, w_shifter_out[31:0]};
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
-
 	    end
 	  SRA:
 	    begin
 	       t_signed_shift = 1'b1;
-	       t_shift_amt = int_uop.srcB[4:0];
-	       t_result = {{HI_EBITS{t_shift_right[31]}}, t_shift_right};
+	       t_32b_shift = 1'b1;	       
+	       t_shift_amt = {{(`LG_M_WIDTH-5) {1'b0}}, int_uop.imm[4:0]};
+	       t_result = {{HI_EBITS{w_shifter_out[31]}}, w_shifter_out[31:0]};
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end // case: SRA
-	  SRAV:
+	  SRL:
 	    begin
-	       t_signed_shift = 1'b1;
-	       t_shift_amt = t_srcB[4:0];
-	       t_result = {{HI_EBITS{t_shift_right[31]}}, t_shift_right}; 
+	       t_32b_shift = 1'b1;
+	       t_shift_amt = {{(`LG_M_WIDTH-5) {1'b0}}, int_uop.imm[4:0]};
+	       t_result = {{HI_EBITS{w_shifter_out[31]}}, w_shifter_out[31:0]};
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
-	  SRL:
+	  SRAV:
 	    begin
-	       t_result = sign_extend32(t_srcA[31:0] >> int_uop.srcB);	       
+	       t_signed_shift = 1'b1;
+	       t_shift_amt = t_srcB[`LG_M_WIDTH-1:0];
+	       t_result = {{HI_EBITS{w_shifter_out[31]}}, w_shifter_out[31:0]}; 
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end

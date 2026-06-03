@@ -125,17 +125,17 @@ module decode_mips(
 			begin
 			   uop.srcA = rt;
 			   uop.srcA_valid = 1'b1;
-			   uop.srcB = shamt;
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
 			   uop.op = is_nop||is_ehb ? NOP :SLL;
-			   uop.is_int = 1'b1;		      
+			   uop.is_int = 1'b1;
+			   uop.imm = {10'b0, shamt};
 			end
 		      6'd2: /* srl */
 			begin
 			   uop.srcA = rt;
 			   uop.srcA_valid = 1'b1;
-			   uop.srcB = shamt;
+			   uop.imm = {10'b0, shamt};			   
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
 			   uop.op = (rd == 'd0) ? NOP : SRL;
@@ -145,7 +145,7 @@ module decode_mips(
 			begin
 			   uop.srcA = rt;
 			   uop.srcA_valid = 1'b1;
-			   uop.srcB = shamt;
+			   uop.imm = {10'b0, shamt};
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
 			   uop.op = (rd == 'd0) ? NOP : SRA;
