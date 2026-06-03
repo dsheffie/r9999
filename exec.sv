@@ -948,7 +948,7 @@ module exec(clk,
 	      .distance(t_shift_amt),
 	      .y(w_shifter_out)
 	      );
-	   
+
 	end
       else
 	begin
@@ -1313,20 +1313,26 @@ module exec(clk,
 	  SRAV:
 	    begin
 	       t_signed_shift = 1'b1;
-	       t_shift_amt = t_srcB[`LG_M_WIDTH-1:0];
+	       t_32b_shift = 1'b1;	       
+	       t_shift_amt = {{(`LG_M_WIDTH-5) {1'b0}}, t_srcB[4:0]};
 	       t_result = {{HI_EBITS{w_shifter_out[31]}}, w_shifter_out[31:0]}; 
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  SLLV:
 	    begin
-	       t_result = sign_extend32(t_srcA[31:0] << (t_srcB[4:0]));
+	       t_32b_shift = 1'b1;
+	       t_shift_left = 1'b1;	       
+	       t_result = {{HI_EBITS{w_shifter_out[31]}}, w_shifter_out[31:0]};
+	       t_shift_amt = {{(`LG_M_WIDTH-5) {1'b0}}, t_srcB[4:0]};
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  SRLV:
 	    begin
-	       t_result = sign_extend32(t_srcA[31:0] >> (t_srcB[4:0]));
+	       t_32b_shift = 1'b1;
+	       t_shift_amt = {{(`LG_M_WIDTH-5) {1'b0}}, t_srcB[4:0]};
+	       t_result = {{HI_EBITS{w_shifter_out[31]}}, w_shifter_out[31:0]};
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
