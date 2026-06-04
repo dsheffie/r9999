@@ -32,7 +32,6 @@ SIM="$REPO_ROOT/ooo_core"
 CSMITH_INC="/usr/include/csmith"
 
 CC=mips-linux-gnu-gcc
-QEMU=qemu-mips-static
 NPROC=$(nproc)
 
 # ---------------------------------------------------------------------------
@@ -49,13 +48,18 @@ SPECIFIC=${4:-}
 #   strcmp.0        char loop:     conservative bound of  200
 CBMC_LIBLOOPS="crc32_gentab.0:9,crc32_gentab.1:257,strcmp.0:200"
 
-TIMEOUT_QEMU=5    # safety-net wall-clock limit for qemu reference (cbmc false-positives)
+TIMEOUT_REF=60    # wall-clock limit for the qemu-mips-static reference run
 TIMEOUT_SIM=30    # simulator wall-clock limit
+
+QEMU=qemu-mips-static
 
 CSMITH_FLAGS="--no-float --no-builtins --concise --max-block-depth 3"
 
 BM_FLAGS="-mxgot -ffreestanding -O1 -mips3 -mno-branch-likely"
 BM_DEFS="-D printf=printf_ -D _FORTIFY_SOURCE=0 -D WRAP_VOLATILES=1"
+# MIPS Linux reference: same ISA and ABI as the bare-metal binary, so
+# architecture-specific behavior (bit-field layout, integer types) matches.
+# Compiled as a static MIPS binary and run under qemu-mips-static.
 REF_FLAGS="-O1 -static"
 
 # ---------------------------------------------------------------------------
@@ -86,9 +90,9 @@ echo ""
 # ---------------------------------------------------------------------------
 # Export everything the worker subshells need
 # ---------------------------------------------------------------------------
-export SHARED REPO_ROOT HELLO SIM CC QEMU CSMITH_INC
+export SHARED REPO_ROOT HELLO SIM CC CSMITH_INC QEMU
 export BM_FLAGS BM_DEFS REF_FLAGS SUPPORT_OBJS CSMITH_FLAGS
-export TIMEOUT_QEMU TIMEOUT_SIM MAXICNT
+export TIMEOUT_REF TIMEOUT_SIM MAXICNT
 export CBMC_K CBMC_LIBLOOPS
 export SPECIFIC
 
@@ -156,14 +160,14 @@ worker() {
         return
     fi
 
-    # ---- Step 2: Reference output (MIPS Linux under QEMU) ---------------
+    # ---- Step 2: Reference output (MIPS Linux under qemu-mips-static) ------
     $CC $REF_FLAGS -I"$CSMITH_INC" -w "$src" -lm -o "$ref_bin" 2>/dev/null \
         || { echo SKIP > "$SHARED/r$id"; return; }
 
     local ref_out
-    ref_out=$(timeout "$TIMEOUT_QEMU" "$QEMU" "$ref_bin" 2>/dev/null) || {
-        # cbmc said finite but QEMU timed out: rare false-positive, skip
-        printf '[%d] SKIP  cbmc k=%s false-positive (QEMU timeout)\n' "$id" "$CBMC_K"
+    ref_out=$(timeout "$TIMEOUT_REF" "$QEMU" "$ref_bin" 2>/dev/null) || {
+        # cbmc said finite but reference timed out: rare false-positive, skip
+        printf '[%d] SKIP  cbmc k=%s false-positive (ref timeout)\n' "$id" "$CBMC_K"
         echo SKIP > "$SHARED/r$id"; return
     }
     ref_out=$(printf '%s' "$ref_out" | grep "^checksum")
@@ -175,10 +179,11 @@ worker() {
         -T "$HELLO/baremetal.ld" -o "$elf" 2>/dev/null \
         || { echo SKIP > "$SHARED/r$id"; return; }
 
-    local sim_out
-    sim_out=$(timeout "$TIMEOUT_SIM" \
-        "$SIM" --file "$elf" --maxicnt "$MAXICNT" --checker false \
-        2>/dev/null | grep "^checksum") || true
+    local sim_raw sim_out
+    sim_raw=$(timeout "$TIMEOUT_SIM" \
+        "$SIM" --file "$elf" --maxicnt "$MAXICNT" \
+        2>&1) || true
+    sim_out=$(printf '%s' "$sim_raw" | grep "^checksum")
 
     # ---- Step 4: Compare -------------------------------------------------
     if [ "$ref_out" = "$sim_out" ]; then
@@ -187,7 +192,10 @@ worker() {
         echo FAIL > "$SHARED/r$id"
         printf '[%d] MISMATCH\n  ref: %s\n  sim: %s\n  saved: fail_%d.c\n' \
             "$id" "$ref_out" "${sim_out:-<no checksum output>}" "$id"
+        printf '%s\n' "$sim_raw" | grep -v "^total_\|^simulation\|^insns\|^ *$" | head -30 | \
+            sed "s/^/  [checker] /"
         cp "$src" "$REPO_ROOT/fail_${id}.c"
+        cp "$elf"  "$REPO_ROOT/fail_${id}.elf"
     fi
 }
 export -f worker
@@ -207,7 +215,7 @@ if [ -n "${SPECIFIC:-}" ]; then
 fi
 
 echo "Running $N tests on $NPROC parallel workers"
-echo "  cbmc k=$CBMC_K   maxicnt=$MAXICNT   qemu_timeout=${TIMEOUT_QEMU}s   sim_timeout=${TIMEOUT_SIM}s"
+echo "  cbmc k=$CBMC_K   maxicnt=$MAXICNT   ref_timeout=${TIMEOUT_REF}s ($QEMU)   sim_timeout=${TIMEOUT_SIM}s"
 echo "  csmith: $CSMITH_FLAGS"
 echo ""
 

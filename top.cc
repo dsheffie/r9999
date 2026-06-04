@@ -341,6 +341,9 @@ int main(int argc, char **argv) {
   namespace po = boost::program_options; 
   // Initialize Verilators variables
   bool enable_checker = true;
+  bool magic_halt = true;
+  /* Physical address of the simulator halt register (kseg1 0xBFD00000). */
+  static const uint32_t MAGIC_HALT_PHYS = 0x1FD00000u;
   std::string pipelog;
   std::string mips_binary = "dhrystone3";
   std::string log_name = "log.txt";
@@ -372,7 +375,9 @@ int main(int argc, char **argv) {
       ("trace,t", po::value<bool>(&globals::trace_retirement)->default_value(false), "trace retired instruction stream")
       ("starttrace,s", po::value<uint64_t>(&start_trace_at)->default_value(~0UL), "start tracing retired instructions")
       ("indy", po::value<bool>(&sgi_indy)->default_value(false), "sgi indy")
-      ; 
+      ("magic-halt", po::value<bool>(&magic_halt)->default_value(true),
+       "stop simulation when magic halt address (kseg1 0xBFD00000) is written")
+      ;
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm); 
@@ -455,6 +460,7 @@ int main(int argc, char **argv) {
   uint64_t mismatches = 0, n_stores = 0, n_loads = 0;
   uint64_t n_branches = 0, n_mispredicts = 0, n_checks = 0, n_flush_cycles = 0;
   bool got_mem_req = false, got_mem_rsp = false, incorrect = false, got_putchar = false;
+  bool sim_halted = false;
   //assert reset
   tb->retire_allowed = 1;
   tb->mem_rsp_bad = 0;
@@ -533,6 +539,8 @@ int main(int argc, char **argv) {
     tb->eval();
 
     if(not(tb->putchar_fifo_empty)) {
+      //printf("got first putchar at icnt %lu\n", insns_retired);
+      //exit(-1);
       char putch = (char)tb->putchar_fifo_out;
       std::cout << putch;
       /* Flush after each newline so output is visible even if the
@@ -803,8 +811,11 @@ int main(int argc, char **argv) {
     		<< "\n";
       break;
     }
+    if(sim_halted) {
+      break;
+    }
     if(tb->got_break) {
-      std::cout << "got break, epc = " << std::hex << tb->epc << std::dec << "\n";      
+      std::cout << "got break, epc = " << std::hex << tb->epc << std::dec << "\n";
       break;
     }
     else if(tb->got_ud) {
@@ -866,7 +877,10 @@ int main(int argc, char **argv) {
 	for(int i = 0; i < 4; i++) {
 	  uint32_t d = tb->mem_req_store_data[i];
 	  uint32_t ea = (tb->mem_req_addr + 4*i) & (~0U);
-	  perform_word_store(s, ea, m, d);	  
+	  perform_word_store(s, ea, m, d);
+	  if(magic_halt && (ea & 0x1fffffffu) == MAGIC_HALT_PHYS && d != 0u) {
+	    sim_halted = true;
+	  }
 	}
 	last_store_addr = tb->mem_req_addr;
 	++n_stores;

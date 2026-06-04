@@ -147,8 +147,8 @@ static void execSpecial2(uint32_t inst,state_t *s) {
     {
     case(0x0): /* madd */ {
       int64_t y,acc;
-      acc = ((int64_t)s->hi) << 32;
-      acc |= ((int64_t)s->lo);
+      acc = ((int64_t)(uint32_t)s->hi) << 32;
+      acc |= (uint32_t)s->lo;
       y = (int64_t)s->gpr[rs] * (int64_t)s->gpr[rt];
       y += acc;
       s->lo = (int32_t)(y & 0xffffffff);
@@ -158,16 +158,14 @@ static void execSpecial2(uint32_t inst,state_t *s) {
     }
     case 0x1: /* maddu */ {
       uint64_t y,acc;
-      uint32_t u0 = *((uint32_t*)&s->gpr[rs]);
-      uint32_t u1 = *((uint32_t*)&s->gpr[rt]);
-      uint64_t uk0 = (uint64_t)u0;
-      uint64_t uk1 = (uint64_t)u1;
+      uint64_t uk0 = (uint64_t)(uint32_t)s->gpr[rs];
+      uint64_t uk1 = (uint64_t)(uint32_t)s->gpr[rt];
       y = uk0*uk1;
-      acc = ((uint64_t)s->hi) << 32;
-      acc |= ((uint64_t)s->lo);
+      acc = ((uint64_t)(uint32_t)s->hi) << 32;
+      acc |= (uint64_t)(uint32_t)s->lo;
       y += acc;
-      s->lo = (uint32_t)(y & 0xffffffff);
-      s->hi = (uint32_t)(y >> 32);
+      s->lo = sext64((uint32_t)(y & 0xffffffff));
+      s->hi = sext64((uint32_t)(y >> 32));
       s->insn_histo[mipsInsn::MADDU]++;
       break;
     }
@@ -1493,13 +1491,13 @@ void execMips(state_t *s) {
       }
       case 0x19: { /* multu */
 	uint64_t y;
-	uint64_t u0 = (uint64_t)*((uint32_t*)&s->gpr[rs]);
-	uint64_t u1 = (uint64_t)*((uint32_t*)&s->gpr[rt]);
+	uint64_t u0 = (uint64_t)(uint32_t)s->gpr[rs];
+	uint64_t u1 = (uint64_t)(uint32_t)s->gpr[rt];
 	y = u0*u1;
-	*((uint64_t*)&(s->lo)) = (uint32_t)y;
-	*((uint64_t*)&(s->hi)) = (uint32_t)(y>>32);
+	s->lo = sext64((uint32_t)y);
+	s->hi = sext64((uint32_t)(y>>32));
 	s->pc += 4;
-	s->insn_histo[mipsInsn::MULTU]++;				
+	s->insn_histo[mipsInsn::MULTU]++;
 	break;
       }
       case 0x1A: /* div */
@@ -1512,8 +1510,8 @@ void execMips(state_t *s) {
 	break;
       case 0x1B: /* divu */
 	if(s->gpr[rt] != 0) {
-	  s->lo = (uint32_t)s->gpr[rs] / (uint32_t)s->gpr[rt];
-	  s->hi = (uint32_t)s->gpr[rs] % (uint32_t)s->gpr[rt];
+	  s->lo = sext64((uint32_t)s->gpr[rs] / (uint32_t)s->gpr[rt]);
+	  s->hi = sext64((uint32_t)s->gpr[rs] % (uint32_t)s->gpr[rt]);
 	}
 	s->pc += 4;
 	s->insn_histo[mipsInsn::DIVU]++;
@@ -1572,11 +1570,9 @@ void execMips(state_t *s) {
 	s->insn_histo[mipsInsn::SLT]++;	
 	break;
       case 0x2B: { /* sltu */
-	uint32_t urs = (uint32_t)s->gpr[rs];
-	uint32_t urt = (uint32_t)s->gpr[rt];
-	s->gpr[rd] = (urs < urt);
+	s->gpr[rd] = ((uint64_t)s->gpr[rs] < (uint64_t)s->gpr[rt]);
 	s->pc += 4;
-	s->insn_histo[mipsInsn::SLTU]++;	
+	s->insn_histo[mipsInsn::SLTU]++;
 	break;
       }
       case 0x0B: /* movn */
@@ -1822,7 +1818,7 @@ void execMips(state_t *s) {
 	s->insn_histo[mipsInsn::SLTI]++;
 	break;
       case 0x0B:/* sltiu */
-	s->gpr[rt] = ((uint32_t)s->gpr[rs] < (uint32_t)simm32);
+	s->gpr[rt] = ((uint64_t)s->gpr[rs] < (uint64_t)(int64_t)simm32);
 	s->pc += 4;
 	s->insn_histo[mipsInsn::SLTIU]++;
 	break;
