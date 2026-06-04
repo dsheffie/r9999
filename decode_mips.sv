@@ -410,6 +410,20 @@ module decode_mips(
 			   uop.op = (rd == 'd0) ? NOP : SLTU;
 			   uop.is_int = 1'b1;
 			end // case: 6'd43
+		      6'd44: /* dadd */
+			begin
+			   if(w_in_64b_mode)
+			     begin		      
+				uop.srcA = rt;
+				uop.srcA_valid = 1'b1;
+				uop.srcB = rs;
+				uop.srcB_valid = 1'b1;
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : DADD;
+				uop.is_int = 1'b1;
+			     end
+			end
 		      6'd45: /* daddu */
 			begin
 			   if(w_in_64b_mode)
@@ -795,6 +809,19 @@ module decode_mips(
 		    uop.is_br = 1'b1;
 		    uop.br_pred = insn_pred;
 		    uop.is_int = 1'b1;
+		 end // case: 6'd23
+	       6'd25: /* daddiu */
+		 begin
+		    if(w_in_64b_mode)
+		      begin		      
+			 uop.srcA = rt;
+			 uop.srcA_valid = 1'b1;
+			 uop.dst = rd;
+			 uop.dst_valid = (rd != 'd0);
+			 uop.op = (rd == 'd0) ? NOP : DADDIU;
+			 uop.imm = insn[15:0];
+			 uop.is_int = 1'b1;
+		      end
 		 end
 	       6'd32: /* LB */
 		 begin
