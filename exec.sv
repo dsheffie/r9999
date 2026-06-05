@@ -281,7 +281,7 @@ module exec(clk,
    logic [`MAX_LAT:0] r_wb_bitvec, n_wb_bitvec;
 
    /* divider */
-   logic 	t_div_ready, t_signed_div, t_start_div32;
+   logic 	t_div_ready, t_signed_div, t_start_div32, t_start_div64;
    logic [`LG_ROB_ENTRIES-1:0] t_div_rob_ptr_out;
    logic [(`M_WIDTH*2)-1:0] 	       t_div_result;
    logic [`LG_HILO_PRF_ENTRIES-1:0] t_div_hilo_prf_ptr_out;
@@ -667,7 +667,7 @@ module exec(clk,
 	  begin
 	     n_wb_bitvec[i] = r_wb_bitvec[i+1];	     
 	  end
-	n_wb_bitvec[`DIV32_LAT] = t_start_div32&r_start_int;
+	n_wb_bitvec[`DIV32_LAT] = (t_start_div32 | t_start_div64) & r_start_int;
 	
 	if(t_start_mul&r_start_int)
 	  begin
@@ -967,11 +967,11 @@ module exec(clk,
    
    
    mul #(.W(`M_WIDTH)) m(
-			 .clk(clk), 
-			 .reset(reset), 
-			 .is_signed(int_uop.op != MULTU), 
+			 .clk(clk),
+			 .reset(reset),
+			 .is_signed(int_uop.op != MULTU && int_uop.op != DMULTU),
 			 .go(t_start_mul&r_start_int),
-			 .is_32b(1'b1),
+			 .is_32b(int_uop.op == MULT || int_uop.op == MULTU),
 			 .src_A(t_srcA),
 			 .src_B(t_srcB),
 			 .rob_ptr_in(int_uop.rob_ptr),
@@ -983,9 +983,9 @@ module exec(clk,
 			 .hilo_prf_ptr_out(t_hilo_prf_ptr_out)
 	 );
 
-   divider #(.LG_W(`LG_M_WIDTH)) 
+   divider #(.LG_W(`LG_M_WIDTH))
    d0 (
-       .clk(clk), 
+       .clk(clk),
        .reset(reset),
        .is_32b(t_start_div32),
        .srcA(t_srcA),
@@ -993,7 +993,7 @@ module exec(clk,
        .rob_ptr_in(int_uop.rob_ptr),
        .hilo_prf_ptr_in(int_uop.hilo_dst),
        .is_signed_div(t_signed_div),
-       .start_div(t_start_div32),
+       .start_div(t_start_div32 | t_start_div64),
        .y(t_div_result),
        .rob_ptr_out(t_div_rob_ptr_out),
        .hilo_prf_ptr_out(t_div_hilo_prf_ptr_out),
@@ -1262,7 +1262,8 @@ module exec(clk,
 	t_shift_amt = 'd0;
 	t_start_mul = 1'b0;
 	t_signed_div = 1'b0;
-	t_start_div32 = 1'b0;	
+	t_start_div32 = 1'b0;
+	t_start_div64 = 1'b0;	
 	t_overflow = 1'b0;
 	t_trap = 1'b0;
 	n_tlb_index = r_tlb_index;
@@ -1336,6 +1337,75 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
+	  DSLL:
+	    begin
+	       t_shift_left = 1'b1;
+	       t_shift_amt = {{(`LG_M_WIDTH-5){1'b0}}, int_uop.imm[4:0]};
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSLL32:
+	    begin
+	       t_shift_left = 1'b1;
+	       t_shift_amt = {1'b1, int_uop.imm[4:0]};
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSRL:
+	    begin
+	       t_shift_amt = {{(`LG_M_WIDTH-5){1'b0}}, int_uop.imm[4:0]};
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSRL32:
+	    begin
+	       t_shift_amt = {1'b1, int_uop.imm[4:0]};
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSRA:
+	    begin
+	       t_signed_shift = 1'b1;
+	       t_shift_amt = {{(`LG_M_WIDTH-5){1'b0}}, int_uop.imm[4:0]};
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSRA32:
+	    begin
+	       t_signed_shift = 1'b1;
+	       t_shift_amt = {1'b1, int_uop.imm[4:0]};
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSLLV:
+	    begin
+	       t_shift_left = 1'b1;
+	       t_shift_amt = t_srcB[`LG_M_WIDTH-1:0];
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSRLV:
+	    begin
+	       t_shift_amt = t_srcB[`LG_M_WIDTH-1:0];
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSRAV:
+	    begin
+	       t_signed_shift = 1'b1;
+	       t_shift_amt = t_srcB[`LG_M_WIDTH-1:0];
+	       t_result = w_shifter_out;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  MTLO:
 	    begin
 	       t_hilo_result = {t_src_hilo[(2*`M_WIDTH)-1:`M_WIDTH], t_srcA[`M_WIDTH-1:0]};
@@ -1387,7 +1457,13 @@ module exec(clk,
 	       t_result = w_add64;
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
-	    end	  
+	    end
+	  DSUB:
+	    begin
+	       t_result = w_add64;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  MULT:
 	    begin
 	       t_start_mul = r_start_int&!ds_done;
@@ -1404,6 +1480,23 @@ module exec(clk,
 	  DIVU:
 	    begin
 	       t_start_div32 = r_start_int&!ds_done;
+	    end
+	  DMULT:
+	    begin
+	       t_start_mul = r_start_int&!ds_done;
+	    end
+	  DMULTU:
+	    begin
+	       t_start_mul = r_start_int&!ds_done;
+	    end
+	  DDIV:
+	    begin
+	       t_signed_div = 1'b1;
+	       t_start_div64 = r_start_int&!ds_done;
+	    end
+	  DDIVU:
+	    begin
+	       t_start_div64 = r_start_int&!ds_done;
 	    end
 	  SUBU:
 	    begin
@@ -1482,14 +1575,14 @@ module exec(clk,
 	    end // case: BNE
 	  BGEZ:
 	    begin
-	       t_take_br = (t_srcA[31] == 1'b0);
+	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
 	       t_mispred_br = int_uop.br_pred != t_take_br;
-	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;	       
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
 	       t_alu_valid = 1'b1;
 	    end
 	  BGEZAL:
 	    begin
-	       t_take_br = (t_srcA[31] == 1'b0);
+	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;	  
      	       t_result = t_take_br ?  int_uop.pc + {{HI_EBITS{1'b0}}, 32'd8} : t_srcB;
@@ -1886,6 +1979,12 @@ module exec(clk,
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
 	    end // case: LW
+	  LWU:
+	    begin
+	       t_mem_tail.op = MEM_LWU;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
+	    end
 	  LWL:
 	    begin
 	       t_mem_tail.op = MEM_LWL;
@@ -1924,6 +2023,47 @@ module exec(clk,
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.bad_addr = w_agu[0] | w_bad_seg_perms;
 	    end // case: LH
+	  LD:
+	    begin
+	       t_mem_tail.op = MEM_LD;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
+	    end
+	  SD:
+	    begin
+	       t_mem_tail.op = MEM_SD;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
+	    end
+	  LDL:
+	    begin
+	       t_mem_tail.op = MEM_LDL;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
+	    end
+	  LDR:
+	    begin
+	       t_mem_tail.op = MEM_LDR;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
+	    end
+	  SDL:
+	    begin
+	       t_mem_tail.op = MEM_SDL;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
+	    end
+	  SDR:
+	    begin
+	       t_mem_tail.op = MEM_SDR;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
+	    end
 	  TLBP:
 	    begin
 	       t_mem_tail.op = MEM_TLBP;
@@ -2349,7 +2489,7 @@ module exec(clk,
 	r_sr_ksu <= reset ? 'd0 : n_sr_ksu;
 	r_sr_ux <= reset ? 'd0 : n_sr_ux;
 	r_sr_sx <= reset ? 'd0 : n_sr_sx;
-	r_sr_kx <= reset ? 'd0 : n_sr_kx;	
+	r_sr_kx <= reset ? 'd0 : n_sr_kx;
 	r_sr_bev <= reset ? 1'b1 : n_sr_bev;
 	r_sr_ts <= reset ? 1'b0 : n_sr_ts;
 	r_wired <= reset ? 'd0 :  n_wired;

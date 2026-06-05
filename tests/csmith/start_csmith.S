@@ -22,12 +22,89 @@ _start:
 
     .section .boot.exc, "ax"
     .set noreorder
+    .set noat
     .globl _exc_handler_stub
-$Lexc:
-    move $gp, $zero
-    la   $k0, exc_handler
-    jr   $k0
+_exc_handler_stub:
+    /* k0 = &exc_regfile[0]; save all GPRs except $0, $k0, $k1 (kernel scratch) */
+    lui   $k0, %hi(exc_regfile)
+    addiu $k0, $k0, %lo(exc_regfile)
+    sd    $1,   8($k0)
+    sd    $2,  16($k0)
+    sd    $3,  24($k0)
+    sd    $4,  32($k0)
+    sd    $5,  40($k0)
+    sd    $6,  48($k0)
+    sd    $7,  56($k0)
+    sd    $8,  64($k0)
+    sd    $9,  72($k0)
+    sd    $10, 80($k0)
+    sd    $11, 88($k0)
+    sd    $12, 96($k0)
+    sd    $13, 104($k0)
+    sd    $14, 112($k0)
+    sd    $15, 120($k0)
+    sd    $16, 128($k0)
+    sd    $17, 136($k0)
+    sd    $18, 144($k0)
+    sd    $19, 152($k0)
+    sd    $20, 160($k0)
+    sd    $21, 168($k0)
+    sd    $22, 176($k0)
+    sd    $23, 184($k0)
+    sd    $24, 192($k0)
+    sd    $25, 200($k0)
+    /* $26/$27 are k0/k1 -- skip */
+    sd    $28, 224($k0)
+    sd    $29, 232($k0)
+    sd    $30, 240($k0)
+    sd    $31, 248($k0)
+    /* jal can't reach .text from bfc00180 (top nibbles differ); use jalr */
+    lui   $k1, %hi(exc_handler)
+    addiu $k1, $k1, %lo(exc_handler)
+    move  $a0, $k0
+    jalr  $k1
     nop
+    /* v0==1 -> ERET; v0==0 -> exc_handler already wrote halt sentinel */
+    beqz  $v0, _exc_halt
+    nop
+    /* restore all saved GPRs */
+    lui   $k0, %hi(exc_regfile)
+    addiu $k0, $k0, %lo(exc_regfile)
+    ld    $1,   8($k0)
+    ld    $2,  16($k0)
+    ld    $3,  24($k0)
+    ld    $4,  32($k0)
+    ld    $5,  40($k0)
+    ld    $6,  48($k0)
+    ld    $7,  56($k0)
+    ld    $8,  64($k0)
+    ld    $9,  72($k0)
+    ld    $10, 80($k0)
+    ld    $11, 88($k0)
+    ld    $12, 96($k0)
+    ld    $13, 104($k0)
+    ld    $14, 112($k0)
+    ld    $15, 120($k0)
+    ld    $16, 128($k0)
+    ld    $17, 136($k0)
+    ld    $18, 144($k0)
+    ld    $19, 152($k0)
+    ld    $20, 160($k0)
+    ld    $21, 168($k0)
+    ld    $22, 176($k0)
+    ld    $23, 184($k0)
+    ld    $24, 192($k0)
+    ld    $25, 200($k0)
+    ld    $28, 224($k0)
+    ld    $29, 232($k0)
+    ld    $30, 240($k0)
+    ld    $31, 248($k0)
+    eret
+    nop
+_exc_halt:
+    b     _exc_halt
+    nop
+    .set at
 
     /* ------------------------------------------------------------------ */
     .section .text, "ax"
@@ -77,6 +154,13 @@ reset_init:
     la   $sp, _end               /* $sp = &_end (= top of BSS) */
     addiu $sp, $sp, 0x7ff0       /* + 32752 */
     addiu $sp, $sp, 0x7ff0       /* + 32752 more  (total +65504 bytes) */
+    /* Enable 64-bit mode: set KX=1, SX=1, UX=1 in Status (bits 7:5).
+     * Hardware reset leaves these clear; we set them here so LD/SD and
+     * other 64-bit instructions are valid before entering main(). */
+    mfc0  $k0, $12
+    ori   $k0, $k0, 0xe0
+    mtc0  $k0, $12
+
     jal  main                    /* call main; $ra set to the break below */
     nop
 

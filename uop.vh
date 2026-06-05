@@ -92,10 +92,30 @@ typedef enum logic [6:0]
    DSUBU = 'd85,
    DADDIU = 'd86,
    DADDI = 'd87,
-   FETCH_MISALIGNED,   
+   LD = 'd88,
+   SD = 'd89,
+   DSLL   = 'd90,
+   DSRL   = 'd91,
+   DSRA   = 'd92,
+   DSLL32 = 'd93,
+   DSRL32 = 'd94,
+   DSRA32 = 'd95,
+   DSLLV  = 'd96,
+   DSRLV  = 'd97,
+   DSRAV  = 'd98,
+   LWU,
+   DMULT,
+   DMULTU,
+   DDIV,
+   DDIVU,
+   LDL,
+   LDR,
+   SDL,
+   SDR,
+   FETCH_MISALIGNED,
    FETCH_TLB_MISS,
    II,
-   IRQ 
+   IRQ
    } opcode_t;
 
 function logic is_mult(opcode_t op);
@@ -138,6 +158,12 @@ function logic is_store(opcode_t op);
      SWR:
        x = 1'b1;
      SWL:
+       x = 1'b1;
+     SD:
+       x = 1'b1;
+     SDL:
+       x = 1'b1;
+     SDR:
        x = 1'b1;
      default:
        x = 1'b0;

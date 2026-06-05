@@ -295,6 +295,19 @@ std::ostream &operator<<(std::ostream &out, const state_t & s);
 
 bool is_store_insn(state_t *s);
 
+/* CP0 Status register bit positions */
+#define SR_IE    (1u <<  0)  /* interrupt enable */
+#define SR_EXL   (1u <<  1)  /* exception level */
+#define SR_ERL   (1u <<  2)  /* error level */
+#define SR_UX    (1u <<  5)  /* user extended (64-bit user mode) */
+#define SR_SX    (1u <<  6)  /* supervisor extended */
+#define SR_KX    (1u <<  7)  /* kernel extended (64-bit kernel mode) */
+#define SR_BEV   (1u << 22)  /* bootstrap exception vectors */
+#define SR_CU0   (1u << 28)  /* coprocessor 0 usable */
+#define SR_CU1   (1u << 29)  /* coprocessor 1 usable (FPU) */
+#define SR_CU2   (1u << 30)  /* coprocessor 2 usable */
+#define SR_CU3   (1u << 31)  /* coprocessor 3 usable */
+
 /* CP0 register indices */
 #define CPR0_INDEX    0
 #define CPR0_RANDOM   1

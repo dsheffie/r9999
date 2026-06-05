@@ -134,7 +134,7 @@ module l1i(clk,
    localparam BTB_ENTRIES = 1 << `LG_BTB_SZ;
 
    output logic [(`M_WIDTH-1):0] mem_req_addr;
-   output logic [3:0] 			  mem_req_opcode;
+   output logic [4:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
    output logic [15:0]			  mem_req_mask;
    

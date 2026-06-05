@@ -51,6 +51,7 @@
   X(MFC1)					\
   X(MTC1)					\
   X(LW)						\
+  X(LWU)					\
   X(LB)						\
   X(LBU)					\
   X(LH)						\
@@ -82,9 +83,16 @@
   X(SWR)					\
   X(SEB)					\
   X(SEH)					\
+  X(DADD)					\
   X(DADDU)					\
+  X(DADDI)					\
   X(DADDIU)					\
+  X(DSUB)					\
   X(DSUBU)					\
+  X(DMULT)					\
+  X(DMULTU)					\
+  X(DDIV)					\
+  X(DDIVU)					\
   X(DSLL)					\
   X(DSRL)					\
   X(DSRA)					\

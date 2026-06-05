@@ -114,7 +114,7 @@ module l1d(clk,
    output logic mem_req_valid;
    output logic [(`M_WIDTH-1):0] mem_req_addr;
    output logic [L1D_CL_LEN_BITS-1:0] mem_req_store_data;
-   output logic [3:0] 			  mem_req_opcode;
+   output logic [4:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
    output logic [15:0]			  mem_req_mask;
    
@@ -159,6 +159,8 @@ module l1d(clk,
       
       swl_swr = (r.op == MEM_SWR | r.op == MEM_SWL);
       lwl_lwr = (r.op == MEM_LWR | r.op == MEM_LWL);
+      if(r.op == MEM_LDL || r.op == MEM_LDR || r.op == MEM_SDL || r.op == MEM_SDR)
+	return 16'hff << {r.addr[DWORD_START], 3'b0};
       
       b = 	(r.op == MEM_SB | r.op == MEM_LB | r.op == MEM_LBU);
       s = 	(r.op == MEM_SH | r.op == MEM_LH | r.op == MEM_LHU);
@@ -341,7 +343,7 @@ endfunction
    logic [(`M_WIDTH-1):0] r_mem_req_addr, n_mem_req_addr;
    logic [L1D_CL_LEN_BITS-1:0] r_mem_req_store_data, n_mem_req_store_data;
    
-   logic [3:0] 		       r_mem_req_opcode, n_mem_req_opcode;
+   logic [4:0] 		       r_mem_req_opcode, n_mem_req_opcode;
    logic [63:0] 	       n_cache_accesses, r_cache_accesses;
    logic [63:0] 	       n_cache_hits, r_cache_hits;
 
@@ -968,6 +970,18 @@ endfunction
 	       t_rsp_data2 = {{32{t_bswap_w32_2[31]}}, t_bswap_w32_2};
 	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
 	    end
+	  MEM_LWU:
+	    begin
+	       t_rsp_data2 = {32'd0, t_bswap_w32_2};
+	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
+	    end
+	  MEM_LD:
+	    begin
+	       t_rsp_data2 = {t_bswap_w32_2,
+			      bswap32(select_cl32(t_data2,
+			        r_req2.addr[WORD_STOP-1:WORD_START] + 2'd1))};
+	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
+	    end
 	  MEM_LWR:
 	    begin
 	       case(r_req2.addr[1:0])
@@ -1101,6 +1115,19 @@ endfunction
 	       t_rsp_data = {{32{t_bswap_w32[31]}}, t_bswap_w32};
 	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
 	    end
+	  MEM_LWU:
+	    begin
+	       t_rsp_data = {32'd0, t_bswap_w32};
+	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
+	    end
+	  MEM_LD:
+	    begin
+	       /* High word at addr, low word at addr+4 (big-endian doubleword). */
+	       t_rsp_data = {t_bswap_w32,
+			     bswap32(select_cl32(t_data,
+			       r_req.addr[WORD_STOP-1:WORD_START] + 2'd1))};
+	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
+	    end
 	  MEM_LWR:
 	    begin
 	       case(r_req.addr[1:0])
@@ -1145,6 +1172,109 @@ endfunction
 	       endcase // case (r_req.addr[1:0])
 	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;	       
 	    end // case: MEM_LWL
+	  MEM_LDL:
+	    begin
+	       /* Doubleword-aligned base: high word (MSW, lower addr) at dw_hi_idx,
+		* low word (LSW, higher addr) at dw_hi_idx+1.
+		* t_dword[63:56]=byte0(lowest addr) .. t_dword[7:0]=byte7(highest addr). */
+	       begin
+		  logic [LG_WORDS_PER_CL-1:0] t_dw_hi_idx;
+		  logic [63:0] 		       t_dword;
+		  t_dw_hi_idx = {r_req.addr[DWORD_START], 1'b0};
+		  t_dword = {bswap32(select_cl32(t_data, t_dw_hi_idx)),
+			     bswap32(select_cl32(t_data, t_dw_hi_idx + 2'd1))};
+		  case(r_req.addr[2:0])
+		    3'd0: t_rsp_data = t_dword;
+		    3'd1: t_rsp_data = {t_dword[55:0], r_req.data[7:0]};
+		    3'd2: t_rsp_data = {t_dword[47:0], r_req.data[15:0]};
+		    3'd3: t_rsp_data = {t_dword[39:0], r_req.data[23:0]};
+		    3'd4: t_rsp_data = {t_dword[31:0], r_req.data[31:0]};
+		    3'd5: t_rsp_data = {t_dword[23:0], r_req.data[39:0]};
+		    3'd6: t_rsp_data = {t_dword[15:0], r_req.data[47:0]};
+		    3'd7: t_rsp_data = {t_dword[7:0],  r_req.data[55:0]};
+		  endcase
+	       end
+	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
+	    end // case: MEM_LDL
+	  MEM_LDR:
+	    begin
+	       begin
+		  logic [LG_WORDS_PER_CL-1:0] t_dw_hi_idx;
+		  logic [63:0] 		       t_dword;
+		  t_dw_hi_idx = {r_req.addr[DWORD_START], 1'b0};
+		  t_dword = {bswap32(select_cl32(t_data, t_dw_hi_idx)),
+			     bswap32(select_cl32(t_data, t_dw_hi_idx + 2'd1))};
+		  case(r_req.addr[2:0])
+		    3'd0: t_rsp_data = {r_req.data[63:8],  t_dword[63:56]};
+		    3'd1: t_rsp_data = {r_req.data[63:16], t_dword[63:48]};
+		    3'd2: t_rsp_data = {r_req.data[63:24], t_dword[63:40]};
+		    3'd3: t_rsp_data = {r_req.data[63:32], t_dword[63:32]};
+		    3'd4: t_rsp_data = {r_req.data[63:40], t_dword[63:24]};
+		    3'd5: t_rsp_data = {r_req.data[63:48], t_dword[63:16]};
+		    3'd6: t_rsp_data = {r_req.data[63:56], t_dword[63:8]};
+		    3'd7: t_rsp_data = t_dword;
+		  endcase
+	       end
+	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
+	    end // case: MEM_LDR
+	  MEM_SDL:
+	    begin
+	       begin
+		  logic [LG_WORDS_PER_CL-1:0] t_dw_hi_idx;
+		  logic [63:0] 		       t_dword, t_sdl_merged;
+		  t_dw_hi_idx = {r_req.addr[DWORD_START], 1'b0};
+		  t_dword = {bswap32(select_cl32(t_data, t_dw_hi_idx)),
+			     bswap32(select_cl32(t_data, t_dw_hi_idx + 2'd1))};
+		  /* SDL: store rt's high bytes at positions [ma..7]; preserve mem [0..ma-1].
+		   * For ma=k: merged = {t_dword[63:64-k*8], data[63:k*8]}
+		   * (top k bytes from memory, bottom (8-k) bytes = data shifted right k bytes). */
+		  case(r_req.addr[2:0])
+		    3'd0: t_sdl_merged = r_req.data;
+		    3'd1: t_sdl_merged = {t_dword[63:56], r_req.data[63:8]};
+		    3'd2: t_sdl_merged = {t_dword[63:48], r_req.data[63:16]};
+		    3'd3: t_sdl_merged = {t_dword[63:40], r_req.data[63:24]};
+		    3'd4: t_sdl_merged = {t_dword[63:32], r_req.data[63:32]};
+		    3'd5: t_sdl_merged = {t_dword[63:24], r_req.data[63:40]};
+		    3'd6: t_sdl_merged = {t_dword[63:16], r_req.data[63:48]};
+		    3'd7: t_sdl_merged = {t_dword[63:8],  r_req.data[63:56]};
+		  endcase
+		  t_array_data = merge_cl32(
+		     merge_cl32(t_data,
+				bswap32(t_sdl_merged[63:32]),
+				t_dw_hi_idx),
+		     bswap32(t_sdl_merged[31:0]),
+		     t_dw_hi_idx + 2'd1);
+	       end
+	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);
+	    end // case: MEM_SDL
+	  MEM_SDR:
+	    begin
+	       begin
+		  logic [LG_WORDS_PER_CL-1:0] t_dw_hi_idx;
+		  logic [63:0] 		       t_dword, t_sdr_merged;
+		  t_dw_hi_idx = {r_req.addr[DWORD_START], 1'b0};
+		  t_dword = {bswap32(select_cl32(t_data, t_dw_hi_idx)),
+			     bswap32(select_cl32(t_data, t_dw_hi_idx + 2'd1))};
+		  /* SDR: store rt's low bytes at positions [0..ma]; preserve mem [ma+1..7] */
+		  case(r_req.addr[2:0])
+		    3'd0: t_sdr_merged = {r_req.data[7:0],  t_dword[55:0]};
+		    3'd1: t_sdr_merged = {r_req.data[15:0], t_dword[47:0]};
+		    3'd2: t_sdr_merged = {r_req.data[23:0], t_dword[39:0]};
+		    3'd3: t_sdr_merged = {r_req.data[31:0], t_dword[31:0]};
+		    3'd4: t_sdr_merged = {r_req.data[39:0], t_dword[23:0]};
+		    3'd5: t_sdr_merged = {r_req.data[47:0], t_dword[15:0]};
+		    3'd6: t_sdr_merged = {r_req.data[55:0], t_dword[7:0]};
+		    3'd7: t_sdr_merged = r_req.data;
+		  endcase
+		  t_array_data = merge_cl32(
+		     merge_cl32(t_data,
+				bswap32(t_sdr_merged[63:32]),
+				t_dw_hi_idx),
+		     bswap32(t_sdr_merged[31:0]),
+		     t_dw_hi_idx + 2'd1);
+	       end
+	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);
+	    end // case: MEM_SDR
 	  MEM_SB:
 	    begin
 	       case(r_req.addr[1:0])
@@ -1186,7 +1316,17 @@ endfunction
 	    begin
 	       t_array_data = merge_cl32(t_data, bswap32(r_req.data[31:0]), r_req.addr[WORD_STOP-1:WORD_START]);
 	       //t_wr_array = t_hit_cache && t_can_release_store;
-	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);	       
+	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);
+	    end
+	  MEM_SD:
+	    begin
+	       /* High word at addr, low word at addr+4 (big-endian doubleword). */
+	       t_array_data = merge_cl32(
+		  merge_cl32(t_data, bswap32(r_req.data[63:32]),
+		    r_req.addr[WORD_STOP-1:WORD_START]),
+		  bswap32(r_req.data[31:0]),
+		  r_req.addr[WORD_STOP-1:WORD_START] + 2'd1);
+	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);
 	    end
 	  MEM_SC:
 	    begin
@@ -1469,13 +1609,14 @@ endfunction
 			 n_core_mem_rsp_valid = 1'b1;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 		      end // if (r_req2.is_store)
-		    else if(r_req2.op == MEM_LWL || r_req2.op == MEM_LWR)
+		    else if(r_req2.op == MEM_LWL || r_req2.op == MEM_LWR ||
+			    r_req2.op == MEM_LDL || r_req2.op == MEM_LDR)
 		      begin
 			 t_push_miss = 1'b1;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
 			 n_core_mem_rsp.tlb_index = w_tlb_index;
-		      end		    
+		      end
 		    else if(t_port2_hit_cache && !r_hit_busy_addr2)
 		      begin
 `ifdef VERBOSE_L1D
@@ -1675,7 +1816,8 @@ endfunction
 				 t_force_clear_busy = 1'b1;
 			      end
 			 end // if (t_mem_head.is_store)
-		       else if(t_mem_head.op == MEM_LWL || t_mem_head.op == MEM_LWR)
+		       else if(t_mem_head.op == MEM_LWL || t_mem_head.op == MEM_LWR ||
+			       t_mem_head.op == MEM_LDL || t_mem_head.op == MEM_LDR)
 			 begin
 			    if((core_store_data_valid ? (t_mem_head.rob_ptr == core_store_data.rob_ptr) : 1'b0) || drain_ds_complete)
 			      begin

@@ -113,14 +113,47 @@ static void _movzd(uint32_t inst, state_t *s);
 static void _movzs(uint32_t inst, state_t *s);
 
 void initState(state_t *s) {
-  /* Status: KUo (bit 2) + BEV=1 (bit 22, bootstrap exception vectors) */
-  s->cpr0[CPR0_SR] |= (1<<2) | (1<<22);
+  /* Matches the RTL's cpr0_status_reg reset in exec.sv. */
+  s->cpr0[CPR0_SR] |= SR_ERL | SR_BEV | SR_CU0 | SR_CU1 | SR_CU2;
   /* Random starts at max TLB index; it cycles downward to Wired */
   s->cpr0[CPR0_RANDOM] = state_t::NUM_TLB_ENTRIES - 1;
   /* PRId: R4000 compatible (Company=0, Product=0x04, Rev=0x00) */
   s->cpr0[CPR0_PRID] = 0x00000400;
   /* Config: return the same constant as the RTL (cache geometry) */
   s->cpr0[CPR0_CONFIG] = 0x00088200;
+}
+
+/* Raise MIPS Reserved Instruction exception (ExcCode=10).
+ * Called by the interpreter when it encounters an unimplemented opcode.
+ * Sets EPC/Cause/Status and redirects the interpreter to the exception
+ * vector so execution follows the bare-metal exc_handler path. */
+/* Sign-extend a 32-bit value to 64-bit, matching MIPS hardware behaviour
+ * for registers and PC values where bit 31 indicates kernel address space. */
+static inline state_t::reg_t sext32(uint32_t v) {
+  return (state_t::reg_t)(int64_t)(int32_t)v;
+}
+
+static void raise_adel(state_t *s) {
+  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (4u << 2);
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->pc = sext32(0xBFC00180u);
+}
+
+static void raise_ades(state_t *s) {
+  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (5u << 2);
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->pc = sext32(0xBFC00180u);
+}
+
+static void raise_ri(state_t *s, uint32_t inst) {
+  fprintf(stderr, "unimplemented: opcode=0x%02x funct=0x%02x @ pc=0x%08x\n",
+          inst >> 26, inst & 0x3fu, (uint32_t)s->pc);
+  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (10u << 2);
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->pc = sext32(0xBFC00180u);
 }
 
 static uint32_t getConditionCode(state_t *s, uint32_t cc) {
@@ -436,7 +469,7 @@ void branch(uint32_t inst, state_t *s) {
     execMips<EL>(s);
     if(takeBranch){
       if(saveReturn) {
-	s->gpr[31] = npc + 4;
+	s->gpr[31] = sext32((uint32_t)(npc + 4));
       }
       s->pc = (imm+npc);
     }
@@ -477,6 +510,7 @@ void _lw(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 3) { raise_adel(s); return; }
   s->gpr[rt] = bswap<EL>(s->mem.get<int32_t>(ea));
   //#define TRACE_MEM
   //printf("_lw pc %x from ea %x = %x\n", s->pc, (uint32_t)s->gpr[rs] + imm,
@@ -492,8 +526,9 @@ void _lh(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  
+
   uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 1) { raise_adel(s); return; }
   int16_t mem = bswap<EL>(s->mem.get<int16_t>(ea));
   
   s->gpr[rt] = static_cast<int32_t>(mem);
@@ -540,8 +575,9 @@ void _lhu(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  
+
   uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 1) { raise_adel(s); return; }
   uint32_t zExt = bswap<EL>(s->mem.get<uint16_t>(ea));
   *((uint64_t*)&(s->gpr[rt])) = zExt;
   //printf("_lhu from %x = %x\n", ea, s->gpr[rt]);  
@@ -556,11 +592,35 @@ void _sw(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  //printf("store %x to %x\n", s->gpr[rt], s->gpr[rs] + imm);  
   uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 3) { raise_ades(s); return; }
   s->mem.set<int32_t>(ea,  bswap<EL>(static_cast<int32_t>(s->gpr[rt])));
   s->pc += 4;
   s->insn_histo[mipsInsn::SW]++;
+}
+
+template <bool EL>
+void _sd(uint32_t inst, state_t *s) {
+  uint32_t rt = (inst >> 16) & 31;
+  uint32_t rs = (inst >> 21) & 31;
+  int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 7) { raise_ades(s); return; }
+  s->mem.set<int64_t>(ea, bswap<EL>(s->gpr[rt]));
+  s->pc += 4;
+  s->insn_histo[mipsInsn::SD]++;
+}
+
+template <bool EL>
+void _ld(uint32_t inst, state_t *s) {
+  uint32_t rt = (inst >> 16) & 31;
+  uint32_t rs = (inst >> 21) & 31;
+  int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 7) { raise_adel(s); return; }
+  s->gpr[rt] = bswap<EL>(s->mem.get<int64_t>(ea));
+  s->pc += 4;
+  s->insn_histo[mipsInsn::LD]++;
 }
 
 template <bool EL>
@@ -585,9 +645,10 @@ void _sh(uint32_t inst, state_t *s) {
   int32_t imm = (int32_t)himm;
     
   uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 1) { raise_ades(s); return; }
   s->mem.set<int16_t>(ea,  bswap<EL>(((int16_t)s->gpr[rt])));
   s->pc += 4;
-  s->insn_histo[mipsInsn::SH]++;  
+  s->insn_histo[mipsInsn::SH]++;
 }
 
 static void _sb(uint32_t inst, state_t *s) {
@@ -749,6 +810,107 @@ void _lwr(uint32_t inst, state_t *s) {
   
   s->pc += 4;
   s->insn_histo[mipsInsn::LWR]++;
+}
+
+template <bool EL>
+void _ldl(uint32_t inst, state_t *s) {
+  uint32_t rt = (inst >> 16) & 31;
+  uint32_t rs = (inst >> 21) & 31;
+  int32_t imm = (int32_t)(int16_t)(inst & 0xffff);
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ma = ea & 7;
+  ea &= ~7u;
+  if(EL) ma = 7 - ma;
+  uint64_t r = bswap<EL>(s->mem.get<uint64_t>(ea));
+  uint64_t x = s->gpr[rt];
+  /* Load (8-ma) bytes from positions [ma..7] of aligned dword into rt[63:ma*8].
+   * In BE: r[63:56]=pos0, r[7:0]=pos7.  Bytes [ma..7] = r[(8-ma)*8-1:0].
+   * Shift them left by ma*8 to place at rt[63:ma*8]. */
+  switch(ma) {
+    case 0: s->gpr[rt] = r; break;
+    case 1: s->gpr[rt] = (r & 0x00ffffffffffffffULL) << 8  | (x & 0xffULL); break;
+    case 2: s->gpr[rt] = (r & 0x0000ffffffffffffULL) << 16 | (x & 0xffffULL); break;
+    case 3: s->gpr[rt] = (r & 0x000000ffffffffffULL) << 24 | (x & 0xffffffULL); break;
+    case 4: s->gpr[rt] = (r & 0x00000000ffffffffULL) << 32 | (x & 0xffffffffULL); break;
+    case 5: s->gpr[rt] = (r & 0x0000000000ffffffULL) << 40 | (x & 0xffffffffffULL); break;
+    case 6: s->gpr[rt] = (r & 0x000000000000ffffULL) << 48 | (x & 0xffffffffffffULL); break;
+    case 7: s->gpr[rt] = (r & 0x00000000000000ffULL) << 56 | (x & 0x00ffffffffffffffULL); break;
+  }
+  s->pc += 4;
+  s->insn_histo[mipsInsn::LDL]++;
+}
+
+template <bool EL>
+void _ldr(uint32_t inst, state_t *s) {
+  uint32_t rt = (inst >> 16) & 31;
+  uint32_t rs = (inst >> 21) & 31;
+  int32_t imm = (int32_t)(int16_t)(inst & 0xffff);
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ma = ea & 7;
+  ea &= ~7u;
+  if(EL) ma = 7 - ma;
+  uint64_t r = bswap<EL>(s->mem.get<uint64_t>(ea));
+  uint64_t x = s->gpr[rt];
+  /* Load (ma+1) bytes from positions [0..ma] of aligned dword into rt[(ma+1)*8-1:0].
+   * Bytes [0..ma] = r[63:63-ma*8].  Shift right by (7-ma)*8 to place at rt[(ma+1)*8-1:0]. */
+  switch(ma) {
+    case 0: s->gpr[rt] = (x & 0xffffffffffffff00ULL) | (r >> 56); break;
+    case 1: s->gpr[rt] = (x & 0xffffffffffff0000ULL) | (r >> 48); break;
+    case 2: s->gpr[rt] = (x & 0xffffffffff000000ULL) | (r >> 40); break;
+    case 3: s->gpr[rt] = (x & 0xffffffff00000000ULL) | (r >> 32); break;
+    case 4: s->gpr[rt] = (x & 0xffffff0000000000ULL) | (r >> 24); break;
+    case 5: s->gpr[rt] = (x & 0xffff000000000000ULL) | (r >> 16); break;
+    case 6: s->gpr[rt] = (x & 0xff00000000000000ULL) | (r >>  8); break;
+    case 7: s->gpr[rt] = r; break;
+  }
+  s->pc += 4;
+  s->insn_histo[mipsInsn::LDR]++;
+}
+
+template <bool EL>
+void _sdl(uint32_t inst, state_t *s) {
+  uint32_t rt = (inst >> 16) & 31;
+  uint32_t rs = (inst >> 21) & 31;
+  int32_t imm = (int32_t)(int16_t)(inst & 0xffff);
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ma = ea & 7;
+  ea &= ~7u;
+  if(EL) ma = 7 - ma;
+  uint64_t r = bswap<EL>(s->mem.get<uint64_t>(ea));
+  uint64_t x = s->gpr[rt];
+  /* SDL: store x's high (8-ma) bytes at memory positions [ma..7];
+   * preserve memory positions [0..ma-1].
+   * xs = x >> (ma*8) places x[63:ma*8] at bits [63-ma*8:0].
+   * m masks the top ma bytes to preserve from memory. */
+  uint64_t xs = x >> (8 * ma);
+  uint64_t m  = (ma == 0) ? 0ULL : (-(1ULL << (8 * (8 - ma))));
+  uint64_t merged = (r & m) | xs;
+  s->mem.set<uint64_t>(ea, bswap<EL>(merged));
+  s->pc += 4;
+  s->insn_histo[mipsInsn::SDL]++;
+}
+
+template <bool EL>
+void _sdr(uint32_t inst, state_t *s) {
+  uint32_t rt = (inst >> 16) & 31;
+  uint32_t rs = (inst >> 21) & 31;
+  int32_t imm = (int32_t)(int16_t)(inst & 0xffff);
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ma = ea & 7;
+  ea &= ~7u;
+  if(EL) ma = 7 - ma;
+  uint64_t r = bswap<EL>(s->mem.get<uint64_t>(ea));
+  uint64_t x = s->gpr[rt];
+  /* SDR: store x's low (ma+1) bytes at memory positions [0..ma];
+   * preserve memory positions [ma+1..7].
+   * Shift x left by (7-ma)*8 to align x's low bytes to the high positions.
+   * rm masks the low bytes to preserve from memory. */
+  uint32_t xs_bits = 8 * (7 - ma);
+  uint64_t rm = (xs_bits == 0) ? 0ULL : ((1ULL << xs_bits) - 1);
+  uint64_t merged = (x << xs_bits) | (rm & r);
+  s->mem.set<uint64_t>(ea, bswap<EL>(merged));
+  s->pc += 4;
+  s->insn_histo[mipsInsn::SDR]++;
 }
 
 static inline char* get_open_string(sparse_mem &mem, uint32_t offset) {
@@ -1440,7 +1602,7 @@ void execMips(state_t *s) {
       }
       case 0x09: { /* jalr */
 	state_t::reg_t jaddr = s->gpr[rs];
-	s->gpr[31] = s->pc+8;
+	s->gpr[31] = sext32((uint32_t)(s->pc + 8));
 	s->pc += 4;
 	execMips<EL>(s);
 	s->pc = jaddr;
@@ -1515,6 +1677,39 @@ void execMips(state_t *s) {
 	}
 	s->pc += 4;
 	s->insn_histo[mipsInsn::DIVU]++;
+	break;
+      case 0x1C: { /* dmult: signed 64x64 -> 128, hi:lo */
+	__int128 y = (__int128)s->gpr[rs] * (__int128)s->gpr[rt];
+	s->lo = (int64_t)(y & 0xffffffffffffffffULL);
+	s->hi = (int64_t)(y >> 64);
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DMULT]++;
+	break;
+      }
+      case 0x1D: { /* dmultu: unsigned 64x64 -> 128, hi:lo */
+	unsigned __int128 y = (unsigned __int128)(uint64_t)s->gpr[rs]
+	                    * (unsigned __int128)(uint64_t)s->gpr[rt];
+	s->lo = (int64_t)(y & 0xffffffffffffffffULL);
+	s->hi = (int64_t)(uint64_t)(y >> 64);
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DMULTU]++;
+	break;
+      }
+      case 0x1E: /* ddiv: signed 64-bit divide */
+	if(s->gpr[rt] != 0) {
+	  s->lo = s->gpr[rs] / s->gpr[rt];
+	  s->hi = s->gpr[rs] % s->gpr[rt];
+	}
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DDIV]++;
+	break;
+      case 0x1F: /* ddivu: unsigned 64-bit divide */
+	if(s->gpr[rt] != 0) {
+	  s->lo = (int64_t)((uint64_t)s->gpr[rs] / (uint64_t)s->gpr[rt]);
+	  s->hi = (int64_t)((uint64_t)s->gpr[rs] % (uint64_t)s->gpr[rt]);
+	}
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DDIVU]++;
 	break;
       case 0x20: /* add */
 	s->gpr[rd] = s->gpr[rs] + s->gpr[rt];
@@ -1593,10 +1788,73 @@ void execMips(state_t *s) {
 	s->pc += 4;
 	s->insn_histo[mipsInsn::TEQ]++;
 	break;
+      case 0x2C: /* dadd */
+	s->gpr[rd] = s->gpr[rs] + s->gpr[rt];
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DADD]++;
+	break;
+      case 0x2D: /* daddu */
+	s->gpr[rd] = s->gpr[rs] + s->gpr[rt];
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DADDU]++;
+	break;
+      case 0x2E: /* dsub */
+	s->gpr[rd] = s->gpr[rs] - s->gpr[rt];
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSUB]++;
+	break;
+      case 0x2F: /* dsubu */
+	s->gpr[rd] = s->gpr[rs] - s->gpr[rt];
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSUBU]++;
+	break;
+      case 0x14: /* dsllv: rd = rt << rs[5:0] */
+	s->gpr[rd] = s->gpr[rt] << (s->gpr[rs] & 63);
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSLLV]++;
+	break;
+      case 0x16: /* dsrlv: rd = rt >> rs[5:0] (logical) */
+	s->gpr[rd] = (int64_t)((uint64_t)s->gpr[rt] >> (s->gpr[rs] & 63));
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSRLV]++;
+	break;
+      case 0x17: /* dsrav: rd = rt >> rs[5:0] (arithmetic) */
+	s->gpr[rd] = s->gpr[rt] >> (s->gpr[rs] & 63);
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSRAV]++;
+	break;
+      case 0x38: /* dsll: rd = rt << sa */
+	s->gpr[rd] = s->gpr[rt] << sa;
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSLL]++;
+	break;
+      case 0x3A: /* dsrl: rd = rt >> sa (logical) */
+	s->gpr[rd] = (int64_t)((uint64_t)s->gpr[rt] >> sa);
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSRL]++;
+	break;
+      case 0x3B: /* dsra: rd = rt >> sa (arithmetic) */
+	s->gpr[rd] = s->gpr[rt] >> sa;
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSRA]++;
+	break;
+      case 0x3C: /* dsll32: rd = rt << (sa + 32) */
+	s->gpr[rd] = s->gpr[rt] << (sa + 32);
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSLL32]++;
+	break;
+      case 0x3E: /* dsrl32: rd = rt >> (sa + 32) (logical) */
+	s->gpr[rd] = (int64_t)((uint64_t)s->gpr[rt] >> (sa + 32));
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSRL32]++;
+	break;
+      case 0x3F: /* dsra32: rd = rt >> (sa + 32) (arithmetic) */
+	s->gpr[rd] = s->gpr[rt] >> (sa + 32);
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DSRA32]++;
+	break;
       default:
-	printf("%sunknown RType instruction %x, funct = %d%s\n", 
-	       KRED, s->pc, funct, KNRM);
-	exit(-1);
+	raise_ri(s, inst);
 	break;
       }
   }
@@ -1612,7 +1870,7 @@ void execMips(state_t *s) {
       s->insn_histo[mipsInsn::J]++;
     }
     else if(opcode==0x3) { /* jal */
-      s->gpr[31] = s->pc+8;
+      s->gpr[31] = sext32((uint32_t)(s->pc + 8));
       s->pc += 4;
       s->insn_histo[mipsInsn::JAL]++;
     }
@@ -1695,14 +1953,14 @@ void execMips(state_t *s) {
 	  break;
 	}
 	case 24: { /* ERET -- exception return */
-	  if(s->cpr0[CPR0_SR] & (1u << 2)) { /* ERL=1 */
+	  if(s->cpr0[CPR0_SR] & SR_ERL) {
 	    /* Return from error: EPC = ErrorEPC, clear ERL */
 	    s->pc = (int32_t)s->cpr0[CPR0_ERROREPC] - 4;
-	    s->cpr0[CPR0_SR] &= ~(1u << 2);
+	    s->cpr0[CPR0_SR] &= ~SR_ERL;
 	  } else {
 	    /* Return from exception: PC = EPC, clear EXL */
 	    s->pc = (int32_t)s->cpr0[CPR0_EPC] - 4;
-	    s->cpr0[CPR0_SR] &= ~(1u << 1);
+	    s->cpr0[CPR0_SR] &= ~SR_EXL;
 	  }
 	  s->insn_histo[mipsInsn::ERET]++;
 	  break;
@@ -1743,10 +2001,10 @@ void execMips(state_t *s) {
 	{
 	case 0x0: /*mfc0*/
 	  if(rd == 7) {
-	    /* putchar FIFO full status -- always empty in interpreter */
 	    s->gpr[rt] = 0;
 	  } else {
-	    s->gpr[rt] = s->cpr0[rd];
+	    /* mfc0 sign-extends the 32-bit CP0 value to 64 bits, matching HW. */
+	    s->gpr[rt] = sext32(s->cpr0[rd]);
 	  }
 	  s->insn_histo[mipsInsn::MFC0]++;
 	  break;
@@ -1853,7 +2111,18 @@ void execMips(state_t *s) {
 	branch<EL,branch_type::bnel>(inst, s); 
 	break;
       case 0x17:
-	branch<EL,branch_type::bgtzl>(inst, s); 
+	branch<EL,branch_type::bgtzl>(inst, s);
+	break;
+      case 0x19: /* daddiu */
+	s->gpr[rt] = s->gpr[rs] + simm32;
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DADDIU]++;
+	break;
+      case 0x1a:
+	_ldl<EL>(inst, s);
+	break;
+      case 0x1b:
+	_ldr<EL>(inst, s);
 	break;
       case 0x20:
 	_lb(inst, s);
@@ -1865,11 +2134,22 @@ void execMips(state_t *s) {
 	_lwl<EL>(inst, s);
 	break;
       case 0x23:
-	_lw<EL>(inst, s); 
+	_lw<EL>(inst, s);
 	break;
       case 0x24:
 	_lbu(inst, s);
 	break;
+      case 0x27: { /* lwu: load word unsigned (zero-extend to 64 bits) */
+	uint32_t rs_ = (inst >> 21) & 31;
+	uint32_t rt_ = (inst >> 16) & 31;
+	int32_t imm  = (int32_t)(int16_t)(inst & 0xffffu);
+	uint32_t ea  = va2pa(s->gpr[rs_] + imm);
+	if(ea & 3) { raise_adel(s); break; }
+	s->gpr[rt_] = (uint64_t)(uint32_t)bswap<EL>(s->mem.get<int32_t>(ea));
+	s->pc += 4;
+	s->insn_histo[mipsInsn::LWU]++;
+	break;
+      }
       case 0x25:
 	_lhu<EL>(inst, s);
 	break;
@@ -1883,10 +2163,16 @@ void execMips(state_t *s) {
 	_sh<EL>(inst, s); 
 	break;
       case 0x2a:
-	_swl<EL>(inst, s); 
+	_swl<EL>(inst, s);
 	break;
       case 0x2B:
-	_sw<EL>(inst, s); 
+	_sw<EL>(inst, s);
+	break;
+      case 0x2c:
+	_sdl<EL>(inst, s);
+	break;
+      case 0x2d:
+	_sdr<EL>(inst, s);
 	break;
       case 0x2e:
 	_swr<EL>(inst, s); 
@@ -1903,13 +2189,17 @@ void execMips(state_t *s) {
       case 0x39:
 	_swc1<EL>(inst, s);
 	break;
+      case 0x37:
+	_ld<EL>(inst, s);
+	break;
       case 0x3D:
 	_sdc1<EL>(inst, s);
 	break;
+      case 0x3F:
+	_sd<EL>(inst, s);
+	break;
       default:
-	printf("%s: Unknown IType instruction (bits=%x) @ pc=0x%08x\n", 
-	       __func__, inst, s ? s->pc : 0);
-	exit(-1);
+	raise_ri(s, inst);
 	break;
       }
   }

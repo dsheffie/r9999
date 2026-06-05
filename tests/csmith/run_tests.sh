@@ -55,11 +55,9 @@ QEMU=qemu-mips-static
 
 CSMITH_FLAGS="--no-float --no-builtins --concise --max-block-depth 3"
 
-BM_FLAGS="-mxgot -ffreestanding -O1 -mips3 -mno-branch-likely"
+BM_FLAGS="-mxgot -ffreestanding -O1 -mips3 -mno-branch-likely -mabi=n32 -mno-abicalls"
 BM_DEFS="-D printf=printf_ -D _FORTIFY_SOURCE=0 -D WRAP_VOLATILES=1"
-# MIPS Linux reference: same ISA and ABI as the bare-metal binary, so
-# architecture-specific behavior (bit-field layout, integer types) matches.
-# Compiled as a static MIPS binary and run under qemu-mips-static.
+# Reference: O32 Linux binary; integer type sizes match N32 so checksums agree.
 REF_FLAGS="-O1 -static"
 
 # ---------------------------------------------------------------------------
@@ -176,7 +174,7 @@ worker() {
     # ---- Step 3: Bare-metal MIPS on r9999 simulator ----------------------
     $CC $BM_FLAGS $BM_DEFS -I"$CSMITH_INC" -I"$HELLO" \
         -w -nostdlib "$src" $SUPPORT_OBJS \
-        -T "$HELLO/baremetal.ld" -o "$elf" 2>/dev/null \
+        -T "$HELLO/baremetal.ld" -Wl,-melf32btsmipn32 -o "$elf" 2>/dev/null \
         || { echo SKIP > "$SHARED/r$id"; return; }
 
     local sim_raw sim_out
