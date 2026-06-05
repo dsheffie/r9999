@@ -454,7 +454,7 @@ int main(int argc, char **argv) {
   // Create an instance of our module under test
    //Vcore_l1d_l1i *tb = new Vcore_l1d_l1i;
   std::unique_ptr<Vcore_l1d_l1i> tb(new Vcore_l1d_l1i);
-  uint32_t last_match_pc = 0;
+  state_t::reg_t last_match_pc = 0;
   uint64_t last_retire = 0, last_check = 0, last_restart = 0;
   uint64_t last_retired_pc = 0, last_retired_fp_pc = 0;
   uint64_t mismatches = 0, n_stores = 0, n_loads = 0;
@@ -646,7 +646,7 @@ int main(int argc, char **argv) {
 	  // }
 
 	  bool diverged = false;
-	  if((uint32_t)ss->pc == ((uint32_t)tb->retire_pc + 4)) {
+	  if((state_t::reg_t)ss->pc == ((state_t::reg_t)tb->retire_pc + 4)) {
 	    for(int i = 0; i < 32; i++) {
 	      if((ss->gpr[i] != s->gpr[i])) {
 		int wrong_bits = __builtin_popcount(ss->gpr[i] ^ s->gpr[i]);
@@ -720,52 +720,90 @@ int main(int argc, char **argv) {
 	  last_match_pc =  tb->retire_pc; 
 	}
 	else {
-	  ++last_check;
-	  /* Peek at the pending checker instruction.  If it is BREAK or
-	   * SYSCALL the RTL has entered exception/halt mode and the
-	   * simulation is effectively over -- terminate cleanly. */
-	  {
-	    uint32_t pending = bswap<IS_LITTLE_ENDIAN>(
-	      ss->mem.get<uint32_t>(va2pa((uint32_t)ss->pc)));
-	    uint32_t pend_op   = pending >> 26;
-	    uint32_t pend_func = pending & 63;
-	    if(pend_op == 0 && (pend_func == 0x0C || pend_func == 0x0D)) {
-	      /* BREAK or SYSCALL is the next checker instruction */
+	  /* When the RTL takes an exception (retiring instructions from the
+	   * exception handler at bfc00180-bfc003ff) while the sim is still
+	   * at the faulting instruction in non-ROM code, advance the sim to
+	   * execute the fault and re-sync.  All other mismatches (e.g. a
+	   * normal branch delay slot) are handled by the original last_check
+	   * counter. */
+	  uint32_t rtl_pc32 = (uint32_t)tb->retire_pc;
+	  uint32_t sim_pc32 = (uint32_t)ss->pc;
+	  bool rtl_in_exc_handler = (rtl_pc32 >= 0xbfc00180u &&
+				     rtl_pc32 <  0xbfc00400u);
+	  /* "sim in user code" = sim is not in the entire bfc00xxx ROM area */
+	  bool sim_in_user_code   = !(sim_pc32 >= 0xbfc00000u &&
+				      sim_pc32 <  0xbfc00400u);
+	  bool caught_up = false;
+
+	  if(rtl_in_exc_handler && sim_in_user_code) {
+	    /* Advance the sim past the faulting instruction (which raises the
+	     * exception and sets sim->pc to bfc00180).  If it now matches the
+	     * retiring handler PC, advance one more step to restore the
+	     * normal invariant: ss->pc == next_retire_pc. */
+	    execMips(ss);
+	    if(ss->brk) {
 	      break;
 	    }
-	  }
-	  if(last_check > 2) {
-	    uint32_t linsn = bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(last_match_pc));
-	    std::cerr << "no match in a while, last match : "
-		      << std::hex
-		      << last_match_pc
-		      << " "
-		      << getAsmString(linsn, last_match_pc)
-		      << ", rtl pc =" << std::hex << (uint32_t)tb->retire_pc
-		      << ", sim pc =" << std::hex << (uint32_t)ss->pc
-		      << std::dec
-		      <<"\n";
-	    for(int i = 0; i < 32; i+=4) {
-	      std::cout << "reg "
-			<< getGPRName(i)
-			<< " = "
-			<< std::hex
-			<< s->gpr[i]
-			<< " reg "
-			<< getGPRName(i+1)
-			<< " = "
-			<< s->gpr[i+1]
-			<< " reg "
-			<< getGPRName(i+2)
-			<< " = "
-			<< s->gpr[i+2]
-			<< " reg "
-			<< getGPRName(i+3)
-			<< " = "
-			<< s->gpr[i+3]
-			<< std::dec <<"\n";
+	    if((uint32_t)tb->retire_pc == (uint32_t)ss->pc) {
+	      execMips(ss);
+	      if(ss->brk) {
+		break;
+	      }
+	      ++n_checks;
+	      last_check = 0;
+	      last_match_pc = tb->retire_pc;
+	      caught_up = true;
 	    }
-	    break;
+	  }
+
+	  if(!caught_up) {
+	    ++last_check;
+	    /* Peek at the pending checker instruction.  If it is BREAK or
+	     * SYSCALL the RTL has entered exception/halt mode and the
+	     * simulation is effectively over -- terminate cleanly. */
+	    {
+	      uint32_t pending = bswap<IS_LITTLE_ENDIAN>(
+		ss->mem.get<uint32_t>(va2pa((uint32_t)ss->pc)));
+	      uint32_t pend_op   = pending >> 26;
+	      uint32_t pend_func = pending & 63;
+	      if(pend_op == 0 && (pend_func == 0x0C || pend_func == 0x0D)) {
+		/* BREAK or SYSCALL is the next checker instruction */
+		break;
+	      }
+	    }
+	    if(last_check > 2) {
+	      uint32_t linsn = bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(last_match_pc));
+	      std::cerr << "no match in a while, last match : "
+		        << std::hex
+		        << last_match_pc
+		        << " "
+		        << getAsmString(linsn, last_match_pc)
+		        << ", rtl pc =" << std::hex << (uint32_t)tb->retire_pc
+		        << ", sim pc =" << std::hex << (uint32_t)ss->pc
+		        << std::dec
+		        <<"\n";
+	      for(int i = 0; i < 32; i+=4) {
+		std::cout << "reg "
+			  << getGPRName(i)
+			  << " = "
+			  << std::hex
+			  << s->gpr[i]
+			  << " reg "
+			  << getGPRName(i+1)
+			  << " = "
+			  << s->gpr[i+1]
+			  << " reg "
+			  << getGPRName(i+2)
+			  << " = "
+			  << s->gpr[i+2]
+			  << " reg "
+			  << getGPRName(i+3)
+			  << " = "
+			  << s->gpr[i+3]
+			  << std::dec <<"\n";
+	      }
+	      break;
+	    }
 	  }
 	}
       }

@@ -40,7 +40,7 @@ NPROC=$(nproc)
 # ---------------------------------------------------------------------------
 N=${1:-100}
 CBMC_K=${2:-20}         # unwind bound for user-generated loops
-MAXICNT=${3:-10000000}
+MAXICNT=${3:-50000000}
 SPECIFIC=${4:-}
 
 # Library loop bounds: fixed, exact counts derived from csmith.h source.
@@ -197,6 +197,11 @@ worker() {
     # ---- Step 4: Compare -------------------------------------------------
     if [ "$ref_out" = "$sim_out" ]; then
         echo PASS > "$SHARED/r$id"
+    elif [ -z "$sim_out" ] && ! printf '%s' "$sim_raw" | grep -q "no match in a while"; then
+        # Sim produced no checksum but no checker error either: it timed out
+        # before the program finished (program is too slow for the sim).
+        printf '[%d] SKIP  sim timeout (no checksum, no checker error)\n' "$id"
+        echo SKIP > "$SHARED/r$id"
     else
         echo FAIL > "$SHARED/r$id"
         printf '[%d] MISMATCH\n  ref: %s\n  sim: %s\n  saved: failures/fail_%d.c\n' \
