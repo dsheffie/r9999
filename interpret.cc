@@ -156,6 +156,13 @@ static void raise_ri(state_t *s, uint32_t inst) {
   s->pc = sext32(0xBFC00180u);
 }
 
+static void raise_trap(state_t *s) {
+  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (13u << 2);
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->pc = sext32(0xBFC00180u);
+}
+
 static uint32_t getConditionCode(state_t *s, uint32_t cc) {
   return ((s->fcr1[CP1_CR25] & (1U<<cc)) >> cc) & 0x1;
 }
@@ -1782,8 +1789,8 @@ void execMips(state_t *s) {
 	break;
       case 0x34: /* teq */
 	if(s->gpr[rs] == s->gpr[rt]) {
-	  printf("teq trap!!!!!\n");
-	  exit(-1);
+	  raise_trap(s);
+	  return;
 	}
 	s->pc += 4;
 	s->insn_histo[mipsInsn::TEQ]++;

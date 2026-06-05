@@ -2324,18 +2324,18 @@ module core(clk,
 	//if(t_push_dq_one)
 	//$display("decoded %x to uop %d", t_dec_uop.pc, t_dec_uop.op);
 	//if(t_push_dq_two)
-	//$display("decoded %x to uop %d", t_dec_uop2.pc, t_dec_uop2.op);	
+	//$display("decoded %x to uop %d", t_dec_uop2.pc, t_dec_uop2.op);
 
     	if(insn_ack && insn_ack_two && 1'b0)
     	  begin
-    	     $display("ack two insns in cycle %d, valid %b, %b, pc %x %x", 
+    	     $display("ack two insns in cycle %d, valid %b, %b, pc %x %x",
     		      r_cycle, insn_valid, insn_valid_two,
    		      insn.pc, insn_two.pc);
     	  end
     	else if(insn_ack && !insn_ack_two && 1'b0)
     	  begin
-    	     $display("ack one insn in cycle %d, valid %b, pc %x ", 
-    		      r_cycle, insn_valid, 
+    	     $display("ack one insn in cycle %d, valid %b, pc %x ",
+    		      r_cycle, insn_valid,
     		      insn.pc);
     	  end
      end

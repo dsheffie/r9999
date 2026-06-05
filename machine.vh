@@ -25,7 +25,7 @@
 
 `define LG_PRF_ENTRIES 6
 
-`define LG_HILO_PRF_ENTRIES 2
+`define LG_HILO_PRF_ENTRIES 3
 
 //queue between decode and alloc
 `define LG_DQ_ENTRIES 2

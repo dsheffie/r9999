@@ -197,7 +197,8 @@ module divider(clk,
 		 end
 	       if(r_is_32b & (`M_WIDTH == 64))
 		 begin
-		    n_Y[63:0] = { {32{n_Y[31]}}, n_Y[31:0]};
+		    n_Y[63:0]   = { {32{n_Y[31]}},  n_Y[31:0]};   /* sign-extend quotient */
+		    n_Y[127:64] = { {32{n_Y[95]}},  n_Y[95:64]};  /* sign-extend remainder */
 		 end
 	    end
 	  WAIT_FOR_WB:

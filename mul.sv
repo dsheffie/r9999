@@ -69,7 +69,7 @@ module mul(clk,
       if(`M_WIDTH == 64)
 	begin
 	   assign   w_src_A = is_32b ? {32'd0, src_A[31:0]} : src_A;
-	   assign   w_src_B = is_32b ? {32'd0, src_B[31:0]} : src_B;   
+	   assign   w_src_B = is_32b ? {32'd0, src_B[31:0]} : src_B;
 	end
       else
 	begin
@@ -77,11 +77,18 @@ module mul(clk,
 	   assign w_src_B = src_B;
 	end
    endgenerate
-   
+
+   /* Sign/zero-extend inputs to 2W bits so the product is a full 2W-bit result.
+    * Without this, SV truncates the W*W multiply to W bits and the HI half is wrong. */
+   wire signed [(2*W)-1:0] w_signed_A = {{W{src_A[W-1]}}, src_A};
+   wire signed [(2*W)-1:0] w_signed_B = {{W{src_B[W-1]}}, src_B};
+   wire        [(2*W)-1:0] w_unsigned_A = {{W{1'b0}}, w_src_A};
+   wire        [(2*W)-1:0] w_unsigned_B = {{W{1'b0}}, w_src_B};
+
    wire [127:0]				   w_mul32b = {w_mul32b_hi, w_mul32b_lo};
    always_comb
      begin
-	t_mul = is_signed ? ($signed(src_A) * $signed(src_B)) : w_src_A * w_src_B;	
+	t_mul = is_signed ? (w_signed_A * w_signed_B) : (w_unsigned_A * w_unsigned_B);
      end
 
    // always_ff@(negedge clk)
