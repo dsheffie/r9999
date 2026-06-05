@@ -125,6 +125,10 @@ function logic is_mult(opcode_t op);
        x = 1'b1;
      MULTU:
        x = 1'b1;
+     DMULT:
+       x = 1'b1;
+     DMULTU:
+       x = 1'b1;
      default:
        x = 1'b0;
    endcase
@@ -137,6 +141,10 @@ function logic is_div(opcode_t op);
      DIV:
        x = 1'b1;
      DIVU:
+       x = 1'b1;
+     DDIV:
+       x = 1'b1;
+     DDIVU:
        x = 1'b1;
      default:
        x = 1'b0;
