@@ -7,14 +7,14 @@
 # understanding what the simulator might encounter.
 #
 # Flow per test:
-#   1. Generate with csmith
+#   1. Generate with csmith; retry until cbmc passes (up to MAX_CBMC_TRIES)
 #   2. cbmc --unwind $CBMC_K  (< 1 s for most programs)
-#        FAIL with user-code violation  → SKIP, print loop location
+#        FAIL with user-code violation  → regenerate and retry
 #        PASS                           → continue
 #   3. Compile MIPS Linux, run under qemu-mips-static  → reference checksum
 #        Timeout (cbmc false-positive)  → SKIP
 #   4. Compile bare-metal, run on r9999 simulator      → test checksum
-#   5. Compare checksums; save mismatches as fail_N.c
+#   5. Compare checksums; save mismatches to failures/fail_N.{c,elf}
 #
 # Usage:
 #   ./run_tests.sh [num_tests [cbmc_k [maxicnt]]]
@@ -30,6 +30,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HELLO="$REPO_ROOT/hello"
 SIM="$REPO_ROOT/ooo_core"
 CSMITH_INC="/usr/include/csmith"
+FAIL_DIR="$REPO_ROOT/failures"
 
 CC=mips-linux-gnu-gcc
 NPROC=$(nproc)
@@ -66,6 +67,8 @@ REF_FLAGS="-O1 -static"
 SHARED=$(mktemp -d)
 trap 'rm -rf "$SHARED"' EXIT
 
+mkdir -p "$FAIL_DIR"
+
 echo "Building common bare-metal objects  (parallelism: ${NPROC} jobs)..."
 
 $CC $BM_FLAGS \
@@ -88,7 +91,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Export everything the worker subshells need
 # ---------------------------------------------------------------------------
-export SHARED REPO_ROOT HELLO SIM CC CSMITH_INC QEMU
+export SHARED REPO_ROOT HELLO SIM CC CSMITH_INC QEMU FAIL_DIR
 export BM_FLAGS BM_DEFS REF_FLAGS SUPPORT_OBJS CSMITH_FLAGS
 export TIMEOUT_REF TIMEOUT_SIM MAXICNT
 export CBMC_K CBMC_LIBLOOPS
@@ -103,59 +106,67 @@ worker() {
     mkdir -p "$work"
 
     local src ref_bin elf
-
-    if [ -n "${SPECIFIC:-}" ]; then
-        src="$SPECIFIC"
-    else
-        src="$work/test.c"
-        csmith $CSMITH_FLAGS > "$src" 2>/dev/null \
-            || { echo SKIP > "$SHARED/r$id"; return; }
-    fi
-
     ref_bin="$work/ref"
     elf="$work/test.elf"
 
-    # ---- Step 1: cbmc infinite-loop gate ---------------------------------
-    #
-    # Run cbmc with the per-library exact bounds so that known-finite library
-    # loops (crc32_gentab, strcmp) are handled correctly.  Any remaining
-    # unwinding failure must be in user-generated code.
-    local cbmc_out
-    cbmc_out=$(timeout 30 cbmc \
-        --unwind "$CBMC_K" \
-        --unwinding-assertions \
-        --unwindset "$CBMC_LIBLOOPS" \
-        -I"$CSMITH_INC" "$src" 2>&1) || true
+    if [ -n "${SPECIFIC:-}" ]; then
+        src="$SPECIFIC"
 
-    local cbmc_verdict
-    cbmc_verdict=$(printf '%s' "$cbmc_out" | grep "^VERIFICATION" | head -1)
+        # Single cbmc check (no retry) for a specific file
+        local cbmc_out cbmc_verdict
+        cbmc_out=$(timeout 30 cbmc \
+            --unwind "$CBMC_K" \
+            --unwinding-assertions \
+            --unwindset "$CBMC_LIBLOOPS" \
+            -I"$CSMITH_INC" "$src" 2>&1) || true
+        cbmc_verdict=$(printf '%s' "$cbmc_out" | grep "^VERIFICATION" | head -1)
 
-    if printf '%s' "$cbmc_verdict" | grep -q FAILED; then
-        # Extract the user-code violation (ignore library loops)
-        local where
-        where=$(printf '%s' "$cbmc_out" \
-            | grep "unwinding assertion.*FAILURE" \
-            | grep -v "crc32_gentab\|strcmp" \
-            | head -1 \
-            | sed 's/.*\[\(.*\)\].*/\1/')   # extract [func.unwind.N]
-
-        echo SKIP > "$SHARED/r$id"
-
-        # Print diagnostic (GNU parallel --line-buffer keeps lines intact)
-        if [ -n "$where" ]; then
+        if printf '%s' "$cbmc_verdict" | grep -q FAILED; then
+            local where
+            where=$(printf '%s' "$cbmc_out" \
+                | grep "unwinding assertion.*FAILURE" \
+                | grep -v "crc32_gentab\|strcmp" \
+                | head -1 \
+                | sed 's/.*\[\(.*\)\].*/\1/')
             local lineno
             lineno=$(printf '%s' "$cbmc_out" \
                 | grep "unwinding assertion.*FAILURE" \
                 | grep -v "crc32_gentab\|strcmp" \
                 | head -1 \
                 | grep -o "line [0-9]*" | head -1)
-            printf '[%d] SKIP  cbmc: unbounded loop  %s  %s\n' \
-                "$id" "$where" "$lineno"
-        else
-            # Violation only in library code with the given K — rare; treat as skip
-            printf '[%d] SKIP  cbmc: only library loop exceeded k=%s\n' "$id" "$CBMC_K"
+            printf '[%d] SKIP  cbmc: unbounded loop  %s  %s\n' "$id" "$where" "$lineno"
+            echo SKIP > "$SHARED/r$id"; return
         fi
-        return
+    else
+        src="$work/test.c"
+
+        # Retry loop: keep generating until cbmc passes (counts as one test slot)
+        local MAX_TRIES=100
+        local tries=0
+        local cbmc_clean=0
+
+        while [ $tries -lt $MAX_TRIES ]; do
+            tries=$((tries+1))
+            csmith $CSMITH_FLAGS > "$src" 2>/dev/null || continue
+
+            local cbmc_out cbmc_verdict
+            cbmc_out=$(timeout 30 cbmc \
+                --unwind "$CBMC_K" \
+                --unwinding-assertions \
+                --unwindset "$CBMC_LIBLOOPS" \
+                -I"$CSMITH_INC" "$src" 2>&1) || true
+            cbmc_verdict=$(printf '%s' "$cbmc_out" | grep "^VERIFICATION" | head -1)
+
+            if ! printf '%s' "$cbmc_verdict" | grep -q FAILED; then
+                cbmc_clean=1
+                break
+            fi
+        done
+
+        if [ $cbmc_clean -eq 0 ]; then
+            printf '[%d] SKIP  no cbmc-clean test found in %d tries\n' "$id" "$MAX_TRIES"
+            echo SKIP > "$SHARED/r$id"; return
+        fi
     fi
 
     # ---- Step 2: Reference output (MIPS Linux under qemu-mips-static) ------
@@ -188,12 +199,12 @@ worker() {
         echo PASS > "$SHARED/r$id"
     else
         echo FAIL > "$SHARED/r$id"
-        printf '[%d] MISMATCH\n  ref: %s\n  sim: %s\n  saved: fail_%d.c\n' \
+        printf '[%d] MISMATCH\n  ref: %s\n  sim: %s\n  saved: failures/fail_%d.c\n' \
             "$id" "$ref_out" "${sim_out:-<no checksum output>}" "$id"
         printf '%s\n' "$sim_raw" | grep -v "^total_\|^simulation\|^insns\|^ *$" | head -30 | \
             sed "s/^/  [checker] /"
-        cp "$src" "$REPO_ROOT/fail_${id}.c"
-        cp "$elf"  "$REPO_ROOT/fail_${id}.elf"
+        cp "$src" "$FAIL_DIR/fail_${id}.c"
+        cp "$elf"  "$FAIL_DIR/fail_${id}.elf"
     fi
 }
 export -f worker
@@ -248,7 +259,7 @@ if [ "${#FAILED_IDS[@]}" -gt 0 ]; then
     echo ""
     echo "Failed tests (rerun commands):"
     for i in "${FAILED_IDS[@]}"; do
-        f="$REPO_ROOT/fail_${i}.c"
+        f="$FAIL_DIR/fail_${i}.c"
         if [ -f "$f" ]; then
             printf '  [%d]  %s\n' "$i" "$f"
             printf '       ./run_tests.sh 1 %s %s %s\n' "$CBMC_K" "$MAXICNT" "$f"
