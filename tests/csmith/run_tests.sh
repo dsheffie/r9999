@@ -38,6 +38,16 @@ NPROC=$(nproc)
 # ---------------------------------------------------------------------------
 # Parameters
 # ---------------------------------------------------------------------------
+TIMER_IRQ=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --timer-irq) TIMER_IRQ=1 ;;
+        *)           ARGS+=("$arg") ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 N=${1:-100}
 CBMC_K=${2:-20}         # unwind bound for user-generated loops
 MAXICNT=${3:-50000000}
@@ -71,7 +81,9 @@ mkdir -p "$FAIL_DIR"
 
 echo "Building common bare-metal objects  (parallelism: ${NPROC} jobs)..."
 
-$CC $BM_FLAGS \
+TIMER_IRQ_FLAG=""
+[ "$TIMER_IRQ" -eq 1 ] && TIMER_IRQ_FLAG="-DENABLE_TIMER_IRQ"
+$CC $BM_FLAGS $TIMER_IRQ_FLAG \
     -c "$SCRIPT_DIR/start_csmith.S"                       -o "$SHARED/start.o"
 $CC $BM_FLAGS -I"$HELLO" \
     -c "$HELLO/printf.c"                                   -o "$SHARED/printf.o"
@@ -95,7 +107,7 @@ export SHARED REPO_ROOT HELLO SIM CC CSMITH_INC QEMU FAIL_DIR
 export BM_FLAGS BM_DEFS REF_FLAGS SUPPORT_OBJS CSMITH_FLAGS
 export TIMEOUT_REF TIMEOUT_SIM MAXICNT
 export CBMC_K CBMC_LIBLOOPS
-export SPECIFIC
+export SPECIFIC TIMER_IRQ
 
 # ---------------------------------------------------------------------------
 # Worker: one test per invocation; writes PASS / SKIP / FAIL to $SHARED/r$id
@@ -228,9 +240,12 @@ if [ -n "${SPECIFIC:-}" ]; then
     exit 0
 fi
 
+TIMER_STR="off"
+[ "$TIMER_IRQ" -eq 1 ] && TIMER_STR="on (every 10000 cycles)"
 echo "Running $N tests on $NPROC parallel workers"
 echo "  cbmc k=$CBMC_K   maxicnt=$MAXICNT   ref_timeout=${TIMEOUT_REF}s ($QEMU)   sim_timeout=${TIMEOUT_SIM}s"
 echo "  csmith: $CSMITH_FLAGS"
+echo "  timer irq: $TIMER_STR"
 echo ""
 
 if [ -t 2 ]; then

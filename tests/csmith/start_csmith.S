@@ -154,12 +154,33 @@ reset_init:
     la   $sp, _end               /* $sp = &_end (= top of BSS) */
     addiu $sp, $sp, 0x7ff0       /* + 32752 */
     addiu $sp, $sp, 0x7ff0       /* + 32752 more  (total +65504 bytes) */
-    /* Enable 64-bit mode: set KX=1, SX=1, UX=1 in Status (bits 7:5).
-     * Hardware reset leaves these clear; we set them here so LD/SD and
-     * other 64-bit instructions are valid before entering main(). */
+#ifdef ENABLE_TIMER_IRQ
+    /* Arm timer: first IRQ at cycle 20000, rearm every 10000 cycles.
+     * Use a fixed initial Compare rather than reading Count (mfc0 $9 in an
+     * OOO pipeline captures Count at issue time; the checker compares at
+     * retire time, so they diverge by however many cycles are in flight). */
+    li    $t0, 20000            /* first Compare value */
+    li    $t1, 10000            /* rearm interval */
+    mtc0  $t0, $11              /* write Compare */
+    la    $t2, g_timer_next_compare
+    sw    $t0, 0($t2)
+    la    $t2, g_timer_interval
+    sw    $t1, 0($t2)
+
+    /* SR: IM7 (bit 15) + KX/SX/UX (bits 7:5) + IE (bit 0); clear EXL/ERL (bits 2:1). */
+    mfc0  $k0, $12
+    ori   $k0, $k0, 0x80e1
+    li    $k1, -7               /* ~(ERL|EXL) */
+    and   $k0, $k0, $k1
+    mtc0  $k0, $12
+    nop
+    nop
+#else
+    /* SR: KX/SX/UX only; interrupts remain disabled. */
     mfc0  $k0, $12
     ori   $k0, $k0, 0xe0
     mtc0  $k0, $12
+#endif
 
     jal  main                    /* call main; $ra set to the break below */
     nop
