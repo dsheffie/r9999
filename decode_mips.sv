@@ -9,14 +9,15 @@ module decode_mips(
 		   in_64b_kernel_mode,
 		   in_64b_supervisor_mode,
 		   in_64b_user_mode,
+		   irq,
 		   tlb_miss,
 		   misaligned,
-		   insn, 
-		   pc, 
+		   insn,
+		   pc,
 		   insn_pred,
-		   pht_idx, 
+		   pht_idx,
 		   insn_pred_target,
-`ifdef ENABLE_CYCLE_ACCOUNTING   		     
+`ifdef ENABLE_CYCLE_ACCOUNTING
 		   fetch_cycle,
 `endif
 		   uop);
@@ -26,6 +27,7 @@ module decode_mips(
    input logic			in_64b_kernel_mode;
    input logic			in_64b_supervisor_mode;
    input logic			in_64b_user_mode;
+   input logic			irq;
    input logic			tlb_miss;
    input logic			misaligned;
    input logic [31:0]		insn;
@@ -107,7 +109,11 @@ module decode_mips(
 `ifdef ENABLE_CYCLE_ACCOUNTING
 	uop.fetch_cycle = fetch_cycle;
 `endif
-	if(misaligned)
+	if(irq)
+	  begin
+	     uop.op = IRQ;
+	  end
+	else if(misaligned)
 	  begin
 	     uop.op = FETCH_MISALIGNED;
 	  end

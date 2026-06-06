@@ -163,6 +163,13 @@ static void raise_trap(state_t *s) {
   s->pc = sext32(0xBFC00180u);
 }
 
+void raise_int(state_t *s, uint32_t epc) {
+  s->cpr0[CPR0_EPC]   = epc;
+  s->cpr0[CPR0_CAUSE] = (1u << 15);  /* IP[7]=1 (timer), ExcCode=0, BD=0 */
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->pc = sext32(0xBFC00180u);
+}
+
 static uint32_t getConditionCode(state_t *s, uint32_t cc) {
   return ((s->fcr1[CP1_CR25] & (1U<<cc)) >> cc) & 0x1;
 }

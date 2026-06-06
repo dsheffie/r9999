@@ -67,6 +67,7 @@ typedef struct packed {
    logic [(`LG_PHT_SZ-1):0] pht_idx;
    logic		    misaligned;
    logic		    tlb_miss;
+   logic		    is_branch;
 `ifdef ENABLE_CYCLE_ACCOUNTING
    logic [63:0] 	    fetch_cycle;
 `endif

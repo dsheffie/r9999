@@ -77,6 +77,14 @@ int strncmp(const char *a, const char *b, size_t n) {
 /* Register save area filled by the assembly stub before calling us. */
 uint64_t exc_regfile[32];
 
+/* Timer interrupt support.  Set g_timer_interval > 0 to enable rearm-and-ERET
+ * behaviour on every timer interrupt; leave 0 (default) to halt on Int.
+ * g_timer_next_compare tracks the next Compare value so the handler never
+ * needs to read CP0 Count (which would cause a checker mismatch). */
+volatile uint32_t g_timer_interval    = 0;
+volatile uint32_t g_timer_next_compare = 0;
+volatile int      g_timer_irq_count   = 0;
+
 /*
  * Called from the .boot.exc stub with a pointer to the saved GPR file.
  * Returns 1 to request ERET (resume after emulation), 0 to halt.
@@ -90,6 +98,22 @@ int exc_handler(uint64_t *regs) {
     __asm__ volatile("mfc0 %0, $13" : "=r"(cause));
     __asm__ volatile("mfc0 %0, $14" : "=r"(epc));
     uint32_t exccode = (cause >> 2) & 0x1fu;
+
+    if (exccode == 0u) {
+        /* Timer interrupt: rearm Compare and resume.
+         * We advance g_timer_next_compare by the interval and write it to
+         * Compare — no mfc0 $9 needed (reading Count would diverge between
+         * RTL and sim since Count is cycle-dependent). */
+        if (g_timer_interval == 0) {
+            *SIM_HALT_ADDR = 1u;
+            return 0;
+        }
+        ++g_timer_irq_count;
+        g_timer_next_compare += g_timer_interval;
+        uint32_t compare = g_timer_next_compare;
+        __asm__ volatile("mtc0 %0, $11" : : "r"(compare));
+        return 1;
+    }
 
     if (exccode == 9u || exccode == 10u || exccode == 13u) {
         *SIM_HALT_ADDR = 1u;

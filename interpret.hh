@@ -289,6 +289,7 @@ static inline uint32_t get_branch_target(uint32_t pc, uint32_t inst) {
 
 void initState(state_t *s);
 void execMips(state_t *s);
+void raise_int(state_t *s, uint32_t epc);
 
 
 std::ostream &operator<<(std::ostream &out, const state_t & s);

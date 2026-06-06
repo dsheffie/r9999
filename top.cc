@@ -573,7 +573,23 @@ int main(int argc, char **argv) {
     if(tb->in_flush_mode) {
       ++n_flush_cycles;
     }
-    
+
+    /* Keep the sim's CP0 Count register in sync with the RTL every cycle.
+     * Without this, mfc0 rd,$9 reads in the sim return 0 while the RTL
+     * returns the real cycle count, causing a checker register mismatch. */
+    if(enable_checker) {
+      ss->cpr0[CPR0_COUNT] = (uint32_t)tb->cp0_count;
+    }
+
+
+    /* When the RTL takes a timer interrupt, synchronise the sim by jumping
+     * it to the exception vector with the correct EPC/Cause/SR.  This fires
+     * in WRITE_EPC (retire_valid is 0 at that point) so the checker sees
+     * RTL and sim both at bfc00180 when the handler starts retiring. */
+    if(tb->took_irq && enable_checker) {
+      raise_int(ss, (uint32_t)tb->epc);
+    }
+
     if(tb->retire_valid) {
       ++insns_retired;
       if(last_retire > 1) {

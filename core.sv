@@ -34,11 +34,14 @@ import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 
 `endif
 
-module core(clk, 
+module core(clk,
 	    reset,
 	    in_kernel_mode,
 	    in_supervisor_mode,
-	    in_user_mode,	    
+	    in_user_mode,
+	    in_64b_kernel_mode,
+	    in_64b_supervisor_mode,
+	    in_64b_user_mode,
 	    putchar_fifo_out,
 	    putchar_fifo_empty,
 	    putchar_fifo_pop,
@@ -120,6 +123,8 @@ module core(clk,
 	    asid,
 	    tlb_entry_out,
 	    tlb_entry_out_valid,
+	    took_irq,
+	    cp0_count,
 	    
 	    l1i_flush_done,
 	    l1d_flush_done,
@@ -130,6 +135,9 @@ module core(clk,
    output logic	in_kernel_mode;
    output logic	in_supervisor_mode;
    output logic	in_user_mode;
+   output logic	in_64b_kernel_mode;
+   output logic	in_64b_supervisor_mode;
+   output logic	in_64b_user_mode;
     
    output logic [7:0] putchar_fifo_out;
    output logic       putchar_fifo_empty;
@@ -235,15 +243,23 @@ module core(clk,
    output logic [7:0]			  asid;
    output tlb_data_t		          tlb_entry_out;
    output logic				  tlb_entry_out_valid;
+   output logic				  took_irq;
+   output logic [31:0]			  cp0_count;
    
    
    output logic				  l1i_flush_done;
    output logic				  l1d_flush_done;
    output logic				  l2_flush_done;
    
+   assign in_64b_kernel_mode     = w_in_64b_kernel_mode;
+   assign in_64b_supervisor_mode = w_in_64b_supervisor_mode;
+   assign in_64b_user_mode       = w_in_64b_user_mode;
+
    wire					  w_in_64b_kernel_mode;
    wire					  w_in_64b_supervisor_mode;
    wire					  w_in_64b_user_mode;
+   wire					  w_irq_pending;
+   wire [31:0]				  w_cp0_count;
    
    
    logic [`M_WIDTH-1:0]			  r_epc, n_epc;
@@ -487,6 +503,8 @@ module core(clk,
    assign epc = r_epc;
    assign badvaddr = r_badvaddr;
    assign cause = r_cause;
+   assign took_irq  = t_wr_epc & (r_cause == 5'd0);
+   assign cp0_count = w_cp0_count;
    assign l1i_flush_done = n_l1i_flush_complete;
    assign l1d_flush_done = n_l1d_flush_complete;
    assign l2_flush_done = n_l2_flush_complete;
@@ -1780,7 +1798,7 @@ module core(clk,
 		  else if(t_uop2.op == IRQ)
 		    begin
 		       t_rob_next_tail.faulted = 1'b1;
-		    end		  
+		    end
 		  else if(t_uop2.op == J)
 		    begin
 		       t_rob_next_tail.take_br = 1'b1;
@@ -2157,6 +2175,7 @@ module core(clk,
 		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
+		     .irq(w_irq_pending & insn.is_branch),
 		     .tlb_miss(insn.tlb_miss),
 		     .misaligned(insn.misaligned),
 		     .insn(insn.data), 
@@ -2176,6 +2195,7 @@ module core(clk,
 		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
+		     .irq(w_irq_pending & insn_two.is_branch),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .misaligned(insn_two.misaligned),		     
 		     .insn(insn_two.data), 
@@ -2287,7 +2307,9 @@ module core(clk,
 	   .mem_rsp_dst_ptr(core_mem_rsp.dst_ptr),
 	   .mem_rsp_dst_valid(core_mem_rsp.dst_valid),
 	   .mem_rsp_load_data(core_mem_rsp.data),
-	   .mem_rsp_rob_ptr(core_mem_rsp.rob_ptr)
+	   .mem_rsp_rob_ptr(core_mem_rsp.rob_ptr),
+	   .irq_pending(w_irq_pending),
+	   .cp0_count(w_cp0_count)
 	   );
 
 

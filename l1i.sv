@@ -31,6 +31,9 @@ module l1i(clk,
 	   in_kernel_mode,
 	   in_supervisor_mode,
 	   in_user_mode,
+	   in_64b_kernel_mode,
+	   in_64b_supervisor_mode,
+	   in_64b_user_mode,
 	   flush_req,
 	   flush_complete,
 	   restart_pc,
@@ -80,6 +83,9 @@ module l1i(clk,
    input logic			in_kernel_mode;
    input logic			in_supervisor_mode;
    input logic			in_user_mode;
+   input logic			in_64b_kernel_mode;
+   input logic			in_64b_supervisor_mode;
+   input logic			in_64b_user_mode;
    
    input logic 	      flush_req;
    output logic       flush_complete;
@@ -458,11 +464,17 @@ endfunction
 
 
    mipsseg seg0 (
-		 .v_addr(n_cache_pc), 
-		 .l_addr(w_la_pc), 
-		 .cache(w_cached), 
+		 .v_addr(n_cache_pc),
+		 .l_addr(w_la_pc),
+		 .cache(w_cached),
 		 .mapped(w_mapped),
-		 .seg(w_seg)
+		 .seg(w_seg),
+		 .in_kernel_mode(in_kernel_mode),
+		 .in_supervisor_mode(in_supervisor_mode),
+		 .in_user_mode(in_user_mode),
+		 .in_64b_kernel_mode(in_64b_kernel_mode),
+		 .in_64b_supervisor_mode(in_64b_supervisor_mode),
+		 .in_64b_user_mode(in_64b_user_mode)
 		 );
 
    always@(posedge clk)
@@ -882,36 +894,40 @@ endfunction
 	t_insn.pred_target = n_pc;
 	t_insn.pred = t_take_br;
 	t_insn.pht_idx = r_pht_idx;
+	t_insn.is_branch = (t_pd != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn.fetch_cycle = r_cycle;
 `endif
 	t_insn2.data = t_insn_data2;
 	t_insn2.misaligned = 1'b0;
-	t_insn2.tlb_miss = 1'b0;	
+	t_insn2.tlb_miss = 1'b0;
 	t_insn2.pc = r_cache_pc + 'd4;
 	t_insn2.pred_target = 'd0;
 	t_insn2.pred = 1'b0;
 	t_insn2.pht_idx = 'd0;
+	t_insn2.is_branch = 1'b0;
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn2.fetch_cycle = r_cycle;
 `endif
 	t_insn3.data = t_insn_data3;
 	t_insn3.misaligned = 1'b0;
-	t_insn3.tlb_miss = 1'b0;	
+	t_insn3.tlb_miss = 1'b0;
 	t_insn3.pc = r_cache_pc + 'd8;
 	t_insn3.pred_target = 'd0;
 	t_insn3.pred = 1'b0;
 	t_insn3.pht_idx = 'd0;
+	t_insn3.is_branch = 1'b0;
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn3.fetch_cycle = r_cycle;
 `endif
 	t_insn4.data = t_insn_data4;
 	t_insn4.misaligned = 1'b0;
-	t_insn4.tlb_miss = 1'b0;	
+	t_insn4.tlb_miss = 1'b0;
 	t_insn4.pc = r_cache_pc + 'd12;
 	t_insn4.pred_target = 'd0;
 	t_insn4.pred = 1'b0;
 	t_insn4.pht_idx = 'd0;
+	t_insn4.is_branch = 1'b0;
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn4.fetch_cycle = r_cycle;
 `endif

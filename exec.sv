@@ -77,7 +77,9 @@ module exec(clk,
 	    mem_rsp_rob_ptr,
 	    mem_rsp_load_data,
 	    tlb_entry_out,
-	    tlb_entry_out_valid
+	    tlb_entry_out_valid,
+	    irq_pending,
+	    cp0_count
 	    );
    input logic clk;
    input logic reset;
@@ -109,6 +111,8 @@ module exec(clk,
    output logic			in_64b_kernel_mode;
    output logic			in_64b_supervisor_mode;
    output logic			in_64b_user_mode;
+   output logic			irq_pending;
+   output logic [31:0]		cp0_count;
 
    
    output logic [7:0]		putchar_fifo_out;
@@ -1897,11 +1901,17 @@ module exec(clk,
    wire		       w_cached, w_mapped;
    wire [1:0]	       w_seg;
    
-   mipsseg seg0 (.v_addr(w_agu), 
-		 .l_addr(w_agu_la), 
-		 .cache(w_cached), 
-		 .mapped(w_mapped), 
-		 .seg(w_seg));
+   mipsseg seg0 (.v_addr(w_agu),
+		 .l_addr(w_agu_la),
+		 .cache(w_cached),
+		 .mapped(w_mapped),
+		 .seg(w_seg),
+		 .in_kernel_mode(in_kernel_mode),
+		 .in_supervisor_mode(in_supervisor_mode),
+		 .in_user_mode(in_user_mode),
+		 .in_64b_kernel_mode(in_64b_kernel_mode),
+		 .in_64b_supervisor_mode(in_64b_supervisor_mode),
+		 .in_64b_user_mode(in_64b_user_mode));
 
    wire w_bad_seg_perms = (w_seg != 2'd3) & in_user_mode;
  
@@ -2214,10 +2224,19 @@ module exec(clk,
    
    /* interrupt enable */
    logic r_sr_ie, n_sr_ie;
+   /* interrupt mask IM[7:0] = SR[15:8] */
+   logic [7:0] r_sr_im, n_sr_im;
    /* exception level */
    logic r_sr_exl, n_sr_exl;
    /* error level */
    logic r_sr_erl, n_sr_erl;
+
+   /* CP0 register 9: Count (free-running, increments each cycle) */
+   logic [31:0] r_count, n_count;
+   /* CP0 register 11: Compare (timer fires when Count == Compare) */
+   logic [31:0] r_compare, n_compare;
+   /* timer interrupt pending: set when Count==Compare, cleared by MTC0 Compare */
+   logic        r_timer_ip, n_timer_ip;
    /* kernel - 00, supervisor - 01, user - 10 */
    logic [1:0] r_sr_ksu, n_sr_ksu;
    /* 64b user */
@@ -2456,9 +2475,17 @@ module exec(clk,
 	n_sr_ksu = r_sr_ksu;
 	n_sr_ux = r_sr_ux;
 	n_sr_sx = r_sr_sx;
-	n_sr_kx = r_sr_kx;	
+	n_sr_kx = r_sr_kx;
 	n_sr_bev = r_sr_bev;
 	n_sr_ts = r_sr_ts;
+	n_sr_im = r_sr_im;
+
+	/* Count increments every cycle */
+	n_count = r_count + 32'd1;
+	n_compare = r_compare;
+	/* Timer IP: set when Count wraps to Compare, cleared by MTC0 Compare */
+	n_timer_ip = r_timer_ip | (n_count == r_compare);
+
 	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd12)
 	  begin
 	     n_sr_ie = t_srcA[0];
@@ -2470,6 +2497,18 @@ module exec(clk,
 	     n_sr_kx = t_srcA[7];
 	     n_sr_bev = t_srcA[22];
 	     n_sr_ts = t_srcA[21];
+	     n_sr_im = t_srcA[15:8];
+	  end
+	/* MTC0 reg 9: write Count */
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd9)
+	  begin
+	     n_count = t_srcA[31:0];
+	  end
+	/* MTC0 reg 11: write Compare and clear timer IP */
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd11)
+	  begin
+	     n_compare = t_srcA[31:0];
+	     n_timer_ip = 1'b0;
 	  end
 	else if(core_wr_cause)
 	  begin
@@ -2492,17 +2531,28 @@ module exec(clk,
 	r_sr_kx <= reset ? 'd0 : n_sr_kx;
 	r_sr_bev <= reset ? 1'b1 : n_sr_bev;
 	r_sr_ts <= reset ? 1'b0 : n_sr_ts;
+	r_sr_im <= reset ? 8'd0 : n_sr_im;
 	r_wired <= reset ? 'd0 :  n_wired;
-	r_random <= reset ? 'd47 : n_random;   
+	r_random <= reset ? 'd47 : n_random;
+	r_count   <= reset ? 32'd0 : n_count;
+	r_compare <= reset ? 32'd0 : n_compare;
+	r_timer_ip <= reset ? 1'b0 : n_timer_ip;
      end
 
    assign in_kernel_mode = (r_sr_ksu=='d0) | r_sr_exl | r_sr_erl;
    assign in_supervisor_mode = (r_sr_ksu=='d1) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
-   assign in_user_mode = (r_sr_ksu=='d2) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);   
+   assign in_user_mode = (r_sr_ksu=='d2) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
 
    assign in_64b_user_mode = (in_user_mode) & r_sr_ux;
    assign in_64b_kernel_mode = in_kernel_mode & r_sr_kx;
    assign in_64b_supervisor_mode = in_supervisor_mode & r_sr_sx;
+
+   /* IP[7] = timer; others not yet wired */
+   wire [7:0] w_ip = {r_timer_ip, 7'd0};
+   /* interrupt is pending when IE=1, EXL=0, ERL=0, and any (IP & IM) bit set */
+   assign irq_pending = r_sr_ie & ~r_sr_exl & ~r_sr_erl & |(w_ip & r_sr_im);
+   assign cp0_count   = r_count;
+
    
    always_comb
      begin
@@ -2519,7 +2569,7 @@ module exec(clk,
 			     r_sr_bev,
 			     r_sr_ts,
 			     5'd0, /* other diagnostic bits */
-			     8'd0, /* im field */
+			     r_sr_im, /* im field */
 			     r_sr_kx, /* bit 7 */
 			     r_sr_sx,
 			     r_sr_ux,
@@ -2589,13 +2639,21 @@ module exec(clk,
 	       t_csr0_val = zero_extend32(cpr0_status_reg);
 	       //$display("reading cpr status reg %x", cpr0_status_reg);
 	    end
+	  'd9: /* Count */
+	    begin
+	       t_csr0_val = zero_extend32(r_count);
+	    end
+	  'd11: /* Compare */
+	    begin
+	       t_csr0_val = zero_extend32(r_compare);
+	    end
 	  'd13: /* cause */
 	    begin
 	       t_csr0_val = zero_extend32({r_exc_in_ds,
-					   1'b0, /* must be zero */ 
+					   1'b0, /* must be zero */
 					   2'd0, /* coproc field */
 					   12'd0, /* must be zero */
-					   8'd0, /* interrupt */
+					   w_ip, /* interrupt pending bits */
 					   1'b0, /* must be zero */
 					   r_cause,
 					   2'd0 /* must be zero */});

@@ -60,7 +60,9 @@ module core_l1d_l1i(clk,
 		    cause,
 		    l1i_flush_done,
 		    l1d_flush_done,
-		    l2_flush_done
+		    l2_flush_done,
+		    took_irq,
+		    cp0_count
 		    );
 
    localparam L1D_CL_LEN = 1 << `LG_L1D_CL_LEN;
@@ -170,6 +172,8 @@ module core_l1d_l1i(clk,
    output logic			 l1d_flush_done;
    output logic			 l1i_flush_done;
    output logic			 l2_flush_done;
+   output logic			 took_irq;
+   output logic [31:0]		 cp0_count;
       
 
 
@@ -178,8 +182,10 @@ module core_l1d_l1i(clk,
    logic				  head_of_rob_has_delay_slot;
    
 
-   wire					  w_in_kernel_mode, w_in_supervisor_mode, 
-					  w_in_user_mode;   
+   wire					  w_in_kernel_mode, w_in_supervisor_mode,
+					  w_in_user_mode;
+   wire					  w_in_64b_kernel_mode, w_in_64b_supervisor_mode,
+					  w_in_64b_user_mode;
    wire 				  flush_req_l1i, flush_req_l1d;
    logic 				  flush_cl_req;
    logic [`M_WIDTH-1:0] 		  flush_cl_addr;
@@ -561,7 +567,10 @@ module core_l1d_l1i(clk,
 	      .state(l1i_state),
 	      .in_kernel_mode(w_in_kernel_mode),
 	      .in_supervisor_mode(w_in_supervisor_mode),
-	      .in_user_mode(w_in_user_mode),	      
+	      .in_user_mode(w_in_user_mode),
+	      .in_64b_kernel_mode(w_in_64b_kernel_mode),
+	      .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
+	      .in_64b_user_mode(w_in_64b_user_mode),
 	      .flush_req(flush_req_l1i),
 	      .flush_complete(l1i_flush_complete),
 	      .restart_pc(restart_pc),
@@ -604,6 +613,9 @@ module core_l1d_l1i(clk,
 	     .in_kernel_mode(w_in_kernel_mode),
 	     .in_supervisor_mode(w_in_supervisor_mode),
 	     .in_user_mode(w_in_user_mode),
+	     .in_64b_kernel_mode(w_in_64b_kernel_mode),
+	     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
+	     .in_64b_user_mode(w_in_64b_user_mode),
 	     .putchar_fifo_out(putchar_fifo_out),
 	     .putchar_fifo_empty(putchar_fifo_empty),
 	     .putchar_fifo_pop(putchar_fifo_pop),
@@ -686,7 +698,9 @@ module core_l1d_l1i(clk,
 	     .tlb_entry_out(tlb_entry_out),	   	     
 	     .l1i_flush_done(l1i_flush_done),
 	     .l1d_flush_done(l1d_flush_done),
-	     .l2_flush_done(l2_flush_done)
+	     .l2_flush_done(l2_flush_done),
+	     .took_irq(took_irq),
+	     .cp0_count(cp0_count)
 	     );
 
    
