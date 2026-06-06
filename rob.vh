@@ -33,6 +33,7 @@ typedef struct packed {
    logic [(`M_WIDTH-1):0]	 data;
    logic [6:0]			 opcode;
    logic [`LG_PHT_SZ-1:0] 	 pht_idx;
+   logic                         oldest_first;
 
    logic       tlb_refill;
    logic       tlb_invalid;

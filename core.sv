@@ -474,6 +474,7 @@ module core(clk,
    
    state_t r_state, n_state;
    logic 	r_pending_fault, n_pending_fault;
+   logic        r_oldest_first_pending, n_oldest_first_pending;
    logic [31:0] r_restart_cycles, n_restart_cycles;
    logic t_divide_ready;
    
@@ -650,6 +651,7 @@ module core(clk,
 	     r_save_to_tlb_regs <= 1'b0;
 	     r_has_badvaddr <= 1'b0;
 	     r_pending_fault <= 1'b0;
+	     r_oldest_first_pending <= 1'b0;
 	  end
 	else
 	  begin
@@ -662,6 +664,7 @@ module core(clk,
 	     r_save_to_tlb_regs <= n_save_to_tlb_regs;
 	     r_has_badvaddr <= n_has_badvaddr;
 	     r_pending_fault <= n_pending_fault;
+	     r_oldest_first_pending <= n_oldest_first_pending;
 	  end
      end
 
@@ -886,6 +889,7 @@ module core(clk,
 	t_alloc_two = 1'b0;
 	t_possible_to_alloc = 1'b0;
 	n_save_to_tlb_regs = r_save_to_tlb_regs;
+	n_oldest_first_pending = r_oldest_first_pending;
 	
 	n_in_delay_slot = r_in_delay_slot;
 	t_retire = 1'b0;
@@ -1048,16 +1052,19 @@ module core(clk,
 
 			      t_alloc = !t_rob_full
 					&& !t_uq_full
-					&& !t_dq_empty					
+					&& !t_dq_empty
 					&& t_enough_iprfs
 					&& t_enough_hlprfs
+					&& !r_oldest_first_pending
 					&& (r_pending_fault ? r_in_delay_slot : 1'b1);
 
-			      
+
 			      t_alloc_two = t_alloc
 					    && !t_uop.is_br
+					    && !t_uop.oldest_first
 					    && !t_uop2.serializing_op
-					    && !t_dq_next_empty 
+					    && !t_uop2.oldest_first
+					    && !t_dq_next_empty
 					    && !t_rob_next_full
 					    && !t_uq_next_full
 					    && t_enough_next_iprfs
@@ -1095,14 +1102,17 @@ module core(clk,
 				   && !t_dq_empty
 				   && t_enough_iprfs
 				   && t_enough_hlprfs
+				   && !r_oldest_first_pending
 				   && (r_pending_fault ? r_in_delay_slot : 1'b1);
 
 			 //$display("r_cycle = %d, can alloc %b, r_pending %b, delay %b", r_cycle, t_alloc, r_pending_fault, r_in_delay_slot);
-			 
+
 			 t_alloc_two = t_alloc
 				       && !t_uop.is_br
+				       && !t_uop.oldest_first
 				       && !t_uop2.serializing_op
-				       && !t_dq_next_empty 
+				       && !t_uop2.oldest_first
+				       && !t_dq_next_empty
 				       && !t_rob_next_full
 				       && !t_uq_next_full
 				       && t_enough_next_iprfs
@@ -1383,6 +1393,13 @@ module core(clk,
 	    end
 	endcase // unique case (r_state)
 
+	if(t_clr_rob)
+	  n_oldest_first_pending = 1'b0;
+	else if(t_retire && t_rob_head.oldest_first)
+	  n_oldest_first_pending = 1'b0;
+	else if(t_alloc && t_uop.oldest_first)
+	  n_oldest_first_pending = 1'b1;
+
 	if(t_alloc)
 	  begin
 	     n_in_delay_slot = t_alloc_two ? t_uop2.has_delay_slot
@@ -1658,6 +1675,7 @@ module core(clk,
 	t_rob_tail.data = 'd0;
 	t_rob_tail.opcode = t_alloc_uop.op;
 	t_rob_tail.pht_idx = t_alloc_uop.pht_idx;
+	t_rob_tail.oldest_first = t_uop.oldest_first;
 	
 	t_rob_next_tail.faulted  = 1'b0;
 	t_rob_next_tail.valid_dst  = 1'b0;
@@ -1693,6 +1711,7 @@ module core(clk,
 	t_rob_next_tail.in_delay_slot = r_in_delay_slot;
 	t_rob_next_tail.data = 'd0;
 	t_rob_next_tail.pht_idx = t_alloc_uop2.pht_idx;
+	t_rob_next_tail.oldest_first = t_uop2.oldest_first;
 	
 	t_rob_tail.has_delay_slot = t_alloc_uop.has_delay_slot;
 	t_rob_tail.has_nullifying_delay_slot = t_alloc_uop.has_nullifying_delay_slot;
@@ -2342,6 +2361,8 @@ module core(clk,
 	   .ds_done(r_ds_done),
 	   .mem_dq_clr(t_clr_rob),
 	   .restart_complete(t_restart_complete),
+	   .head_of_rob_ptr_valid(head_of_rob_ptr_valid),
+	   .head_of_rob_ptr(head_of_rob_ptr),
 	   .cpr0_status_reg(t_cpr0_status_reg),
 	   .mq_wait(mq_wait),
 	   .uq_wait(uq_wait),

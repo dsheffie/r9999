@@ -52,6 +52,8 @@ module exec(clk,
 	    ds_done,
 	    mem_dq_clr,
 	    restart_complete,
+	    head_of_rob_ptr_valid,
+	    head_of_rob_ptr,
 	    cpr0_status_reg,
 	    uq_wait,
 	    mq_wait,
@@ -128,6 +130,8 @@ module exec(clk,
    input logic ds_done;
    input logic mem_dq_clr;
    input logic restart_complete;
+   input logic head_of_rob_ptr_valid;
+   input logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
    output logic [31:0]     cpr0_status_reg;
       
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);   
@@ -865,9 +869,12 @@ module exec(clk,
 		t_alu_entry_rdy[i] = r_alu_sched_valid[i] &&
 				     (is_div(r_alu_sched_uops[i].op) ?  t_div_ready :  (is_mult(r_alu_sched_uops[i].op) ?  !r_wb_bitvec[`MUL_LAT+2] : !r_wb_bitvec[1]))
 				     ? (
-					(t_alu_srcA_match[i] |r_alu_srcA_rdy[i]) & 
+					(t_alu_srcA_match[i] |r_alu_srcA_rdy[i]) &
 					(t_alu_srcB_match[i] |r_alu_srcB_rdy[i]) &
-					(t_alu_hilo_match[i] |r_alu_hilo_rdy[i]) ) : 1'b0;
+					(t_alu_hilo_match[i] |r_alu_hilo_rdy[i]) &
+					(!r_alu_sched_uops[i].oldest_first ||
+					 (head_of_rob_ptr_valid &&
+					  (r_alu_sched_uops[i].rob_ptr == head_of_rob_ptr))) ) : 1'b0;
 	     end // always_comb
 	   
 	   always_ff@(posedge clk)

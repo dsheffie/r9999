@@ -208,6 +208,7 @@ typedef struct packed {
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic 		       serializing_op;
    logic 		       must_restart;
+   logic 		       oldest_first;
    logic 		       br_pred;
    logic 		       is_int;
    logic 		       is_br;
