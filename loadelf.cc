@@ -120,7 +120,7 @@ void load_elf(const char* fn, state_t *ms) {
   ph32 = reinterpret_cast<Elf32_Phdr*>(buf + e_phoff);
   e_shnum = bswap_(eh32->e_shnum);
   sh32 = reinterpret_cast<Elf32_Shdr*>(buf + bswap_(eh32->e_shoff));
-  ms->pc = lAddr;
+  ms->pc = (int64_t)(int32_t)lAddr;
 
   uint32_t loaddr = ~0U, hiaddr = 0;
   /* Find instruction segments and copy to
