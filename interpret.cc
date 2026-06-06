@@ -156,6 +156,13 @@ static void raise_ri(state_t *s, uint32_t inst) {
   s->pc = sext32(0xBFC00180u);
 }
 
+static void raise_overflow(state_t *s) {
+  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (12u << 2);
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->pc = sext32(0xBFC00180u);
+}
+
 static void raise_trap(state_t *s) {
   s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (13u << 2);
@@ -1725,11 +1732,21 @@ void execMips(state_t *s) {
 	s->pc += 4;
 	s->insn_histo[mipsInsn::DDIVU]++;
 	break;
-      case 0x20: /* add */
-	s->gpr[rd] = s->gpr[rs] + s->gpr[rt];
+      case 0x20: { /* add */
+	uint32_t u_rs = (uint32_t)s->gpr[rs];
+	uint32_t u_rt = (uint32_t)s->gpr[rt];
+	uint32_t result = u_rs + u_rt;
+	/* Overflow iff same-sign inputs produce different-sign result.
+	 * Matches RTL: w_add32_overflow = (result[31]!=rt[31]) & (rs[31]==rt[31]) */
+	if (((result >> 31) != (u_rt >> 31)) && ((u_rs >> 31) == (u_rt >> 31))) {
+	  raise_overflow(s);
+	  break;
+	}
+	s->gpr[rd] = sext64(result);
 	s->pc += 4;
 	s->insn_histo[mipsInsn::ADD]++;
 	break;
+      }
       case 0x21: { /* addu */
 	uint32_t u_rs = (uint32_t)s->gpr[rs];
 	uint32_t u_rt = (uint32_t)s->gpr[rt];
@@ -1738,10 +1755,21 @@ void execMips(state_t *s) {
 	s->insn_histo[mipsInsn::ADDU]++;
 	break;
       }
-      case 0x22: /* sub */
-	printf("sub()\n");
-	exit(-1);
+      case 0x22: { /* sub */
+	uint32_t u_rs = (uint32_t)s->gpr[rs];
+	uint32_t u_rt = (uint32_t)s->gpr[rt];
+	uint32_t result = u_rs - u_rt;
+	/* Overflow iff operands have different signs AND result sign != rs sign.
+	 * Matches RTL: w_sub32_overflow = (result[31]!=rt[31]) & (rs[31]!=rt[31]) */
+	if (((result >> 31) != (u_rt >> 31)) && ((u_rs >> 31) != (u_rt >> 31))) {
+	  raise_overflow(s);
+	  break;
+	}
+	s->gpr[rd] = sext64(result);
+	s->pc += 4;
+	s->insn_histo[mipsInsn::SUB]++;
 	break;
+      }
       case 0x23:{ /*subu*/  
 	uint32_t u_rs = (uint32_t)s->gpr[rs];
 	uint32_t u_rt = (uint32_t)s->gpr[rt];
@@ -1802,21 +1830,39 @@ void execMips(state_t *s) {
 	s->pc += 4;
 	s->insn_histo[mipsInsn::TEQ]++;
 	break;
-      case 0x2C: /* dadd */
-	s->gpr[rd] = s->gpr[rs] + s->gpr[rt];
+      case 0x2C: { /* dadd */
+	uint64_t u_rs = (uint64_t)s->gpr[rs];
+	uint64_t u_rt = (uint64_t)s->gpr[rt];
+	uint64_t result = u_rs + u_rt;
+	/* Matches RTL: w_add64_overflow = (result[63]!=rt[63]) & (rs[63]==rt[63]) */
+	if (((result >> 63) != (u_rt >> 63)) && ((u_rs >> 63) == (u_rt >> 63))) {
+	  raise_overflow(s);
+	  break;
+	}
+	s->gpr[rd] = (int64_t)result;
 	s->pc += 4;
 	s->insn_histo[mipsInsn::DADD]++;
 	break;
+      }
       case 0x2D: /* daddu */
 	s->gpr[rd] = s->gpr[rs] + s->gpr[rt];
 	s->pc += 4;
 	s->insn_histo[mipsInsn::DADDU]++;
 	break;
-      case 0x2E: /* dsub */
-	s->gpr[rd] = s->gpr[rs] - s->gpr[rt];
+      case 0x2E: { /* dsub */
+	uint64_t u_rs = (uint64_t)s->gpr[rs];
+	uint64_t u_rt = (uint64_t)s->gpr[rt];
+	uint64_t result = u_rs - u_rt;
+	/* Matches RTL: w_sub64_overflow = (result[63]!=rt[63]) & (rs[63]!=rt[63]) */
+	if (((result >> 63) != (u_rt >> 63)) && ((u_rs >> 63) != (u_rt >> 63))) {
+	  raise_overflow(s);
+	  break;
+	}
+	s->gpr[rd] = (int64_t)result;
 	s->pc += 4;
 	s->insn_histo[mipsInsn::DSUB]++;
 	break;
+      }
       case 0x2F: /* dsubu */
 	s->gpr[rd] = s->gpr[rs] - s->gpr[rt];
 	s->pc += 4;

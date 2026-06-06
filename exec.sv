@@ -1465,6 +1465,8 @@ module exec(clk,
 	  DSUB:
 	    begin
 	       t_result = w_add64;
+	       t_overflow = w_sub64_overflow;
+	       t_fault = w_sub64_overflow;
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
@@ -1501,6 +1503,14 @@ module exec(clk,
 	  DDIVU:
 	    begin
 	       t_start_div64 = r_start_int&!ds_done;
+	    end
+	  SUB:
+	    begin
+	       t_result = sign_extend32(w_add32);
+	       t_overflow = w_sub32_overflow;
+	       t_fault = w_sub32_overflow;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
 	    end
 	  SUBU:
 	    begin

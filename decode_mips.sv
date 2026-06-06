@@ -473,6 +473,17 @@ module decode_mips(
 			   uop.op = (rd == 'd0) ? NOP : ADDU;
 			   uop.is_int = 1'b1;
 			end
+		      6'd34: /* sub */
+			begin
+			   uop.srcA = rs;
+			   uop.srcA_valid = 1'b1;
+			   uop.srcB = rt;
+			   uop.srcB_valid = 1'b1;
+			   uop.dst = rd;
+			   uop.dst_valid = (rd != 'd0);
+			   uop.op = (rd == 'd0) ? NOP : SUB;
+			   uop.is_int = 1'b1;
+			end
 		      6'd35: /* subu */
 			begin
 			   uop.srcA = rs;
