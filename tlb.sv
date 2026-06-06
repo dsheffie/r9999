@@ -91,23 +91,26 @@ module tlb(clk,
    //	       {r_pa_data[w_idx[LG_N-1:0]][51:4], va[15:0]};
 	       
 	       	          
-   find_first_set#(.LG_N(LG_N)) 
+   find_first_set#(.LG_N(LG_N))
    ffs(.in(w_hits),
        .y(w_idx));
 
-   
+   wire [LG_N-1:0]     w_hit_idx = w_idx[LG_N-1:0];
+   /* VA[12]=0 → even page (pfn0/d0/v0), VA[12]=1 → odd page (pfn1/d1/v1) */
+   wire                w_odd     = va[12];
+   wire [23:0]         w_pfn     = w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0;
+   wire                w_dirty   = w_odd ? r_tlb[w_hit_idx].d1   : r_tlb[w_hit_idx].d0;
+   wire                w_valid   = w_odd ? r_tlb[w_hit_idx].v1   : r_tlb[w_hit_idx].v0;
+   /* 4KB page only (pagemask=0): PA[PA_WIDTH-1:12]=pfn[PA_WIDTH-13:0], PA[11:0]=va[11:0] */
+   wire [`PA_WIDTH-1:0] w_pa4k   = {w_pfn[`PA_WIDTH-13:0], va[11:0]};
+
    always_ff@(posedge clk)
      begin
-	hit <= reset ? 1'b0 : (active ? (req & |w_hits) : 1'b1);
-	hit_index <= reset ? 'd0 : w_idx[5:0];
-	// writable <= r_writable[w_idx[LG_N-1:0]];
-	// readable <= r_readable[w_idx[LG_N-1:0]];
-	// executable <= r_executable[w_idx[LG_N-1:0]];
-	// dirty <= r_dirty[w_idx[LG_N-1:0]];
-	// user <= r_user[w_idx[LG_N-1:0]];
-	//pa <= active ? w_pa_sel[`PA_WIDTH-1:0] : va[`PA_WIDTH-1:0];
-	pa <= va;
-	// zero_page <= reset ? 1'b0 : ((|va[39:12]) == 1'b0);
+	hit     <= reset ? 1'b0 : (active ? (req & |w_hits) : 1'b1);
+	hit_index <= reset ? 'd0 : w_hit_idx;
+	dirty   <= reset ? 1'b0 : w_dirty;
+	writable <= reset ? 1'b0 : w_valid;
+	pa      <= active ? {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_pa4k} : va;
      end
 
 

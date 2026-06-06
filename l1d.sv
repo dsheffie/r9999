@@ -1583,16 +1583,14 @@ endfunction
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 			 n_core_mem_rsp_valid = 1'b1;			 
 		      end
-`ifdef RESPECT_MAPPED
 		    else if(w_tlb_hit==1'b0)
 		       begin
-		     	 n_core_mem_rsp.data = w_mapped_addr;
-		     	 n_core_mem_rsp.dst_valid = 1'b0;
-		     	 n_core_mem_rsp.bad_addr = 1'b0;
-		     	 n_core_mem_rsp.tlb_refill = 1'b1;
-		     	 n_core_mem_rsp_valid = 1'b1;			 
+			  n_core_mem_rsp.data = w_mapped_addr;
+			  n_core_mem_rsp.dst_valid = 1'b0;
+			  n_core_mem_rsp.bad_addr = 1'b0;
+			  n_core_mem_rsp.tlb_refill = 1'b1;
+			  n_core_mem_rsp_valid = 1'b1;
 		       end
-`endif
 		    else if(r_req2.is_store)
 		      begin
 			 t_push_miss = 1'b1;

@@ -26,12 +26,13 @@ STARTUP := $(COMMON)/crt0.o
 TESTS := hello/hello.elf \
          cp0/test_cp0.elf \
          tlb/test_tlb.elf \
+         dside_tlb/test_dside_tlb.elf \
          except/test_except.elf \
          unaligned/test_unaligned.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
-.PHONY: all clean run-hello run-cp0 run-tlb run-except run-unaligned
+.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned
 
 all: $(STARTUP) $(TESTS) $(DISASMS)
 
@@ -91,18 +92,29 @@ run-cp0: cp0/test_cp0.elf
 run-tlb: tlb/test_tlb.elf
 	cd .. && $(SIM) --file tests/$< -c 0 2>&1
 
+# -----------------------------------------------------------------------
+# D-side TLB translation test
+# -----------------------------------------------------------------------
+dside_tlb/test_dside_tlb.elf: dside_tlb/test_dside_tlb.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c dside_tlb/test_dside_tlb.S -o dside_tlb/test_dside_tlb.o
+	$(LD) $(LDFLAGS) $(STARTUP) dside_tlb/test_dside_tlb.o -o $@
+
+run-dside-tlb: dside_tlb/test_dside_tlb.elf
+	cd .. && $(SIM) --file tests/$< --checker true 2>&1
+
 run-except: except/test_except.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
 
 run-unaligned: unaligned/test_unaligned.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
 
-run-all: run-hello run-cp0 run-tlb run-except run-unaligned
+run-all: run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned
 
 clean:
 	rm -f $(COMMON)/crt0.o \
 	      hello/hello.o hello/hello.elf hello/hello.dis \
 	      cp0/test_cp0.o cp0/test_cp0.elf cp0/test_cp0.dis \
 	      tlb/test_tlb.o tlb/test_tlb.elf tlb/test_tlb.dis \
+	      dside_tlb/test_dside_tlb.o dside_tlb/test_dside_tlb.elf dside_tlb/test_dside_tlb.dis \
 	      except/test_except.o except/test_except.elf except/test_except.dis \
 	      unaligned/test_unaligned.o unaligned/test_unaligned.elf unaligned/test_unaligned.dis
