@@ -645,8 +645,14 @@ int main(int argc, char **argv) {
 	std::cout << "fatal - unaligned address\n";
 	break;
       }
-       
-      
+
+      if(!enable_checker) {
+	uint32_t ri = get_insn(tb->retire_pc & 0x1fffffffu, s);
+	if((ri >> 26) == 0 && ((ri & 63) == 0xC || (ri & 63) == 0xD)) {
+	  break; /* BREAK or SYSCALL retired; stop without checker */
+	}
+      }
+
       if( enable_checker) {
 	if((uint32_t)tb->retire_pc == (uint32_t)ss->pc) {
 	  //std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";
