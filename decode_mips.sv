@@ -320,13 +320,13 @@ module decode_mips(
 		      6'd12:
 			begin
 			   uop.op = SYSCALL;
-			   uop.serializing_op = 1'b1;
+			   uop.oldest_first = 1'b1;
 			   uop.is_int = 1'b1;
 			end
 		      6'd13:
 			begin
 			   uop.op = BREAK;
-			   uop.serializing_op = 1'b1;
+			   uop.oldest_first = 1'b1;
 			   uop.is_int = 1'b1;
 			end
 		      6'd15: /* sync - treat as nop */
@@ -865,22 +865,19 @@ module decode_mips(
 		      begin
 			 uop.op = TLBR;
 			 uop.is_int = 1'b1;
-			 uop.serializing_op = 1'b1;
-			 uop.must_restart = 1'b1;
-		      end       
+			 uop.oldest_first = 1'b1;
+		      end
 		    else if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd2))
 		      begin
 			 uop.op = TLBWI;
 			 uop.is_int = 1'b1;
-			 uop.serializing_op = 1'b1;
-			 uop.must_restart = 1'b1;
+			 uop.oldest_first = 1'b1;
 		      end
 		    else if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd6))
 		      begin
 			 uop.op = TLBWR;
 			 uop.is_int = 1'b1;
-			 uop.serializing_op = 1'b1;
-			 uop.must_restart = 1'b1;
+			 uop.oldest_first = 1'b1;
 		      end
 		    else if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd8))
 		      begin
@@ -909,10 +906,9 @@ module decode_mips(
 		    else if(insn[25:0] == 26'b10000000000000000000011000)
 		      begin
 			 uop.op = ERET;
-			 uop.serializing_op = 1'b1;
+			 uop.oldest_first = 1'b1;
 			 uop.has_delay_slot = 1'b0;
 			 uop.is_int = 1'b1;
-			 uop.must_restart = 1'b1;
 		      end
 		 end // case: 6'd16
 	       6'd17: /* coproc1 */

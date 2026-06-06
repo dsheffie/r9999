@@ -1606,7 +1606,7 @@ module exec(clk,
 	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;	  
-     	       t_result = t_take_br ?  int_uop.pc + {{HI_EBITS{1'b0}}, 32'd8} : t_srcB;
+     	       t_result = t_take_br ?  int_uop.pc[`M_WIDTH-1:0] + 'd8 : t_srcB;
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end // case: BGEZAL
@@ -1615,7 +1615,7 @@ module exec(clk,
 	       t_take_br = 1'b1;
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-	       t_result = int_uop.pc + {{HI_EBITS{1'b0}}, 32'd8};
+	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -1687,8 +1687,8 @@ module exec(clk,
 	    begin
 	       t_take_br = 1'b1;
 	       t_mispred_br = int_uop.br_pred != t_take_br;
-	       t_pc = {t_pc4[`M_WIDTH-1:28],t_jaddr};
-	       t_result = int_uop.pc + {{HI_EBITS{1'b0}}, 32'd8};
+	       t_pc = {t_pc4[`M_WIDTH-1:28], t_jaddr};
+	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -1705,7 +1705,7 @@ module exec(clk,
 	       t_mispred_br = (t_srcA != {int_uop.jmp_imm,int_uop.imm});
 	       t_pc = t_srcA;
 	       t_alu_valid = 1'b1;
-	       t_result = int_uop.pc + {{HI_EBITS{1'b0}},32'd8};
+	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;
 	       t_wr_int_prf = 1'b1;
 	    end
 	  ANDI:
@@ -1795,6 +1795,7 @@ module exec(clk,
 	    begin
 	       t_clr_erl = 1'b1;
 	       t_alu_valid = 1'b1;
+	       t_fault = 1'b1;
 	       t_pc = r_epc;
 	    end
 	  TEQ:
@@ -2599,19 +2600,19 @@ module exec(clk,
    
    always_comb
      begin
-	t_csr0_val = zero_extend32(cpr0_status_reg);
+	t_csr0_val = sign_extend32(cpr0_status_reg);
 	case(int_uop.srcA[4:0] )
 	  'd0:
 	    begin
-	       t_csr0_val = zero_extend32({r_index_probe_failed,25'd0, r_index});
+	       t_csr0_val = sign_extend32({r_index_probe_failed,25'd0, r_index});
 	    end
 	  'd1:
 	    begin
-	       t_csr0_val = zero_extend32({26'd0, r_random});
+	       t_csr0_val = sign_extend32({26'd0, r_random});
 	    end
 	  'd2:
 	    begin
-	       t_csr0_val = zero_extend32({2'd0,
+	       t_csr0_val = sign_extend32({2'd0,
 					   r_entrylo0_pfn,
 					   r_entrylo0_c,
 					   r_entrylo0_d,
@@ -2620,7 +2621,7 @@ module exec(clk,
 	    end
 	  'd3:
 	    begin
-	       t_csr0_val = zero_extend32({2'd0,
+	       t_csr0_val = sign_extend32({2'd0,
 					   r_entrylo1_pfn,
 					   r_entrylo1_c,
 					   r_entrylo1_d,
@@ -2629,19 +2630,19 @@ module exec(clk,
 	    end
 	  'd4:
 	    begin
-	       t_csr0_val = zero_extend32({r_ptebase,r_badvpn2,4'd0});
+	       t_csr0_val = sign_extend32({r_ptebase,r_badvpn2,4'd0});
 	    end
 	  'd5:
 	    begin
-	       t_csr0_val = zero_extend32({7'd0, r_pagemask, 13'd0});
+	       t_csr0_val = sign_extend32({7'd0, r_pagemask, 13'd0});
 	    end
 	  'd6:
 	    begin
-	       t_csr0_val = zero_extend32({26'd0, r_wired});
-	    end	  
+	       t_csr0_val = sign_extend32({26'd0, r_wired});
+	    end
 	  'd7:
 	    begin
-	       t_csr0_val = zero_extend32({31'd0, w_putchar_fifo_full});
+	       t_csr0_val = sign_extend32({31'd0, w_putchar_fifo_full});
 	    end
 	  'd8:
 	    begin
@@ -2649,24 +2650,24 @@ module exec(clk,
 	    end
 	  'd10:
 	    begin
-	       t_csr0_val = zero_extend32({r_entryhi_vpn2, 5'd0, r_entryhi_asid});
+	       t_csr0_val = sign_extend32({r_entryhi_vpn2, 5'd0, r_entryhi_asid});
 	    end
 	  'd12:
 	    begin
-	       t_csr0_val = zero_extend32(cpr0_status_reg);
+	       t_csr0_val = sign_extend32(cpr0_status_reg);
 	       //$display("reading cpr status reg %x", cpr0_status_reg);
 	    end
 	  'd9: /* Count */
 	    begin
-	       t_csr0_val = zero_extend32(r_count);
+	       t_csr0_val = sign_extend32(r_count);
 	    end
 	  'd11: /* Compare */
 	    begin
-	       t_csr0_val = zero_extend32(r_compare);
+	       t_csr0_val = sign_extend32(r_compare);
 	    end
 	  'd13: /* cause */
 	    begin
-	       t_csr0_val = zero_extend32({r_exc_in_ds,
+	       t_csr0_val = sign_extend32({r_exc_in_ds,
 					   1'b0, /* must be zero */
 					   2'd0, /* coproc field */
 					   12'd0, /* must be zero */
@@ -2685,11 +2686,11 @@ module exec(clk,
 	    end
 	  'd23:
 	    begin
-	       t_csr0_val = zero_extend32(r_cycle[31:0]);
+	       t_csr0_val = sign_extend32(r_cycle[31:0]);
 	    end
 	  'd24:
 	    begin
-	       t_csr0_val = zero_extend32(r_retired_insns[31:0]);
+	       t_csr0_val = sign_extend32(r_retired_insns[31:0]);
 	    end
 	endcase
      end

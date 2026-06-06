@@ -476,8 +476,8 @@ int main(int argc, char **argv) {
     ++globals::cycle;
   }
   
-  tb->resume_pc = s->pc;
-  contextp->timeInc(1);  // 1 timeprecision period passes...  
+  tb->resume_pc = (uint64_t)(int64_t)(int32_t)(uint32_t)s->pc;
+  contextp->timeInc(1);  // 1 timeprecision period passes...
   tb->reset = 0;
   tb->clk = 1;
   tb->eval();
@@ -516,7 +516,7 @@ int main(int argc, char **argv) {
     
   ++globals::cycle;
   tb->resume = 1;
-  tb->resume_pc = s->pc;
+  tb->resume_pc = (uint64_t)(int64_t)(int32_t)(uint32_t)s->pc;
   tb->clk = 1;
   tb->eval();
   tb->clk = 0;
@@ -648,7 +648,6 @@ int main(int argc, char **argv) {
        
       
       if( enable_checker) {
-	//std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";
 	if((uint32_t)tb->retire_pc == (uint32_t)ss->pc) {
 	  //std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";
 	  execMips(ss);
@@ -662,7 +661,7 @@ int main(int argc, char **argv) {
 	  // }
 
 	  bool diverged = false;
-	  if((state_t::reg_t)ss->pc == ((state_t::reg_t)tb->retire_pc + 4)) {
+	  if((uint32_t)ss->pc == (uint32_t)(tb->retire_pc + 4)) {
 	    for(int i = 0; i < 32; i++) {
 	      if((ss->gpr[i] != s->gpr[i])) {
 		int wrong_bits = __builtin_popcount(ss->gpr[i] ^ s->gpr[i]);
@@ -788,14 +787,14 @@ int main(int argc, char **argv) {
 	      }
 	    }
 	    if(last_check > 2) {
-	      uint32_t linsn = bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(last_match_pc));
+	      uint32_t linsn = bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>((uint32_t)last_match_pc & 0x1fffffffu));
 	      std::cerr << "no match in a while, last match : "
 		        << std::hex
 		        << last_match_pc
 		        << " "
 		        << getAsmString(linsn, last_match_pc)
-		        << ", rtl pc =" << std::hex << (uint32_t)tb->retire_pc
-		        << ", sim pc =" << std::hex << (uint32_t)ss->pc
+		        << ", rtl pc =" << std::hex << tb->retire_pc
+		        << ", sim pc =" << std::hex << ss->pc
 		        << std::dec
 		        <<"\n";
 	      for(int i = 0; i < 32; i+=4) {
@@ -842,11 +841,14 @@ int main(int argc, char **argv) {
     
 
     if(enable_checker && tb->retire_two_valid) {
-      if(tb->retire_two_pc == ss->pc) {
+      if((uint32_t)tb->retire_two_pc == (uint32_t)ss->pc) {
 	execMips(ss);
+	if(ss->brk) {
+	  break;
+	}
 	++n_checks;
 	last_check = 0;
-	last_match_pc =  tb->retire_two_pc; 
+	last_match_pc =  tb->retire_two_pc;
       }
     }
 
