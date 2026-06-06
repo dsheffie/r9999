@@ -2167,6 +2167,65 @@ module core(clk,
 	  end
      end // always_comb
 
+   logic t_dec0_in_delay_slot, t_dec1_in_delay_slot;
+   logic n_dec_delay_slot, r_dec_delay_slot;
+   
+   always_comb
+     begin
+	n_dec_delay_slot = r_dec_delay_slot;
+	t_dec0_in_delay_slot = 1'b0;
+	t_dec1_in_delay_slot = 1'b0;
+	
+	if(t_push_dq_two)
+	  begin
+	     if(r_dec_delay_slot)
+	       begin
+		  t_dec0_in_delay_slot = 1'b1;
+		  n_dec_delay_slot = insn_two.is_branch;
+	       end
+	     else
+	       begin
+		  if(insn.is_branch)
+		    begin
+		       t_dec1_in_delay_slot = 1'b1;
+		    end
+		  else if(insn_two.is_branch)
+		    begin
+		       n_dec_delay_slot = 1'b1;
+		    end
+	       end
+	  end // if (t_push_dq_two)
+	else if(t_push_dq_one)
+	  begin
+	     if(r_dec_delay_slot)
+	       begin
+		  t_dec0_in_delay_slot = 1'b1;
+		  n_dec_delay_slot = 1'b0;
+	       end
+	     else
+	       begin
+		  if(insn.is_branch)
+		    begin
+		       n_dec_delay_slot = 1'b1;		       
+		    end
+	       end
+	  end
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_dec_delay_slot <= 1'b0;
+	  end
+	else
+	  begin
+	     r_dec_delay_slot <= t_clr_rob ? 1'b0 : n_dec_delay_slot;
+	  end
+     end // always_ff@ (posedge clk)
+   //t_push_dq_one
+   //t_push_dq_two
+
    
    decode_mips dec0 (
 		     .in_kernel_mode(in_kernel_mode),
@@ -2175,7 +2234,7 @@ module core(clk,
 		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
-		     .irq(w_irq_pending & insn.is_branch),
+		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn.tlb_miss),
 		     .misaligned(insn.misaligned),
 		     .insn(insn.data), 
@@ -2195,7 +2254,7 @@ module core(clk,
 		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
-		     .irq(w_irq_pending & insn_two.is_branch),
+		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .misaligned(insn_two.misaligned),		     
 		     .insn(insn_two.data), 

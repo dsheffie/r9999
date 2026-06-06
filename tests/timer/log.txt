@@ -1,53 +1,59 @@
-n_mispredicts = 91, cycles = 179380, insns = 231109, n_checks = 173406
-1.28838 insn per cycle
-231109 insns retired
-avg insns in ROB = 8.71219, max inflight = 19
-l1d cache hits = 57842
-l1d cache accesses = 57926
+n_mispredicts = 91, cycles = 179379, insns = 231105, n_checks = 173403
+1.28836 insn per cycle
+231105 insns retired
+avg insns in ROB = 8.71153, max inflight = 19
+l1d cache hits = 57829
+l1d cache accesses = 57913
 l1d hit rate = 99.855
-l1i cache hits = 174654
-l1i cache accesses = 175120
+l1i cache hits = 174653
+l1i cache accesses = 175119
 l1i hit rate = 99.7339
 l2 cache hits = 58
 l2 cache accesses = 251
-branch mispredict rate = 0.157718
-mispredicts per kiloinsn = 0.393754
+branch mispredict rate = 0.157721
+mispredicts per kiloinsn = 0.39376
 0 cycles spent flushing caches
 238 cache line loads
 15 cache line stores
 0 l1d misses
 0 insns access the l1d
-avg fetch = 0.951358
+avg fetch = 0.951366
 resteer bubble = 0
-front-end queues full = 1392
-173524 cycles where int exec queue is not empty
-173390 cycles where int exec queue dispatches
-58460 cycles where mem exec queue is not empty
-57926 cycles where mem exec queue dispatches
+front-end queues full = 1393
+173509 cycles where int exec queue is not empty
+173375 cycles where int exec queue dispatches
+58449 cycles where mem exec queue is not empty
+57913 cycles where mem exec queue dispatches
 72 cycles where mem exec queue is blocked by a store
 21 cycles with int queue full
-82 cycles with mem queue full
+83 cycles with mem queue full
 68740 cycles with an empty decode queue
-776 cycles with a  full uop queue
-173851 cycles where the machine is in active state
+777 cycles with a  full uop queue
+173849 cycles where the machine is in active state
 46 cycles where the rob is full
 5 median flush cycles
-230038 cycles spent in pipeline flush
+230025 cycles spent in pipeline flush
 95 times pipeline was flushed
-2421.45 cycles to flush on avg
+2421.32 cycles to flush on avg
 5 min cycles to flush
-133368 max cycles to flush
+133367 max cycles to flush
 4 median delay slot flush cycles
 441 cycles spent waiting for delay slot in flush
 4.9 cycles waiting on delay slot on avg
 4 min cycles for delay slot
 48 max cycles for delay slot
-0 faults inflight, 244704 times
-1 faults inflight, 418 times
-2 faults inflight, 44 times
-3 faults inflight, 14 times
+0 faults inflight, 244703 times
+1 faults inflight, 405 times
+2 faults inflight, 8 times
+3 faults inflight, 9 times
+4 faults inflight, 2 times
+5 faults inflight, 4 times
+6 faults inflight, 14 times
+7 faults inflight, 12 times
+8 faults inflight, 16 times
+9 faults inflight, 6 times
 0 branches inflight, 186594 times
-1 branches inflight, 58250 times
+1 branches inflight, 58249 times
 2 branches inflight, 302 times
 3 branches inflight, 32 times
 4 branches inflight, 2 times
@@ -68,17 +74,17 @@ front-end queues full = 1392
 71 cycles before restart, 1 times
 87 cycles before restart, 1 times
 146 cycles before restart, 1 times
-4702 cycles of pushout
-avg int rdy insn = 1.56527
+4704 cycles of pushout
+avg int rdy insn = 1.5652
 median int rdy insn = 2
 avg mem alloc to complete = 0
 median mem alloc to complete = 0
-avg non-mem alloc to complete = 6.74863
+avg non-mem alloc to complete = 6.74867
 median non-mem alloc to complete = 8
-l1d_reqs = 58600
-l1d_acks = 57926
+l1d_reqs = 58587
+l1d_acks = 57913
 l1d_stores = 244
-l1d tput = 0.988498
+l1d tput = 0.988496
 16 got miss
 4 load retry
 5 store to same set
@@ -96,7 +102,7 @@ ORI,2
 JALR,41
 MFC0,46
 NOP,163
-LW,57365
+LW,57364
 ADDU,15
 AND,3
 LBU,4
@@ -104,16 +110,16 @@ JR,55
 ANDI,51
 ADDIU,225
 OR,238
-SLTI,57322
-BNE,57384
+SLTI,57321
+BNE,57383
 SRL,9
 BEQ,207
 ERET,5
-LUI,57365
+LUI,57364
 LD,193
 LB,44
 SLTIU,10
 SLL,4
 SRA,4
 XOR,2
-total_histo = 231109
+total_histo = 231105
