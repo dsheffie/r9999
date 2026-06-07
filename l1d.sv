@@ -12,7 +12,7 @@ import "DPI-C" function void record_l1d(input int req,
 					input int stall_reason);
 `endif
 
-module l1d(clk, 
+module l1d(clk,
 	   reset,
 	   asid,
 	   tlb_entry_in,
@@ -22,13 +22,14 @@ module l1d(clk,
 	   in_supervisor_mode,
 	   in_user_mode,
 	   head_of_rob_ptr,
-	   head_of_rob_ptr_valid,	
-	   head_of_rob_has_delay_slot,   
+	   head_of_rob_ptr_valid,
+	   head_of_rob_has_delay_slot,
 	   retired_rob_ptr_valid,
 	   retired_rob_ptr_two_valid,
 	   retired_rob_ptr,
 	   retired_rob_ptr_two,
 	   restart_valid,
+	   clr_link_reg,
 	   memq_empty,
 	   drain_ds_complete,
 	   dead_rob_mask,
@@ -87,6 +88,7 @@ module l1d(clk,
    input logic [`LG_ROB_ENTRIES-1:0] retired_rob_ptr;
    input logic [`LG_ROB_ENTRIES-1:0] retired_rob_ptr_two;
    input logic 			     restart_valid;
+   input logic			     clr_link_reg;
    output logic			     memq_empty;
    input logic 			     drain_ds_complete;
    input logic [(1<<`LG_ROB_ENTRIES)-1:0] dead_rob_mask;
@@ -159,12 +161,13 @@ module l1d(clk,
       
       swl_swr = (r.op == MEM_SWR | r.op == MEM_SWL);
       lwl_lwr = (r.op == MEM_LWR | r.op == MEM_LWL);
-      if(r.op == MEM_LDL || r.op == MEM_LDR || r.op == MEM_SDL || r.op == MEM_SDR)
+      if(r.op == MEM_LDL || r.op == MEM_LDR || r.op == MEM_SDL || r.op == MEM_SDR ||
+         r.op == MEM_LLD || r.op == MEM_SCD)
 	return 16'hff << {r.addr[DWORD_START], 3'b0};
-      
+
       b = 	(r.op == MEM_SB | r.op == MEM_LB | r.op == MEM_LBU);
       s = 	(r.op == MEM_SH | r.op == MEM_LH | r.op == MEM_LHU);
-      w = 	(r.op == MEM_SW | r.op == MEM_LW | lwl_lwr);
+      w = 	(r.op == MEM_SW | r.op == MEM_LW | r.op == MEM_LL | r.op == MEM_SC | lwl_lwr);
       
       t_m = b ? 16'h0001 :
 	    s ? 16'h0003 :
@@ -392,8 +395,17 @@ endfunction
    logic [1:0] r_graduated [N_ROB_ENTRIES-1:0];
    logic [N_ROB_ENTRIES-1:0] r_missed;
    logic [N_ROB_ENTRIES-1:0] r_rob_inflight;
-   
-   
+
+   logic r_link_reg_val;
+   logic [`M_WIDTH-1:0] r_link_reg;
+   wire w_match_link = r_link_reg_val &&
+                       (r_link_reg == {r_req.addr[`M_WIDTH-1:`LG_L1D_CL_LEN],
+                                       {`LG_L1D_CL_LEN{1'b0}}});
+   wire w_match_link2 = r_link_reg_val &&
+                        (r_link_reg == {r_req2.addr[`M_WIDTH-1:`LG_L1D_CL_LEN],
+                                        {`LG_L1D_CL_LEN{1'b0}}});
+   logic r_sc_should_write;
+
    logic t_reset_graduated;
 
    always_ff@(posedge clk)
@@ -431,8 +443,39 @@ endfunction
 	  end
      end // always_ff@ (posedge clk)
 
+   always_ff@(posedge clk)
+     begin
+	if(reset || clr_link_reg)
+	  begin
+	     r_link_reg_val <= 1'b0;
+	     r_link_reg <= 'd0;
+	  end
+	else if(n_core_mem_rsp_valid && r_got_req2 && (r_req2.op == MEM_LL || r_req2.op == MEM_LLD))
+	  begin
+	     /* LL/LLD response from port2 (direct cache hit) */
+	     r_link_reg_val <= 1'b1;
+	     r_link_reg <= {r_req2.addr[`M_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+	  end
+	else if(n_core_mem_rsp_valid && r_got_req2 && (r_req2.op == MEM_SC || r_req2.op == MEM_SCD))
+	  begin
+	     /* SC/SCD early ack at port2 always clears LLbit */
+	     r_link_reg_val <= 1'b0;
+	  end
+	else if(n_core_mem_rsp_valid && (r_req.op == MEM_LL || r_req.op == MEM_LLD))
+	  begin
+	     /* LL/LLD response from port1 (miss→reload path) */
+	     r_link_reg_val <= 1'b1;
+	     r_link_reg <= {r_req.addr[`M_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+	  end
+     end
 
-   
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  r_sc_should_write <= 1'b0;
+	else if(n_core_mem_rsp_valid && r_got_req2 && (r_req2.op == MEM_SC || r_req2.op == MEM_SCD))
+	  r_sc_should_write <= t_port2_hit_cache && w_match_link2;
+     end
 
    always_ff@(posedge clk)
      begin
@@ -975,6 +1018,18 @@ endfunction
 	       t_rsp_data2 = {32'd0, t_bswap_w32_2};
 	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
 	    end
+	  MEM_LL:
+	    begin
+	       t_rsp_data2 = {{32{t_bswap_w32_2[31]}}, t_bswap_w32_2};
+	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
+	    end
+	  MEM_LLD:
+	    begin
+	       t_rsp_data2 = {t_bswap_w32_2,
+			      bswap32(select_cl32(t_data2,
+			        r_req2.addr[WORD_STOP-1:WORD_START] + 2'd1))};
+	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
+	    end
 	  MEM_LD:
 	    begin
 	       t_rsp_data2 = {t_bswap_w32_2,
@@ -1118,6 +1173,18 @@ endfunction
 	  MEM_LWU:
 	    begin
 	       t_rsp_data = {32'd0, t_bswap_w32};
+	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
+	    end
+	  MEM_LL:
+	    begin
+	       t_rsp_data = {{32{t_bswap_w32[31]}}, t_bswap_w32};
+	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
+	    end
+	  MEM_LLD:
+	    begin
+	       t_rsp_data = {t_bswap_w32,
+			     bswap32(select_cl32(t_data,
+			       r_req.addr[WORD_STOP-1:WORD_START] + 2'd1))};
 	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
 	    end
 	  MEM_LD:
@@ -1331,9 +1398,20 @@ endfunction
 	  MEM_SC:
 	    begin
 	       t_array_data = merge_cl32(t_data, bswap32(r_req.data[31:0]), r_req.addr[WORD_STOP-1:WORD_START]);
-	       t_rsp_data = 64'd1;
-	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
-	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);
+	       t_rsp_data = 'd0;
+	       t_rsp_dst_valid = 1'b0;
+	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_sc_should_write;
+	    end
+	  MEM_SCD:
+	    begin
+	       t_array_data = merge_cl32(
+		  merge_cl32(t_data, bswap32(r_req.data[63:32]),
+		    r_req.addr[WORD_STOP-1:WORD_START]),
+		  bswap32(r_req.data[31:0]),
+		  r_req.addr[WORD_STOP-1:WORD_START] + 2'd1);
+	       t_rsp_data = 'd0;
+	       t_rsp_dst_valid = 1'b0;
+	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_sc_should_write;
 	    end
 	  MEM_SWR:
 	    begin
@@ -1517,7 +1595,7 @@ endfunction
 	t_force_clear_busy = 1'b0;
 	
 	t_incr_busy = 1'b0;
-	
+
 	n_stall_store = 1'b0;
 	n_q_priority = !r_q_priority;
 	
@@ -1596,16 +1674,32 @@ endfunction
 			 t_push_miss = 1'b1;
 			 t_incr_busy = 1'b1;
 			 n_stall_store = 1'b1;
-			 //ack early
-			 n_core_mem_rsp.dst_valid = 1'b0;
-			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
-			 n_core_mem_rsp.tlb_index = w_tlb_index;
-			 if(t_port2_hit_cache)
+			 if(r_req2.op != MEM_SC && r_req2.op != MEM_SCD)
 			   begin
-			      n_cache_hits = r_cache_hits + 'd1;
+			      //ack early
+			      n_core_mem_rsp.dst_valid = 1'b0;
+			      n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			      n_core_mem_rsp.tlb_index = w_tlb_index;
+			      if(t_port2_hit_cache)
+				begin
+				   n_cache_hits = r_cache_hits + 'd1;
+				end
+			      n_core_mem_rsp_valid = 1'b1;
+			      n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 			   end
-			 n_core_mem_rsp_valid = 1'b1;
-			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
+			 else
+			   begin
+			      /* SC/SCD: send early ack with correct result.
+			       * Cache write deferred to graduated-store port1 path. */
+			      n_core_mem_rsp.data = {{(`M_WIDTH-1){1'b0}}, t_port2_hit_cache && w_match_link2};
+			      n_core_mem_rsp.dst_valid = r_req2.dst_valid;
+			      n_core_mem_rsp.bad_addr = r_req2.bad_addr;
+			      if(t_port2_hit_cache)
+				begin
+				   n_cache_hits = r_cache_hits + 'd1;
+				end
+			      n_core_mem_rsp_valid = 1'b1;
+			   end
 		      end // if (r_req2.is_store)
 		    else if(r_req2.op == MEM_LWL || r_req2.op == MEM_LWR ||
 			    r_req2.op == MEM_LDL || r_req2.op == MEM_LDR)
@@ -1686,7 +1780,9 @@ endfunction
 		      begin /* valid cacheline - hit in cache */
 			 if(r_req.is_store)
 			   begin
-			      t_reset_graduated = 1'b1;				   
+			      /* All stores (including SC) just reset graduated state.
+			       * SC result was already sent via port2 early ack. */
+			      t_reset_graduated = 1'b1;
 			   end
 			 else
 			   begin
@@ -1694,7 +1790,7 @@ endfunction
 			      n_core_mem_rsp.dst_valid = t_rsp_dst_valid;
 			      n_core_mem_rsp_valid = 1'b1;
 			      n_core_mem_rsp.bad_addr = r_req.bad_addr;
-			   end // else: !if(r_req.is_store)
+			   end
 		      end // if (r_valid_out && (r_tag_out == r_cache_tag))
 		    else if(r_valid_out && r_dirty_out && (r_tag_out != r_cache_tag) )
 		      begin
@@ -1783,10 +1879,6 @@ endfunction
 		    begin
 		       if(t_mem_head.is_store)
 			 begin
-			    //$display("t_mem_head.rob_ptr = %d, grad %b, dq ptr %d valid %b", 
-			    //t_mem_head.rob_ptr, r_graduated[t_mem_head.rob_ptr], 
-			    //core_store_data.rob_ptr, core_store_data_valid);
-			    
 			    if(r_graduated[t_mem_head.rob_ptr] == 2'b10 && (core_store_data_valid ? (t_mem_head.rob_ptr == core_store_data.rob_ptr) : 1'b0) )
 			      begin
 `ifdef VERBOSE_L1D

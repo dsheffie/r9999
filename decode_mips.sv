@@ -1215,15 +1215,61 @@ module decode_mips(
 		    uop.is_mem = 1'b1;
 		    uop.is_store = 1'b1;
 		 end
-	       6'd48: /* LL - hack treat load-linked as normal load*/
+	       6'd48: /* LL */
 		 begin
-		    uop.op = LW;
+		    uop.op = LL;
 		    uop.srcA = rs;
 		    uop.srcA_valid = 1'b1;
 		    uop.dst = rt;
 		    uop.dst_valid = (rt != 'd0);
 		    uop.imm = insn[15:0];
 		    uop.is_mem = 1'b1;
+		    uop.oldest_first = 1'b1;
+		 end
+	       6'd52: /* LLD */
+		 begin
+		    if(w_in_64b_mode)
+		      begin
+			 uop.op = LLD;
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.dst = rt;
+			 uop.dst_valid = (rt != 'd0);
+			 uop.imm = insn[15:0];
+			 uop.is_mem = 1'b1;
+			 uop.oldest_first = 1'b1;
+		      end
+		 end
+	       6'd56: /* SC */
+		 begin
+		    uop.op = SC;
+		    uop.srcA = rs;
+		    uop.srcA_valid = 1'b1;
+		    uop.srcB = rt;
+		    uop.srcB_valid = 1'b1;
+		    uop.dst = rt;
+		    uop.dst_valid = (rt != 'd0);
+		    uop.imm = insn[15:0];
+		    uop.is_mem = 1'b1;
+		    uop.is_store = 1'b1;
+		    uop.oldest_first = 1'b1;
+		 end
+	       6'd60: /* SCD */
+		 begin
+		    if(w_in_64b_mode)
+		      begin
+			 uop.op = SCD;
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.srcB = rt;
+			 uop.srcB_valid = 1'b1;
+			 uop.dst = rt;
+			 uop.dst_valid = (rt != 'd0);
+			 uop.imm = insn[15:0];
+			 uop.is_mem = 1'b1;
+			 uop.is_store = 1'b1;
+			 uop.oldest_first = 1'b1;
+		      end
 		 end
 	       6'd51: /* PREF */
 		 begin

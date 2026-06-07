@@ -2092,6 +2092,26 @@ module exec(clk,
 	       t_mem_tail.dst_valid = 1'b0;
 	       t_mem_tail.bad_addr = w_bad_seg_perms;
 	    end
+	  LL:
+	    begin
+	       t_mem_tail.op = MEM_LL;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
+	    end
+	  LLD:
+	    begin
+	       t_mem_tail.op = MEM_LLD;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
+	    end
+	  SCD:
+	    begin
+	       t_mem_tail.op = MEM_SCD;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
+	    end
 	  TLBP:
 	    begin
 	       t_mem_tail.op = MEM_TLBP;

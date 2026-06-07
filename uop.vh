@@ -112,6 +112,9 @@ typedef enum logic [6:0]
    LDR,
    SDL,
    SDR,
+   LL,
+   LLD,
+   SCD,
    FETCH_MISALIGNED,
    FETCH_TLB_MISS,
    FETCH_TLB_INVALID,
@@ -173,6 +176,8 @@ function logic is_store(opcode_t op);
      SDL:
        x = 1'b1;
      SDR:
+       x = 1'b1;
+     SCD:
        x = 1'b1;
      default:
        x = 1'b0;

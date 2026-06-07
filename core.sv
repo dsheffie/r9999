@@ -79,7 +79,8 @@ module core(clk,
 	    restart_src_pc,
 	    restart_src_is_indirect,
 	    restart_valid,
-	    restart_ack,	    
+	    clr_link_reg,
+	    restart_ack,
 	    core_mem_req_ack,
 	    core_mem_req,
 	    core_mem_req_valid,
@@ -180,6 +181,7 @@ module core(clk,
    output logic [(`M_WIDTH-1):0] restart_src_pc;
    output logic 		 restart_src_is_indirect;
    output logic 		 restart_valid;
+   output logic			 clr_link_reg;
    input logic 			 restart_ack;
    
    output logic [(`M_WIDTH-1):0] branch_pc;
@@ -527,8 +529,15 @@ module core(clk,
    assign restart_src_pc = r_restart_src_pc;
    assign restart_src_is_indirect = r_restart_src_is_indirect;
 
-   assign dead_rob_mask = r_rob_dead_insns;   
+   assign dead_rob_mask = r_rob_dead_insns;
    assign restart_valid = r_restart_valid;
+
+   /* clr_link_reg: pulse on exception (WRITE_EPC) or ERET retirement only.
+    * Branch mispredictions must NOT clear the link register. */
+   assign clr_link_reg = (r_state == WRITE_EPC) ||
+                         (r_state == ACTIVE && t_can_retire_rob_head &&
+                          t_rob_head.faulted && !t_arch_fault &&
+                          t_rob_head.opcode == ERET);
 
    
    assign branch_pc = r_branch_pc;
