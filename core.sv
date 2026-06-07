@@ -924,18 +924,20 @@ module core(clk,
 
 
 	
-	t_fold_uop = (t_uop.op == NOP | 
+	t_fold_uop = (t_uop.op == NOP |
 		      t_uop.op == J  |
 		      t_uop.op == IRQ |
 		      t_uop.op == FETCH_MISALIGNED |
 		      t_uop.op == FETCH_TLB_MISS |
+		      t_uop.op == FETCH_TLB_INVALID |
 		      t_uop.op == II);
 
-	t_fold_uop2 = (t_uop2.op == NOP | 
+	t_fold_uop2 = (t_uop2.op == NOP |
 		       t_uop2.op == J  |
 		       t_uop2.op == IRQ |
 		       t_uop2.op == FETCH_MISALIGNED |
-		       t_uop2.op == FETCH_TLB_MISS |		       
+		       t_uop2.op == FETCH_TLB_MISS |
+		       t_uop2.op == FETCH_TLB_INVALID |
 		       t_uop2.op == II);
 	
 	n_ds_done = r_ds_done;
@@ -1754,6 +1756,12 @@ module core(clk,
 		  else if(t_uop.op == FETCH_TLB_MISS)
 		    begin
 		       t_rob_tail.faulted = 1'b1;
+		       t_rob_tail.tlb_refill = 1'b1;
+		    end
+		  else if(t_uop.op == FETCH_TLB_INVALID)
+		    begin
+		       t_rob_tail.faulted = 1'b1;
+		       t_rob_tail.tlb_invalid = 1'b1;
 		    end
 		  else if(t_uop.op == FETCH_MISALIGNED)
 		    begin
@@ -1809,6 +1817,12 @@ module core(clk,
 		  else if(t_uop2.op == FETCH_TLB_MISS)
 		    begin
 		       t_rob_next_tail.faulted = 1'b1;
+		       t_rob_next_tail.tlb_refill = 1'b1;
+		    end
+		  else if(t_uop2.op == FETCH_TLB_INVALID)
+		    begin
+		       t_rob_next_tail.faulted = 1'b1;
+		       t_rob_next_tail.tlb_invalid = 1'b1;
 		    end
 		  else if(t_uop2.op == FETCH_MISALIGNED)
 		    begin
@@ -1917,6 +1931,10 @@ module core(clk,
 		  
 		  r_rob[core_mem_rsp.rob_ptr].is_bad_addr <= core_mem_rsp.bad_addr;
 		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
+		  if(t_alloc && (t_uop.op == FETCH_TLB_MISS || t_uop.op == FETCH_TLB_INVALID))
+		    r_addrs[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.pc;
+		  if(t_alloc_two && (t_uop2.op == FETCH_TLB_MISS || t_uop2.op == FETCH_TLB_INVALID))
+		    r_addrs[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.pc;
 
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		  r_rob[core_mem_rsp.rob_ptr].complete_cycle <= r_cycle;
@@ -2255,6 +2273,7 @@ module core(clk,
 		     .in_64b_user_mode(w_in_64b_user_mode),
 		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn.tlb_miss),
+		     .tlb_invalid(insn.tlb_invalid),
 		     .misaligned(insn.misaligned),
 		     .insn(insn.data), 
 		     .pc(insn.pc), 
@@ -2275,6 +2294,7 @@ module core(clk,
 		     .in_64b_user_mode(w_in_64b_user_mode),
 		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn_two.tlb_miss),
+		     .tlb_invalid(insn_two.tlb_invalid),
 		     .misaligned(insn_two.misaligned),		     
 		     .insn(insn_two.data), 
 		     .pc(insn_two.pc), 

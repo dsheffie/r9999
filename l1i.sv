@@ -63,16 +63,19 @@ module l1i(clk,
 	   
 	   //output to the memory system
 	   mem_req_ack,
-	   mem_req_valid, 
-	   mem_req_addr, 
+	   mem_req_valid,
+	   mem_req_addr,
 	   mem_req_opcode,
 	   mem_req_cacheable,
-	   mem_req_mask,	   
+	   mem_req_mask,
 	   //reply from memory system
 	   mem_rsp_valid,
 	   mem_rsp_load_data,
 	   cache_accesses,
-	   cache_hits
+	   cache_hits,
+	   // I-side TLB entry write port (shared with D-side)
+	   tlb_entry_in_valid,
+	   tlb_entry_in
 	   );
 
    input logic clk;
@@ -148,6 +151,8 @@ module l1i(clk,
    input logic [L1I_CL_LEN_BITS-1:0] 	  mem_rsp_load_data;
    output logic [63:0] 			  cache_accesses;
    output logic [63:0] 			  cache_hits;
+   input logic 				  tlb_entry_in_valid;
+   input 				  tlb_data_t tlb_entry_in;
       
    logic [N_TAG_BITS-1:0] 		  t_cache_tag, r_cache_tag, r_tag_out;
 
@@ -477,6 +482,27 @@ endfunction
 		 .in_64b_user_mode(in_64b_user_mode)
 		 );
 
+   /* I-side TLB: translates kuseg/kseg2 fetch addresses */
+   wire [`M_WIDTH-1:0]  w_itlb_pa;
+   wire 		w_itlb_hit;
+   wire 		w_itlb_valid;   /* V bit of matched page */
+
+   tlb #(.ISIDE(1)) itlb (
+		       .clk(clk),
+		       .reset(reset),
+		       .asid(asid),
+		       .active(w_mapped),
+		       .req(1'b1),
+		       .va(w_la_pc),
+		       .pa(w_itlb_pa),
+		       .hit(w_itlb_hit),
+		       .hit_index(),
+		       .dirty(),
+		       .writable(w_itlb_valid),
+		       .tlb_entry_in_valid(tlb_entry_in_valid),
+		       .tlb_entry_in(tlb_entry_in)
+		       );
+
    always@(posedge clk)
      begin
 	r_tlb_pc <= reset ? 'd0 : w_la_pc;
@@ -484,7 +510,9 @@ endfunction
 	r_cached <= reset ? 1'b0 : w_cached;
 	r_mapped <= reset ? 1'b0 : w_mapped;
      end
-   assign w_tlb_pc = r_la_pc;
+
+   /* For mapped (kuseg) addresses use TLB-translated PA; unmapped uses mipsseg output directly */
+   assign w_tlb_pc = (r_mapped && w_itlb_hit) ? w_itlb_pa : r_la_pc;
    
    wire w_hit = (r_tag_out == w_tlb_pc[(`M_WIDTH-1):IDX_STOP]);
    //always@(negedge clk)
@@ -518,12 +546,19 @@ endfunction
 	t_next_spec_rs_tos = r_spec_rs_tos+'d1;
 	n_restart_req = restart_valid | r_restart_req;
 
-	t_miss = r_req & !(r_valid_out & (r_tag_out == w_tlb_pc[`M_WIDTH-1:IDX_STOP]));
-	t_hit = r_req & (r_valid_out & (r_tag_out == w_tlb_pc[`M_WIDTH-1:IDX_STOP]));
-
-	
-	//t_miss = r_req & !(r_valid_out & (!w_hit));
-	//t_hit = r_req & (r_valid_out & w_hit);
+	/* I-TLB fault: mapped address with no TLB entry (refill) or V=0 (invalid).
+	 * In these cases suppress normal cache hit/miss — the pipeline will take
+	 * an ITLB exception instead of trying to fetch from memory. */
+	if(r_mapped && !(w_itlb_hit && w_itlb_valid))
+	  begin
+	     t_miss = 1'b0;
+	     t_hit  = 1'b0;
+	  end
+	else
+	  begin
+	     t_miss = r_req & !(r_valid_out & (r_tag_out == w_tlb_pc[`M_WIDTH-1:IDX_STOP]));
+	     t_hit  = r_req & (r_valid_out & (r_tag_out == w_tlb_pc[`M_WIDTH-1:IDX_STOP]));
+	  end
 
 	t_insn_idx = r_cache_pc[WORD_STOP-1:WORD_START];
 	
@@ -642,13 +677,23 @@ endfunction
 		    n_state = ACTIVE;
 		    t_clear_fq = 1'b1;
 		 end // if (n_restart_req)
+	       else if(r_req && r_mapped && !(w_itlb_hit && w_itlb_valid) && !fq_full)
+		 begin
+		    t_push_insn = 1'b1;
+		    n_pc = r_cache_pc + 'd4;
+		 end
+	       else if(r_req && r_mapped && !(w_itlb_hit && w_itlb_valid) && fq_full)
+		 begin
+		    n_pc = r_pc;
+		    n_miss_pc = r_cache_pc;
+		    n_state = WAIT_FOR_NOT_FULL;
+		 end
 	       else if(t_miss)
 		 begin
 		    n_state = INJECT_RELOAD;
-		    n_mem_req_addr = {w_tlb_pc[`M_WIDTH-1:`LG_L1D_CL_LEN], 
+		    n_mem_req_addr = {w_tlb_pc[`M_WIDTH-1:`LG_L1D_CL_LEN],
 				      {`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_cacheable = r_cached;
-		    
 		    n_mem_req_valid = 1'b1;
 		    n_miss_pc = r_cache_pc;
 		    n_pc = r_pc;
@@ -889,7 +934,8 @@ endfunction
      begin
 	t_insn.data = t_insn_data;
 	t_insn.misaligned = 1'b0;
-	t_insn.tlb_miss = 1'b0;
+	t_insn.tlb_miss    = r_mapped & r_req & !w_itlb_hit;
+	t_insn.tlb_invalid = r_mapped & r_req &  w_itlb_hit & !w_itlb_valid;
 	t_insn.pc = r_cache_pc;
 	t_insn.pred_target = n_pc;
 	t_insn.pred = t_take_br;
@@ -901,6 +947,7 @@ endfunction
 	t_insn2.data = t_insn_data2;
 	t_insn2.misaligned = 1'b0;
 	t_insn2.tlb_miss = 1'b0;
+	t_insn2.tlb_invalid = 1'b0;
 	t_insn2.pc = r_cache_pc + 'd4;
 	t_insn2.pred_target = 'd0;
 	t_insn2.pred = 1'b0;
@@ -912,6 +959,7 @@ endfunction
 	t_insn3.data = t_insn_data3;
 	t_insn3.misaligned = 1'b0;
 	t_insn3.tlb_miss = 1'b0;
+	t_insn3.tlb_invalid = 1'b0;
 	t_insn3.pc = r_cache_pc + 'd8;
 	t_insn3.pred_target = 'd0;
 	t_insn3.pred = 1'b0;
@@ -923,6 +971,7 @@ endfunction
 	t_insn4.data = t_insn_data4;
 	t_insn4.misaligned = 1'b0;
 	t_insn4.tlb_miss = 1'b0;
+	t_insn4.tlb_invalid = 1'b0;
 	t_insn4.pc = r_cache_pc + 'd12;
 	t_insn4.pred_target = 'd0;
 	t_insn4.pred = 1'b0;

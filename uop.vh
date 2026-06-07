@@ -114,6 +114,7 @@ typedef enum logic [6:0]
    SDR,
    FETCH_MISALIGNED,
    FETCH_TLB_MISS,
+   FETCH_TLB_INVALID,
    II,
    IRQ
    } opcode_t;

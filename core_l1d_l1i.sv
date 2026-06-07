@@ -604,7 +604,9 @@ module core_l1d_l1i(clk,
 	      .mem_rsp_valid(l1i_mem_rsp_valid),
 	      .mem_rsp_load_data(w_l1_mem_load_data),
 	      .cache_accesses(l1i_cache_accesses),
-	      .cache_hits(l1i_cache_hits)	      
+	      .cache_hits(l1i_cache_hits),
+	      .tlb_entry_in_valid(tlb_entry_out_valid),
+	      .tlb_entry_in(tlb_entry_out)
 	      );
 
    core cpu (

@@ -11,6 +11,7 @@ module decode_mips(
 		   in_64b_user_mode,
 		   irq,
 		   tlb_miss,
+		   tlb_invalid,
 		   misaligned,
 		   insn,
 		   pc,
@@ -29,6 +30,7 @@ module decode_mips(
    input logic			in_64b_user_mode;
    input logic			irq;
    input logic			tlb_miss;
+   input logic			tlb_invalid;
    input logic			misaligned;
    input logic [31:0]		insn;
    input logic [`M_WIDTH-1:0] pc;
@@ -121,6 +123,10 @@ module decode_mips(
 	else if(tlb_miss)
 	  begin
 	     uop.op = FETCH_TLB_MISS;
+	  end
+	else if(tlb_invalid)
+	  begin
+	     uop.op = FETCH_TLB_INVALID;
 	  end
 	else
 	  begin
