@@ -40,15 +40,22 @@ NPROC=$(nproc)
 # ---------------------------------------------------------------------------
 TIMER_IRQ=0
 MAPPED_DATA=0
+MAPPED_INSN=0
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --timer-irq)   TIMER_IRQ=1 ;;
         --mapped-data) MAPPED_DATA=1 ;;
+        --mapped-insn) MAPPED_INSN=1 ;;
         *)             ARGS+=("$arg") ;;
     esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+if [ "$MAPPED_DATA" -eq 1 ] && [ "$MAPPED_INSN" -eq 1 ]; then
+    echo "error: --mapped-data and --mapped-insn cannot be combined" >&2
+    exit 1
+fi
 
 N=${1:-100}
 CBMC_K=${2:-20}         # unwind bound for user-generated loops
@@ -88,6 +95,9 @@ TIMER_IRQ_FLAG=""
 if [ "$MAPPED_DATA" -eq 1 ]; then
     $CC $BM_FLAGS $TIMER_IRQ_FLAG \
         -c "$SCRIPT_DIR/start_csmith_mapped.S"            -o "$SHARED/start.o"
+elif [ "$MAPPED_INSN" -eq 1 ]; then
+    $CC $BM_FLAGS $TIMER_IRQ_FLAG \
+        -c "$SCRIPT_DIR/start_csmith_mapped_insn.S"       -o "$SHARED/start.o"
 else
     $CC $BM_FLAGS $TIMER_IRQ_FLAG \
         -c "$SCRIPT_DIR/start_csmith.S"                   -o "$SHARED/start.o"
@@ -114,7 +124,7 @@ export SHARED REPO_ROOT HELLO SIM CC CSMITH_INC QEMU FAIL_DIR
 export BM_FLAGS BM_DEFS REF_FLAGS SUPPORT_OBJS CSMITH_FLAGS
 export TIMEOUT_REF TIMEOUT_SIM MAXICNT
 export CBMC_K CBMC_LIBLOOPS
-export SPECIFIC TIMER_IRQ MAPPED_DATA
+export SPECIFIC TIMER_IRQ MAPPED_DATA MAPPED_INSN
 
 # ---------------------------------------------------------------------------
 # Worker: one test per invocation; writes PASS / SKIP / FAIL to $SHARED/r$id
@@ -204,6 +214,7 @@ worker() {
     # ---- Step 3: Bare-metal MIPS on r9999 simulator ----------------------
     local ld_script="$HELLO/baremetal.ld"
     [ "${MAPPED_DATA:-0}" -eq 1 ] && ld_script="$HELLO/baremetal_mapped.ld"
+    [ "${MAPPED_INSN:-0}" -eq 1 ] && ld_script="$HELLO/baremetal_mapped_insn.ld"
     $CC $BM_FLAGS $BM_DEFS -I"$CSMITH_INC" -I"$HELLO" \
         -w -nostdlib "$src" $SUPPORT_OBJS \
         -T "$ld_script" -Wl,-melf32btsmipn32 -o "$elf" 2>/dev/null \
@@ -251,13 +262,16 @@ fi
 
 TIMER_STR="off"
 [ "$TIMER_IRQ" -eq 1 ] && TIMER_STR="on (every 10000 cycles)"
-MAPPED_STR="off (kseg0)"
-[ "$MAPPED_DATA" -eq 1 ] && MAPPED_STR="on (kuseg 0x400000-0x45FFFF, 1:1)"
+MAPPED_DATA_STR="off (kseg0)"
+[ "$MAPPED_DATA" -eq 1 ] && MAPPED_DATA_STR="on (kuseg 0x400000-0x45FFFF, 1:1)"
+MAPPED_INSN_STR="off (kseg0)"
+[ "$MAPPED_INSN" -eq 1 ] && MAPPED_INSN_STR="on (kuseg 0x200000-0x25FFFF, 1:1)"
 echo "Running $N tests on $NPROC parallel workers"
 echo "  cbmc k=$CBMC_K   maxicnt=$MAXICNT   ref_timeout=${TIMEOUT_REF}s ($QEMU)   sim_timeout=${TIMEOUT_SIM}s"
 echo "  csmith: $CSMITH_FLAGS"
 echo "  timer irq: $TIMER_STR"
-echo "  mapped data: $MAPPED_STR"
+echo "  mapped data: $MAPPED_DATA_STR"
+echo "  mapped insn: $MAPPED_INSN_STR"
 echo ""
 
 if [ -t 2 ]; then
