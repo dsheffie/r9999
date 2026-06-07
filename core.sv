@@ -1288,6 +1288,12 @@ module core(clk,
 		    //$display("bad pc %x", t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);	     
 		    n_cause = 5'd10;
 		 end
+	       else if(t_rob_head.opcode == FETCH_MISALIGNED)
+		 begin
+		    n_pending_bad_addr = 1'b1;
+		    n_has_badvaddr = 1'b1;
+		    n_cause = 5'd4;
+		 end
 	       else if(t_rob_head.is_bad_addr)
 		 begin
 		    n_pending_bad_addr = 1'b1;
@@ -1931,9 +1937,9 @@ module core(clk,
 		  
 		  r_rob[core_mem_rsp.rob_ptr].is_bad_addr <= core_mem_rsp.bad_addr;
 		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
-		  if(t_alloc && (t_uop.op == FETCH_TLB_MISS || t_uop.op == FETCH_TLB_INVALID))
+		  if(t_alloc && (t_uop.op == FETCH_TLB_MISS || t_uop.op == FETCH_TLB_INVALID || t_uop.op == FETCH_MISALIGNED))
 		    r_addrs[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.pc;
-		  if(t_alloc_two && (t_uop2.op == FETCH_TLB_MISS || t_uop2.op == FETCH_TLB_INVALID))
+		  if(t_alloc_two && (t_uop2.op == FETCH_TLB_MISS || t_uop2.op == FETCH_TLB_INVALID || t_uop2.op == FETCH_MISALIGNED))
 		    r_addrs[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.pc;
 
 `ifdef ENABLE_CYCLE_ACCOUNTING

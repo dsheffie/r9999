@@ -677,6 +677,17 @@ endfunction
 		    n_state = ACTIVE;
 		    t_clear_fq = 1'b1;
 		 end // if (n_restart_req)
+	       else if(r_req && r_cache_pc[1:0] != 2'b00 && !fq_full)
+		 begin
+		    t_push_insn = 1'b1;
+		    n_pc = r_cache_pc + 'd4;
+		 end
+	       else if(r_req && r_cache_pc[1:0] != 2'b00 && fq_full)
+		 begin
+		    n_pc = r_pc;
+		    n_miss_pc = r_cache_pc;
+		    n_state = WAIT_FOR_NOT_FULL;
+		 end
 	       else if(r_req && r_mapped && !(w_itlb_hit && w_itlb_valid) && !fq_full)
 		 begin
 		    t_push_insn = 1'b1;
@@ -933,8 +944,8 @@ endfunction
    always_comb
      begin
 	t_insn.data = t_insn_data;
-	t_insn.misaligned = 1'b0;
-	t_insn.tlb_miss    = r_mapped & r_req & !w_itlb_hit;
+	t_insn.misaligned  = r_req & (r_cache_pc[1:0] != 2'b00);
+	t_insn.tlb_miss    = r_mapped & r_req & !w_itlb_hit & (r_cache_pc[1:0] == 2'b00);
 	t_insn.tlb_invalid = r_mapped & r_req &  w_itlb_hit & !w_itlb_valid;
 	t_insn.pc = r_cache_pc;
 	t_insn.pred_target = n_pc;
