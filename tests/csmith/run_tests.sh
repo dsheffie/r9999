@@ -39,11 +39,13 @@ NPROC=$(nproc)
 # Parameters
 # ---------------------------------------------------------------------------
 TIMER_IRQ=0
+MAPPED_DATA=0
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
-        --timer-irq) TIMER_IRQ=1 ;;
-        *)           ARGS+=("$arg") ;;
+        --timer-irq)   TIMER_IRQ=1 ;;
+        --mapped-data) MAPPED_DATA=1 ;;
+        *)             ARGS+=("$arg") ;;
     esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
@@ -83,8 +85,13 @@ echo "Building common bare-metal objects  (parallelism: ${NPROC} jobs)..."
 
 TIMER_IRQ_FLAG=""
 [ "$TIMER_IRQ" -eq 1 ] && TIMER_IRQ_FLAG="-DENABLE_TIMER_IRQ"
-$CC $BM_FLAGS $TIMER_IRQ_FLAG \
-    -c "$SCRIPT_DIR/start_csmith.S"                       -o "$SHARED/start.o"
+if [ "$MAPPED_DATA" -eq 1 ]; then
+    $CC $BM_FLAGS $TIMER_IRQ_FLAG \
+        -c "$SCRIPT_DIR/start_csmith_mapped.S"            -o "$SHARED/start.o"
+else
+    $CC $BM_FLAGS $TIMER_IRQ_FLAG \
+        -c "$SCRIPT_DIR/start_csmith.S"                   -o "$SHARED/start.o"
+fi
 $CC $BM_FLAGS -I"$HELLO" \
     -c "$HELLO/printf.c"                                   -o "$SHARED/printf.o"
 $CC $BM_FLAGS \
@@ -107,7 +114,7 @@ export SHARED REPO_ROOT HELLO SIM CC CSMITH_INC QEMU FAIL_DIR
 export BM_FLAGS BM_DEFS REF_FLAGS SUPPORT_OBJS CSMITH_FLAGS
 export TIMEOUT_REF TIMEOUT_SIM MAXICNT
 export CBMC_K CBMC_LIBLOOPS
-export SPECIFIC TIMER_IRQ
+export SPECIFIC TIMER_IRQ MAPPED_DATA
 
 # ---------------------------------------------------------------------------
 # Worker: one test per invocation; writes PASS / SKIP / FAIL to $SHARED/r$id
@@ -195,9 +202,11 @@ worker() {
     [ -z "$ref_out" ] && { echo SKIP > "$SHARED/r$id"; return; }
 
     # ---- Step 3: Bare-metal MIPS on r9999 simulator ----------------------
+    local ld_script="$HELLO/baremetal.ld"
+    [ "${MAPPED_DATA:-0}" -eq 1 ] && ld_script="$HELLO/baremetal_mapped.ld"
     $CC $BM_FLAGS $BM_DEFS -I"$CSMITH_INC" -I"$HELLO" \
         -w -nostdlib "$src" $SUPPORT_OBJS \
-        -T "$HELLO/baremetal.ld" -Wl,-melf32btsmipn32 -o "$elf" 2>/dev/null \
+        -T "$ld_script" -Wl,-melf32btsmipn32 -o "$elf" 2>/dev/null \
         || { echo SKIP > "$SHARED/r$id"; return; }
 
     local sim_raw sim_out
@@ -242,10 +251,13 @@ fi
 
 TIMER_STR="off"
 [ "$TIMER_IRQ" -eq 1 ] && TIMER_STR="on (every 10000 cycles)"
+MAPPED_STR="off (kseg0)"
+[ "$MAPPED_DATA" -eq 1 ] && MAPPED_STR="on (kuseg 0x400000-0x45FFFF, 1:1)"
 echo "Running $N tests on $NPROC parallel workers"
 echo "  cbmc k=$CBMC_K   maxicnt=$MAXICNT   ref_timeout=${TIMEOUT_REF}s ($QEMU)   sim_timeout=${TIMEOUT_SIM}s"
 echo "  csmith: $CSMITH_FLAGS"
 echo "  timer irq: $TIMER_STR"
+echo "  mapped data: $MAPPED_STR"
 echo ""
 
 if [ -t 2 ]; then

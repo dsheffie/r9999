@@ -517,11 +517,11 @@ module core(clk,
    uop_t t_uop, t_dec_uop, t_alloc_uop;
    uop_t t_uop2, t_dec_uop2, t_alloc_uop2;
       
-   assign insn_ack = !t_dq_full && insn_valid && (r_state == ACTIVE);
-   assign insn_ack_two = !t_dq_full && 
-			 insn_valid && 
-			 !t_dq_next_full && 
-			 insn_valid_two && (r_state == ACTIVE);
+   assign insn_ack = !t_dq_full && insn_valid && (r_state == ACTIVE) && !r_oldest_first_pending;
+   assign insn_ack_two = !t_dq_full &&
+			 insn_valid &&
+			 !t_dq_next_full &&
+			 insn_valid_two && (r_state == ACTIVE) && !r_oldest_first_pending;
    
    assign restart_pc = r_restart_pc;
    assign restart_src_pc = r_restart_src_pc;
@@ -1320,7 +1320,7 @@ module core(clk,
 		    n_pending_bad_addr = 1'b1;
 		    n_has_badvaddr = 1'b1;		    
 		 end
-	       t_bump_rob_head = 1'b1;	       
+	       t_bump_rob_head = 1'b1;
 	       n_state = WRITE_EPC;
 	       n_epc = (t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);
 	       n_exc_in_delay = t_rob_head.in_delay_slot;
@@ -2416,9 +2416,13 @@ module core(clk,
    always_ff@(posedge clk)
      begin
 	if(t_push_dq_one)
-	  r_dq[r_dq_tail_ptr[`LG_DQ_ENTRIES-1:0]] <= t_dec_uop;
+	  begin
+	     r_dq[r_dq_tail_ptr[`LG_DQ_ENTRIES-1:0]] <= t_dec_uop;
+	  end
 	if(t_push_dq_two)
-	  r_dq[r_dq_next_tail_ptr[`LG_DQ_ENTRIES-1:0]] <= t_dec_uop2;
+	  begin
+	     r_dq[r_dq_next_tail_ptr[`LG_DQ_ENTRIES-1:0]] <= t_dec_uop2;
+	  end
      end
 
    always_ff@(negedge clk)
@@ -2473,7 +2477,7 @@ module core(clk,
 	  end
 	else
 	  begin
-	     if(insn_valid && !t_dq_full && !(!t_dq_next_full && insn_valid_two))
+	     if(insn_valid && !t_dq_full && !(!t_dq_next_full && insn_valid_two) && !r_oldest_first_pending)
 	       begin
 		  //push one instruction
 		  t_push_dq_one = 1'b1;
@@ -2481,11 +2485,11 @@ module core(clk,
 		  n_dq_next_tail_ptr = r_dq_next_tail_ptr + 'd1;
 		  n_dq_cnt = n_dq_cnt + 'd1;
 	       end
-	     else if(insn_valid && !t_dq_full && !t_dq_next_full && insn_valid_two)
+	     else if(insn_valid && !t_dq_full && !t_dq_next_full && insn_valid_two && !r_oldest_first_pending)
 	       begin
 		  //push two instructions
 		  t_push_dq_one = 1'b1;
-		  t_push_dq_two = 1'b1;		  
+		  t_push_dq_two = 1'b1;
 		  n_dq_tail_ptr = r_dq_tail_ptr + 'd2;
 		  n_dq_next_tail_ptr = r_dq_next_tail_ptr + 'd2;
 		  n_dq_cnt = n_dq_cnt + 'd2;
