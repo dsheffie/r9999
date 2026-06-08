@@ -72,6 +72,7 @@
   X(MOVN)					\
   X(MOVZ)					\
   X(TEQ)					\
+  X(TNE)					\
   X(EXT)					\
   X(INS)					\
   X(MADD)					\

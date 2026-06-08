@@ -1831,6 +1831,14 @@ void execMips(state_t *s) {
 	s->pc += 4;
 	s->insn_histo[mipsInsn::TEQ]++;
 	break;
+      case 0x36: /* tne */
+	if(s->gpr[rs] != s->gpr[rt]) {
+	  raise_trap(s);
+	  return;
+	}
+	s->pc += 4;
+	s->insn_histo[mipsInsn::TNE]++;
+	break;
       case 0x2C: { /* dadd */
 	uint64_t u_rs = (uint64_t)s->gpr[rs];
 	uint64_t u_rt = (uint64_t)s->gpr[rt];

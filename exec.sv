@@ -1817,7 +1817,13 @@ module exec(clk,
 	  TEQ:
 	    begin
 	       t_trap = (t_srcA == t_srcB);
-	       t_fault = (t_srcA == t_srcB);	       	       
+	       t_fault = (t_srcA == t_srcB);
+	       t_alu_valid = 1'b1;
+	    end
+	  TNE:
+	    begin
+	       t_trap = (t_srcA != t_srcB);
+	       t_fault = (t_srcA != t_srcB);
 	       t_alu_valid = 1'b1;
 	    end
 	  TLBWI:

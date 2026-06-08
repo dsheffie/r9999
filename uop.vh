@@ -117,6 +117,7 @@ typedef enum logic [6:0]
    LL,
    LLD,
    SCD,
+   TNE,
    FETCH_MISALIGNED,
    FETCH_TLB_MISS,
    FETCH_TLB_INVALID,
