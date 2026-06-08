@@ -2748,6 +2748,10 @@ module exec(clk,
 	    begin
 	       t_csr0_val = r_epc;
 	    end
+	  'd15: /* PRId: read-only processor id */
+	    begin
+	       t_csr0_val = sign_extend32(`PRID_VALUE);
+	    end
 	  'd16:
 	    begin
 	       t_csr0_val = 'h88200;

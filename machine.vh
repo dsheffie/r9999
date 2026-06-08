@@ -72,6 +72,13 @@
 
 `define PA_WIDTH 40
 
+/* CP0 PRId (processor identification) values. imp field is bits [15:8];
+ * the R4000 family shares imp=0x04 and is distinguished by the revision byte. */
+`define PRID_R4000  32'h00000400   /* imp 0x04, rev 0x00 */
+`define PRID_R4400  32'h00000440   /* imp 0x04, rev 0x40 */
+`define PRID_R10000 32'h00000900   /* imp 0x09, rev 0x00 */
+`define PRID_VALUE  `PRID_R4000
+
 `define LG_BTB_SZ 7
 
 typedef enum logic [4:0] {

@@ -33,7 +33,8 @@ TESTS := hello/hello.elf \
          xtlb/test_xtlb32.elf \
          xtlb/test_xtlb_nested.elf \
          xtlb/test_eret.elf \
-         xtlb/test_cache.elf
+         xtlb/test_cache.elf \
+         xtlb/test_prid.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
@@ -107,6 +108,11 @@ xtlb/test_cache.elf: xtlb/test_cache.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_cache.S -o xtlb/test_cache.o
 	$(LD) $(LDFLAGS) xtlb/test_cache.o -o $@
 
+# PRId reads the R4000-family value and is read-only.
+xtlb/test_prid.elf: xtlb/test_prid.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_prid.S -o xtlb/test_prid.o
+	$(LD) $(LDFLAGS) xtlb/test_prid.o -o $@
+
 # -----------------------------------------------------------------------
 # Generic disassembly rule
 # -----------------------------------------------------------------------
@@ -152,6 +158,8 @@ run-xtlb: xtlb/test_xtlb64.elf xtlb/test_xtlb32.elf xtlb/test_xtlb_nested.elf
 	cd .. && $(SIM) --file tests/xtlb/test_eret.elf -c 0 2>&1 | grep -E "H|R"
 	@echo "== CACHE decoded as NOP (expect CACHE-OK) =="
 	cd .. && $(SIM) --file tests/xtlb/test_cache.elf -c 0 2>&1 | grep -E "CACHE"
+	@echo "== PRId read-only R4000 value (expect PRID-OK) =="
+	cd .. && $(SIM) --file tests/xtlb/test_prid.elf -c 0 2>&1 | grep -E "PRID"
 
 run-all: run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned
 

@@ -117,8 +117,9 @@ void initState(state_t *s) {
   s->cpr0[CPR0_SR] |= SR_ERL | SR_BEV | SR_CU0 | SR_CU1 | SR_CU2;
   /* Random starts at max TLB index; it cycles downward to Wired */
   s->cpr0[CPR0_RANDOM] = state_t::NUM_TLB_ENTRIES - 1;
-  /* PRId: R4000 compatible (Company=0, Product=0x04, Rev=0x00) */
-  s->cpr0[CPR0_PRID] = 0x00000400;
+  /* PRId: read-only processor id (R4000 family for now) */
+  s->cpr0[CPR0_PRID] = PRID_VALUE;
+  s->cpr0_64[CPR0_PRID] = PRID_VALUE;
   /* Config: return the same constant as the RTL (cache geometry) */
   s->cpr0[CPR0_CONFIG] = 0x00088200;
 }
@@ -2076,8 +2077,10 @@ void execMips(state_t *s) {
 	  s->insn_histo[mipsInsn::DMFC0]++;
 	  break;
 	case 0x4: /*mtc0*/
-	  s->cpr0[rd] = (uint32_t)s->gpr[rt];
-	  s->cpr0_64[rd] = (uint64_t)(uint32_t)s->gpr[rt];
+	  if(rd != 15) { /* PRId (reg 15) is read-only */
+	    s->cpr0[rd] = (uint32_t)s->gpr[rt];
+	    s->cpr0_64[rd] = (uint64_t)(uint32_t)s->gpr[rt];
+	  }
 	  /* CP0 reg 7 is the simulator putchar port */
 	  if(rd == 7 && !s->silent) {
 	    fputc((int)(s->gpr[rt] & 0xff), stdout);
@@ -2086,8 +2089,10 @@ void execMips(state_t *s) {
 	  s->insn_histo[mipsInsn::MTC0]++;
 	  break;
 	case 0x5: /*dmtc0 -- write full 64-bit CP0 register */
-	  s->cpr0_64[rd] = s->gpr[rt];
-	  s->cpr0[rd] = (uint32_t)s->gpr[rt];
+	  if(rd != 15) { /* PRId (reg 15) is read-only */
+	    s->cpr0_64[rd] = s->gpr[rt];
+	    s->cpr0[rd] = (uint32_t)s->gpr[rt];
+	  }
 	  if(rd == 7 && !s->silent) {
 	    fputc((int)(s->gpr[rt] & 0xff), stdout);
 	    fflush(stdout);

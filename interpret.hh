@@ -331,6 +331,13 @@ bool is_store_insn(state_t *s);
 #define CPR0_CONFIG   16
 #define CPR0_ERROREPC 30
 
+/* CP0 PRId values (imp field bits [15:8]; R4000 family shares imp 0x04 and is
+ * distinguished by the revision byte). */
+#define PRID_R4000  0x00000400u   /* imp 0x04, rev 0x00 */
+#define PRID_R4400  0x00000440u   /* imp 0x04, rev 0x40 */
+#define PRID_R10000 0x00000900u   /* imp 0x09, rev 0x00 */
+#define PRID_VALUE  PRID_R4000
+
 #define VA2PA(x) ((x & 0x1fffffff))
 
 static uint32_t va2pa(uint32_t va) {
