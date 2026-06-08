@@ -76,7 +76,7 @@ arcs_romvec:
     .word   stub_default        /*  7 imode               */
     .word   stub_default        /*  8 _unused1            */
     .word   stub_default        /*  9 next_component      */
-    .word   stub_default        /* 10 child_component     */
+    .word   stub_child          /* 10 child_component     */
     .word   stub_default        /* 11 parent_component    */
     .word   stub_default        /* 12 component_data      */
     .word   stub_default        /* 13 child_add           */
@@ -151,6 +151,21 @@ stub_getenv:
     jr      $ra
     move    $v0, $zero
 
+/* pcomponent *GetChild(pcomponent *cur a0)
+ * prom_identify_arch() calls GetChild(NULL) to get the root component and reads
+ * its ->iname to identify the machine.  Return our root for the NULL query
+ * (the system/root component named "SGI-IP22"); NULL otherwise. */
+    .globl  stub_child
+stub_child:
+    bne     $a0, $zero, 1f
+    nop
+    la      $v0, root_component
+    jr      $ra
+    nop
+1:
+    jr      $ra
+    move    $v0, $zero
+
 /* Default callback: return 0 cleanly (no wild jumps for unimplemented calls) */
     .globl  stub_default
 stub_default:
@@ -177,3 +192,22 @@ mdesc_ram:
     .word   2                   /* type: arcs_fcontig (free RAM) */
     .word   ARCS_RAM_BASE_PG    /* base page (0x08000000 >> 12) */
     .word   ARCS_RAM_PAGES      /* page count */
+
+/* Root ARC component (struct linux_component, 32-bit ARC).  Only ->iname is
+ * read by prom_identify_arch; the rest is benign.  iname -> "SGI-IP22". */
+    .align  3
+    .globl  root_component
+root_component:
+    .word   1                   /* +0x00 class (SystemClass) */
+    .word   1                   /* +0x04 type  */
+    .word   0                   /* +0x08 iflags */
+    .short  0                   /* +0x0c vers */
+    .short  0                   /* +0x0e rev */
+    .word   0                   /* +0x10 key */
+    .word   0                   /* +0x14 amask */
+    .word   0                   /* +0x18 cdsize */
+    .word   8                   /* +0x1c ilen (strlen "SGI-IP22") */
+    .word   arch_name           /* +0x20 iname -> identifier string */
+
+arch_name:
+    .asciz  "SGI-IP22"
