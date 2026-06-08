@@ -346,6 +346,7 @@ int main(int argc, char **argv) {
   static const uint32_t MAGIC_HALT_PHYS = 0x1FD00000u;
   std::string pipelog;
   std::string mips_binary = "dhrystone3";
+  std::string arcs_image;
   std::string log_name = "log.txt";
   std::string pushout_name = "pushout.txt";
   std::string branch_name = "branch_info.txt";
@@ -375,6 +376,8 @@ int main(int argc, char **argv) {
       ("trace,t", po::value<bool>(&globals::trace_retirement)->default_value(false), "trace retired instruction stream")
       ("starttrace,s", po::value<uint64_t>(&start_trace_at)->default_value(~0UL), "start tracing retired instructions")
       ("indy", po::value<bool>(&sgi_indy)->default_value(false), "sgi indy")
+      ("arcs", po::value<std::string>(&arcs_image),
+       "synthetic ARCS firmware image; loaded at physical 0x1000 (kseg1 0xA0001000)")
       ("magic-halt", po::value<bool>(&magic_halt)->default_value(true),
        "stop simulation when magic halt address (kseg1 0xBFD00000) is written")
       ;
@@ -423,6 +426,31 @@ int main(int argc, char **argv) {
     }
     load_elf(mips_binary.c_str(), s);
     load_elf(mips_binary.c_str(), ss);
+
+    /* Optional synthetic ARCS firmware: the kernel's PROMLIB reads the ARCS
+     * System Parameter Block at kseg1 0xA0001000 (physical 0x1000).  Load the
+     * blob there so prom_init passes the magic check and the romvec callbacks
+     * (Write->putchar, GetMemoryDescriptor, ...) are available. */
+    if(not(arcs_image.empty())) {
+      struct stat ast;
+      int afd = open(arcs_image.c_str(), O_RDONLY);
+      if(afd < 0) {
+        std::cerr << "could not open arcs image " << arcs_image << "\n";
+        exit(-1);
+      }
+      if(fstat(afd, &ast) < 0) {
+        std::cerr << "fstat failed on arcs image " << arcs_image << "\n";
+        exit(-1);
+      }
+      char *abuf = (char*)mmap(nullptr, ast.st_size, PROT_READ, MAP_PRIVATE, afd, 0);
+      /* ARCS SPB lives at kseg1 0xA0001000 -> physical 0x1000 */
+      memcpy(s->mem.mem  + 0x1000, abuf, ast.st_size);
+      memcpy(ss->mem.mem + 0x1000, abuf, ast.st_size);
+      munmap(abuf, ast.st_size);
+      close(afd);
+      std::cout << "loaded ARCS firmware (" << ast.st_size
+                << " bytes) at physical 0x1000\n";
+    }
   }
   else {
     enable_checker = false;    
