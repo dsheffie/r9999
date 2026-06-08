@@ -1,12 +1,35 @@
 # R9999 MIPS-III OOO Simulator — Project State
 
-**Last updated:** 2026-06-05
+**Last updated:** 2026-06-07
 
 ---
 
 ## Goal
 
-Run IRIX 6.5 on a simulated SGI Indigo2 (IP22 / R4000). The immediate milestone is passing a large corpus of N32 ABI csmith tests to validate the ISA implementation before tackling the OS.
+Long-term: run a real OS on a simulated R4000-class MIPS. **Near-term active target: boot a stripped-down 64-bit MIPS Linux on the RTL only** (C++ checker disabled — the RTL's `tlb.sv` does real translation, so the interpreter's 1:1 `va2pa` is irrelevant for that path). Linux is chosen first because we can modify the source and build a minimal platform; IRIX 6.5 (closed source, SGI-specific HW/ARCS firmware) is a much-later "only when we're sure it'll work" aspiration. The csmith N32 corpus remains the ISA-validation backbone.
+
+---
+
+## Session 2026-06-07 — 64-bit TLB, exception model, Linux64 prep
+
+All pushed to `main`:
+
+| Commit | Summary |
+|--------|---------|
+| `fdcafe3` | 64-bit (R10000) TLB format: region `r[1:0]`, 27-bit VPN2 (VA[39:13]), 28-bit PFN (PA[39:12]), `PA_WIDTH` 32→40; `DMFC0`/`DMTC0` (rs=1/5); XContext (CP0 reg 20). Plus `--mapped64-data`/`--mapped64-insn` csmith variants (install TLB via DMTC0 in the 64-bit format, 1:1 mapping preserved). |
+| `4a55121` | XTLB refill vector: a refill taken in 64-bit addressing mode vectors to `base\|0x080` (vs 32-bit `base\|0x000`); general exceptions `base\|0x180`. |
+| `2335ceb` | EXL-based exception model: normal exceptions set `Status.EXL` (was wrongly setting `ERL`); ERET clears EXL with ERL precedence; EXL-gated refill vector (nested refill, EXL=1, → general vector). |
+| `f0b46f5` | Fixed the `except` test: made self-contained (own vectors, no crt0) so the handler reaches `0x80000180` (crt0's `break` stubs had pushed it to `0x304`). |
+| `6905e54` | CACHE (opcode 0x2f) decoded as NOP (RTL + interpreter). |
+| `4c81611` | Read-only PRId (CP0 reg 15) = R4000 value; named `PRID_R4000/R4400/R10000` defines in `machine.vh`/`interpret.hh`/`sim.h`. |
+
+**New self-contained test pattern** (`tests/xtlb/`, `tests/except/`): own vectors at exact BEV=0 offsets, no crt0, halt via the magic-halt register (store non-zero word to kseg1 `0xBFD00000` = PA `0x1FD00000`); build without crt0, run with `-c 0`. Tests: `test_xtlb64/32/_nested` (VEC=XTLB/TLB/GEN), `test_eret` (H1 R0), `test_cache` (CACHE-OK), `test_prid` (PRID-OK). `make run-xtlb` runs them all.
+
+**Linux64 kernel bring-up — decided, not yet implemented:**
+- Memory map: **hardcoded in the kernel** (`mach-r9999` platform, `prom_init` → `add_memory_region(0, SIZE)` + `CONFIG_CMDLINE`); sim passes nothing.
+- Loader: **SGI-ROM-style raw blob, not ELF64** — model on `top.cc:427-451` (`--indy`): `memcpy` `objcopy -O binary vmlinux vmlinux.bin` into `s->mem.mem + (load_pa & 0x1fffffff)`, set PC = entry, `enable_checker=false`, no SGI MC/HPC. Pending sim work: a `--kernel <bin>` mode + `--kernel-load-pa`/`--kernel-entry` options.
+- Addresses NOT finalized (proposed ckseg0: load PA `0x100000`, entry `0xffffffff80100000`). **PAUSED**: user researching Linux/MIPS boot + qemu-mips first.
+- Console: CP0-reg-7 putchar works (no SGI devices needed); kseg1 pseudo-UART later for a real earlycon.
 
 ---
 
@@ -69,7 +92,8 @@ SB, SH, SW, SWL, SWR
 LD, SD — aligned 64-bit doubleword load/store
 
 ### CP0 / System
-MFC0, MTC0, DMFC0, DMTC0, SYSCALL, BREAK, ERET, TLBWI, TLBWR, TLBR, TLBP
+MFC0, MTC0, DMFC0, DMTC0, SYSCALL, BREAK, ERET, TLBWI, TLBWR, TLBR, TLBP, CACHE (NOP)
+CP0 regs include EntryHi/Lo (64-bit format), Index/Random/Wired/PageMask, Context + XContext (reg 20), PRId (reg 15, read-only), Config (reg 16), Count/Compare, Status/Cause/EPC/BadVAddr.
 
 ### CP0 Timer
 CP0 Count (reg 9) increments every cycle; Compare (reg 11) fires IP[7] when Count==Compare; writing Compare clears the interrupt. Exposed as `cp0_count` output port and `irq_pending` signal. Checker syncs Count via `tb->cp0_count` each cycle; `took_irq` fires `raise_int()` in the interpreter.
@@ -190,9 +214,11 @@ When a must_restart instruction is in the delay slot of a **taken** branch, the 
 
 | Task | Priority | Notes |
 |------|----------|-------|
-| Implement `cache` as NOP | High | Opcode 47 currently decodes as II (illegal); 77 occurrences in firmware; all are cache maintenance — safe to NOP in sim since caches are reset by FSMs at boot |
-| Fix MFC0 must_restart | High | 5 instances in firmware delay slots cause wrong restart PC for taken branches |
+| `--kernel` raw-blob loader | High | SGI-ROM-style; load `vmlinux.bin` at a PA, set entry PC, RTL-only. Paused pending Linux/qemu-mips research + final addresses. |
+| kseg1 pseudo-UART | Med | For a real Linux `earlycon`; CP0-r7 putchar works for now |
 | FPU stubs | Low | `lwc1`/`swc1`/`ldc1`/`sdc1` + FP arithmetic; blocked on FPU datapath |
+
+**Done this session:** `cache`→NOP (`6905e54`); PRId (`4c81611`). MFC0/MTC0/TLB ops are now `oldest_first` (no longer `must_restart`) — see the [[project_oldest_first_plan]] note.
 
 (The `sdl`/`sdr` and `ldl`/`ldr` implementation sections below are retained for reference.)
 
@@ -215,7 +241,9 @@ The csmith N32 test suite is essentially clean. To increase pass count further, 
 ## Longer-term Work
 
 1. FP instructions (dmtc1, c.lt.d, add.d) — appear rarely in N32 code; currently skipped by csmith `--no-float` flag
-2. TLB: pass-through VA→PA currently, not functionally correct
-3. Exception vectors: detected but not dispatched
-4. SGI IP22 machine model: MC + HPC3 stubs only; need more peripherals for IRIX boot
-5. PROM: SGI Indy PROM binary needed for `--indy` mode
+2. TLB: **RTL now does real VA→PA translation** (tlb.sv, 64-bit format, refill/XTLB/general vectoring). The C++ **interpreter** still uses 1:1 `va2pa` — fine because Linux runs RTL-only; would need real translation only to re-enable the checker on a non-1:1 page table.
+3. Exception vectors: **now dispatched** (EXL model; TLB-refill 0x000, XTLB 0x080, general 0x180, BEV-aware). ErrorEPC / true ERL-NMI-cache-error path intentionally deferred (not needed now).
+4. SGI IP22 machine model: MC + HPC3 stubs only — only relevant to the eventual IRIX path, not Linux64.
+5. PROM: SGI Indy PROM binary needed for `--indy` mode (IRIX path).
+
+> Authoritative live status for the Linux64 effort: the "Session 2026-06-07" section above, and the auto-memory note `project_linux64_todo.md`.
