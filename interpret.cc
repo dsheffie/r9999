@@ -2252,7 +2252,10 @@ void execMips(state_t *s) {
 	_sdr<EL>(inst, s);
 	break;
       case 0x2e:
-	_swr<EL>(inst, s); 
+	_swr<EL>(inst, s);
+	break;
+      case 0x2f: /* cache -- treated as NOP for now */
+	s->pc += 4;
 	break;
       case 0x31:
 	_lwc1<EL>(inst, s);

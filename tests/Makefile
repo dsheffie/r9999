@@ -32,7 +32,8 @@ TESTS := hello/hello.elf \
          xtlb/test_xtlb64.elf \
          xtlb/test_xtlb32.elf \
          xtlb/test_xtlb_nested.elf \
-         xtlb/test_eret.elf
+         xtlb/test_eret.elf \
+         xtlb/test_cache.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
@@ -101,6 +102,11 @@ xtlb/test_eret.elf: xtlb/test_eret.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_eret.S -o xtlb/test_eret.o
 	$(LD) $(LDFLAGS) xtlb/test_eret.o -o $@
 
+# CACHE instruction decoded as NOP (must not trap).
+xtlb/test_cache.elf: xtlb/test_cache.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_cache.S -o xtlb/test_cache.o
+	$(LD) $(LDFLAGS) xtlb/test_cache.o -o $@
+
 # -----------------------------------------------------------------------
 # Generic disassembly rule
 # -----------------------------------------------------------------------
@@ -144,6 +150,8 @@ run-xtlb: xtlb/test_xtlb64.elf xtlb/test_xtlb32.elf xtlb/test_xtlb_nested.elf
 	cd .. && $(SIM) --file tests/xtlb/test_xtlb_nested.elf -c 0 2>&1 | grep -E "VEC=|NO"
 	@echo "== exception/ERET round trip (expect H1 R0) =="
 	cd .. && $(SIM) --file tests/xtlb/test_eret.elf -c 0 2>&1 | grep -E "H|R"
+	@echo "== CACHE decoded as NOP (expect CACHE-OK) =="
+	cd .. && $(SIM) --file tests/xtlb/test_cache.elf -c 0 2>&1 | grep -E "CACHE"
 
 run-all: run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned
 

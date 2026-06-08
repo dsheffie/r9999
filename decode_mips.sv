@@ -1234,6 +1234,11 @@ module decode_mips(
 		    uop.is_mem = 1'b1;
 		    uop.is_store = 1'b1;
 		 end
+	       6'd47: /* CACHE -- decoded as NOP for now */
+		 begin
+		    uop.op = NOP;
+		    uop.is_int = 1'b1;
+		 end
 	       6'd48: /* LL */
 		 begin
 		    uop.op = LL;
