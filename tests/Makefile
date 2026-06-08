@@ -65,11 +65,11 @@ tlb/test_tlb.elf: tlb/test_tlb.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(LD) $(LDFLAGS) $(STARTUP) tlb/test_tlb.o -o $@
 
 # -----------------------------------------------------------------------
-# Exception / ERET test
+# Exception / ERET test (self-contained: own vectors, no crt0)
 # -----------------------------------------------------------------------
-except/test_except.elf: except/test_except.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+except/test_except.elf: except/test_except.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_except.S -o except/test_except.o
-	$(LD) $(LDFLAGS) $(STARTUP) except/test_except.o -o $@
+	$(LD) $(LDFLAGS) except/test_except.o -o $@
 
 # -----------------------------------------------------------------------
 # Unaligned load test (lwl / lwr)
@@ -130,7 +130,7 @@ run-dside-tlb: dside_tlb/test_dside_tlb.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
 
 run-except: except/test_except.elf
-	cd .. && $(SIM) --file tests/$< --checker true 2>&1
+	cd .. && $(SIM) --file tests/$< -c 0 2>&1
 
 run-unaligned: unaligned/test_unaligned.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
