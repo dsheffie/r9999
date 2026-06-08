@@ -269,7 +269,8 @@ module core(clk,
    wire [`M_WIDTH-1:0]			  w_exec_epc;
    
    wire					  w_sr_bev;
-   
+   wire					  w_sr_exl;
+
    
    logic				  r_exc_in_delay, n_exc_in_delay;
    
@@ -1329,11 +1330,14 @@ module core(clk,
 		 end
 	       else if(t_rob_head.tlb_refill | t_rob_head.tlb_invalid)
 		 begin
-		    n_tlb_refill = (t_rob_head.tlb_refill);
+		    /* A refill uses the special refill vector only when EXL=0 at
+		     * fault time; a nested refill (EXL already set) falls through
+		     * to the general vector (0x180). */
+		    n_tlb_refill = t_rob_head.tlb_refill & ~w_sr_exl;
 		    /* XTLB refill vector (0x080) when 64-bit addressing is active
 		     * for the operating mode of the faulting access; else the
 		     * 32-bit TLB refill vector (0x000). */
-		    n_xtlb_refill = t_rob_head.tlb_refill &
+		    n_xtlb_refill = t_rob_head.tlb_refill & ~w_sr_exl &
 				    (w_in_64b_kernel_mode |
 				     w_in_64b_supervisor_mode |
 				     w_in_64b_user_mode);
@@ -2386,7 +2390,8 @@ module core(clk,
 	   .asid(asid),
 	   .tlb_entry_out_valid(tlb_entry_out_valid),
 	   .tlb_entry_out(tlb_entry_out),	   
-	   .sr_bev(w_sr_bev),	   
+	   .sr_bev(w_sr_bev),
+	   .sr_exl(w_sr_exl),
 	   .core_wr_cause(t_wr_cause),
 	   .core_wr_badvaddr(t_wr_badvaddr),
 	   .core_badvaddr(r_badvaddr),

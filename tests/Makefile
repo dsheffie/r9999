@@ -30,7 +30,9 @@ TESTS := hello/hello.elf \
          except/test_except.elf \
          unaligned/test_unaligned.elf \
          xtlb/test_xtlb64.elf \
-         xtlb/test_xtlb32.elf
+         xtlb/test_xtlb32.elf \
+         xtlb/test_xtlb_nested.elf \
+         xtlb/test_eret.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
@@ -89,6 +91,16 @@ xtlb/test_xtlb32.elf: xtlb/test_xtlb.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_xtlb.S -o xtlb/test_xtlb32.o
 	$(LD) $(LDFLAGS) xtlb/test_xtlb32.o -o $@
 
+# Nested refill: EXL already set -> must fall through to the general vector.
+xtlb/test_xtlb_nested.elf: xtlb/test_xtlb.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -DMODE_NESTED -x assembler-with-cpp -c xtlb/test_xtlb.S -o xtlb/test_xtlb_nested.o
+	$(LD) $(LDFLAGS) xtlb/test_xtlb_nested.o -o $@
+
+# EXL-based exception/ERET round trip (exception sets EXL; ERET clears it).
+xtlb/test_eret.elf: xtlb/test_eret.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_eret.S -o xtlb/test_eret.o
+	$(LD) $(LDFLAGS) xtlb/test_eret.o -o $@
+
 # -----------------------------------------------------------------------
 # Generic disassembly rule
 # -----------------------------------------------------------------------
@@ -123,11 +135,15 @@ run-except: except/test_except.elf
 run-unaligned: unaligned/test_unaligned.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
 
-run-xtlb: xtlb/test_xtlb64.elf xtlb/test_xtlb32.elf
+run-xtlb: xtlb/test_xtlb64.elf xtlb/test_xtlb32.elf xtlb/test_xtlb_nested.elf
 	@echo "== 64-bit refill (expect VEC=XTLB) =="
 	cd .. && $(SIM) --file tests/xtlb/test_xtlb64.elf -c 0 2>&1 | grep -E "VEC=|NO"
 	@echo "== 32-bit refill (expect VEC=TLB) =="
 	cd .. && $(SIM) --file tests/xtlb/test_xtlb32.elf -c 0 2>&1 | grep -E "VEC=|NO"
+	@echo "== nested refill, EXL=1 (expect VEC=GEN) =="
+	cd .. && $(SIM) --file tests/xtlb/test_xtlb_nested.elf -c 0 2>&1 | grep -E "VEC=|NO"
+	@echo "== exception/ERET round trip (expect H1 R0) =="
+	cd .. && $(SIM) --file tests/xtlb/test_eret.elf -c 0 2>&1 | grep -E "H|R"
 
 run-all: run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned
 

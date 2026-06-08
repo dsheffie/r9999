@@ -33,6 +33,7 @@ module exec(clk,
 	    save_to_tlb_regs,
 	    asid,
 	    sr_bev,
+	    sr_exl,
 	    exc_in_delay,
 	    in_kernel_mode,
 	    in_supervisor_mode,
@@ -104,7 +105,8 @@ module exec(clk,
    output logic [7:0]	       asid;
    
    output logic		       sr_bev;
-   
+   output logic		       sr_exl;
+
    input logic			exc_in_delay;
    output logic			in_kernel_mode;
    output logic			in_supervisor_mode;
@@ -195,6 +197,7 @@ module exec(clk,
    
    logic 	t_wr_hilo;
    logic	t_overflow;
+   logic	t_eret;
    logic	t_trap;
    
    logic	t_clr_erl;
@@ -1281,7 +1284,7 @@ module exec(clk,
 	n_tlb_index = r_tlb_index;
 	n_tlb_entry_out_valid = 1'b0;
 	n_tlbr = 1'b0;
-	t_clr_erl = 1'b0;
+	t_eret = 1'b0;
 	t_32b_shift = 1'b0;
 	t_shift_left = 1'b0;
 	
@@ -1804,9 +1807,11 @@ module exec(clk,
 	    end
 	  ERET:
 	    begin
-	       t_clr_erl = 1'b1;
+	       t_eret = 1'b1;
 	       t_alu_valid = 1'b1;
 	       t_fault = 1'b1;
+	       /* ERL takes precedence: error return uses ErrorEPC (not yet
+		* implemented -> fall back to EPC); otherwise EPC. */
 	       t_pc = r_epc;
 	    end
 	  TEQ:
@@ -2310,6 +2315,7 @@ module exec(clk,
    logic [`M_WIDTH-1:0]	n_epc, r_epc, n_badvaddr, r_badvaddr;
    assign exec_epc = r_epc;
    assign sr_bev = r_sr_bev;
+   assign sr_exl = r_sr_exl;
    
 
    logic		r_exc_in_ds, n_exc_in_ds;
@@ -2586,11 +2592,17 @@ module exec(clk,
 	  end
 	else if(core_wr_cause)
 	  begin
-	     n_sr_erl = 1'b1;
+	     /* normal exception entry sets EXL (not ERL); ERL is reserved
+	      * for reset/NMI/cache-error. */
+	     n_sr_exl = 1'b1;
 	  end
-	else if(t_clr_erl)
+	else if(t_eret)
 	  begin
-	     n_sr_erl = 1'b0;
+	     /* ERET: ERL takes precedence over EXL. */
+	     if(r_sr_erl)
+	       n_sr_erl = 1'b0;
+	     else
+	       n_sr_exl = 1'b0;
 	  end
      end // always_ff@ (posedge clk)
 

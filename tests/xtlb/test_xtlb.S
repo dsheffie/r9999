@@ -85,7 +85,11 @@ _vec_gen:
     .globl  _start
     .type   _start, @function
 _start:
-#ifdef MODE64
+#if defined(MODE_NESTED)
+    /* Status = KX=1 + EXL=1: a refill taken with EXL already set is a nested
+     * miss and must use the general vector (0x180), not the XTLB vector. */
+    li      $t0, 0x82
+#elif defined(MODE64)
     /* Status = KX(bit7)=1, KSU=0(kernel), EXL=0, ERL=0, BEV=0, IE=0 */
     li      $t0, 0x80
 #else
@@ -97,7 +101,7 @@ _start:
     nop
     nop
 
-#ifdef MODE64
+#if defined(MODE_NESTED) || defined(MODE64)
     /* xkseg VA (bits 63:62 = 01, upper word != 0xFFFFFFFF): TLB-mapped,
      * 64-bit addressing.  Not present in the (empty) TLB -> refill. */
     dli     $t0, 0x4000000000010000
