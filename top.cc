@@ -347,6 +347,7 @@ int main(int argc, char **argv) {
   std::string pipelog;
   std::string mips_binary = "dhrystone3";
   std::string arcs_image;
+  std::string memdump_spec;
   std::string log_name = "log.txt";
   std::string pushout_name = "pushout.txt";
   std::string branch_name = "branch_info.txt";
@@ -378,6 +379,8 @@ int main(int argc, char **argv) {
       ("indy", po::value<bool>(&sgi_indy)->default_value(false), "sgi indy")
       ("arcs", po::value<std::string>(&arcs_image),
        "synthetic ARCS firmware image; loaded at physical 0x1000 (kseg1 0xA0001000)")
+      ("memdump", po::value<std::string>(&memdump_spec),
+       "dump physical memory at exit; format hexPA:hexLEN:file")
       ("magic-halt", po::value<bool>(&magic_halt)->default_value(true),
        "stop simulation when magic halt address (kseg1 0xBFD00000) is written")
       ;
@@ -1207,6 +1210,24 @@ int main(int argc, char **argv) {
   std::cout << "simulation took " << t0 << " seconds, " << (insns_retired/t0)
 	    << " insns per second\n";
 
+
+  /* Optional physical-memory dump (e.g. to read the kernel printk buffer).
+   * Format: hexPA:hexLEN:file.  s->mem reflects RTL stores in -c 0 mode. */
+  if(not(memdump_spec.empty())) {
+    uint64_t dpa = 0, dlen = 0;
+    char dfile[512] = {0};
+    if(sscanf(memdump_spec.c_str(), "%lx:%lx:%511s", &dpa, &dlen, dfile) == 3) {
+      FILE *df = fopen(dfile, "wb");
+      if(df) {
+        fwrite(s->mem.mem + dpa, 1, dlen, df);
+        fclose(df);
+        std::cout << "memdump: wrote " << dlen << " bytes from PA 0x"
+                  << std::hex << dpa << std::dec << " to " << dfile << "\n";
+      }
+      else { std::cerr << "memdump: cannot open " << dfile << "\n"; }
+    }
+    else { std::cerr << "memdump: bad spec (want hexPA:hexLEN:file)\n"; }
+  }
 
   delete s;
   delete ss;
