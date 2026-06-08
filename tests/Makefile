@@ -28,11 +28,13 @@ TESTS := hello/hello.elf \
          tlb/test_tlb.elf \
          dside_tlb/test_dside_tlb.elf \
          except/test_except.elf \
-         unaligned/test_unaligned.elf
+         unaligned/test_unaligned.elf \
+         xtlb/test_xtlb64.elf \
+         xtlb/test_xtlb32.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
-.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned
+.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb
 
 all: $(STARTUP) $(TESTS) $(DISASMS)
 
@@ -75,6 +77,19 @@ unaligned/test_unaligned.elf: unaligned/test_unaligned.c $(STARTUP) $(COMMON)/si
 	$(LD) $(LDFLAGS) $(STARTUP) unaligned/test_unaligned.o -o $@
 
 # -----------------------------------------------------------------------
+# TLB-refill vs XTLB-refill vector test (self-contained: no crt0, own vectors)
+#   64-bit variant faults in 64-bit mode -> must take the XTLB vector (0x080)
+#   32-bit variant faults in 32-bit mode -> must take the TLB  vector (0x000)
+# -----------------------------------------------------------------------
+xtlb/test_xtlb64.elf: xtlb/test_xtlb.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -DMODE64 -x assembler-with-cpp -c xtlb/test_xtlb.S -o xtlb/test_xtlb64.o
+	$(LD) $(LDFLAGS) xtlb/test_xtlb64.o -o $@
+
+xtlb/test_xtlb32.elf: xtlb/test_xtlb.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_xtlb.S -o xtlb/test_xtlb32.o
+	$(LD) $(LDFLAGS) xtlb/test_xtlb32.o -o $@
+
+# -----------------------------------------------------------------------
 # Generic disassembly rule
 # -----------------------------------------------------------------------
 %.dis: %.elf
@@ -107,6 +122,12 @@ run-except: except/test_except.elf
 
 run-unaligned: unaligned/test_unaligned.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
+
+run-xtlb: xtlb/test_xtlb64.elf xtlb/test_xtlb32.elf
+	@echo "== 64-bit refill (expect VEC=XTLB) =="
+	cd .. && $(SIM) --file tests/xtlb/test_xtlb64.elf -c 0 2>&1 | grep -E "VEC=|NO"
+	@echo "== 32-bit refill (expect VEC=TLB) =="
+	cd .. && $(SIM) --file tests/xtlb/test_xtlb32.elf -c 0 2>&1 | grep -E "VEC=|NO"
 
 run-all: run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned
 

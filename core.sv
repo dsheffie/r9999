@@ -407,7 +407,8 @@ module core(clk,
 
    logic [4:0] 		     n_cause, r_cause;
    logic		     r_tlb_refill, n_tlb_refill;
-   logic		     n_save_to_tlb_regs, r_save_to_tlb_regs;   
+   logic		     r_xtlb_refill, n_xtlb_refill;
+   logic		     n_save_to_tlb_regs, r_save_to_tlb_regs;
    logic		     n_has_badvaddr,r_has_badvaddr;
    
    
@@ -657,6 +658,7 @@ module core(clk,
 	     r_got_restart_ack <= 1'b0;
 	     r_cause <= 5'd0;
 	     r_tlb_refill <= 1'b0;
+	     r_xtlb_refill <= 1'b0;
 	     r_save_to_tlb_regs <= 1'b0;
 	     r_has_badvaddr <= 1'b0;
 	     r_pending_fault <= 1'b0;
@@ -670,6 +672,7 @@ module core(clk,
 	     r_got_restart_ack <= n_got_restart_ack;
 	     r_cause <= n_cause;
 	     r_tlb_refill <= n_tlb_refill;
+	     r_xtlb_refill <= n_xtlb_refill;
 	     r_save_to_tlb_regs <= n_save_to_tlb_regs;
 	     r_has_badvaddr <= n_has_badvaddr;
 	     r_pending_fault <= n_pending_fault;
@@ -892,7 +895,8 @@ module core(clk,
 	
 	n_cause = r_cause;
 	n_tlb_refill = r_tlb_refill;
-       
+	n_xtlb_refill = r_xtlb_refill;
+
 	n_machine_clr = r_machine_clr;
 	t_alloc = 1'b0;
 	t_alloc_two = 1'b0;
@@ -1279,6 +1283,7 @@ module core(clk,
 	  ARCH_FAULT:
 	    begin
 	       n_tlb_refill = 1'b0;
+	       n_xtlb_refill = 1'b0;
 	       n_has_badvaddr = 1'b0;
 	       n_save_to_tlb_regs = 1'b0;
 	       n_badvaddr = r_addrs[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
@@ -1325,6 +1330,13 @@ module core(clk,
 	       else if(t_rob_head.tlb_refill | t_rob_head.tlb_invalid)
 		 begin
 		    n_tlb_refill = (t_rob_head.tlb_refill);
+		    /* XTLB refill vector (0x080) when 64-bit addressing is active
+		     * for the operating mode of the faulting access; else the
+		     * 32-bit TLB refill vector (0x000). */
+		    n_xtlb_refill = t_rob_head.tlb_refill &
+				    (w_in_64b_kernel_mode |
+				     w_in_64b_supervisor_mode |
+				     w_in_64b_user_mode);
 		    n_save_to_tlb_regs = 1'b1;
 		    n_cause = t_rob_head.is_store ? 5'd3 : 5'd2;
 		    n_pending_bad_addr = 1'b1;
@@ -1350,7 +1362,10 @@ module core(clk,
 	       
 	       n_machine_clr = 1'b1;
 	       
-	       n_restart_pc = sign_extend32((w_sr_bev ? 32'hbfc00000 : 32'h80000000) | (r_tlb_refill ? 32'h0 : 32'h180));
+	       /* TLB refill -> 0x000 (32-bit) or 0x080 (64-bit XTLB);
+		* all other exceptions -> 0x180 general vector. */
+	       n_restart_pc = sign_extend32((w_sr_bev ? 32'hbfc00000 : 32'h80000000) |
+					    (r_tlb_refill ? (r_xtlb_refill ? 32'h80 : 32'h0) : 32'h180));
 	       n_restart_src_pc = 'd0;
 	       n_restart_src_is_indirect = 1'b0;
 	       n_restart_valid = 1'b1;
