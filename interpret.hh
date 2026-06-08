@@ -122,11 +122,13 @@ public:
   /* Software TLB -- mirrors the 48-entry fully-associative RTL TLB */
   static const int NUM_TLB_ENTRIES = 48;
   struct tlb_entry_t {
-    uint32_t entry_hi  = 0;   /* VPN2[31:13] + ASID[7:0] */
-    uint32_t entry_lo0 = 0;   /* PFN[29:6] + C[5:3] + D[2] + V[1] + G[0] */
-    uint32_t entry_lo1 = 0;
+    uint64_t entry_hi  = 0;   /* R[63:62] + VPN2[39:13] + ASID[7:0] */
+    uint64_t entry_lo0 = 0;   /* PFN[33:6] + C[5:3] + D[2] + V[1] + G[0] */
+    uint64_t entry_lo1 = 0;
     uint32_t page_mask = 0;   /* variable page size bits [24:13] */
   } tlb[NUM_TLB_ENTRIES];
+  /* 64-bit CP0 shadow registers for DMTC0/DMFC0 (EntryHi, EntryLo, XContext) */
+  uint64_t cpr0_64[32] = {0};
 
   /*
    * When true, MMIO side-effects (MTC0 $7 putchar) are suppressed.

@@ -1951,10 +1951,13 @@ void execMips(state_t *s) {
 	case 0x1: { /* TLBR -- read TLB[Index] into staging regs */
 	  uint32_t idx = s->cpr0[CPR0_INDEX] & 63;
 	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
-	    s->cpr0[CPR0_ENTRYHI]  = s->tlb[idx].entry_hi;
-	    s->cpr0[CPR0_ENTRYLO0] = s->tlb[idx].entry_lo0;
-	    s->cpr0[CPR0_ENTRYLO1] = s->tlb[idx].entry_lo1;
-	    s->cpr0[CPR0_PAGEMASK] = s->tlb[idx].page_mask;
+	    s->cpr0_64[CPR0_ENTRYHI]  = s->tlb[idx].entry_hi;
+	    s->cpr0_64[CPR0_ENTRYLO0] = s->tlb[idx].entry_lo0;
+	    s->cpr0_64[CPR0_ENTRYLO1] = s->tlb[idx].entry_lo1;
+	    s->cpr0[CPR0_ENTRYHI]     = (uint32_t)s->tlb[idx].entry_hi;
+	    s->cpr0[CPR0_ENTRYLO0]    = (uint32_t)s->tlb[idx].entry_lo0;
+	    s->cpr0[CPR0_ENTRYLO1]    = (uint32_t)s->tlb[idx].entry_lo1;
+	    s->cpr0[CPR0_PAGEMASK]    = s->tlb[idx].page_mask;
 	  }
 	  s->insn_histo[mipsInsn::TLBR]++;
 	  break;
@@ -1962,9 +1965,9 @@ void execMips(state_t *s) {
 	case 0x2: { /* TLBWI -- write staging regs to TLB[Index] */
 	  uint32_t idx = s->cpr0[CPR0_INDEX] & 63;
 	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
-	    s->tlb[idx].entry_hi  = s->cpr0[CPR0_ENTRYHI];
-	    s->tlb[idx].entry_lo0 = s->cpr0[CPR0_ENTRYLO0];
-	    s->tlb[idx].entry_lo1 = s->cpr0[CPR0_ENTRYLO1];
+	    s->tlb[idx].entry_hi  = s->cpr0_64[CPR0_ENTRYHI];
+	    s->tlb[idx].entry_lo0 = s->cpr0_64[CPR0_ENTRYLO0];
+	    s->tlb[idx].entry_lo1 = s->cpr0_64[CPR0_ENTRYLO1];
 	    s->tlb[idx].page_mask = s->cpr0[CPR0_PAGEMASK];
 	  }
 	  s->insn_histo[mipsInsn::TLBWI]++;
@@ -1973,9 +1976,9 @@ void execMips(state_t *s) {
 	case 0x6: { /* TLBWR -- write staging regs to TLB[Random] */
 	  uint32_t idx = s->cpr0[CPR0_RANDOM] & 63;
 	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
-	    s->tlb[idx].entry_hi  = s->cpr0[CPR0_ENTRYHI];
-	    s->tlb[idx].entry_lo0 = s->cpr0[CPR0_ENTRYLO0];
-	    s->tlb[idx].entry_lo1 = s->cpr0[CPR0_ENTRYLO1];
+	    s->tlb[idx].entry_hi  = s->cpr0_64[CPR0_ENTRYHI];
+	    s->tlb[idx].entry_lo0 = s->cpr0_64[CPR0_ENTRYLO0];
+	    s->tlb[idx].entry_lo1 = s->cpr0_64[CPR0_ENTRYLO1];
 	    s->tlb[idx].page_mask = s->cpr0[CPR0_PAGEMASK];
 	  }
 	  /* Decrement Random, wrap to NUM_TLB_ENTRIES-1 when it reaches Wired */
@@ -1989,12 +1992,12 @@ void execMips(state_t *s) {
 	  break;
 	}
 	case 0x8: { /* TLBP -- probe TLB for matching entry */
-	  uint32_t probe_hi   = s->cpr0[CPR0_ENTRYHI];
-	  uint32_t probe_asid = probe_hi & 0xffu;
+	  uint64_t probe_hi   = s->cpr0_64[CPR0_ENTRYHI];
+	  uint64_t probe_asid = probe_hi & 0xffu;
 	  bool found = false;
 	  for(int i = 0; i < state_t::NUM_TLB_ENTRIES; i++) {
 	    /* Apply page-mask to get the significant VPN2 bits */
-	    uint32_t mask    = ~(s->tlb[i].page_mask | 0x1fffu);
+	    uint64_t mask    = ~(uint64_t)(s->tlb[i].page_mask | 0x1fffu);
 	    bool global      = (s->tlb[i].entry_lo0 & 1u) &&
 	                       (s->tlb[i].entry_lo1 & 1u);
 	    bool vpn_match   = (probe_hi & mask) == (s->tlb[i].entry_hi & mask);
@@ -2068,14 +2071,28 @@ void execMips(state_t *s) {
 	  }
 	  s->insn_histo[mipsInsn::MFC0]++;
 	  break;
+	case 0x1: /*dmfc0 -- read full 64-bit CP0 register */
+	  s->gpr[rt] = s->cpr0_64[rd];
+	  s->insn_histo[mipsInsn::DMFC0]++;
+	  break;
 	case 0x4: /*mtc0*/
-	  s->cpr0[rd] = s->gpr[rt];
+	  s->cpr0[rd] = (uint32_t)s->gpr[rt];
+	  s->cpr0_64[rd] = (uint64_t)(uint32_t)s->gpr[rt];
 	  /* CP0 reg 7 is the simulator putchar port */
 	  if(rd == 7 && !s->silent) {
 	    fputc((int)(s->gpr[rt] & 0xff), stdout);
 	    fflush(stdout);
 	  }
 	  s->insn_histo[mipsInsn::MTC0]++;
+	  break;
+	case 0x5: /*dmtc0 -- write full 64-bit CP0 register */
+	  s->cpr0_64[rd] = s->gpr[rt];
+	  s->cpr0[rd] = (uint32_t)s->gpr[rt];
+	  if(rd == 7 && !s->silent) {
+	    fputc((int)(s->gpr[rt] & 0xff), stdout);
+	    fflush(stdout);
+	  }
+	  s->insn_histo[mipsInsn::DMTC0]++;
 	  break;
 	default:
 	  std::cerr << "unhandled cpr0 instruction @ "

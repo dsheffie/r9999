@@ -117,22 +117,23 @@ typedef struct packed {
 
 typedef struct packed {
 
-   logic [5:0] entry;
-   logic [11:0]	pagemask;
-   logic [7:0]	asid;
-   logic [18:0]	vpn;
-   
-   logic [23:0]	pfn0;
-   logic	d0;
-   logic	v0;
-   logic	g0;
-   logic [2:0]	c0;
-   
-   logic [23:0]	pfn1;
-   logic	d1;
-   logic	v1;
-   logic	g1;
-   logic [2:0]	c1;
+   logic [5:0]  entry;
+   logic [11:0] pagemask;
+   logic [7:0]  asid;
+   logic [1:0]  r;      /* region: va[63:62] */
+   logic [26:0] vpn;    /* va[39:13], 27 bits for 64-bit mode */
+
+   logic [27:0] pfn0;   /* pa[39:12], 28 bits for 40-bit PA */
+   logic        d0;
+   logic        v0;
+   logic        g0;
+   logic [2:0]  c0;
+
+   logic [27:0] pfn1;   /* pa[39:12], 28 bits for 40-bit PA */
+   logic        d1;
+   logic        v1;
+   logic        g1;
+   logic [2:0]  c1;
 } tlb_data_t;
 
 `endif

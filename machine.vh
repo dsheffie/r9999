@@ -70,7 +70,7 @@
 
 `define M_WIDTH (1 << `LG_M_WIDTH)
 
-`define PA_WIDTH 32
+`define PA_WIDTH 40
 
 `define LG_BTB_SZ 7
 

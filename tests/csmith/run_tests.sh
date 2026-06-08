@@ -41,19 +41,22 @@ NPROC=$(nproc)
 TIMER_IRQ=0
 MAPPED_DATA=0
 MAPPED_INSN=0
+MAPPED64=0
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
-        --timer-irq)   TIMER_IRQ=1 ;;
-        --mapped-data) MAPPED_DATA=1 ;;
-        --mapped-insn) MAPPED_INSN=1 ;;
-        *)             ARGS+=("$arg") ;;
+        --timer-irq)     TIMER_IRQ=1 ;;
+        --mapped-data)   MAPPED_DATA=1 ;;
+        --mapped-insn)   MAPPED_INSN=1 ;;
+        --mapped64-data) MAPPED_DATA=1; MAPPED64=1 ;;
+        --mapped64-insn) MAPPED_INSN=1; MAPPED64=1 ;;
+        *)               ARGS+=("$arg") ;;
     esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 if [ "$MAPPED_DATA" -eq 1 ] && [ "$MAPPED_INSN" -eq 1 ]; then
-    echo "error: --mapped-data and --mapped-insn cannot be combined" >&2
+    echo "error: data and insn mapping options cannot be combined" >&2
     exit 1
 fi
 
@@ -93,15 +96,16 @@ echo "Building common bare-metal objects  (parallelism: ${NPROC} jobs)..."
 TIMER_IRQ_FLAG=""
 [ "$TIMER_IRQ" -eq 1 ] && TIMER_IRQ_FLAG="-DENABLE_TIMER_IRQ"
 if [ "$MAPPED_DATA" -eq 1 ]; then
-    $CC $BM_FLAGS $TIMER_IRQ_FLAG \
-        -c "$SCRIPT_DIR/start_csmith_mapped.S"            -o "$SHARED/start.o"
+    [ "$MAPPED64" -eq 1 ] && START_S="start_csmith_mapped64.S" \
+                          || START_S="start_csmith_mapped.S"
 elif [ "$MAPPED_INSN" -eq 1 ]; then
-    $CC $BM_FLAGS $TIMER_IRQ_FLAG \
-        -c "$SCRIPT_DIR/start_csmith_mapped_insn.S"       -o "$SHARED/start.o"
+    [ "$MAPPED64" -eq 1 ] && START_S="start_csmith_mapped64_insn.S" \
+                          || START_S="start_csmith_mapped_insn.S"
 else
-    $CC $BM_FLAGS $TIMER_IRQ_FLAG \
-        -c "$SCRIPT_DIR/start_csmith.S"                   -o "$SHARED/start.o"
+    START_S="start_csmith.S"
 fi
+$CC $BM_FLAGS $TIMER_IRQ_FLAG \
+    -c "$SCRIPT_DIR/$START_S"                              -o "$SHARED/start.o"
 $CC $BM_FLAGS -I"$HELLO" \
     -c "$HELLO/printf.c"                                   -o "$SHARED/printf.o"
 $CC $BM_FLAGS \
@@ -124,7 +128,7 @@ export SHARED REPO_ROOT HELLO SIM CC CSMITH_INC QEMU FAIL_DIR
 export BM_FLAGS BM_DEFS REF_FLAGS SUPPORT_OBJS CSMITH_FLAGS
 export TIMEOUT_REF TIMEOUT_SIM MAXICNT
 export CBMC_K CBMC_LIBLOOPS
-export SPECIFIC TIMER_IRQ MAPPED_DATA MAPPED_INSN
+export SPECIFIC TIMER_IRQ MAPPED_DATA MAPPED_INSN MAPPED64
 
 # ---------------------------------------------------------------------------
 # Worker: one test per invocation; writes PASS / SKIP / FAIL to $SHARED/r$id
@@ -262,10 +266,12 @@ fi
 
 TIMER_STR="off"
 [ "$TIMER_IRQ" -eq 1 ] && TIMER_STR="on (every 10000 cycles)"
+FMT_STR="32b mtc0"
+[ "$MAPPED64" -eq 1 ] && FMT_STR="64b dmtc0"
 MAPPED_DATA_STR="off (kseg0)"
-[ "$MAPPED_DATA" -eq 1 ] && MAPPED_DATA_STR="on (kuseg 0x400000-0x45FFFF, 1:1)"
+[ "$MAPPED_DATA" -eq 1 ] && MAPPED_DATA_STR="on (kuseg 0x400000-0x45FFFF, 1:1, $FMT_STR)"
 MAPPED_INSN_STR="off (kseg0)"
-[ "$MAPPED_INSN" -eq 1 ] && MAPPED_INSN_STR="on (kuseg 0x200000-0x25FFFF, 1:1)"
+[ "$MAPPED_INSN" -eq 1 ] && MAPPED_INSN_STR="on (kuseg 0x200000-0x25FFFF, 1:1, $FMT_STR)"
 echo "Running $N tests on $NPROC parallel workers"
 echo "  cbmc k=$CBMC_K   maxicnt=$MAXICNT   ref_timeout=${TIMEOUT_REF}s ($QEMU)   sim_timeout=${TIMEOUT_SIM}s"
 echo "  csmith: $CSMITH_FLAGS"

@@ -190,8 +190,8 @@ module exec(clk,
    logic [N_INT_PRF_ENTRIES-1:0]  r_prf_inflight, n_prf_inflight;
    logic [N_HILO_PRF_ENTRIES-1:0] r_hilo_inflight, n_hilo_inflight;
    
-   logic 			  t_wr_int_prf, t_wr_cpr0;
-   logic [`M_WIDTH-1:0]		  t_csr0_val;
+   logic 			  t_wr_int_prf, t_wr_cpr0, t_wr_cpr0_64;
+   logic [`M_WIDTH-1:0]		  t_csr0_val, t_csr0_64_val;
    
    logic 	t_wr_hilo;
    logic	t_overflow;
@@ -1263,6 +1263,7 @@ module exec(clk,
 	t_simm = {{E_BITS{int_uop.imm[15]}},int_uop.imm};
 	t_wr_int_prf = 1'b0;
 	t_wr_cpr0 = 1'b0;
+	t_wr_cpr0_64 = 1'b0;
 	t_take_br = 1'b0;
 	t_mispred_br = 1'b0;
 	t_jaddr = {int_uop.jmp_imm[9:0],int_uop.imm,2'd0};
@@ -1779,18 +1780,28 @@ module exec(clk,
 	       t_alu_valid = 1'b1;
 	    end
 	  MFC0:
-	    begin	       
+	    begin
 	       t_result = t_csr0_val;
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
-	       t_pc = t_pc4;	       
 	    end
 	  MTC0:
 	    begin
-	       t_wr_cpr0 = 1'b1;	       
+	       t_wr_cpr0 = 1'b1;
 	       t_alu_valid = 1'b1;
-	       t_pc = t_pc4;
 	    end // case: MTC0
+	  DMFC0:
+	    begin
+	       t_result = t_csr0_64_val;
+	       t_alu_valid = 1'b1;
+	       t_wr_int_prf = 1'b1;
+	    end
+	  DMTC0:
+	    begin
+	       t_wr_cpr0 = 1'b1;
+	       t_wr_cpr0_64 = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  ERET:
 	    begin
 	       t_clr_erl = 1'b1;
@@ -2115,8 +2126,7 @@ module exec(clk,
 	  TLBP:
 	    begin
 	       t_mem_tail.op = MEM_TLBP;
-	       t_mem_tail.addr = {{HI_EBITS{1'b0}},
-				  r_entryhi_vpn2, 13'd0};
+	       t_mem_tail.addr = {r_entryhi_r, 22'd0, r_entryhi_vpn2, 13'd0};
 	       t_mem_tail.mapped = 1'b1;
 	    end
 	  default:
@@ -2239,22 +2249,24 @@ module exec(clk,
    assign putchar_fifo_wptr = r_wr_pc_idx;
    assign putchar_fifo_rptr = r_rd_pc_idx;
 
-   logic [7:0] r_entryhi_asid, n_entryhi_asid;
-   logic [18:0] n_entryhi_vpn2, r_entryhi_vpn2;
-   logic [23:0]	n_entrylo0_pfn, r_entrylo0_pfn;
-   logic [2:0]	n_entrylo0_c, r_entrylo0_c;
+   logic [7:0]  r_entryhi_asid, n_entryhi_asid;
+   logic [1:0]  r_entryhi_r, n_entryhi_r;
+   logic [26:0] n_entryhi_vpn2, r_entryhi_vpn2;
+   logic [27:0] n_entrylo0_pfn, r_entrylo0_pfn;
+   logic [2:0]  n_entrylo0_c, r_entrylo0_c;
    logic n_entrylo0_d, r_entrylo0_d;
    logic n_entrylo0_v, r_entrylo0_v;
-   logic n_entrylo0_g, r_entrylo0_g;   
+   logic n_entrylo0_g, r_entrylo0_g;
    
-   logic [23:0]	n_entrylo1_pfn, r_entrylo1_pfn;   
-   logic [2:0]	n_entrylo1_c, r_entrylo1_c;
+   logic [27:0] n_entrylo1_pfn, r_entrylo1_pfn;
+   logic [2:0]  n_entrylo1_c, r_entrylo1_c;
    logic n_entrylo1_d, r_entrylo1_d;
    logic n_entrylo1_v, r_entrylo1_v;
-   logic n_entrylo1_g, r_entrylo1_g;   
+   logic n_entrylo1_g, r_entrylo1_g;
 
-   logic [8:0] r_ptebase, n_ptebase;
-   logic [18:0]	r_badvpn2, n_badvpn2;
+   logic [8:0]  r_ptebase, n_ptebase;
+   logic [30:0] r_xptebase, n_xptebase;
+   logic [26:0] r_badvpn2, n_badvpn2;
       
    logic [11:0]	n_pagemask, r_pagemask;
    
@@ -2343,6 +2355,7 @@ module exec(clk,
 	r_cause <= reset ? 'd0 : n_cause;
 	r_exc_in_ds <= reset ? 1'b0 : n_exc_in_ds;
 	r_entryhi_asid <= reset ? 'd0 : n_entryhi_asid;
+	r_entryhi_r    <= reset ? 'd0 : n_entryhi_r;
 	r_entryhi_vpn2 <= reset ? 'd0 : n_entryhi_vpn2;
 	r_pagemask <= reset ? 'd0 : n_pagemask;
 	r_entrylo0_pfn <= reset ? 'd0 : n_entrylo0_pfn;
@@ -2356,6 +2369,7 @@ module exec(clk,
 	r_entrylo1_v <= reset ? 'd0 : n_entrylo1_v;
 	r_entrylo1_g <= reset ? 'd0 : n_entrylo1_g;
 	r_ptebase <= reset ? 'd0 : n_ptebase;
+	r_xptebase <= reset ? 'd0 : n_xptebase;
 	r_badvpn2 <= reset ? 'd0 : n_badvpn2;
      end // always_ff@ (posedge clk)
 
@@ -2368,6 +2382,7 @@ module exec(clk,
 	tlb_entry_out.pfn1 = r_entrylo1_pfn;
 	tlb_entry_out.pagemask = r_pagemask;
 	tlb_entry_out.asid = r_entryhi_asid;
+	tlb_entry_out.r = r_entryhi_r;
 	tlb_entry_out.vpn = r_entryhi_vpn2;
 	
 	tlb_entry_out.c0 = r_entrylo0_c;
@@ -2431,9 +2446,9 @@ module exec(clk,
 	     n_entrylo0_g = t_srcA[0];
 	     n_entrylo0_v = t_srcA[1];
 	     n_entrylo0_d = t_srcA[2];
-	     n_entrylo0_c = t_srcA[5:3];	     
-	     n_entrylo0_pfn = t_srcA[29:6];
-	  end	
+	     n_entrylo0_c = t_srcA[5:3];
+	     n_entrylo0_pfn = t_wr_cpr0_64 ? t_srcA[33:6] : {4'd0, t_srcA[29:6]};
+	  end
      end
 
    always_comb
@@ -2456,22 +2471,27 @@ module exec(clk,
 	     n_entrylo1_g = t_srcA[0];
 	     n_entrylo1_v = t_srcA[1];
 	     n_entrylo1_d = t_srcA[2];
-	     n_entrylo1_c = t_srcA[5:3];	     
-	     n_entrylo1_pfn = t_srcA[29:6];	     
-	  end		
+	     n_entrylo1_c = t_srcA[5:3];
+	     n_entrylo1_pfn = t_wr_cpr0_64 ? t_srcA[33:6] : {4'd0, t_srcA[29:6]};
+	  end
      end
 
    always_comb
      begin
 	n_badvpn2 = r_badvpn2;
 	n_ptebase = r_ptebase;
+	n_xptebase = r_xptebase;
 	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd4)
 	  begin
 	     n_ptebase = t_srcA[31:23];
 	  end
-	else if(save_to_tlb_regs)
+	else if(r_start_int & t_wr_cpr0 & t_wr_cpr0_64 & int_uop.dst == 'd20)
 	  begin
-	     n_badvpn2 = core_badvaddr[31:13];
+	     n_xptebase = t_srcA[63:33];
+	  end
+	if(save_to_tlb_regs)
+	  begin
+	     n_badvpn2 = core_badvaddr[39:13];
 	  end
      end
    
@@ -2492,16 +2512,32 @@ module exec(clk,
    always_comb
      begin
 	n_entryhi_asid = r_entryhi_asid;
+	n_entryhi_r    = r_entryhi_r;
 	n_entryhi_vpn2 = r_entryhi_vpn2;
 	if(r_tlbr)
 	  begin
 	     n_entryhi_asid = r_tlb_entry.asid;
+	     n_entryhi_r    = r_tlb_entry.r;
 	     n_entryhi_vpn2 = r_tlb_entry.vpn;
+	  end
+	else if(save_to_tlb_regs)
+	  begin
+	     n_entryhi_r    = core_badvaddr[63:62];
+	     n_entryhi_vpn2 = core_badvaddr[39:13];
 	  end
 	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd10)
 	  begin
 	     n_entryhi_asid = t_srcA[7:0];
-	     n_entryhi_vpn2 = t_srcA[31:13];
+	     if(t_wr_cpr0_64)
+	       begin
+		  n_entryhi_r    = t_srcA[63:62];
+		  n_entryhi_vpn2 = t_srcA[39:13];
+	       end
+	     else
+	       begin
+		  n_entryhi_r    = 2'd0;
+		  n_entryhi_vpn2 = {8'd0, t_srcA[31:13]};
+	       end
 	  end
      end
    
@@ -2633,7 +2669,7 @@ module exec(clk,
 	  'd2:
 	    begin
 	       t_csr0_val = sign_extend32({2'd0,
-					   r_entrylo0_pfn,
+					   r_entrylo0_pfn[23:0],
 					   r_entrylo0_c,
 					   r_entrylo0_d,
 					   r_entrylo0_v,
@@ -2642,7 +2678,7 @@ module exec(clk,
 	  'd3:
 	    begin
 	       t_csr0_val = sign_extend32({2'd0,
-					   r_entrylo1_pfn,
+					   r_entrylo1_pfn[23:0],
 					   r_entrylo1_c,
 					   r_entrylo1_d,
 					   r_entrylo1_v,
@@ -2650,7 +2686,7 @@ module exec(clk,
 	    end
 	  'd4:
 	    begin
-	       t_csr0_val = sign_extend32({r_ptebase,r_badvpn2,4'd0});
+	       t_csr0_val = sign_extend32({r_ptebase,r_badvpn2[18:0],4'd0});
 	    end
 	  'd5:
 	    begin
@@ -2670,7 +2706,7 @@ module exec(clk,
 	    end
 	  'd10:
 	    begin
-	       t_csr0_val = sign_extend32({r_entryhi_vpn2, 5'd0, r_entryhi_asid});
+	       t_csr0_val = sign_extend32({r_entryhi_vpn2[18:0], 5'd0, r_entryhi_asid});
 	    end
 	  'd12:
 	    begin
@@ -2711,6 +2747,31 @@ module exec(clk,
 	  'd24:
 	    begin
 	       t_csr0_val = sign_extend32(r_retired_insns[31:0]);
+	    end
+	endcase
+     end
+
+   always_comb
+     begin
+	t_csr0_64_val = t_csr0_val;
+	case(int_uop.srcA[4:0])
+	  'd2:
+	    begin
+	       t_csr0_64_val = {30'd0, r_entrylo0_pfn, r_entrylo0_c,
+				 r_entrylo0_d, r_entrylo0_v, r_entrylo0_g};
+	    end
+	  'd3:
+	    begin
+	       t_csr0_64_val = {30'd0, r_entrylo1_pfn, r_entrylo1_c,
+				 r_entrylo1_d, r_entrylo1_v, r_entrylo1_g};
+	    end
+	  'd10:
+	    begin
+	       t_csr0_64_val = {r_entryhi_r, 22'd0, r_entryhi_vpn2, 5'd0, r_entryhi_asid};
+	    end
+	  'd20:
+	    begin
+	       t_csr0_64_val = {r_xptebase, r_entryhi_r, r_badvpn2, 4'd0};
 	    end
 	endcase
      end

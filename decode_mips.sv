@@ -899,6 +899,15 @@ module decode_mips(
 			 uop.is_int = 1'b1;
 			 uop.oldest_first = 1'b1;
 		      end
+		    else if((insn[25:21] == 5'd1) & (insn[10:0] == 'd0)) /* dmfc0 */
+		      begin
+			 uop.op = DMFC0;
+			 uop.dst = rt;
+			 uop.dst_valid = 1'b1;
+			 uop.srcA = rd;
+			 uop.is_int = 1'b1;
+			 uop.oldest_first = 1'b1;
+		      end
 		    else if((insn[25:21] == 5'd4) & (insn[10:0] == 'd0)) /* switch on RS */
 		      begin
 			 uop.op = MTC0;
@@ -909,6 +918,16 @@ module decode_mips(
 			 uop.is_int = 1'b1;
 			 uop.oldest_first = 1'b1;
 		      end // case: 5'd4
+		    else if((insn[25:21] == 5'd5) & (insn[10:0] == 'd0)) /* dmtc0 */
+		      begin
+			 uop.op = DMTC0;
+			 uop.dst = rd;
+			 uop.srcA = rt;
+			 uop.srcA_valid = 1'b1;
+			 uop.has_delay_slot = 1'b0;
+			 uop.is_int = 1'b1;
+			 uop.oldest_first = 1'b1;
+		      end
 		    else if(insn[25:0] == 26'b10000000000000000000011000)
 		      begin
 			 uop.op = ERET;

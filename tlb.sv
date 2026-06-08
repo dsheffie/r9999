@@ -78,7 +78,7 @@ module tlb(clk,
       for(genvar i = 0; i < N; i=i+1)
 	begin : hits
 	   assign w_addr_space_match[i] = (r_tlb[i].asid == asid) | (r_tlb[i].g0 & r_tlb[i].g1);
-	   assign w_hit8k[i] = (r_tlb[i].vpn == va[31:13]);
+	   assign w_hit8k[i] = (r_tlb[i].vpn == va[39:13]) && (r_tlb[i].r == va[63:62]);
 	   assign w_hits[i] = w_addr_space_match[i] & w_hit8k[i];
 	end
    endgenerate
@@ -98,11 +98,11 @@ module tlb(clk,
    wire [LG_N-1:0]     w_hit_idx = w_idx[LG_N-1:0];
    /* VA[12]=0 → even page (pfn0/d0/v0), VA[12]=1 → odd page (pfn1/d1/v1) */
    wire                w_odd     = va[12];
-   wire [23:0]         w_pfn     = w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0;
+   wire [27:0]         w_pfn     = w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0;
    wire                w_dirty   = w_odd ? r_tlb[w_hit_idx].d1   : r_tlb[w_hit_idx].d0;
    wire                w_valid   = w_odd ? r_tlb[w_hit_idx].v1   : r_tlb[w_hit_idx].v0;
-   /* 4KB page only (pagemask=0): PA[PA_WIDTH-1:12]=pfn[PA_WIDTH-13:0], PA[11:0]=va[11:0] */
-   wire [`PA_WIDTH-1:0] w_pa4k   = {w_pfn[`PA_WIDTH-13:0], va[11:0]};
+   /* 4KB page only (pagemask=0): PA[39:12]=pfn[27:0], PA[11:0]=va[11:0] */
+   wire [`PA_WIDTH-1:0] w_pa4k   = {w_pfn, va[11:0]};
 
    always_ff@(posedge clk)
      begin

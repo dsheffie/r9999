@@ -48,6 +48,8 @@
   X(JAL)					\
   X(MFC0)					\
   X(MTC0)					\
+  X(DMFC0)					\
+  X(DMTC0)					\
   X(MFC1)					\
   X(MTC1)					\
   X(LW)						\
