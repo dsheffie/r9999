@@ -74,7 +74,9 @@ module decode_mips(
    wire [`LG_PRF_ENTRIES-1:0]	fd = {{ZP{1'b0}},insn[10:6]};
 
    
-   wire [`LG_PRF_ENTRIES-1:0]	shamt = {{ZP{1'b0}},insn[10:6]};
+   /* shamt only feeds the 16-bit imm as {10'b0, shamt}; keep it 6 bits so it
+    * does not depend on LG_PRF_ENTRIES (the shift amount is insn[10:6]). */
+   wire [5:0]			shamt = {1'b0, insn[10:6]};
    
    always_comb
      begin

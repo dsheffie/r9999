@@ -23,7 +23,7 @@
 //page size
 `define LG_PG_SZ 12
 
-`define LG_PRF_ENTRIES 6
+`define LG_PRF_ENTRIES 7
 
 `define LG_HILO_PRF_ENTRIES 2
 
