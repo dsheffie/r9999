@@ -831,10 +831,11 @@ module core(clk,
 `ifdef DUMP_ROB
    always_ff@(negedge clk)
      begin
- 	if(1)
+ 	if(r_cycle > 'd23594306)
 	  begin
-	     $display("cycle %d : state = %d, alu complete %b, mem complete %b,head_ptr %d, inflight %d, complete %b,  can_retire_rob_head %b, t_faulted_head_and_serializing_delay %b, head pc %x, empty %b, full %b", 
+	     $display("cycle %d : oldp %b, state = %d, aluc  %b, memc %b,head_ptr %d, inflight %d, complete %b,  can_retire_rob_head %b, t_faulted_head_and_serializing_delay %b, head pc %x, empty %b, full %b", 
 		      r_cycle,
+		      r_oldest_first_pending,
 		      r_state,
 		      t_complete_valid_1,
 		      core_mem_rsp_valid,
@@ -1431,7 +1432,8 @@ module core(clk,
 
 	if(t_clr_rob)
 	  n_oldest_first_pending = 1'b0;
-	else if(t_retire && t_rob_head.oldest_first)
+	else if((t_retire && t_rob_head.oldest_first) ||
+		(t_retire_two && t_rob_next_head.oldest_first))
 	  n_oldest_first_pending = 1'b0;
 	else if(t_alloc && t_uop.oldest_first)
 	  n_oldest_first_pending = 1'b1;

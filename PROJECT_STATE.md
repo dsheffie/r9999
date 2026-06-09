@@ -214,11 +214,12 @@ When a must_restart instruction is in the delay slot of a **taken** branch, the 
 
 | Task | Priority | Notes |
 |------|----------|-------|
-| `--kernel` raw-blob loader | High | SGI-ROM-style; load `vmlinux.bin` at a PA, set entry PC, RTL-only. Paused pending Linux/qemu-mips research + final addresses. |
-| kseg1 pseudo-UART | Med | For a real Linux `earlycon`; CP0-r7 putchar works for now |
-| FPU stubs | Low | `lwc1`/`swc1`/`ldc1`/`sdc1` + FP arithmetic; blocked on FPU datapath |
+| **FPGA: get the IP22 address map working** | High | Zynq UltraScale, `hdl/axi_is_the_worst_v1_0_M00_AXI.v` routes CPU physical → shared DRAM (`baseaddr + t_cpuaddr`). Need: (1) ARM-side loader (vmlinux.32 → baseaddr+0x08004000, arcs_fw.bin → baseaddr+0x1000, set resume_pc/sgi_mode/baseaddr/addrmask); (2) **ARM-side device emulation** replacing sgi_mc/sgi_hpc (seed MC MEMCFG/sysid at the device DRAM window +0x10000000, poll SCC console @ +0x10BD9837 and magic-halt @ +0x10D00000); (3) RTL decode cleanup in M00_AXI.v (RAM `{4'd0,cpuaddr[27:0]}` wraps 0x10000000+ onto low mem — cap RAM at 128MB or fix; make `t_cpuaddr` match `compute_mem_range_type`); (4) validate endianness (MEMCFG byte-swap). **Full write-up: `docs/fpga_address_map.html`.** |
+| L1D miss-queue: "huh N should be inflight" | High | current kernel-boot blocker (appears after the MC/make_mask fixes); L1D inflight-tracking accounting |
+| kseg1 pseudo-UART | Low | ARC console now works via the ARCS Write stub → CP0-r7 putchar; only needed for a real SCC `earlycon` |
+| FPU stubs / Coproc-Unusable | Low | kernel currently built no-FPU; for FPU: stub cfc1 + CpU exception + FP emulator |
 
-**Done this session:** `cache`→NOP (`6905e54`); PRId (`4c81611`). MFC0/MTC0/TLB ops are now `oldest_first` (no longer `must_restart`) — see the [[project_oldest_first_plan]] note.
+**Recent progress (2026-06-08):** 64-bit IP22 vmlinux.32 boots on the RTL via `--file vmlinux.32 -c 0 --arcs arcs/arcs_fw.bin` with **live console** ("Linux version… / ARCH: SGI-IP22 / CPU0 revision 00000400 (R4000SC) / MC: bank0 128M @ 08000000"). Fixed along the way: TNE, CACHE→NOP, PRId, EXL model, XTLB vector, ARCS firmware (`arcs/`), `sgi_mc` MEMCFG (wired into the `--arcs` path, decoupled from `--indy`), L1D `make_mask` missing MEM_SD/MEM_LD (full-mask bug), and refactored 64-bit load/store to `merge_cl64`/`select_cl64`. **Not yet committed** (per request). Physical address map + FPGA bring-up plan documented in `docs/fpga_address_map.html`.
 
 (The `sdl`/`sdr` and `ldl`/`ldr` implementation sections below are retained for reference.)
 

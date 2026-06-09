@@ -252,11 +252,11 @@ static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
   uint32_t k = addr & 15;
   uint32_t w = (addr>>2) & 3;
   mem_range_t mr = mem_range_t::low_local;
-  if(sgi_indy) {
+  if(sgi_indy or (mc != nullptr)) {
     mr = compute_mem_range_type(addr);
   }
   uint16_t wm = (m >> (4*w)) & 15;
-  
+
   switch(mr)
     {
     case mem_range_t::hpc_regs:
@@ -267,14 +267,15 @@ static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
       }
       break;
     case mem_range_t::mc_regs:
-      //printf("mc  load addr %x, offs %u, mask %x\n", addr, w, wm);      
+      //printf("mc  load addr %x, offs %u, mask %x\n", addr, w, wm);
       if(wm == 15) {
-	//std::cout << "mc  : " << std::hex << addr << std::dec  << "\n";      
+	//std::cout << "mc  : " << std::hex << addr << std::dec  << "\n";
 	d = mc->read(addr & 0x1ffff, 4);
       }
       break;
-    case mem_range_t::low_local:
-    case mem_range_t::boot_rom:
+    default:
+      /* everything else (sys_mem_alias, low/high_local, boot_rom, eisa, ...)
+       * is plain physical memory */
       for(int j = 0; j < 4; j++) {
 	if( ((m >> k) & 1) ) {
 	  uint32_t by = s->mem.get<uint8_t>(addr+j);
@@ -283,10 +284,6 @@ static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
 	k++;
       }
       break;
-    default:
-      std::cout << std::hex << addr << std::dec << " in "
-		<< mr << " not handled in " << __PRETTY_FUNCTION__ << "\n";
-      assert(false);
     }
   return d;
 }
@@ -296,7 +293,7 @@ static void perform_word_store(state_t *s, uint32_t addr, uint16_t m, uint32_t d
   uint32_t k = addr & 15;
   uint32_t w = (addr >> 2) & 0x3;
   mem_range_t mr = mem_range_t::low_local;
-  if(sgi_indy) {
+  if(sgi_indy or (mc != nullptr)) {
     mr = compute_mem_range_type(addr);
   }
   uint16_t wm = (m >> (4*w)) & 15;
@@ -327,10 +324,21 @@ static void perform_word_store(state_t *s, uint32_t addr, uint16_t m, uint32_t d
 	k++;
       }
       break;
+    case mem_range_t::hpc_regs:
+      if(wm == 15) {
+	hpc->write(addr & 0x7ffff, d, 4);
+      }
+      break;
     default:
-      std::cout << std::hex << addr << std::dec << " in "
-		<< mr << " not handled in " << __PRETTY_FUNCTION__ << "\n";
-      assert(false);
+      /* plain physical memory */
+      for(int j = 0; j < 4; j++) {
+	if(((m >> k) & 1)) {
+	  uint32_t by = (d>>(8*j)) & 0xff;
+	  s->mem.set<uint8_t>(addr+j, by);
+	}
+	k++;
+      }
+      break;
     }
 }
 
@@ -453,6 +461,11 @@ int main(int argc, char **argv) {
       close(afd);
       std::cout << "loaded ARCS firmware (" << ast.st_size
                 << " bytes) at physical 0x1000\n";
+
+      /* Model the SGI MC/HPC devices for the kernel boot (decoupled from the
+       * --indy ROM path): the IP22 kernel probes the MC for the memory map. */
+      mc  = new sgi_mc(s);
+      hpc = new sgi_hpc(s);
     }
   }
   else {

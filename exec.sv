@@ -1972,6 +1972,7 @@ module exec(clk,
 	t_mem_tail.dst_valid = 1'b0;
 	t_mem_tail.dst_ptr = mem_uq.dst;
 	t_mem_tail.is_store = 1'b0;
+	t_mem_tail.is_atomic = 1'b0;
 	t_mem_tail.data = zero_extend32(32'd0);
 	t_mem_tail.bad_addr = 1'b0;
 	t_mem_tail.cached = w_cached;
@@ -2005,6 +2006,7 @@ module exec(clk,
 	    begin
 	       t_mem_tail.op = MEM_SC;
 	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.is_atomic = 1'b1;
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;		    
@@ -2119,12 +2121,14 @@ module exec(clk,
 	       t_mem_tail.op = MEM_LL;
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
+	       t_mem_tail.is_atomic = 1'b1;
 	    end
 	  LLD:
 	    begin
 	       t_mem_tail.op = MEM_LLD;
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
+	       t_mem_tail.is_atomic = 1'b1;
 	    end
 	  SCD:
 	    begin
@@ -2133,6 +2137,7 @@ module exec(clk,
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
+	       t_mem_tail.is_atomic = 1'b1;	       
 	    end
 	  TLBP:
 	    begin
@@ -2386,9 +2391,10 @@ module exec(clk,
      end // always_ff@ (posedge clk)
 
    
+
    always_comb
      begin
-	tlb_entry_out_valid = r_tlb_entry_out_valid;	
+	tlb_entry_out_valid = r_tlb_entry_out_valid;
 	tlb_entry_out.entry = r_tlb_index;
 	tlb_entry_out.pfn0 = r_entrylo0_pfn;
 	tlb_entry_out.pfn1 = r_entrylo1_pfn;
@@ -2760,7 +2766,10 @@ module exec(clk,
 	    end
 	  'd16:
 	    begin
-	       t_csr0_val = 'h88200;
+	       /* Config: set SC (bit 17) = no secondary cache -> kernel sees
+		* R4000PC and skips run_uncached(probe_scache). Our L2 is a
+		* transparent, coherent cache, not an SGI-probeable scache. */
+	       t_csr0_val = 'ha8200;
 	    end
 	  'd23:
 	    begin

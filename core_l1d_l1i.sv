@@ -361,8 +361,6 @@ module core_l1d_l1i(clk,
    wire w_l1_mem_req_ack;
    
 
-   //   always_ff@(negedge clk) $display("grant state %d", r_state);
-   
    always_comb
      begin
 	n_state = r_state;

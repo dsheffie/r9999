@@ -29,16 +29,20 @@ uint32_t sgi_mc::read(uint32_t offs, size_t sz) {
     case 0x4:
     case 0x8:
     case 0xc: {
-      const uint32_t index = (offs >> 1) & 1;
+      const uint32_t index = (offs >> 3) & 1;
       x = cpu_control[index];
       break;
     }
-    case 0xc4: 
+    case 0x18:
+    case 0x1c:
+      x = systemid;            /* MC system ID (low nibble = revision) */
+      break;
+    case 0xc4:
     case 0xcc: {
-      const uint32_t index = (offs >> 1) & 1;
+      const uint32_t index = (offs >> 3) & 1;
       x = memcfg[index];
       break;
-    }      
+    }
     case 0xd4:
       x = cpu_mem_access_config;
       break;
@@ -53,8 +57,8 @@ uint32_t sgi_mc::read(uint32_t offs, size_t sz) {
       x = static_cast<uint32_t>(s->icnt/10);//rpss_counter;
       break;
     default:
-      printf("trying to read reg %x\n", offs);
-      exit(-1);
+      //printf("sgi_mc: unhandled read reg %x -> 0\n", offs);
+      x = 0;
       break;
     }
   //printf("read access to MC, reg %x, value %x\n", offs, x);  
@@ -67,14 +71,15 @@ static uint8_t byte = 0;
 static uint32_t cbyte = 0;
 
 void sgi_mc::write(uint32_t offs, uint32_t x, size_t sz) {
-  printf("write access to MC, reg %x, value %x, size %lu\n", offs, x, sz);
-  
+  //printf("write access to MC, reg %x, value %x, size %lu\n", offs, x, sz);
+
   switch(offs)
     {
     case 0x0:
     case 0x4:
+    case 0x8:
     case 0xc: {
-      const uint32_t index = (offs >> 1) & 1;
+      const uint32_t index = (offs >> 3) & 1;
       cpu_control[index] = x;
       break;
     }
@@ -84,12 +89,12 @@ void sgi_mc::write(uint32_t offs, uint32_t x, size_t sz) {
     case 0x84:
       gio64_arb_param = x;
       break;
-    case 0xc4: 
+    case 0xc4:
     case 0xcc: {
-      const uint32_t index = (offs >> 1) & 1;
+      const uint32_t index = (offs >> 3) & 1;
       memcfg[index] = x;
       break;
-    }      
+    }
     case 0xd4:
       cpu_mem_access_config = x;
       break;
@@ -120,8 +125,7 @@ void sgi_mc::write(uint32_t offs, uint32_t x, size_t sz) {
       }
       break;
     default:
-      printf("write to garbage address %x\n", offs);
-      exit(-1);
+      //printf("sgi_mc: unhandled write reg %x value %x (ignored)\n", offs, x);
       break;
     }
 }

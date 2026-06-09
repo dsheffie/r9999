@@ -162,7 +162,7 @@ module l1d(clk,
       swl_swr = (r.op == MEM_SWR | r.op == MEM_SWL);
       lwl_lwr = (r.op == MEM_LWR | r.op == MEM_LWL);
       if(r.op == MEM_LDL || r.op == MEM_LDR || r.op == MEM_SDL || r.op == MEM_SDR ||
-         r.op == MEM_LLD || r.op == MEM_SCD)
+         r.op == MEM_LLD || r.op == MEM_SCD || r.op == MEM_LD || r.op == MEM_SD)
 	return 16'hff << {r.addr[DWORD_START], 3'b0};
 
       b = 	(r.op == MEM_SB | r.op == MEM_LB | r.op == MEM_LBU);
@@ -208,6 +208,32 @@ function logic [31:0] select_cl32(logic [L1D_CL_LEN_BITS-1:0] cl, logic[LG_WORDS
        w32 = cl[127:96];
    endcase // case (pos)
    return w32;
+endfunction
+
+function logic [63:0] bswap64(logic [63:0] x);
+   return {x[7:0],x[15:8],x[23:16],x[31:24],x[39:32],x[47:40],x[55:48],x[63:56]};
+endfunction
+
+function logic [L1D_CL_LEN_BITS-1:0] merge_cl64(logic [L1D_CL_LEN_BITS-1:0] cl, logic [63:0] w64, logic [LG_DWORDS_PER_CL-1:0] pos);
+   logic [L1D_CL_LEN_BITS-1:0] cl_out;
+   case(pos)
+     1'd0:
+       cl_out = {cl[127:64], w64};
+     1'd1:
+       cl_out = {w64, cl[63:0]};
+   endcase
+   return cl_out;
+endfunction
+
+function logic [63:0] select_cl64(logic [L1D_CL_LEN_BITS-1:0] cl, logic [LG_DWORDS_PER_CL-1:0] pos);
+   logic [63:0] w64;
+   case(pos)
+     1'd0:
+       w64 = cl[63:0];
+     1'd1:
+       w64 = cl[127:64];
+   endcase
+   return w64;
 endfunction
    
    logic 				  r_got_req, r_last_wr, n_last_wr;
@@ -328,7 +354,8 @@ endfunction
                              FLUSH_CL_WAIT = 'd9,
                              HANDLE_RELOAD = 'd10,
 			     INJECT_UNCACHE_STORE = 'd11,
-			     INJECT_UNCACHE_LOAD = 'd12
+			     INJECT_UNCACHE_LOAD = 'd12,
+			     UNCACHE_WB = 'd13
                              } state_t;
 
    
@@ -336,6 +363,7 @@ endfunction
    logic 	t_pop_mq;
    logic 	n_reload_issue, r_reload_issue;
    logic 	n_did_reload, r_did_reload;
+   logic 	n_uncache_wb_dirty, r_uncache_wb_dirty;
 
    assign state = r_state;
    
@@ -361,7 +389,7 @@ endfunction
    assign mem_req_valid = r_mem_req_valid;
    assign mem_req_cacheable = r_mem_req_cacheable;
    assign mem_req_mask = r_mem_req_mask;
-   
+
    assign core_mem_rsp_valid = n_core_mem_rsp_valid;
    assign core_mem_rsp = n_core_mem_rsp;
    
@@ -474,7 +502,11 @@ endfunction
 	if(reset)
 	  r_sc_should_write <= 1'b0;
 	else if(n_core_mem_rsp_valid && r_got_req2 && (r_req2.op == MEM_SC || r_req2.op == MEM_SCD))
-	  r_sc_should_write <= t_port2_hit_cache && w_match_link2;
+	  /* SC succeeds on the reservation (link); the data write is deferred to the
+	   * port1 graduated-store path, which waits for the hit after a reload.  (Do
+	   * NOT require a cache hit here, else a conflict-displaced line livelocks the
+	   * SC even with a valid reservation -- matches rv64core MEM_SCD.) */
+	  r_sc_should_write <= w_match_link2;
      end
 
    always_ff@(posedge clk)
@@ -720,6 +752,7 @@ endfunction
 	     r_cache_hits <= 'd0;
 	     r_cache_accesses <= 'd0;
 	     r_inhibit_write <= 1'b0;
+	     r_uncache_wb_dirty <= 1'b0;
 	     memq_empty <= 1'b1;
 	     r_q_priority <= 1'b0;
 	     r_must_forward <= 1'b0;
@@ -729,6 +762,7 @@ endfunction
 	  begin
 	     r_reload_issue <= n_reload_issue;
 	     r_did_reload <= n_did_reload;
+	     r_uncache_wb_dirty <= n_uncache_wb_dirty;
 	     r_stall_store <= n_stall_store;
 	     r_is_retry <= n_is_retry;
 	     r_flush_complete <= n_flush_complete;
@@ -1025,16 +1059,12 @@ endfunction
 	    end
 	  MEM_LLD:
 	    begin
-	       t_rsp_data2 = {t_bswap_w32_2,
-			      bswap32(select_cl32(t_data2,
-			        r_req2.addr[WORD_STOP-1:WORD_START] + 2'd1))};
+	       t_rsp_data2 = bswap64(select_cl64(t_data2, r_req2.addr[DWORD_START]));
 	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
 	    end
 	  MEM_LD:
 	    begin
-	       t_rsp_data2 = {t_bswap_w32_2,
-			      bswap32(select_cl32(t_data2,
-			        r_req2.addr[WORD_STOP-1:WORD_START] + 2'd1))};
+	       t_rsp_data2 = bswap64(select_cl64(t_data2, r_req2.addr[DWORD_START]));
 	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
 	    end
 	  MEM_LWR:
@@ -1182,17 +1212,13 @@ endfunction
 	    end
 	  MEM_LLD:
 	    begin
-	       t_rsp_data = {t_bswap_w32,
-			     bswap32(select_cl32(t_data,
-			       r_req.addr[WORD_STOP-1:WORD_START] + 2'd1))};
+	       t_rsp_data = bswap64(select_cl64(t_data, r_req.addr[DWORD_START]));
 	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
 	    end
 	  MEM_LD:
 	    begin
 	       /* High word at addr, low word at addr+4 (big-endian doubleword). */
-	       t_rsp_data = {t_bswap_w32,
-			     bswap32(select_cl32(t_data,
-			       r_req.addr[WORD_STOP-1:WORD_START] + 2'd1))};
+	       t_rsp_data = bswap64(select_cl64(t_data, r_req.addr[DWORD_START]));
 	       t_rsp_dst_valid = r_req.dst_valid & t_hit_cache;
 	    end
 	  MEM_LWR:
@@ -1245,11 +1271,8 @@ endfunction
 		* low word (LSW, higher addr) at dw_hi_idx+1.
 		* t_dword[63:56]=byte0(lowest addr) .. t_dword[7:0]=byte7(highest addr). */
 	       begin
-		  logic [LG_WORDS_PER_CL-1:0] t_dw_hi_idx;
 		  logic [63:0] 		       t_dword;
-		  t_dw_hi_idx = {r_req.addr[DWORD_START], 1'b0};
-		  t_dword = {bswap32(select_cl32(t_data, t_dw_hi_idx)),
-			     bswap32(select_cl32(t_data, t_dw_hi_idx + 2'd1))};
+		  t_dword = bswap64(select_cl64(t_data, r_req.addr[DWORD_START]));
 		  case(r_req.addr[2:0])
 		    3'd0: t_rsp_data = t_dword;
 		    3'd1: t_rsp_data = {t_dword[55:0], r_req.data[7:0]};
@@ -1266,11 +1289,8 @@ endfunction
 	  MEM_LDR:
 	    begin
 	       begin
-		  logic [LG_WORDS_PER_CL-1:0] t_dw_hi_idx;
 		  logic [63:0] 		       t_dword;
-		  t_dw_hi_idx = {r_req.addr[DWORD_START], 1'b0};
-		  t_dword = {bswap32(select_cl32(t_data, t_dw_hi_idx)),
-			     bswap32(select_cl32(t_data, t_dw_hi_idx + 2'd1))};
+		  t_dword = bswap64(select_cl64(t_data, r_req.addr[DWORD_START]));
 		  case(r_req.addr[2:0])
 		    3'd0: t_rsp_data = {r_req.data[63:8],  t_dword[63:56]};
 		    3'd1: t_rsp_data = {r_req.data[63:16], t_dword[63:48]};
@@ -1287,11 +1307,8 @@ endfunction
 	  MEM_SDL:
 	    begin
 	       begin
-		  logic [LG_WORDS_PER_CL-1:0] t_dw_hi_idx;
 		  logic [63:0] 		       t_dword, t_sdl_merged;
-		  t_dw_hi_idx = {r_req.addr[DWORD_START], 1'b0};
-		  t_dword = {bswap32(select_cl32(t_data, t_dw_hi_idx)),
-			     bswap32(select_cl32(t_data, t_dw_hi_idx + 2'd1))};
+		  t_dword = bswap64(select_cl64(t_data, r_req.addr[DWORD_START]));
 		  /* SDL: store rt's high bytes at positions [ma..7]; preserve mem [0..ma-1].
 		   * For ma=k: merged = {t_dword[63:64-k*8], data[63:k*8]}
 		   * (top k bytes from memory, bottom (8-k) bytes = data shifted right k bytes). */
@@ -1305,23 +1322,15 @@ endfunction
 		    3'd6: t_sdl_merged = {t_dword[63:16], r_req.data[63:48]};
 		    3'd7: t_sdl_merged = {t_dword[63:8],  r_req.data[63:56]};
 		  endcase
-		  t_array_data = merge_cl32(
-		     merge_cl32(t_data,
-				bswap32(t_sdl_merged[63:32]),
-				t_dw_hi_idx),
-		     bswap32(t_sdl_merged[31:0]),
-		     t_dw_hi_idx + 2'd1);
+		  t_array_data = merge_cl64(t_data, bswap64(t_sdl_merged), r_req.addr[DWORD_START]);
 	       end
 	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);
 	    end // case: MEM_SDL
 	  MEM_SDR:
 	    begin
 	       begin
-		  logic [LG_WORDS_PER_CL-1:0] t_dw_hi_idx;
 		  logic [63:0] 		       t_dword, t_sdr_merged;
-		  t_dw_hi_idx = {r_req.addr[DWORD_START], 1'b0};
-		  t_dword = {bswap32(select_cl32(t_data, t_dw_hi_idx)),
-			     bswap32(select_cl32(t_data, t_dw_hi_idx + 2'd1))};
+		  t_dword = bswap64(select_cl64(t_data, r_req.addr[DWORD_START]));
 		  /* SDR: store rt's low bytes at positions [0..ma]; preserve mem [ma+1..7] */
 		  case(r_req.addr[2:0])
 		    3'd0: t_sdr_merged = {r_req.data[7:0],  t_dword[55:0]};
@@ -1333,12 +1342,7 @@ endfunction
 		    3'd6: t_sdr_merged = {r_req.data[55:0], t_dword[7:0]};
 		    3'd7: t_sdr_merged = r_req.data;
 		  endcase
-		  t_array_data = merge_cl32(
-		     merge_cl32(t_data,
-				bswap32(t_sdr_merged[63:32]),
-				t_dw_hi_idx),
-		     bswap32(t_sdr_merged[31:0]),
-		     t_dw_hi_idx + 2'd1);
+		  t_array_data = merge_cl64(t_data, bswap64(t_sdr_merged), r_req.addr[DWORD_START]);
 	       end
 	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);
 	    end // case: MEM_SDR
@@ -1388,11 +1392,7 @@ endfunction
 	  MEM_SD:
 	    begin
 	       /* High word at addr, low word at addr+4 (big-endian doubleword). */
-	       t_array_data = merge_cl32(
-		  merge_cl32(t_data, bswap32(r_req.data[63:32]),
-		    r_req.addr[WORD_STOP-1:WORD_START]),
-		  bswap32(r_req.data[31:0]),
-		  r_req.addr[WORD_STOP-1:WORD_START] + 2'd1);
+	       t_array_data = merge_cl64(t_data, bswap64(r_req.data[63:0]), r_req.addr[DWORD_START]);
 	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload);
 	    end
 	  MEM_SC:
@@ -1404,11 +1404,7 @@ endfunction
 	    end
 	  MEM_SCD:
 	    begin
-	       t_array_data = merge_cl32(
-		  merge_cl32(t_data, bswap32(r_req.data[63:32]),
-		    r_req.addr[WORD_STOP-1:WORD_START]),
-		  bswap32(r_req.data[31:0]),
-		  r_req.addr[WORD_STOP-1:WORD_START] + 2'd1);
+	       t_array_data = merge_cl64(t_data, bswap64(r_req.data[63:0]), r_req.addr[DWORD_START]);
 	       t_rsp_data = 'd0;
 	       t_rsp_dst_valid = 1'b0;
 	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_sc_should_write;
@@ -1487,22 +1483,22 @@ endfunction
    //end
    //end
    
-   // always_ff@(negedge clk)
-   //   begin
-   // 	if(core_mem_req_valid)
-   // 	  begin
-   // 	     $display("core_mem_req_valid = %b, w_uncachable_req = %b, addr = %x, rob_ptr = %x, is_store = %b, pc = %x, cached = %b, mem_q_empty = %b, inflight %d, r_rob_inflight = %b", 
-   // 		      core_mem_req_valid,w_uncachable_req, 
-   // 		      core_mem_req.addr,
-   // 		      core_mem_req.rob_ptr,
-   // 		      core_mem_req.is_store,
-   // 		      core_mem_req.pc, 
-   // 		      core_mem_req.cached,
-   // 		      mem_q_empty,
-   // 		      r_n_inflight,
-   // 		      r_rob_inflight);
-   // 	  end
-   //   end
+   always_ff@(negedge clk)
+     begin
+	if(core_mem_req_valid & core_mem_req.is_atomic)
+	  begin
+	     $display("cycle %d, w_uncachable_req = %b, addr = %x, rob_ptr = %x, is_store = %b, pc = %x, cached = %b, mem_q_empty = %b, inflight %d", 
+		      r_cycle,
+		      w_uncachable_req, 
+		      core_mem_req.addr,
+		      core_mem_req.rob_ptr,
+		      core_mem_req.is_store,
+		      core_mem_req.pc, 
+		      core_mem_req.cached,
+		      mem_q_empty,
+		      r_n_inflight);
+	  end
+     end
 
 
    
@@ -1523,6 +1519,15 @@ endfunction
 	     );
    
 
+
+   //always@(negedge clk)
+   //begin
+   //if(r_cycle > 'd23594309)
+   //begin
+   //	     $display("memory queue empty %b", mem_q_empty);
+   //	  end
+   //  end
+   
    
    always_comb
      begin
@@ -1601,6 +1606,7 @@ endfunction
 	
 	n_reload_issue = r_reload_issue;
 	n_did_reload = 1'b0;
+	n_uncache_wb_dirty = r_uncache_wb_dirty;
 	n_lock_cache = r_lock_cache;
 	
 	t_mh_block = r_got_req && r_last_wr && 
@@ -1689,9 +1695,9 @@ endfunction
 			   end
 			 else
 			   begin
-			      /* SC/SCD: send early ack with correct result.
-			       * Cache write deferred to graduated-store port1 path. */
-			      n_core_mem_rsp.data = {{(`M_WIDTH-1){1'b0}}, t_port2_hit_cache && w_match_link2};
+			      /* SC/SCD: early ack with the reservation result (link); cache write
+			       * deferred to the graduated-store port1 path. */
+			      n_core_mem_rsp.data = {{(`M_WIDTH-1){1'b0}}, w_match_link2};
 			      n_core_mem_rsp.dst_valid = r_req2.dst_valid;
 			      n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 			      if(t_port2_hit_cache)
@@ -1738,18 +1744,40 @@ endfunction
 		 begin
 		    if(r_req.cached == 1'b0)
 		      begin
-			 n_mem_req_cacheable = 1'b0;
-			 n_mem_req_mask = t_mem_req_mask;
-			 if(r_req.op == MEM_SWR)
+			 if(r_valid_out && (r_tag_out == r_cache_tag))
 			   begin
-			      $display("SWR addr[3:0] = %x, {addr[3:2],2'd0} = %x, bits %x, mask = %b", 
-				       r_req.addr[3:0],
-				       {r_req.addr[3:2], 2'd0},
-				       r_req.addr[1:0],
-				       n_mem_req_mask);
-			      //$stop();
-			      
+			      /* uncached access aliases a resident cache line: invalidate
+			       * it (write back first if dirty) so DRAM is authoritative,
+			       * then re-issue the uncached request (no longer aliasing). */
+			      t_got_miss = 1'b1;
+			      t_mark_invalid = 1'b1;
+			      n_uncache_wb_dirty = r_dirty_out;
+			      n_state = UNCACHE_WB;
+			      if(r_dirty_out)
+				begin
+				   n_mem_req_addr = {r_tag_out, r_cache_idx, {`LG_L1D_CL_LEN{1'b0}}};
+				   n_mem_req_cacheable = 1'b1;
+				   n_mem_req_opcode = MEM_SW;
+				   n_mem_req_store_data = t_data;
+				   n_mem_req_mask = 16'hffff;
+				   n_mem_req_valid = 1'b1;
+				   n_inhibit_write = 1'b1;
+				end
 			   end
+			 else
+			   begin
+			      n_mem_req_cacheable = 1'b0;
+			      n_mem_req_mask = t_mem_req_mask;
+			      if(r_req.op == MEM_SWR)
+				begin
+				   $display("SWR addr[3:0] = %x, {addr[3:2],2'd0} = %x, bits %x, mask = %b", 
+					    r_req.addr[3:0],
+					    {r_req.addr[3:2], 2'd0},
+					    r_req.addr[1:0],
+					    n_mem_req_mask);
+				   //$stop();
+				   
+				end
 			 if(r_req.op == MEM_SWL)
 			   begin
 			      $display("SWL addr[3:0] = %x, {addr[3:2],2'd0} = %x, bits %x, mask = %b", 
@@ -1775,13 +1803,20 @@ endfunction
 			 //r_req.pc, {r_req.addr[31:4], 4'd0}, r_req.is_store, r_req.data,
 			 //t_mem_req_mask, r_req.rob_ptr);
 			 
-		      end
+			   end
+		      end // if (r_req.cached == 1'b0)
 		    else if(r_valid_out && (r_tag_out == r_cache_tag))
 		      begin /* valid cacheline - hit in cache */
+
+			 if(r_req.is_atomic)
+			   begin
+			      $display("atomic to addr %x doing its thing at cycle %d", 
+				       r_req.addr, r_cycle);
+			   end
+			 
 			 if(r_req.is_store)
 			   begin
-			      /* All stores (including SC) just reset graduated state.
-			       * SC result was already sent via port2 early ack. */
+			      /* SC result already sent via the port2 early ack. */
 			      t_reset_graduated = 1'b1;
 			   end
 			 else
@@ -1952,6 +1987,7 @@ endfunction
 		  !(r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) && 
 		  !t_cm_block_stall &&
 		  w_uncachable_req &&
+		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) && 
 		  /*(r_graduated[core_mem_req.rob_ptr] == 2'b00) && */
 		  (!r_rob_inflight[core_mem_req.rob_ptr])
 		  )
@@ -2035,7 +2071,7 @@ endfunction
 	    begin
 	       if(mem_rsp_valid)
 		 begin
-		    //$display("data returns for uncached load, got %x, old data %x", t_rsp_data[31:0], r_req.data);
+		    //$display("data returns for uncached load");
 		    n_core_mem_rsp.data = t_rsp_data[`M_WIDTH-1:0];
                     n_core_mem_rsp.dst_valid = r_req.dst_valid;
 		    n_core_mem_rsp.bad_addr = r_req.bad_addr;		    
@@ -2043,6 +2079,21 @@ endfunction
 		    n_state = ACTIVE;		    
 		 end
 	       
+	    end
+	  UNCACHE_WB:
+	    begin
+	       /* aliasing line invalidated (+ written back if dirty); re-issue
+		* the uncached request now that it no longer aliases. */
+	       if(!r_uncache_wb_dirty || mem_rsp_valid)
+		 begin
+		    n_inhibit_write = 1'b0;
+		    n_uncache_wb_dirty = 1'b0;
+		    t_got_req = 1'b1;
+		    t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
+		    t_cache_tag = r_req.addr[`M_WIDTH-1:IDX_STOP];
+		    t_addr = r_req.addr;
+		    n_state = ACTIVE;
+		 end
 	    end
 	  HANDLE_RELOAD:
 	    begin

@@ -107,6 +107,8 @@ module l2(clk,
    logic [127:0] 	   r_rsp_data, n_rsp_data;
    logic [127:0] 	   r_store_data, n_store_data;
    logic [15:0]		   r_store_mask, n_store_mask;
+   logic			   n_is_uncache, r_is_uncache;
+   logic [15:0]		   n_uncache_mask, r_uncache_mask;
    
    
    logic 		   r_reload, n_reload;
@@ -137,7 +139,8 @@ module l2(clk,
 				     FLUSH_TRIAGE = 'd11,
 				     UNCACHE_STORE = 'd12,
 				     UNCACHE_LOAD = 'd13,
-				     GAMEOVER = 'd14
+				     GAMEOVER = 'd14,
+				     UNCACHE_WB_DRAIN = 'd15
 				     } state_t;
 
    state_t n_state, r_state;
@@ -221,6 +224,8 @@ module l2(clk,
 	     r_req_ack <= 1'b0;
 	     r_store_data <= 'd0;
 	     r_store_mask <= 'd0;	     
+	     r_is_uncache <= 1'b0;
+	     r_uncache_mask <= 'd0;
 	     r_flush_req <= 1'b0;
 	     r_need_l1d <= 1'b0;
 	     r_need_l1i <= 1'b0;
@@ -246,6 +251,8 @@ module l2(clk,
 	     r_req_ack <= n_req_ack;
 	     r_store_data <= n_store_data;
 	     r_store_mask <= n_store_mask;
+	     r_is_uncache <= n_is_uncache;
+	     r_uncache_mask <= n_uncache_mask;
 	     r_flush_req <= n_flush_req;
 	     r_need_l1i <= n_need_l1i;
 	     r_need_l1d <= n_need_l1d;
@@ -359,6 +366,8 @@ module l2(clk,
 	n_reload = r_reload;
 	n_store_data = r_store_data;
 	n_store_mask = r_store_mask;
+	n_is_uncache = r_is_uncache;
+	n_uncache_mask = r_uncache_mask;
 	n_flush_req = r_flush_req | t_l2_flush_req;
 	n_mem_req_store_data = r_mem_req_store_data;
 
@@ -410,25 +419,23 @@ module l2(clk,
 		 begin
 		    if(l1_mem_req_cacheable == 1'b0)
 		      begin
-			 //$display("uncachable req at l2 for address %x", n_addr);
+			 /* L2 inclusive of L1: always look the line up first; on an
+			  * uncached hit, evict (write back if dirty) + invalidate before
+			  * the uncached op so s->mem is authoritative. */
+			 n_uncache_mask = l1_mem_req_mask;
 			 n_store_mask = l1_mem_req_mask;
-			 n_req_ack = 1'b1;
-			 n_state = (l1_mem_req_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 			 n_mem_opcode = l1_mem_req_opcode;
 			 n_mem_req_store_data = l1_mem_req_store_data;
-			 if(l1_mem_req_opcode == 7 & (&n_store_mask))
-			   begin
-			      $stop();
-			   end
-			 //$display("l1_mem_req_opcode = %d", l1_mem_req_opcode);
-			 n_mem_req = 1'b1;
-			 n_got_mem_rsp_valid = 1'b0;	     
+			 n_req_ack = 1'b1;
+			 n_is_uncache = 1'b1;
+			 n_state = WAIT_FOR_RAM;
 		      end
 		    else
 		      begin
 			 n_req_ack = 1'b1;
 			 n_state = WAIT_FOR_RAM;
 			 n_rsp_valid = (l1_mem_req_opcode == 5'd7);
+			 n_is_uncache = 1'b0;
 			 n_cache_accesses = r_cache_accesses + 64'd1;
 			 n_cache_hits = r_cache_hits + 64'd1;
 		      end
@@ -442,7 +449,46 @@ module l2(clk,
 	  CHECK_VALID_AND_TAG:
 	    begin
 	       //load hit
-	       if(w_hit)
+	       if(r_is_uncache)
+		 begin
+		    n_is_uncache = 1'b0;
+		    if(w_hit)
+		      begin
+			 t_wr_valid = 1'b1; t_valid = 1'b0;
+			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
+			 if(w_dirty)
+			   begin
+			      n_mem_req_store_data = w_d0;
+			      n_addr = {w_tag, t_idx, 4'd0};
+			      n_mem_opcode = 5'd7;
+			      n_store_mask = 16'hffff;
+			      n_mem_req = 1'b1;
+			      n_got_mem_rsp_valid = 1'b0;
+			      n_state = UNCACHE_WB_DRAIN;
+			   end
+			 else
+			   begin
+			      n_addr = r_saveaddr;
+			      n_mem_opcode = r_opcode;
+			      n_store_mask = r_uncache_mask;
+			      n_mem_req_store_data = r_store_data;
+			      n_mem_req = 1'b1;
+			      n_got_mem_rsp_valid = 1'b0;
+			      n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+			   end
+		      end
+		    else
+		      begin
+			 n_addr = r_saveaddr;
+			 n_mem_opcode = r_opcode;
+			 n_store_mask = r_uncache_mask;
+			 n_mem_req_store_data = r_store_data;
+			 n_mem_req = 1'b1;
+			 n_got_mem_rsp_valid = 1'b0;
+			 n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+		      end
+		 end
+	       else if(w_hit)
 		 begin
 		    n_reload = 1'b0;
 		    if(r_opcode == 5'd4)
@@ -623,6 +669,21 @@ module l2(clk,
 		    n_rsp_data = mem_rsp_load_data;
 		    n_state = IDLE;
 		    n_mem_req = 1'b0;
+		 end
+	    end
+	  UNCACHE_WB_DRAIN:
+	    begin
+	       if(mem_req_ack)
+		 n_mem_req = 1'b0;
+	       if(mem_rsp_valid)
+		 begin
+		    n_addr = r_saveaddr;
+		    n_mem_opcode = r_opcode;
+		    n_store_mask = r_uncache_mask;
+		    n_mem_req_store_data = r_store_data;
+		    n_mem_req = 1'b1;
+		    n_got_mem_rsp_valid = 1'b0;
+		    n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 		 end
 	    end
 	  default:
