@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>r9999 / SGI IP22 Physical Address Map &amp; FPGA Bring-up</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+         max-width: 64rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.45; color: #1b1b1b; }
+  h1 { border-bottom: 3px solid #555; padding-bottom: .3rem; }
+  h2 { margin-top: 2.2rem; border-bottom: 1px solid #ccc; padding-bottom: .2rem; }
+  h3 { margin-top: 1.4rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { border: 1px solid #bbb; padding: .35rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #eef2f7; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  td.mono, th.mono { white-space: nowrap; }
+  .note { background: #fff8e1; border-left: 4px solid #e0b400; padding: .5rem .8rem; margin: 1rem 0; }
+  .ok   { background: #e8f5e9; border-left: 4px solid #43a047; padding: .5rem .8rem; margin: 1rem 0; }
+  .bad  { background: #fdecea; border-left: 4px solid #e53935; padding: .5rem .8rem; margin: 1rem 0; }
+  ol li, ul li { margin: .3rem 0; }
+  caption { caption-side: top; font-weight: bold; text-align: left; margin-bottom: .3rem; }
+  .pl { background:#e3f2fd; } .arm { background:#f3e5f5; } .dram { background:#e8f5e9; } .hole { background:#f5f5f5; color:#777; }
+</style>
+</head>
+<body>
+
+<h1>SGI IP22 (Indy/Indigo2) Physical Address Map &amp; FPGA Bring-up</h1>
+<p>Reference for the r9999 MIPS-III OOO core booting 64-bit MIPS Linux (and, later, IRIX) on an
+SGI IP22 personality &mdash; in the C++/Verilator simulator, in the standalone <code>interp_mips</code>
+functional sim, and on the Zynq UltraScale FPGA. On FPGA the CPU's physical requests are routed by
+<code>hdl/axi_is_the_worst_v1_0_M00_AXI.v</code> into DRAM shared with the ARM PS, and the ARM driver
+(<code>naive-driver-for-rv64-on-ultra96v2/</code>) stages images and emulates the slow devices.
+Sources: <code>indy_docs/mc.pdf</code> (MC Chip Spec &sect;4, p.22 &mdash; authoritative),
+<code>indy_docs/hpc3.pdf</code>, <code>sgi_indy.hh</code> (<code>compute_mem_range_type</code>),
+Linux <code>arch/mips/sgi-ip22</code>, MAME <code>src/mame/sgi/mc.cpp</code>, and the IP32/IP24 PROM
+disassemblies. All addresses are physical unless noted.</p>
+
+<div class="ok"><b>Status (this branch):</b> RTL boots IP22 Linux to <code>NR_IRQS</code>; standalone
+<code>interp_mips</code> boots to device init (MC reg 0x1c). FPGA bring-up = ARM driver +
+device emulation + a small RTL decode update. The address map below is the canonical contract shared
+by the RTL, the ARM driver's <code>fpga_remap()</code>, and the ARM device emulator.</div>
+
+<h2>1. MIPS virtual segments &rarr; physical</h2>
+<table>
+  <tr><th>Segment</th><th class="mono">Virtual range</th><th>Mapped?</th><th>Cached?</th><th>&rarr; Physical</th></tr>
+  <tr><td>kuseg / xkuseg</td><td class="mono">bits63:62=00</td><td>TLB</td><td>cached</td><td>via TLB</td></tr>
+  <tr><td>kseg0 / ckseg0</td><td class="mono">0x80000000&ndash;0x9FFFFFFF</td><td>unmapped</td><td><b>cached</b></td><td class="mono">VA &amp; 0x1FFFFFFF</td></tr>
+  <tr><td>kseg1 / ckseg1</td><td class="mono">0xA0000000&ndash;0xBFFFFFFF</td><td>unmapped</td><td><b>uncached</b></td><td class="mono">VA &amp; 0x1FFFFFFF</td></tr>
+  <tr><td>kseg2/kseg3 / xkseg</td><td class="mono">0xC0000000&ndash;0xFFFFFFFF</td><td>TLB</td><td>per-TLB</td><td>via TLB</td></tr>
+  <tr><td>xkphys</td><td class="mono">bits63:62=10</td><td>unmapped</td><td>cached iff CCA=3</td><td class="mono">VA[58:0] (direct PA)</td></tr>
+</table>
+<p><b>Key:</b> kseg0 and kseg1 alias the same low 512&nbsp;MB of physical space (cached vs uncached).
+The interpreter models this as <code>va2pa(va) = (va&gt;&gt;31)&amp;1 ? va&amp;0x1FFFFFFF : va</code> with
+<b>no translating TLB datapath</b> &mdash; fine because early boot is entirely ckseg0/kseg1 and RAM is
+placed inside the low 512&nbsp;MB.</p>
+
+<h2>2. IP22 CPU physical address map (mc.pdf &sect;4, p.22 &mdash; authoritative)</h2>
+<table>
+  <tr><th class="mono">Base</th><th class="mono">Size</th><th>Usage</th><th>Notes</th></tr>
+  <tr><td class="mono">0x80000000</td><td class="mono">2 GB</td><td>EISA Memory</td><td>unused by us</td></tr>
+  <tr><td class="mono">0x30000000</td><td class="mono">1.25 GB</td><td>Reserved</td><td>bus error</td></tr>
+  <tr><td class="mono">0x20000000</td><td class="mono">256 MB</td><td><b>High System Memory</b> (RAM bank 1)</td><td>only via TLB/kuseg (above kseg0/1 reach)</td></tr>
+  <tr><td class="mono">0x1FC00000</td><td class="mono">4 MB</td><td><b>Boot PROM</b></td><td>reset vector 0xBFC00000</td></tr>
+  <tr><td class="mono">0x1FB00000</td><td class="mono">1 MB</td><td><b>HPC3</b> + I/O devices</td><td>SCC console, SCSI, enet, INT2, RTC</td></tr>
+  <tr><td class="mono">0x1FA00000</td><td class="mono">1 MB</td><td><b>MC registers</b></td><td>MEMCFG, sysid, cpuctrl</td></tr>
+  <tr><td class="mono">0x1F000000</td><td class="mono">10 MB</td><td>Graphics + GIO64 slots</td><td>headless &rarr; absent</td></tr>
+  <tr><td class="mono">0x18000000</td><td class="mono">112 MB</td><td>Reserved (future GIO)</td><td>bus error</td></tr>
+  <tr><td class="mono">0x08000000</td><td class="mono">256 MB</td><td><b>Low Local Memory</b> (RAM bank 0)</td><td>kseg0-reachable; primary RAM</td></tr>
+  <tr><td class="mono">0x000A0000</td><td class="mono">~128 MB</td><td>EISA Memory</td><td>unused</td></tr>
+  <tr><td class="mono">0x00080000</td><td class="mono">128 KB</td><td>EISA I/O (+ alias)</td><td>unused</td></tr>
+  <tr><td class="mono">0x00000000</td><td class="mono">512 KB</td><td><b>System Memory Alias</b></td><td><b>alias of RAM 0x08000000&ndash;0x0807FFFF</b></td></tr>
+</table>
+<p>Three facts from the spec drive the whole FPGA design:</p>
+<ul>
+  <li><b>Max 512&nbsp;MB RAM, in two 256&nbsp;MB banks</b> &mdash; Low Local @ <code>0x08000000</code> and High System
+      @ <code>0x20000000</code>. Only the low 512&nbsp;MB is reachable through kseg0/kseg1; the High bank needs the TLB.</li>
+  <li><b>The bottom 512&nbsp;KB is an alias</b> of the start of RAM (<code>0x08000000&ndash;0x0807FFFF</code>), provided
+      "for the CPU exception vectors at <code>0x00000000</code> and <code>0x00000080</code>" and for EISA/ISA DMA
+      that lives in the first 640&nbsp;KB. So PA <code>0x1000</code> and PA <code>0x08001000</code> are the
+      <em>same DRAM cell</em>. This is why the kernel reserves the <code>0x4000</code> gap below <code>_text</code>.</li>
+  <li><b>"Accesses to unused or reserved regions cause a bus error on reads and a bus error interrupt on writes."</b>
+      Documented &mdash; but see &sect;8: we do <b>not</b> need to implement a guest bus-error path.</li>
+</ul>
+
+<h2>3. The core problem: 4&nbsp;GB sparse &rarr; &lt;512&nbsp;MB aperture (the compaction)</h2>
+<p>The IP22 owns a 4&nbsp;GB physical space but the ARM&harr;softcore shared-DRAM window is <b>&lt;512&nbsp;MB</b>
+(the driver maps 496&nbsp;MB). You cannot map the 4&nbsp;GB 1:1. The address translation is therefore a fixed,
+sparse <b>compaction MMU</b> that folds the few regions the guest actually backs into the aperture and treats
+everything else as inert. Of the 4&nbsp;GB only ~528&nbsp;MB is ever real (512&nbsp;MB RAM in two banks + 16&nbsp;MB
+device window); the rest is bus-error by spec.</p>
+<div class="note"><b>The compaction is one contract that must be byte-identical in three places:</b>
+(1) <code>M00_AXI.v</code> (the softcore's own accesses), (2) <code>fpga_remap()</code> in the ARM driver's
+<code>loadelf.cc</code> (staging images), and (3) the ARM device/DMA emulator (when it dereferences a
+<em>guest</em> physical address &mdash; a SCSI descriptor, an ARC pointer). Drift here silently corrupts.
+<code>fpga_remap()</code> should be the canonical function, matched bit-for-bit by the Verilog.</div>
+<p><b>RAM budget (the only real design variable):</b> 496&nbsp;MB comfortably holds one 256&nbsp;MB bank +
+the 16&nbsp;MB device window. Cap at the <b>Low Local bank (&le;256&nbsp;MB)</b> for bring-up &mdash; it is
+kseg0-reachable, so RAM needs <em>no</em> TLB datapath. The High bank stays unmapped (correctly faults a
+size probe) and only matters if you ever want &gt;256&nbsp;MB, which also drags in the TLB &mdash; a natural "later".</p>
+
+<h2>4. Where the kernel / firmware / ARCS live</h2>
+<table>
+  <tr><th>Object</th><th class="mono">Physical</th><th class="mono">Virtual</th><th>Notes</th></tr>
+  <tr><td>Exception vectors</td><td class="mono">0x00000000 / 0x00000080</td><td class="mono">ebase 0x80000000</td><td>land in RAM bottom via the alias</td></tr>
+  <tr><td>ARCS SPB</td><td class="mono">0x00001000</td><td class="mono">0xA0001000</td><td>= RAM 0x08001000 (alias); fixed ARC location</td></tr>
+  <tr><td>Kernel image (<code>_text</code>&hellip;<code>_end</code>)</td><td class="mono">0x08004000&ndash;0x0848E200</td><td class="mono">0xFFFFFFFF88004000</td><td>~4.6 MB; last ~250 KB is .bss (zero-fill)</td></tr>
+  <tr><td>Kernel entry (<code>kernel_entry</code>)</td><td class="mono">0x08300D58</td><td class="mono">0x88300D58</td><td>verified via <code>readelf</code> on <code>vmlinux.32</code></td></tr>
+  <tr><td>Boot PROM / firmware</td><td class="mono">0x1FC00000</td><td class="mono">0xBFC00000</td><td>reset vector; see &sect;5</td></tr>
+</table>
+<div class="note"><b>Loader gotcha (verified OK in the driver):</b> the ELF's <code>p_vaddr</code>/<code>p_paddr</code> are both
+the kseg0 vaddr <code>0x88004000</code>. The loader must place bytes at <code>va2pa(p_vaddr)=0x08004000</code>,
+not the raw <code>0x88004000</code>. The driver's <code>loadelf()</code> does
+<code>p_vaddr=va2pa(p_vaddr)</code> then <code>fpga_remap()</code>, which lands the image at
+<code>c_addr+0x08004000</code> &mdash; correct, and it mirrors the HW translation exactly.</div>
+
+<h2>5. Boot architecture: preserve the <code>0xBFC00000</code> ROM (for IRIX)</h2>
+<p>IRIX boots through the real ARC PROM (<code>arcsboot</code>/<code>sash</code> &rarr; <code>unix</code>), so we keep a
+PROM at the reset vector rather than jumping the core straight to a kernel entry. Linux and IRIX then share
+one entry model.</p>
+<ul>
+  <li><b>SPB @ PA 0x1000</b> (must stay there) &mdash; small: magic + a pointer to the romvec (now up in the PROM).</li>
+  <li><b>PROM @ 0xBFC00000</b> (PA 0x1FC00000, DRAM-backed) &mdash; reset vector + romvec table + ARC stubs.
+      Currently <code>arcs_fw.S</code> is one blob linked at <code>0xA0001000</code>; split it: SPB at 0x1000, code at 0xBFC00000.</li>
+  <li><b>Reset vector job</b> &mdash; <em>now (Linux):</em> minimal CP0 init, set up ARC argc/argv/envp + cmdline, jump to
+      <code>kernel_entry</code> (0x88300D58). <em>later (IRIX/full):</em> the real ARC disk boot, or a faithful SGI PROM image
+      (the ip32prom-decompiler proves a reassemblable PROM is feasible).</li>
+</ul>
+<p>Boot ROM is read-mostly code in DRAM &mdash; no PL device needed. The driver keeps <code>resume_pc=0xBFC00000</code>.</p>
+
+<h2>6. FPGA translation: CPU physical &rarr; DRAM (M00_AXI &amp; fpga_remap)</h2>
+<p>The ARM PS sets <code>baseaddr</code> (DRAM window base = the ioctl'd <code>phys_addr</code>), <code>addrmask</code>,
+<code>sgi_mode=1</code>, <code>resume_pc</code>, then releases reset. Each request becomes
+<code>w_axi_addr = baseaddr + t_cpuaddr</code>. The current <code>sgi_mode</code> translation:</p>
+<table>
+  <tr><th class="mono">CPU physical</th><th class="mono">t_cpuaddr</th><th>contents</th></tr>
+  <tr><td class="mono">0x08000000&ndash;0x17FFFFFF</td><td class="mono">cpuaddr &amp; 0x0FFFFFFF</td><td>RAM (kept at DRAM 0x08000000+)</td></tr>
+  <tr><td class="mono">0x1F000000&ndash;0x1FFFFFFF</td><td class="mono">0x10000000 + (cpuaddr &amp; 0xFFFFFF)</td><td>16 MB device window (MC/HPC/ROM)</td></tr>
+  <tr><td class="mono">else</td><td class="mono">cpuaddr (passthrough)</td><td>low mem incl. ARCS @ 0x1000</td></tr>
+</table>
+<p>The driver's <code>fpga_remap()</code> matches this bit-for-bit (verified). <b>Two corrections from this thread:</b></p>
+<ol>
+  <li><b>Implement the <code>sys_mem_alias</code></b> in both HW and <code>fpga_remap</code>, so PA 0&ndash;0x7FFFF folds onto
+      the RAM bottom (one copy, like real HW):
+      <pre class="mono">if      (addr &lt;= 0x0007ffff) addr += 0x08000000;   // alias &rarr; real RAM
+else if (addr &lt;= 0x17ffffff) addr &amp;= 0x0fffffff;   // RAM
+else if (0x1f000000..0x1fffffff) addr = (addr&amp;0xffffff) + 0x10000000; // devices</pre>
+      Then the SPB physically lives at <code>DRAM+0x08001000</code> and the vectors at <code>DRAM+0x08000000</code>
+      (inside the kernel's reserved <code>0x4000</code> gap) &mdash; exactly like IP22, and the ARM load + core fetch agree automatically.</li>
+  <li><b>Cap RAM to the backed DRAM.</b> The RAM branch <code>{4'd0,cpuaddr[27:0]}</code> wraps 0x10000000&ndash;0x17FFFFFF
+      back onto low DRAM; if DRAM backs less than the mapped range, a pattern-based sizer over-counts (see &sect;8).
+      Keep <code>memcfg</code> + <code>addrmask</code> consistent with what's actually backed.</li>
+</ol>
+<p><b>Optional tighter layout</b> (frees the wasted low 128 MB): relocate RAM to DRAM base
+(<code>RAM 0x08000000+N &rarr; DRAM 0+N</code>), put the device window at the top of the aperture. Not required at 128&nbsp;MB.</p>
+
+<h2>7. Device plan: PL (real) vs ARM (emulated)</h2>
+<p>Timing-critical / tightly-polled devices become real memory-mapped peripherals in the PL; complex
+IRQ/DMA-driven peripherals are emulated on the ARM (latency-tolerant). The <code>0x1F&hellip;</code> window
+stops being plain DRAM and becomes an AXI peripheral decode + a PS-bridge region.</p>
+<table>
+  <tr><th>Device</th><th class="mono">PA</th><th>Where</th><th>Why / priority</th></tr>
+  <tr class="pl"><td>MC registers</td><td class="mono">0x1FA00000</td><td><b>PL</b></td><td>MEMCFG/sysid/reg 0x1c; values in <code>sgi_mc.cc</code> (#1 &mdash; current wall)</td></tr>
+  <tr class="pl"><td>SCC console (Z8530)</td><td class="mono">0x1FBD9830</td><td><b>PL</b> (UART shim)</td><td>printk; or route to the existing putchar FIFO (&sect;9)</td></tr>
+  <tr class="pl"><td>SGINT / INT2: 8254 timer + irq ctrl</td><td class="mono">~0x1FBD9000</td><td><b>PL</b></td><td><b>critical</b>: <code>dosample</code> (cnt2) + periodic tick (cnt0) + drives <code>extern_irq</code></td></tr>
+  <tr class="pl"><td>DS1286 RTC</td><td class="mono">HPC rtcregs</td><td>PL or ARM</td><td>time-of-day; low priority</td></tr>
+  <tr class="arm"><td>SCSI (WD33C93) + HPC DMA</td><td class="mono">0x1FB&hellip;</td><td><b>ARM</b></td><td>disk image; needed for mount-root</td></tr>
+  <tr class="arm"><td>SEEQ ethernet</td><td class="mono">0x1FB&hellip;</td><td><b>ARM</b></td><td>network</td></tr>
+  <tr class="hole"><td>Graphics / GIO64 slots</td><td class="mono">0x1F000000&ndash;0x1F9FFFFF</td><td>absent</td><td>headless &mdash; inert (&sect;8)</td></tr>
+</table>
+<div class="note"><b>Interrupts are not optional.</b> The PL INT2 must aggregate sources (the 8254 tick, plus
+"done" signals the ARM raises for SCSI/net) and drive the core's <code>extern_irq</code>. Without it: you reach
+clock calibration but get no jiffies/scheduler tick and no I/O completion.</div>
+
+<h2>8. Memory sizing &amp; the bus-error decision</h2>
+<div class="ok"><b>Decision: do NOT implement a guest bus-error (DBE/IBE) path.</b> Confirmed from two
+IRIX-capable references:
+<ul>
+  <li><b>MAME <code>sgi/mc.cpp</code></b> (boots IRIX): no CPU bus error anywhere; <code>memcfg_w</code> <em>dynamically
+      installs RAM regions</em> from whatever the firmware writes to the memory-config register. The OS learns
+      memory size from <code>memcfg</code>, not from faults.</li>
+  <li><b>Real SGI PROM</b> (IP32 firmware disasm, <code>F_0x8100d2e0</code>): the universal presence/size idiom is
+      <code>write 0xdeadbeef; read back; beql match</code> &mdash; it branches on <em>readback mismatch</em>, never on an
+      exception. Exactly the LFSR/pattern write-readback scheme.</li>
+</ul></div>
+<p>What replaces the bus-error path (small, real requirements so a pattern probe of a hole reliably "misses"):</p>
+<ol>
+  <li><b><code>RD_BAD</code> returns 0</b> (<code>r_load_data</code>) &mdash; a defined value, not stale bus data.
+      For the SGI PROM's <code>0xdeadbeef</code> write/readback idiom this is a valid sentinel
+      (<code>0 &ne; pattern</code> &rarr; readback misses &rarr; correctly "absent").</li>
+  <li><b>No unmapped address may alias/wrap into real RAM</b> &mdash; the other false-match route (the RAM-branch wrap, &sect;6).</li>
+  <li><b><code>memcfg</code> must match the DRAM actually backed</b> &mdash; it is the value the OS trusts.</li>
+</ol>
+<div class="note"><b>Sentinel caveat:</b> returning <code>0</code> is generically the <em>least</em>-robust choice &mdash; a
+zero-fill/march sizer that writes <code>0x00000000</code> would false-match a hole. The SGI PROM uses
+<code>0xdeadbeef</code>/address signatures (never plain 0), so <code>0</code> is safe for the target firmware.
+If a future probe ever bites, a non-zero per-address sentinel (e.g. <code>~address</code>) is bulletproof.</div>
+
+<h2>9. The ARM driver (<code>naive-driver-for-rv64-on-ultra96v2/</code>, EXE <code>mips-axi</code>)</h2>
+<p>Two mmap'd regions: (a) AXI-Lite <b>control registers</b> at <code>0xA0050000</code> (32-bit ports via
+<code>read32/write32</code>); (b) the <b>shared DRAM</b> (<code>phys_addr</code> from
+<code>ioctl(/dev/rv64core_fpga)</code>, 496&nbsp;MB) as <code>c_addr</code> &mdash; the MIPS physical space.</p>
+<table>
+  <tr><th class="mono">port</th><th>meaning</th></tr>
+  <tr><td class="mono">6</td><td><b>baseaddr</b> &larr; phys_addr</td></tr>
+  <tr><td class="mono">8</td><td>read = magic <code>0x7370696d</code> ("mips"); write = <b>addrmask</b> (memsize&minus;1)</td></tr>
+  <tr><td class="mono">0xC</td><td><b>sgi_mode</b> (write 1); also badvaddr read</td></tr>
+  <tr><td class="mono">5</td><td><b>resume_pc</b></td></tr>
+  <tr><td class="mono">4</td><td>reset/run control (write 1 then 0 = reset; <code>8|2</code> = go)</td></tr>
+  <tr><td class="mono">0xA</td><td>status: ready, state, bad_addr, monitor, ud, break</td></tr>
+  <tr><td class="mono">0x3A / 0x3B</td><td><b>console putchar FIFO</b> &mdash; <code>read_char_fifo()</code> pops a byte and prints</td></tr>
+</table>
+<p><b>Already done</b> in the driver: <code>baseaddr/addrmask/sgi_mode/resume_pc</code>, <code>loadelf</code> into
+<code>c_addr</code> (with correct <code>va2pa</code>+<code>fpga_remap</code>), reset release, and a hardware
+<b>putchar FIFO console</b> (so the SCC isn't required for first light).</p>
+<p><b>Still to add</b> for IP22 Linux:</p>
+<ul>
+  <li>Load the <b>ARCS/PROM firmware</b>: SPB &rarr; <code>c_addr+0x08001000</code> (with the alias), PROM &rarr;
+      <code>c_addr+0x10C00000</code> (PA 0x1FC00000). Keep <code>resume_pc=0xBFC00000</code> (&sect;5).</li>
+  <li><b>Device servicing</b> in the poll loop (today it only calls <code>read_char_fifo()</code>): the ARM-emulated
+      MC/SCSI windows live in <code>c_addr</code> at <code>0x10000000 + (pa&amp;0xFFFFFF)</code>; read what the kernel wrote,
+      compute side effects, write back.</li>
+  <li>The PL devices (8254 timer + INT2) live in fabric &mdash; the poll loop cannot service the tight
+      <code>dosample</code> loop.</li>
+</ul>
+
+<h2>10. TODO / critical path</h2>
+<ol>
+  <li><b>RTL:</b> add the <code>sys_mem_alias</code> branch (&sect;6.1); ensure <code>t_cpuaddr</code> matches
+      <code>fpga_remap</code>. (<code>RD_BAD</code> already returns 0 via <code>r_load_data</code> &mdash; a valid sentinel for the PROM idiom.)</li>
+  <li><b>Firmware:</b> split <code>arcs_fw.S</code> (SPB @ 0x1000, PROM @ 0xBFC00000); reset vector inits + jumps to <code>kernel_entry</code>.</li>
+  <li><b>Driver:</b> load firmware/SPB, add device-window servicing for ARM devices.</li>
+  <li><b>PL devices:</b> MC register block &rarr; SCC/putchar console &rarr; SGINT (8254 + INT2 &rarr; <code>extern_irq</code>).</li>
+  <li><b>Then:</b> ARM SCSI (mount-root); RTC; revisit High bank + TLB only if &gt;256&nbsp;MB is wanted.</li>
+</ol>
+<div class="ok"><b>Bottom line:</b> the fabric translation is essentially in place and the SW/HW maps agree.
+The remaining work is firmware-at-ROM, the PL timer/INT2 + MC blocks, and the ARM driver's device-servicing loop.
+No guest bus-error path, no 4&nbsp;GB mapping &mdash; just a compaction onto one RAM bank + a 16&nbsp;MB device window
+with inert (zero-returning) holes.</div>
+
+</body>
+</html>

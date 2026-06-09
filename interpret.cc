@@ -1545,6 +1545,7 @@ bool is_store_insn(state_t *s) {
 template <bool EL>
 void execMips(state_t *s) {
   sparse_mem &mem = s->mem;
+  s->gpr[0] = 0;   /* MIPS $0 is hardwired to zero; e.g. `mflo $0` must not stick */
   uint32_t inst = bswap<EL>(mem.get<uint32_t>(va2pa(s->pc)));
   if(globals::trace_retirement and false) {
     std::cout << std::hex
