@@ -323,6 +323,8 @@ endfunction
    mem_rsp_t n_core_mem_rsp, r_core_mem_rsp;
 
    wire [5:0] w_tlb_index;
+   wire        w_tlb_dirty;
+   wire        w_tlb_valid;
    wire	      w_tlb_hit;
    
       
@@ -1512,8 +1514,8 @@ endfunction
 	     .pa(w_mapped_addr),
 	     .hit(w_tlb_hit),
 	     .hit_index(w_tlb_index),
-	     .dirty(),
-	     .writable(),
+	     .dirty(w_tlb_dirty),
+	     .valid(w_tlb_valid),
 	     .tlb_entry_in_valid(tlb_entry_in_valid),
 	     .tlb_entry_in(tlb_entry_in)
 	     );
@@ -1673,6 +1675,28 @@ endfunction
 			  n_core_mem_rsp.dst_valid = 1'b0;
 			  n_core_mem_rsp.bad_addr = 1'b0;
 			  n_core_mem_rsp.tlb_refill = 1'b1;
+			  n_core_mem_rsp_valid = 1'b1;
+		       end
+		    else if(w_tlb_valid == 1'b0)
+		       begin
+			  /* R4400: matching entry, V=0 -> TLB Invalid (TLBL/TLBS), common vector */
+			  n_core_mem_rsp.data = w_mapped_addr;
+			  n_core_mem_rsp.dst_valid = 1'b0;
+			  n_core_mem_rsp.bad_addr = 1'b0;
+			  n_core_mem_rsp.tlb_invalid = 1'b1;
+			  n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			  n_core_mem_rsp.tlb_index = w_tlb_index;
+			  n_core_mem_rsp_valid = 1'b1;
+		       end
+		    else if(r_req2.is_store && (w_tlb_dirty == 1'b0))
+		       begin
+			  /* R4400: store to valid-but-not-dirty page -> TLB Modified (Mod), common vector; no write */
+			  n_core_mem_rsp.data = w_mapped_addr;
+			  n_core_mem_rsp.dst_valid = 1'b0;
+			  n_core_mem_rsp.bad_addr = 1'b0;
+			  n_core_mem_rsp.tlb_modified = 1'b1;
+			  n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			  n_core_mem_rsp.tlb_index = w_tlb_index;
 			  n_core_mem_rsp_valid = 1'b1;
 		       end
 		    else if(r_req2.is_store)

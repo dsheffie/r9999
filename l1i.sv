@@ -498,7 +498,7 @@ endfunction
 		       .hit(w_itlb_hit),
 		       .hit_index(),
 		       .dirty(),
-		       .writable(w_itlb_valid),
+		       .valid(w_itlb_valid),
 		       .tlb_entry_in_valid(tlb_entry_in_valid),
 		       .tlb_entry_in(tlb_entry_in)
 		       );

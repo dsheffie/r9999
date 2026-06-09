@@ -12,7 +12,7 @@ module tlb(clk,
 	   hit,
 	   hit_index,
 	   dirty,
-	   writable,
+	   valid,
 	   tlb_entry_in_valid,
 	   tlb_entry_in);
    
@@ -31,7 +31,7 @@ module tlb(clk,
    output logic [5:0]  hit_index;
    
    output logic	       dirty;
-   output logic	       writable;
+   output logic	       valid;
         
    input logic	       tlb_entry_in_valid;
    input 	       tlb_data_t tlb_entry_in;
@@ -108,8 +108,8 @@ module tlb(clk,
      begin
 	hit     <= reset ? 1'b0 : (active ? (req & |w_hits) : 1'b1);
 	hit_index <= reset ? 'd0 : w_hit_idx;
-	dirty   <= reset ? 1'b0 : w_dirty;
-	writable <= reset ? 1'b0 : w_valid;
+	dirty   <= reset ? 1'b0 : (active ? w_dirty : 1'b1);
+	valid <= reset ? 1'b0 : (active ? w_valid : 1'b1);
 	pa      <= active ? {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_pa4k} : va;
      end
 
