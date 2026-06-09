@@ -248,3 +248,27 @@ The csmith N32 test suite is essentially clean. To increase pass count further, 
 5. PROM: SGI Indy PROM binary needed for `--indy` mode (IRIX path).
 
 > Authoritative live status for the Linux64 effort: the "Session 2026-06-07" section above, and the auto-memory note `project_linux64_todo.md`.
+
+## TODO / Future Work
+
+### Bank the PRF on ALU vs MEM (Henry Wong clustered register file)
+Cut register-file ports by splitting the PRF into an ALU bank and a MEM bank so
+each bank serves fewer consumers (area/timing win). Port of rv64core commit
+`e53661e` (dsheffie/rv64core, "first pass at henry wong's clustered rf scheme").
+
+Mechanism (from the rv64core diff — core.sv / machine.vh / rf6r3w.sv):
+- Two banks `r_ram_alu` / `r_ram_mem`; pointer MSB `rdptr[LG_DEPTH-1]` selects bank.
+- Allocate phys regs by producer: `t_uop.is_mem` -> MEM bank, else ALU bank.
+- Read ports bank-select by ptr MSB: `rdN <= rdN_mem ? r_ram_mem[rdptrN] : r_ram_alu[rdptrN]`.
+- Write ports partitioned: ALU-result write ports -> ALU bank, MEM-result write
+  port -> MEM bank, each with an MSB-mismatch assertion guard.
+- `LG_PRF_ENTRIES` 6 -> 7 (extra bit = bank selector).
+
+r9999 mapping (verified):
+- RF module is `rf4r2w.sv` (4 read / 2 write). Split the 2 write ports
+  (mem-result -> MEM bank, alu-result -> ALU bank); bank-select the 4 read ports by ptr MSB.
+- `uop.vh:224` already has `is_mem` -> use for bank allocation.
+- `machine.vh:26` `LG_PRF_ENTRIES` 6 -> 7.
+- core.sv rename/free-list must hand ALU-bank ptrs to ALU producers and MEM-bank
+  ptrs to MEM producers (two free lists, or partition the existing one by MSB).
+- Validate: csmith 8/8 + Linux boot to NR_IRQS.
