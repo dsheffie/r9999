@@ -596,15 +596,15 @@ endfunction
 	     if(r_got_req && r_valid_out && (r_tag_out == r_cache_tag))
 	       begin
 		  //$display("rob entry %d leaves at cycle %d", r_req.rob_ptr, r_cycle);
-		  if(r_rob_inflight[r_req.rob_ptr] == 1'b0) 
-		    $display("huh %d should be inflight....\n", r_req.rob_ptr);
+		  //if(r_rob_inflight[r_req.rob_ptr] == 1'b0) 
+		  //$display("huh %d should be inflight....\n", r_req.rob_ptr);
 		  
 		  r_rob_inflight[r_req.rob_ptr] <= 1'b0;
 	       end
 	     else if((r_state == INJECT_UNCACHE_STORE | r_state == INJECT_UNCACHE_LOAD) & mem_rsp_valid)
 	       begin
-		  if(r_rob_inflight[r_req.rob_ptr] == 1'b0) 
-		    $display("huh %d should be inflight....\n", r_req.rob_ptr);
+		  //if(r_rob_inflight[r_req.rob_ptr] == 1'b0) 
+		  //$display("huh %d should be inflight....\n", r_req.rob_ptr);
 		  
 		  r_rob_inflight[r_req.rob_ptr] <= 1'b0;
 	       end
@@ -1483,22 +1483,22 @@ endfunction
    //end
    //end
    
-   always_ff@(negedge clk)
-     begin
-	if(core_mem_req_valid & core_mem_req.is_atomic)
-	  begin
-	     $display("cycle %d, w_uncachable_req = %b, addr = %x, rob_ptr = %x, is_store = %b, pc = %x, cached = %b, mem_q_empty = %b, inflight %d", 
-		      r_cycle,
-		      w_uncachable_req, 
-		      core_mem_req.addr,
-		      core_mem_req.rob_ptr,
-		      core_mem_req.is_store,
-		      core_mem_req.pc, 
-		      core_mem_req.cached,
-		      mem_q_empty,
-		      r_n_inflight);
-	  end
-     end
+   // always_ff@(negedge clk)
+   //   begin
+   // 	if(core_mem_req_valid & core_mem_req.is_atomic)
+   // 	  begin
+   // 	     $display("cycle %d, w_uncachable_req = %b, addr = %x, rob_ptr = %x, is_store = %b, pc = %x, cached = %b, mem_q_empty = %b, inflight %d", 
+   // 		      r_cycle,
+   // 		      w_uncachable_req, 
+   // 		      core_mem_req.addr,
+   // 		      core_mem_req.rob_ptr,
+   // 		      core_mem_req.is_store,
+   // 		      core_mem_req.pc, 
+   // 		      core_mem_req.cached,
+   // 		      mem_q_empty,
+   // 		      r_n_inflight);
+   // 	  end
+   //   end
 
 
    
@@ -1807,13 +1807,6 @@ endfunction
 		      end // if (r_req.cached == 1'b0)
 		    else if(r_valid_out && (r_tag_out == r_cache_tag))
 		      begin /* valid cacheline - hit in cache */
-
-			 if(r_req.is_atomic)
-			   begin
-			      $display("atomic to addr %x doing its thing at cycle %d", 
-				       r_req.addr, r_cycle);
-			   end
-			 
 			 if(r_req.is_store)
 			   begin
 			      /* SC result already sent via the port2 early ack. */
