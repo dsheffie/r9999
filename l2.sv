@@ -331,7 +331,7 @@ module l2(clk,
 	if((r_state == IDLE) & (r_mem_req))
 	  begin
 	     $display("l2 protocol busted, last state %d", r_last_state);
-	     $stop();
+	     `ifdef VERILATOR $stop(); `endif
 	  end
      end
    

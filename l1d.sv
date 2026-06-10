@@ -2207,12 +2207,12 @@ endfunction
       if(t_push_miss && mem_q_full)
 	begin
 	   $display("attempting to push to a full memory queue");
-	   $stop();
+	   `ifdef VERILATOR $stop(); `endif
 	end
 	if(t_pop_mq && mem_q_empty)
 	  begin
 	   $display("attempting to pop an empty memory queue");
-	   $stop();
+	   `ifdef VERILATOR $stop(); `endif
 	  end
      end
 
