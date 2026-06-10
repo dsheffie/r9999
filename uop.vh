@@ -214,6 +214,7 @@ typedef struct packed {
    logic [15:0] 	       imm;
    logic [`M_WIDTH-17:0]       jmp_imm;
    logic [`M_WIDTH-1:0]        pc;
+   logic [`M_WIDTH-1:0]        pred_target;
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic 		       serializing_op;
    logic 		       must_restart;

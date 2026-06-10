@@ -1256,7 +1256,7 @@ module exec(clk,
    
    always_comb
      begin
-	t_pc = int_uop.pc;
+	t_pc = int_uop.pc + zero_extend32(32'd4);  /* default restart = pc+4 */
 	t_pc4 = int_uop.pc + zero_extend32(32'd4);
 	t_pc8 = int_uop.pc + zero_extend32(32'd8);
 	t_result = zero_extend32(32'd0);

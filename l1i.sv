@@ -963,7 +963,7 @@ endfunction
 	t_insn2.pred_target = 'd0;
 	t_insn2.pred = 1'b0;
 	t_insn2.pht_idx = 'd0;
-	t_insn2.is_branch = 1'b0;
+	t_insn2.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd1) != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn2.fetch_cycle = r_cycle;
 `endif

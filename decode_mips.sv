@@ -101,6 +101,7 @@ module decode_mips(
 	uop.imm = 16'd0;
 	uop.jmp_imm = {(`M_WIDTH-16){1'b0}};
 	uop.pc = pc;
+	uop.pred_target = insn_pred_target;
 	uop.serializing_op = 1'b0;
 	uop.must_restart = 1'b0;
 	uop.oldest_first = 1'b0;
@@ -927,7 +928,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.has_delay_slot = 1'b0;
 			 uop.is_int = 1'b1;
-			 uop.oldest_first = 1'b1;
+			 uop.serializing_op = 1'b1;
 		      end // case: 5'd4
 		    else if((insn[25:21] == 5'd5) & (insn[10:0] == 'd0)) /* dmtc0 */
 		      begin
@@ -937,7 +938,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.has_delay_slot = 1'b0;
 			 uop.is_int = 1'b1;
-			 uop.oldest_first = 1'b1;
+			 uop.serializing_op = 1'b1;
 		      end
 		    else if(insn[25:0] == 26'b10000000000000000000011000)
 		      begin

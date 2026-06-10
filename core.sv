@@ -369,6 +369,7 @@ module core(clk,
    logic 		     n_in_delay_slot, r_in_delay_slot;
    
    logic 		     t_clr_dq;
+   logic [`M_WIDTH-1:0]   r_last_branch_target;  /* resolved target of last retired branch (Case 2) */
    logic 		     t_enough_iprfs, t_enough_hlprfs;
    logic 		     t_enough_next_iprfs, t_enough_next_hlprfs;
    
@@ -848,7 +849,7 @@ module core(clk,
 `ifdef DUMP_ROB
    always_ff@(negedge clk)
      begin
- 	if(r_cycle > 'd23594306)
+ 	if(r_cycle > 'd50)
 	  begin
 	     $display("cycle %d : oldp %b, state = %d, aluc  %b, memc %b,head_ptr %d, inflight %d, complete %b,  can_retire_rob_head %b, t_faulted_head_and_serializing_delay %b, head pc %x, empty %b, full %b", 
 		      r_cycle,
@@ -1056,7 +1057,7 @@ module core(clk,
 			      t_bump_rob_head = 1'b1;			      
 			   end // else: !if(t_rob_head.is_ii)
 			 n_machine_clr = 1'b1;
-			 n_restart_pc = t_rob_head.target_pc;
+			 n_restart_pc = t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
 			 n_restart_src_pc = t_rob_head.pc;
 			 n_restart_src_is_indirect = t_rob_head.is_indirect && !t_rob_head.is_ret;
 			 
@@ -1242,15 +1243,14 @@ module core(clk,
 	       if(t_rob_head_complete)
 		 begin
 		    t_clr_dq = 1'b1;
-		    n_restart_pc = t_rob_head.target_pc;
+		    n_restart_pc = t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
 		    n_restart_src_pc = t_rob_head.pc;
 		    n_restart_src_is_indirect = 1'b0;
 		    n_restart_valid = 1'b1;
 		    n_pending_fault = 1'b0;		    
 		    if(n_got_restart_ack)
 		      begin
-			 //$display("RESTART PIPELINE AT %d, pc %x", 
-			 //r_cycle, n_restart_pc);
+			 /* restart debug removed */
 			 n_state = ACTIVE;			 
 		      end
 		 end
@@ -1701,7 +1701,10 @@ module core(clk,
 	t_rob_tail.pdst  = 'd0;
 	t_rob_tail.old_pdst  = 'd0;
 	t_rob_tail.pc = t_alloc_uop.pc;
-	t_rob_tail.target_pc = 'd0;
+	/* default to sequential next-PC so a serializing op restarts at pc+4;
+	 * branches overwrite this with the resolved target at completion (~1963). */
+	t_rob_tail.target_pc = (t_alloc_uop.op == J) ? t_alloc_uop.pred_target : (t_alloc_uop.pc + 'd4);
+	t_rob_tail.pred_target = t_alloc_uop.pred_target;
 	
 	t_rob_tail.is_call = t_alloc_uop.op == JAL || t_alloc_uop.op == JALR || t_alloc_uop.op == BAL;
 	t_rob_tail.is_irq = t_alloc_uop.op == IRQ;
@@ -1739,7 +1742,8 @@ module core(clk,
 	t_rob_next_tail.pdst  = 'd0;
 	t_rob_next_tail.old_pdst  = 'd0;
 	t_rob_next_tail.pc = t_alloc_uop2.pc;
-	t_rob_next_tail.target_pc = 'd0;
+	t_rob_next_tail.target_pc = (t_alloc_uop2.op == J) ? t_alloc_uop2.pred_target : (t_alloc_uop2.pc + 'd4);
+	t_rob_next_tail.pred_target = t_alloc_uop2.pred_target;
 	t_rob_next_tail.opcode = t_alloc_uop2.op;
 	t_rob_next_tail.is_call = t_alloc_uop2.op == JAL || t_alloc_uop2.op == JALR || t_alloc_uop2.op == BAL;
 	t_rob_next_tail.is_irq = t_alloc_uop2.op == IRQ;
@@ -2603,4 +2607,23 @@ module core(clk,
 	  end
      end // always_comb
    
+
+   /* Case 2: latch the resolved target of the most-recently-retired branch.
+    * A serializing op restarts only once it is the ROB head (oldest), by which
+    * point its delay-slot parent branch has retired -- so this holds that
+    * branch's target, the correct restart_pc for a delay-slot serializing op. */
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  r_last_branch_target <= 'd0;
+	else if(t_retire_two && (t_rob_next_head.is_br || t_rob_next_head.is_call || t_rob_next_head.is_indirect))
+	  r_last_branch_target <= t_rob_next_head.target_pc;
+	else if(t_retire && (t_rob_head.is_br || t_rob_head.is_call || t_rob_head.is_indirect))
+	  r_last_branch_target <= t_rob_head.target_pc;
+     end
+
+
+
+
+
 endmodule
