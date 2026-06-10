@@ -35,6 +35,8 @@ import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 `endif
 
 module core(clk,
+	    single_step,
+	    step,
 	    reset,
 	    in_kernel_mode,
 	    in_supervisor_mode,
@@ -151,6 +153,8 @@ module core(clk,
    output logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
    output logic			      head_of_rob_has_delay_slot;
    input logic resume;
+   input logic single_step;
+   input logic step;
    input logic memq_empty;
    output logic drain_ds_complete;
    output logic [(1<<`LG_ROB_ENTRIES)-1:0] dead_rob_mask;
@@ -479,6 +483,19 @@ module core(clk,
    state_t r_state, n_state;
    logic 	r_pending_fault, n_pending_fault;
    logic        r_oldest_first_pending, n_oldest_first_pending;
+   /* single-step: one architectural commit per 0->1 edge on `step` */
+   logic        r_step_d, r_step_credit, n_step_credit;
+   wire         w_step_edge = step & ~r_step_d;
+   wire         w_step_ok   = ~single_step | r_step_credit;
+   always_comb begin
+      n_step_credit = r_step_credit;
+      if(w_step_edge)      n_step_credit = 1'b1;
+      else if(t_retire)    n_step_credit = 1'b0;
+   end
+   always_ff@(posedge clk) begin
+      if(reset) begin r_step_d <= 1'b0; r_step_credit <= 1'b0; end
+      else      begin r_step_d <= step;  r_step_credit <= n_step_credit; end
+   end
    logic [31:0] r_restart_cycles, n_restart_cycles;
    logic t_divide_ready;
    
@@ -987,7 +1004,7 @@ module core(clk,
 	
 	if(t_rob_head_complete && !t_rob_empty)
 	  begin
-	     t_can_retire_rob_head = (t_rob_head.has_delay_slot || t_rob_head.has_nullifying_delay_slot) && t_rob_head.faulted ? !t_rob_next_empty : 1'b1;
+	     t_can_retire_rob_head = (((t_rob_head.has_delay_slot || t_rob_head.has_nullifying_delay_slot) && t_rob_head.faulted) ? !t_rob_next_empty : 1'b1) & w_step_ok;
 	     t_faulted_head_and_serializing_delay = (t_rob_head.has_delay_slot || t_rob_head.has_nullifying_delay_slot) && t_rob_head.faulted && !t_dq_empty 
 						    && t_rob_next_empty && t_uop.serializing_op;
 	  end
@@ -1099,7 +1116,7 @@ module core(clk,
 				   & !t_rob_head.is_br
 				   & !t_rob_next_head.is_ret
 				   & !t_rob_next_head.is_call
-		    		   & !t_rob_next_head.valid_hilo_dst;
+		    		   & !t_rob_next_head.valid_hilo_dst & ~single_step;
 		 end // if (t_can_retire_rob_head)
 	       else if(!t_dq_empty)
 		 begin
