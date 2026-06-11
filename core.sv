@@ -484,19 +484,38 @@ module core(clk,
    state_t r_state, n_state;
    logic 	r_pending_fault, n_pending_fault;
    logic        r_oldest_first_pending, n_oldest_first_pending;
+   
    /* single-step: one architectural commit per 0->1 edge on `step` */
    logic        r_step_d, r_step_credit, n_step_credit;
+   logic	r_single_step;
    wire         w_step_edge = step & ~r_step_d;
-   wire         w_step_ok   = ~single_step | r_step_credit;
-   always_comb begin
-      n_step_credit = r_step_credit;
-      if(w_step_edge)      n_step_credit = 1'b1;
-      else if(t_retire)    n_step_credit = 1'b0;
-   end
-   always_ff@(posedge clk) begin
-      if(reset) begin r_step_d <= 1'b0; r_step_credit <= 1'b0; end
-      else      begin r_step_d <= step;  r_step_credit <= n_step_credit; end
-   end
+
+   /* this gets consumed by retirement logic */
+   wire		w_step_ok   = r_single_step ? (t_step_edge) : 1'b1;
+
+   logic	n_step_last, r_step_last, t_step_edge;
+   always_comb
+     begin
+	n_step_last = r_step_last;
+	t_step_edge = 1'b0;
+	if(r_step_last & (step == 1'b0))
+	  begin
+	     n_step_last = 1'b0;
+	  end
+	else if((r_step_last == 1'b0) & (step == 1'b1))
+	  begin
+	     n_step_last = 1'b1;
+	     t_step_edge = 1'b1;
+	  end
+     end // always_comb
+
+
+   always_ff@(posedge clk)
+     begin
+	r_step_last <= reset ? 1'b0 : n_step_last;
+	r_single_step <= reset ? 1'b0 : single_step;
+     end
+
    logic [31:0] r_restart_cycles, n_restart_cycles;
    logic t_divide_ready;
    
@@ -865,7 +884,7 @@ module core(clk,
 		      t_rob_head.pc,
 		      t_rob_empty, 
 		      t_rob_full);
-	     
+
 	     for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
 	       begin
 		  $display("\trob entry %d, pc %x, complete %b, is br %b, faulted %b",
@@ -2625,5 +2644,21 @@ module core(clk,
 
 
 
+
+
+`ifdef FORMAL
+   // P-rob-adjacency (PASSES @ -t20): dual-retire pair is program-order consecutive.
+   wire w_fdbg_head_br = t_rob_head.is_br | t_rob_head.is_call | t_rob_head.is_indirect;
+   wire w_fdbg_next_ds = t_rob_next_head.in_delay_slot;
+   always_ff@(posedge clk)
+     if(!reset && t_retire && t_retire_two)
+       assert(w_fdbg_next_ds == w_fdbg_head_br);
+   // P-restart-pc: deep trigger (WAIT state ~40+ cyc from reset). Needs a precise
+   // cutpoint (not wildcard) or config-floor to exercise; see memory notes.
+   wire w_frst_wait = (r_state == WAIT_FOR_SERIALIZE_AND_RESTART) && t_rob_head_complete && t_rob_head.in_delay_slot;
+   always_ff@(posedge clk)
+     if(!reset && w_frst_wait)
+       assert(n_restart_pc == r_last_branch_target);
+`endif
 
 endmodule

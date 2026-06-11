@@ -2,3 +2,13 @@
 *.o
 obj_dir
 ooo_core
+# generated RTL (regenerate via convert_sv_to_v.py)
+mipscore.v
+# bare-metal test build outputs
+*.elf
+*.mips
+*.dis
+# editor backups / autosave
+*~
+\#*#
+.#*

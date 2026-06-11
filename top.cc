@@ -361,6 +361,8 @@ int main(int argc, char **argv) {
   std::string branch_name = "branch_info.txt";
   uint64_t heartbeat = 1UL<<36, start_trace_at = ~0UL;
   uint64_t max_cycle = 0, max_icnt = 0, mem_lat = 2;
+  bool single_step = false;
+  uint64_t step_hold = 0;
   uint64_t last_store_addr = 0, last_load_addr = 0, last_addr = 0;
   int misses_inflight = 0;
   std::map<uint32_t, uint64_t> pushout_histo;
@@ -381,6 +383,8 @@ int main(int argc, char **argv) {
       ("pipeend", po::value<uint64_t>(&pipeend)->default_value(~0UL), "when to stop logging")      
       ("maxcycle", po::value<uint64_t>(&max_cycle)->default_value(1UL<<34), "maximum cycles")
       ("maxicnt", po::value<uint64_t>(&max_icnt)->default_value(1UL<<50), "maximum icnt")
+      ("singlestep", po::value<bool>(&single_step)->default_value(false), "single-step the core (one retire per step pulse)")
+      ("step_hold", po::value<uint64_t>(&step_hold)->default_value(0), "FPGA-like step: hold step high N cycles between edges (0=clean toggle)")
       ("tracefp", po::value<bool>(&globals::trace_fp)->default_value(false), "trace fp instructions")
       ("trace,t", po::value<bool>(&globals::trace_retirement)->default_value(false), "trace retired instruction stream")
       ("starttrace,s", po::value<uint64_t>(&start_trace_at)->default_value(~0UL), "start tracing retired instructions")
@@ -530,13 +534,13 @@ int main(int argc, char **argv) {
 
 
   while(!tb->ready_for_resume) {
-    ++globals::cycle;  
+    ++globals::cycle;
     tb->clk = 1;
     tb->eval();
     tb->clk = 0;
     tb->eval();
   }
-  
+
   ++globals::cycle;
   tb->resume = 1;
 
@@ -575,11 +579,23 @@ int main(int argc, char **argv) {
   globals::cycle = 0;  
 
   
+  tb->single_step = single_step;
+  tb->step = 0;
   double t0 = timestamp();
   while(!Verilated::gotFinish() && (globals::cycle < max_cycle) && (insns_retired < max_icnt)) {
-    contextp->timeInc(1);  // 1 timeprecision periodd passes...    
+    contextp->timeInc(1);  // 1 timeprecision periodd passes...
 
     tb->clk = 1;
+
+    if(step_hold > 0) {
+      /* FPGA-like: low for 4 cyc, rising edge, then hold step high step_hold cyc
+       * (mimics step held high through the AXI dump_registers window). */
+      uint64_t period = step_hold + 4;
+      tb->step = ((globals::cycle % period) >= 4) ? 1 : 0;
+    }
+    else if((globals::cycle & 3) == 0) {
+      tb->step = (~tb->step) & 1;
+    }
     tb->eval();
 
     if(not(tb->putchar_fifo_empty)) {

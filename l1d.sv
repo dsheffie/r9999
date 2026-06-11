@@ -156,7 +156,7 @@ module l1d(clk,
       swl = r.addr[1:0] == 'd3 ? 4'b1000 :
 	    r.addr[1:0] == 'd2 ? 4'b1100 :
 	    r.addr[1:0] == 'd1 ? 4'b1110 :
-	    4'b0000;
+	    4'b1111;        // BE swl at word-aligned EA stores all 4 bytes (was 4'b0000 = no-op)
             
       
       swl_swr = (r.op == MEM_SWR | r.op == MEM_SWL);
@@ -1438,7 +1438,7 @@ endfunction
 	       case(r_req.addr[1:0])
 		 2'd0:
 		   begin
-		      t_array_data = merge_cl32(t_data, t_bswap_w32, r_req.addr[WORD_STOP-1:WORD_START]);
+		      t_array_data = merge_cl32(t_data, bswap32(r_req.data[31:0]), r_req.addr[WORD_STOP-1:WORD_START]);
 		   end
 		 2'd1:
 		   begin

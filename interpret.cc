@@ -148,13 +148,50 @@ static void raise_ades(state_t *s) {
   s->pc = sext32(0xBFC00180u);
 }
 
-static void raise_ri(state_t *s, uint32_t inst) {
-  fprintf(stderr, "unimplemented: opcode=0x%02x funct=0x%02x @ pc=0x%08x\n",
-          inst >> 26, inst & 0x3fu, (uint32_t)s->pc);
+/* Reserved Instruction exception setup (ExcCode=10), no diagnostic message. */
+static void take_exception_ri(state_t *s) {
   s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (10u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(0xBFC00180u);
+}
+
+static void raise_ri(state_t *s, uint32_t inst) {
+  fprintf(stderr, "unimplemented: opcode=0x%02x funct=0x%02x @ pc=0x%08x\n",
+          inst >> 26, inst & 0x3fu, (uint32_t)s->pc);
+  take_exception_ri(s);
+}
+
+/* 64-bit operating mode, matching exec.sv:2640-2646:
+ *   kernel=(KSU==0)|EXL|ERL ; user=(KSU==2)&!EXL&!ERL ; super=(KSU==1)&!EXL&!ERL
+ *   in_64b = (kernel&KX) | (user&UX) | (super&SX). */
+static inline bool in_64b_mode(state_t *s) {
+  uint32_t sr = s->cpr0[CPR0_SR];
+  uint32_t ksu = (sr >> 3) & 3u;
+  bool exl = (sr & SR_EXL) != 0, erl = (sr & SR_ERL) != 0;
+  bool kernel = (ksu == 0u) || exl || erl;
+  bool user   = (ksu == 2u) && !exl && !erl;
+  bool super  = (ksu == 1u) && !exl && !erl;
+  return (kernel && (sr & SR_KX)) ||
+         (user   && (sr & SR_UX)) ||
+         (super  && (sr & SR_SX));
+}
+
+/* The 64-bit instructions decode_mips.sv gates behind 64-bit mode -- must match
+ * EXACTLY so the co-sim agrees (RTL does NOT gate dsll32/dsrl32/dsra32, daddi,
+ * or 64-bit loads/stores, so neither do we). */
+static inline bool is_64b_gated(uint32_t inst) {
+  uint32_t op = inst >> 26;
+  if(op == 0x19) return true;                  /* daddiu */
+  if(op != 0) return false;
+  switch(inst & 0x3fu) {
+    case 0x14: case 0x16: case 0x17:            /* dsllv dsrlv dsrav        */
+    case 0x1c: case 0x1d: case 0x1e: case 0x1f: /* dmult dmultu ddiv ddivu  */
+    case 0x2c: case 0x2d: case 0x2e: case 0x2f: /* dadd daddu dsub dsubu    */
+    case 0x38: case 0x3a: case 0x3b:            /* dsll dsrl dsra           */
+      return true;
+    default: return false;
+  }
 }
 
 static void raise_overflow(state_t *s) {
@@ -718,7 +755,9 @@ void _swl(uint32_t inst, state_t *s) {
   uint32_t xx=0,x = s->gpr[rt];
   
   uint32_t xs = x >> (8*ma);
-  uint32_t m = ~((1U << (8*(4 - ma))) - 1);
+  /* 64-bit shift: at ma==0 the count is 32, a 32-bit-shift UB (x86 masks to 0,
+   * making m=0xffffffff and storing r|rt instead of rt). */
+  uint32_t m = (uint32_t)~(((uint64_t)1u << (8*(4 - ma))) - 1);
   xx = (r & m) | xs;
   //std::cout << "SIM SWL EA " << std::hex << ea
   //<< ", MA = " << ma
@@ -1571,6 +1610,13 @@ void execMips(state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rd = (inst >> 11) & 31;
   s->icnt++;
+
+  /* 64-bit ops raise Reserved Instruction when not in 64-bit mode (matches the
+   * RTL decode_mips.sv gate; the random instruction tests rely on this). */
+  if(is_64b_gated(inst) && !in_64b_mode(s)) {
+    take_exception_ri(s);
+    return;
+  }
     
   if(isRType) {
     uint32_t funct = inst & 63;
@@ -1605,13 +1651,13 @@ void execMips(state_t *s) {
 	s->pc += 4;
 	s->insn_histo[mipsInsn::SLLV]++;
 	break;
-      case 0x06:  
-	s->gpr[rd] = ((uint32_t)s->gpr[rt]) >> (s->gpr[rs] & 0x1f);
+      case 0x06:  /* srlv: sign-extend the 32-bit logical-shift result (MIPS64) */
+	s->gpr[rd] = sext64((uint32_t)s->gpr[rt] >> (s->gpr[rs] & 0x1f));
 	s->pc += 4;
 	s->insn_histo[mipsInsn::SRLV]++;
 	break;
-      case 0x07:  
-	s->gpr[rd] = s->gpr[rt] >> (s->gpr[rs] & 0x1f);
+      case 0x07:  /* srav: 32-bit arithmetic shift, result sign-extended (MIPS64) */
+	s->gpr[rd] = static_cast<int32_t>(s->gpr[rt]) >> (s->gpr[rs] & 0x1f);
 	s->pc += 4;
 	s->insn_histo[mipsInsn::SRAV]++;
 	break;
@@ -1665,9 +1711,9 @@ void execMips(state_t *s) {
 	s->pc += 4;
 	s->insn_histo[mipsInsn::MTLO]++;		
 	break;
-      case 0x18: { /* mult */
+      case 0x18: { /* mult: 32x32 signed (operands are the low 32 bits) */
 	int64_t y;
-	y = (int64_t)s->gpr[rs] * (int64_t)s->gpr[rt];
+	y = (int64_t)(int32_t)s->gpr[rs] * (int64_t)(int32_t)s->gpr[rt];
 	s->lo = (int32_t)(y & 0xffffffff);
 	s->hi = (int32_t)(y >> 32);
 	s->pc += 4;
@@ -1685,10 +1731,11 @@ void execMips(state_t *s) {
 	s->insn_histo[mipsInsn::MULTU]++;
 	break;
       }
-      case 0x1A: /* div */
-	if(s->gpr[rt] != 0) {
-	  s->lo = s->gpr[rs] / s->gpr[rt];
-	  s->hi = s->gpr[rs] % s->gpr[rt];
+      case 0x1A: /* div: 32-bit signed, sign-extended (int64 avoids INT_MIN/-1 UB) */
+	if((int32_t)s->gpr[rt] != 0) {
+	  int64_t a = (int32_t)s->gpr[rs], b = (int32_t)s->gpr[rt];
+	  s->lo = sext64((uint32_t)(int32_t)(a / b));
+	  s->hi = sext64((uint32_t)(int32_t)(a % b));
 	}
 	s->pc += 4;
 	s->insn_histo[mipsInsn::DIV]++;
@@ -2155,8 +2202,8 @@ void execMips(state_t *s) {
 	s->pc+=4;
 	s->insn_histo[mipsInsn::ADDI]++;
 	break;
-      case 0x09: /* addiu */
-	tmp = s->gpr[rs] + simm32;
+      case 0x09: /* addiu: 32-bit add, result sign-extended (MIPS64) */
+	tmp = sext64((uint32_t)(s->gpr[rs] + simm32));
 	s->gpr[rt] = tmp;
 	s->pc+=4;
 	s->insn_histo[mipsInsn::ADDIU]++;
