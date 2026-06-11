@@ -590,7 +590,7 @@ int main(int argc, char **argv) {
     if(step_hold > 0) {
       /* FPGA-like: low for 4 cyc, rising edge, then hold step high step_hold cyc
        * (mimics step held high through the AXI dump_registers window). */
-      uint64_t period = step_hold + 4;
+      uint64_t period = step_hold + 400;
       tb->step = ((globals::cycle % period) >= 4) ? 1 : 0;
     }
     else if((globals::cycle & 3) == 0) {

@@ -41,6 +41,7 @@ typedef struct packed {
    logic       tlb_modified;   
    logic       tlb_hit;
    logic [5:0] tlb_index;
+   logic       mode_when_fetched;
 `ifdef ENABLE_CYCLE_ACCOUNTING
    logic [63:0] 	    fetch_cycle;
    logic [63:0] 	    alloc_cycle;

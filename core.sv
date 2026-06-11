@@ -261,6 +261,20 @@ module core(clk,
    assign in_64b_supervisor_mode = w_in_64b_supervisor_mode;
    assign in_64b_user_mode       = w_in_64b_user_mode;
 
+   wire				w_in_64b_mode;
+   generate
+      if(`M_WIDTH==64)
+	begin
+	   assign w_in_64b_mode = w_in_64b_kernel_mode | 
+				  w_in_64b_user_mode | 
+				  w_in_64b_supervisor_mode;
+	end
+      else
+	begin
+	   assign w_in_64b_mode =1'b0;
+	end
+   endgenerate
+
    wire					  w_in_64b_kernel_mode;
    wire					  w_in_64b_supervisor_mode;
    wire					  w_in_64b_user_mode;
@@ -1336,6 +1350,9 @@ module core(clk,
 		 end
 	       else if(t_rob_head.is_ii)
 		 begin
+`ifdef VERILATOR
+		    if(t_rob_head.mode_when_fetched != w_in_64b_mode) $stop();  // P-mode-hazard ($stop in sim; formal assert below)
+`endif
 		    n_pending_ud = 1'b1;
 		    //$display("bad pc %x", t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);	     
 		    n_cause = 5'd10;
@@ -2659,6 +2676,15 @@ module core(clk,
    always_ff@(posedge clk)
      if(!reset && w_frst_wait)
        assert(n_restart_pc == r_last_branch_target);
+   // P-mode-hazard: a Reserved-Instruction fault must commit in the mode it was
+   // fetched in; a mismatch is a stale-mode RI restart-on-commit should have squashed.
+   always_ff@(posedge clk)
+     if(!reset && (r_state == ARCH_FAULT) && t_rob_head.is_ii && !t_rob_head.is_break && !t_rob_head.is_syscall)
+       assert(t_rob_head.mode_when_fetched == w_in_64b_mode);
+   // cover: can the BMC reach a committed Reserved Instruction (the P-mode-hazard gate)?
+   always_ff@(posedge clk)
+     if(!reset)
+       cover((r_state == ARCH_FAULT) && t_rob_head.is_ii && !t_rob_head.is_break && !t_rob_head.is_syscall);
 `endif
 
 endmodule

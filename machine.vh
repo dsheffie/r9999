@@ -16,7 +16,11 @@
 `define LG_INT_SCHED_ENTRIES 3
 
 //gshare branch predictor
-`define LG_PHT_SZ 16
+`ifdef FORMAL
+ `define LG_PHT_SZ 2
+`else
+ `define LG_PHT_SZ 16
+`endif
 
 `define GBL_HIST_LEN 64
 
@@ -34,7 +38,11 @@
 `define LG_FQ_ENTRIES 3
 
 //rob size
-`define LG_ROB_ENTRIES 5
+`ifdef FORMAL
+ `define LG_ROB_ENTRIES 2
+`else
+ `define LG_ROB_ENTRIES 5
+`endif
 
 `define LG_RET_STACK_ENTRIES 2
 
@@ -61,11 +69,23 @@
 `define LG_L1D_CL_LEN 4
 
 //number of sets in direct mapped cache
-`define LG_L1D_NUM_SETS 8
+`ifdef FORMAL
+ `define LG_L1D_NUM_SETS 2
+`else
+ `define LG_L1D_NUM_SETS 8
+`endif
 
-`define LG_L1I_NUM_SETS 8
+`ifdef FORMAL
+ `define LG_L1I_NUM_SETS 2
+`else
+ `define LG_L1I_NUM_SETS 8
+`endif
 
-`define LG_L2_NUM_SETS 10
+`ifdef FORMAL
+ `define LG_L2_NUM_SETS 2
+`else
+ `define LG_L2_NUM_SETS 10
+`endif
 
 
 `define M_WIDTH (1 << `LG_M_WIDTH)

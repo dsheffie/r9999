@@ -115,6 +115,7 @@ module decode_mips(
 `ifdef ENABLE_CYCLE_ACCOUNTING
 	uop.fetch_cycle = fetch_cycle;
 `endif
+	uop.mode_when_fetched = w_in_64b_mode;
 	if(irq)
 	  begin
 	     uop.op = IRQ;

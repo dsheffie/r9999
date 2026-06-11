@@ -225,6 +225,7 @@ typedef struct packed {
    logic 		       is_mem;
    logic 		       is_store;
    logic [`LG_PHT_SZ-1:0]      pht_idx;
+   logic		       mode_when_fetched;
 `ifdef VERILATOR
    logic [31:0] 	       clear_id;
 `endif
