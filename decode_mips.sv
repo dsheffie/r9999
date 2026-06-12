@@ -933,13 +933,17 @@ module decode_mips(
 		      end // case: 5'd4
 		    else if((insn[25:21] == 5'd5) & (insn[10:0] == 'd0)) /* dmtc0 */
 		      begin
-			 uop.op = DMTC0;
-			 uop.dst = rd;
-			 uop.srcA = rt;
-			 uop.srcA_valid = 1'b1;
-			 uop.has_delay_slot = 1'b0;
-			 uop.is_int = 1'b1;
-			 uop.serializing_op = 1'b1;
+			 if(w_in_64b_mode)
+			   begin
+			      uop.op = DMTC0;
+			      uop.dst = rd;
+			      uop.srcA = rt;
+			      uop.srcA_valid = 1'b1;
+			      uop.has_delay_slot = 1'b0;
+			      uop.is_int = 1'b1;
+			      uop.serializing_op = 1'b1;
+			   end
+			 /* else: 64-bit op in 32-bit mode -> op stays II (RI) */
 		      end
 		    else if(insn[25:0] == 26'b10000000000000000000011000)
 		      begin

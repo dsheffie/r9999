@@ -1537,32 +1537,9 @@ module core(clk,
 	      if(t_rob_next_head_complete)
 		begin
 		   if(t_rob_next_head.faulted)
-		     begin
-			$display("hello???");
-			 if(t_rob_next_head.is_break)
-			   begin
-			      n_cause = 5'd9;
-			      n_state = WRITE_EPC;
-			   end
-			 else if(t_rob_head.is_syscall)
-			   begin
-			      n_cause = 5'd8;	
-			      n_state = WRITE_EPC;	    
-			   end
-			 else if(t_rob_head.trap)
-			   begin
-			      n_cause = 5'd13;
-			      n_state = WRITE_EPC; 
-			   end
-			 else
-			   begin
-
-			      n_cause = 5'd31;
-			      n_state = WRITE_EPC;
-`ifdef VERILATOR			      
-			      $stop();
-`endif
-			   end			
+		     begin //todo - is this correct?
+			n_state = ARCH_FAULT;
+			t_bump_rob_head = 1'b1;
 		     end
 		   else
 		     begin
