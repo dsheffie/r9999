@@ -121,6 +121,7 @@ module core(clk,
 	    core_state,
 	    inflight,
 	    epc,
+	    status_reg,
 	    badvaddr,
 	    cause,
 	    asid,
@@ -131,8 +132,17 @@ module core(clk,
 	    
 	    l1i_flush_done,
 	    l1d_flush_done,
-	    l2_flush_done);
-   
+	    l2_flush_done,
+	    dbg_head_pc,
+	    dbg_head_fetch_cycle,
+	    dbg_head_alloc_cycle,
+	    dbg_serialize_cycle,
+	    dbg_cycle,
+	    dbg_oldest_first_pending,
+	    dbg_trace_index,
+	    dbg_trace_data,
+	    dbg_trace_wptr);
+
    input logic clk;
    input logic reset;
    output logic	in_kernel_mode;
@@ -243,6 +253,8 @@ module core(clk,
    output logic [4:0]			  core_state;
    
    output logic [`M_WIDTH-1:0]		  epc;
+   output logic [31:0]			  status_reg;
+   
    output logic [`M_WIDTH-1:0]		  badvaddr;
    
    output logic [4:0]			  cause;
@@ -256,7 +268,17 @@ module core(clk,
    output logic				  l1i_flush_done;
    output logic				  l1d_flush_done;
    output logic				  l2_flush_done;
-   
+
+   output logic [31:0]			  dbg_head_pc;
+   output logic [31:0]			  dbg_head_fetch_cycle;
+   output logic [31:0]			  dbg_head_alloc_cycle;
+   output logic [31:0]			  dbg_serialize_cycle;
+   output logic [31:0]			  dbg_cycle;
+   output logic				  dbg_oldest_first_pending;
+   input  logic [11:0] 			  dbg_trace_index;
+   output logic [31:0] 			  dbg_trace_data;
+   output logic [8:0] 			  dbg_trace_wptr;
+
    assign in_64b_kernel_mode     = w_in_64b_kernel_mode;
    assign in_64b_supervisor_mode = w_in_64b_supervisor_mode;
    assign in_64b_user_mode       = w_in_64b_user_mode;
@@ -419,8 +441,6 @@ module core(clk,
    logic 		     n_l1d_flush_complete, r_l1d_flush_complete;
    logic 		     n_l2_flush_complete, r_l2_flush_complete;
    
-   logic [31:0]    t_cpr0_status_reg;
-   
    logic [31:0] 	     r_arch_a0;
 
    logic [4:0] 		     n_cause, r_cause;
@@ -559,6 +579,47 @@ module core(clk,
    assign epc = r_epc;
    assign badvaddr = r_badvaddr;
    assign cause = r_cause;
+
+   assign dbg_head_pc              = t_rob_head.pc[31:0];
+`ifdef ENABLE_CYCLE_ACCOUNTING
+   assign dbg_head_fetch_cycle     = t_rob_head.fetch_cycle[31:0];
+   assign dbg_head_alloc_cycle     = t_rob_head.alloc_cycle[31:0];
+`else
+   assign dbg_head_fetch_cycle     = 'd0;
+   assign dbg_head_alloc_cycle     = 'd0;
+`endif
+   assign dbg_serialize_cycle      = r_serialize_cycle;
+   assign dbg_cycle                = r_cycle[31:0];
+   assign dbg_oldest_first_pending = r_oldest_first_pending;
+
+`ifdef ENABLE_TRACE_BUFFER
+   // ---- trace buffer: log head + next_head {pc,counters,flags} on retire OR arch-fault (incl. II) ----
+   // row = 12 words = 2 records; record = {pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, {valid,faulted,cause}}
+   logic [11:0][31:0] r_trace_ram [255:0];
+   logic [7:0] 	      r_trace_wptr;
+   logic [11:0][31:0] r_trace_row;
+   wire 	      w_trace_we   = (t_retire | (t_arch_fault & (|n_cause))) & (r_state != DEAD);
+   wire [31:0] 	      w_head_flags = {25'd0, (t_retire | t_arch_fault), t_arch_fault, n_cause};
+   wire [31:0] 	      w_next_flags = {25'd0, t_retire_two, 1'b0, 5'd0};
+   always_ff@(posedge clk)
+     begin
+	if(reset) r_trace_wptr <= 8'd0;
+	else if(w_trace_we)
+	  begin
+	     r_trace_ram[r_trace_wptr] <=
+		{ w_next_flags, r_cycle[31:0], t_rob_next_head.complete_cycle[31:0], t_rob_next_head.alloc_cycle[31:0], t_rob_next_head.fetch_cycle[31:0], t_rob_next_head.pc[31:0],
+		  w_head_flags, r_cycle[31:0], t_rob_head.complete_cycle[31:0],      t_rob_head.alloc_cycle[31:0],      t_rob_head.fetch_cycle[31:0],      t_rob_head.pc[31:0] };
+	     r_trace_wptr <= r_trace_wptr + 8'd1;
+	  end
+	r_trace_row <= r_trace_ram[dbg_trace_index[11:4]];
+     end
+   assign dbg_trace_wptr = {1'b0, r_trace_wptr};
+   assign dbg_trace_data = r_trace_row[dbg_trace_index[3:0]];
+`else
+   assign dbg_trace_wptr = 'd0;
+   assign dbg_trace_data = 'd0;
+`endif
+
    assign took_irq  = t_wr_epc & (r_cause == 5'd0);
    assign cp0_count = w_cp0_count;
    assign l1i_flush_done = n_l1i_flush_complete;
@@ -602,11 +663,35 @@ module core(clk,
    
    
    logic [63:0] r_cycle;
+   logic [31:0] r_serialize_cycle;
+   logic [31:0] r_daddiu_decode_cycle;
    always_ff@(posedge clk)
      begin
 	r_cycle <= reset ? 'd0 : r_cycle + 'd1;
 
      end
+
+`ifdef VERILATOR
+   // race probe: stamp when 64b-mode (KX) flips and when the kernel_entry
+   // daddiu (0x..88300d78) allocates, to measure the decode-vs-mode margin.
+   logic r_64b_prev_dbg;
+   always_ff@(posedge clk) begin
+      if(reset) r_64b_prev_dbg <= 1'b0;
+      else begin
+	 r_64b_prev_dbg <= w_in_64b_mode;
+	 if(w_in_64b_mode != r_64b_prev_dbg)
+	   $display("[mode] cyc=%0d 64b_mode -> %b", r_cycle, w_in_64b_mode);
+	 if(t_uop.pc[31:0] == 32'h88300d78)
+	   $display("[dec0] cyc=%0d op=%0d is_ii=%b mode=%b", r_cycle, t_uop.op, (t_uop.op == II), w_in_64b_mode);
+	 if(t_uop2.pc[31:0] == 32'h88300d78)
+	   $display("[dec1] cyc=%0d op=%0d is_ii=%b mode=%b", r_cycle, t_uop2.op, (t_uop2.op == II), w_in_64b_mode);
+	 if(t_alloc && (t_alloc_uop.pc[31:0] == 32'h88300d78))
+	   $display("[daddiu] cyc=%0d slot0 op=%0d is_ii=%b mode=%b", r_cycle, t_alloc_uop.op, (t_alloc_uop.op == II), w_in_64b_mode);
+	 if(t_alloc_two && (t_alloc_uop2.pc[31:0] == 32'h88300d78))
+	   $display("[daddiu] cyc=%0d slot1 op=%0d is_ii=%b mode=%b", r_cycle, t_alloc_uop2.op, (t_alloc_uop2.op == II), w_in_64b_mode);
+      end
+   end
+`endif
 
 
 `ifdef VERILATOR
@@ -715,6 +800,8 @@ module core(clk,
 	     r_has_badvaddr <= 1'b0;
 	     r_pending_fault <= 1'b0;
 	     r_oldest_first_pending <= 1'b0;
+	     r_serialize_cycle <= 32'd0;
+	     r_daddiu_decode_cycle <= 32'd0;
 	  end
 	else
 	  begin
@@ -729,6 +816,9 @@ module core(clk,
 	     r_has_badvaddr <= n_has_badvaddr;
 	     r_pending_fault <= n_pending_fault;
 	     r_oldest_first_pending <= n_oldest_first_pending;
+	     r_serialize_cycle <= (n_oldest_first_pending && !r_oldest_first_pending) ? r_cycle[31:0] : r_serialize_cycle;
+	     if((t_alloc && (t_alloc_uop.pc[31:0] == 32'h88300d78)) || (t_alloc_two && (t_alloc_uop2.pc[31:0] == 32'h88300d78)))
+	       r_daddiu_decode_cycle <= r_cycle[31:0];
 	  end
      end
 
@@ -798,7 +888,7 @@ module core(clk,
 	     retired_rob_ptr_two <= r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0];
    	  end
      end
-`ifdef ENABLE_CYCLE_ACCOUNTING
+`ifdef VERILATOR
    always_ff@(negedge clk)
      begin
 	localparam ZP = (64-`M_WIDTH);	
@@ -1466,7 +1556,10 @@ module core(clk,
 			   end
 			 else
 			   begin
-`ifdef VERILATOR
+
+			      n_cause = 5'd31;
+			      n_state = WRITE_EPC;
+`ifdef VERILATOR			      
 			      $stop();
 `endif
 			   end			
@@ -1478,6 +1571,10 @@ module core(clk,
 		     end
 		end
 	   end // case: WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT
+	  DEAD:
+	    begin
+	       n_state = DEAD;
+	    end
 	  default:
 	    begin
 	    end
@@ -1812,7 +1909,16 @@ module core(clk,
 	t_rob_tail.has_nullifying_delay_slot = t_alloc_uop.has_nullifying_delay_slot;
 
 	t_rob_next_tail.has_delay_slot = t_uop2.has_delay_slot;
-	t_rob_next_tail.has_nullifying_delay_slot = t_uop2.has_nullifying_delay_slot;	
+	t_rob_next_tail.has_nullifying_delay_slot = t_uop2.has_nullifying_delay_slot;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+	// unconditional defaults so the cycle fields never infer a latch (only assigned in if(t_alloc)/if(t_alloc_two) below)
+	t_rob_tail.fetch_cycle = t_alloc_uop.fetch_cycle;
+	t_rob_tail.alloc_cycle = r_cycle;
+	t_rob_tail.complete_cycle = 'd0;
+	t_rob_next_tail.fetch_cycle = t_alloc_uop2.fetch_cycle;
+	t_rob_next_tail.alloc_cycle = r_cycle;
+	t_rob_next_tail.complete_cycle = 'd0;
+`endif
 	
 	if(t_alloc)
 	  begin	     
@@ -2496,7 +2602,7 @@ module core(clk,
 	   .restart_complete(t_restart_complete),
 	   .head_of_rob_ptr_valid(head_of_rob_ptr_valid),
 	   .head_of_rob_ptr(head_of_rob_ptr),
-	   .cpr0_status_reg(t_cpr0_status_reg),
+	   .cpr0_status_reg(status_reg),
 	   .mq_wait(mq_wait),
 	   .uq_wait(uq_wait),
 	   .uq_full(t_uq_full),

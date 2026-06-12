@@ -2559,7 +2559,7 @@ module exec(clk,
 	  end
      end
    
-   always_ff@(posedge clk)
+   always_comb
      begin
 	n_sr_ie = r_sr_ie;
 	n_sr_exl = r_sr_exl;
@@ -2620,7 +2620,7 @@ module exec(clk,
 
    always@(posedge clk)
      begin
-	r_sr_ie = reset ? 'd0 : n_sr_ie;
+	r_sr_ie <= reset ? 'd0 : n_sr_ie;
 	r_sr_exl <= reset ? 'd0 : n_sr_exl;
 	r_sr_erl <= reset ? 1'b1 : n_sr_erl;
 	r_sr_ksu <= reset ? 'd0 : n_sr_ksu;

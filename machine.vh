@@ -1,8 +1,11 @@
 `ifndef __machine_hdr__
 `define __machine_hdr__
 
+// Debug trace infrastructure (ROB cycle stamps + HW trace buffer): sim-only.
+// Synth/FPGA builds omit it -- the 256x384-bit trace RAM dominates build time.
 `ifdef VERILATOR
  `define ENABLE_CYCLE_ACCOUNTING 1
+ `define ENABLE_TRACE_BUFFER 1
 `endif
 
 `define FPGA 1

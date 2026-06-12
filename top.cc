@@ -598,6 +598,14 @@ int main(int argc, char **argv) {
     }
     tb->eval();
 
+    { static uint32_t psr = 0xffffffffu;
+      if(tb->status_reg != psr) {
+        printf("[sr] cyc %lu sr=%08x KX=%d KSU=%d EXL=%d ERL=%d\n",
+               (unsigned long)globals::cycle, tb->status_reg, (tb->status_reg>>7)&1,
+               (tb->status_reg>>3)&3, (tb->status_reg>>1)&1, (tb->status_reg>>2)&1);
+        psr = tb->status_reg;
+      } }
+
     if(not(tb->putchar_fifo_empty)) {
       //printf("got first putchar at icnt %lu\n", insns_retired);
       //exit(-1);
@@ -1027,6 +1035,31 @@ int main(int argc, char **argv) {
     }    
     ++globals::cycle;
   }
+
+  // ---- dump trace buffer (validate the cycle-accounting buffer) ----
+  {
+    unsigned wptr = tb->dbg_trace_wptr;
+    printf("=== TRACE BUFFER: %u rows ===\n", wptr);
+    for(unsigned row = 0; row < wptr; row++) {
+      tb->dbg_trace_index = (row << 4);
+      tb->clk = 1; tb->eval(); tb->clk = 0; tb->eval();   // latch r_trace_row
+      uint32_t rec[12];
+      for(unsigned w = 0; w < 12; w++) {
+        tb->dbg_trace_index = (row << 4) | w;
+        tb->eval();
+        rec[w] = tb->dbg_trace_data;
+      }
+      for(int r = 0; r < 2; r++) {
+        int b = r*6;
+        uint32_t fl = rec[b+5];
+        if(!((fl >> 6) & 1)) continue;   // valid bit
+        printf("row %3u s%d: pc=%08x fetch=%u alloc=%u complete=%u retire=%u faulted=%u cause=%u\n",
+               row, r, rec[b+0], rec[b+1], rec[b+2], rec[b+3], rec[b+4],
+               (fl>>5)&1, fl&0x1f);
+      }
+    }
+  }
+
   tb->final();
   t0 = timestamp() - t0;
 

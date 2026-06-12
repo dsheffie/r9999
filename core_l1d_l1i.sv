@@ -58,13 +58,23 @@ module core_l1d_l1i(clk,
 		    l2_rsp_state,
 		    inflight,
 		    epc,
+		    status_reg,
 		    badvaddr,
 		    cause,
 		    l1i_flush_done,
 		    l1d_flush_done,
 		    l2_flush_done,
 		    took_irq,
-		    cp0_count
+		    cp0_count,
+		    dbg_head_pc,
+		    dbg_head_fetch_cycle,
+		    dbg_head_alloc_cycle,
+		    dbg_serialize_cycle,
+		    dbg_cycle,
+		    dbg_oldest_first_pending,
+		    dbg_trace_index,
+		    dbg_trace_data,
+		    dbg_trace_wptr
 		    );
 
    localparam L1D_CL_LEN = 1 << `LG_L1D_CL_LEN;
@@ -169,6 +179,7 @@ module core_l1d_l1i(clk,
    output logic [3:0]			  l2_rsp_state;
    
    output logic [`M_WIDTH-1:0]		  epc;
+   output logic [31:0]			  status_reg;
    output logic [`M_WIDTH-1:0]		  badvaddr;
    output logic [4:0]			  cause;
 
@@ -179,6 +190,15 @@ module core_l1d_l1i(clk,
    output logic			 l2_flush_done;
    output logic			 took_irq;
    output logic [31:0]		 cp0_count;
+   output logic [31:0]  dbg_head_pc;
+   output logic [31:0]  dbg_head_fetch_cycle;
+   output logic [31:0]  dbg_head_alloc_cycle;
+   output logic [31:0]  dbg_serialize_cycle;
+   output logic [31:0]  dbg_cycle;
+   output logic         dbg_oldest_first_pending;
+   input  logic [11:0]  dbg_trace_index;
+   output logic [31:0]  dbg_trace_data;
+   output logic [8:0]   dbg_trace_wptr;
       
 
 
@@ -700,6 +720,7 @@ module core_l1d_l1i(clk,
 	     .core_state(core_state),
 	     .inflight(inflight),
 	     .epc(epc),
+	     .status_reg(status_reg),
 	     .badvaddr(badvaddr),
 	     .cause(cause),
 	     .asid(w_asid),
@@ -709,7 +730,16 @@ module core_l1d_l1i(clk,
 	     .l1d_flush_done(l1d_flush_done),
 	     .l2_flush_done(l2_flush_done),
 	     .took_irq(took_irq),
-	     .cp0_count(cp0_count)
+	     .cp0_count(cp0_count),
+	     .dbg_head_pc(dbg_head_pc),
+	     .dbg_head_fetch_cycle(dbg_head_fetch_cycle),
+	     .dbg_head_alloc_cycle(dbg_head_alloc_cycle),
+	     .dbg_serialize_cycle(dbg_serialize_cycle),
+	     .dbg_cycle(dbg_cycle),
+	     .dbg_oldest_first_pending(dbg_oldest_first_pending),
+	     .dbg_trace_index(dbg_trace_index),
+	     .dbg_trace_data(dbg_trace_data),
+	     .dbg_trace_wptr(dbg_trace_wptr)
 	     );
 
    
