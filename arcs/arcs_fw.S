@@ -120,7 +120,12 @@ stub_write:
     blez    $t0, 2f
     nop
     lb      $t2, 0($t1)
-    mtc0    $t2, $7             /* putchar */
+9:
+    mfc0    $t3, $7             /* CP0 reg7 read = FIFO-full flag (bit 0) */
+    andi    $t3, $t3, 1
+    bne     $t3, $zero, 9b      /* spin while console FIFO is full (backpressure) */
+    nop
+    mtc0    $t2, $7             /* putchar (space now guaranteed) */
     addiu   $t1, $t1, 1
     b       1b
     addiu   $t0, $t0, -1        /* (delay slot) */
