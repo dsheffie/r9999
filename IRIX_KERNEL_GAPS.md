@@ -144,8 +144,11 @@ programs a watch address**, so the Watch exception (ExcCode 23) never fires. The
 `addwatch`/`deletewatch`/`handle_watch`/`kdebug` watchpoint facility is **software** (a managed
 watchpoint list + the debugger exception hook loaded from `0x80001010`; `handle_watch` is part of the
 `exception` dispatch and does NOT read the CP0 Watch regs; `addwatch` doesn't touch them either).
-**Implication:** r9999 needs WatchLo/WatchHi only as **RAZ/WI** (accept `mtc0`/`mfc0` r18/r19 without
-faulting); no Watch-match hardware or ExcCode-23 delivery is required to boot/run IRIX.
+**Implication:** r9999 needs WatchLo/WatchHi only as a functional register (accept `mtc0`/`mfc0` r18/r19
+without faulting); no Watch-match hardware or ExcCode-23 delivery is required to boot/run IRIX.
+**DONE (272360d):** functional WatchLo/WatchHi register interface added in `exec.sv` (store on `mtc0`
+r18/r19, read back on `mfc0`, reset 0; modeled on `Compare`) — a superset of RAZ/WI, so the kernel's
+`mtc0 zero` clears and any read-back work without faulting.
 
 ## Serial console output — how IRIX prints (r9999 bring-up)
 Two phases:
