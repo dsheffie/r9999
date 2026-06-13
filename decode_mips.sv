@@ -54,8 +54,12 @@ module decode_mips(
    generate
       if(`M_WIDTH==64)
 	begin
-	   assign w_in_64b_mode = in_64b_kernel_mode | 
-				  in_64b_user_mode | 
+	   /* 64-bit OPERATIONS are always valid in Kernel mode (independent of KX --
+	    * KX gates 64-bit addressing + XTLB-vector selection, not op availability).
+	    * Supervisor/User require SX/UX.  (Gating kernel ops on KX was the root
+	    * cause of the kernel_entry daddiu RI / 64b-mode silicon hazard.) */
+	   assign w_in_64b_mode = in_kernel_mode |
+				  in_64b_user_mode |
 				  in_64b_supervisor_mode;
 	end
       else

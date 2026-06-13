@@ -200,7 +200,10 @@ static inline bool in_64b_mode(state_t *s) {
   bool kernel = (ksu == 0u) || exl || erl;
   bool user   = (ksu == 2u) && !exl && !erl;
   bool super  = (ksu == 1u) && !exl && !erl;
-  return (kernel && (sr & SR_KX)) ||
+  /* 64-bit operations are always valid in Kernel mode (KX gates 64-bit
+   * addressing / the XTLB vector, not op availability); Supervisor/User need
+   * SX/UX.  Must match decode_mips.sv's w_in_64b_mode for the co-sim. */
+  return  kernel ||
          (user   && (sr & SR_UX)) ||
          (super  && (sr & SR_SX));
 }
