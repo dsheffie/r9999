@@ -19,7 +19,7 @@ LDFLAGS := -T arcs.ld -nostdlib -G 0 -static
 ARCS_DEFS ?=
 
 .PHONY: all clean
-all: arcs_fw.bin arcs_fw.dis
+all: arcs_fw.bin arcs_fw.dis arcs_irix.bin arcs_irix.dis
 
 arcs_fw.o: arcs_fw.S arcs.ld ../tests/common/sim.h
 	$(CC) $(ASFLAGS) $(ARCS_DEFS) -x assembler-with-cpp -c arcs_fw.S -o $@
@@ -33,5 +33,18 @@ arcs_fw.bin: arcs_fw.elf
 arcs_fw.dis: arcs_fw.elf
 	$(OBJDUMP) -d $< > $@
 
+arcs_irix.o: arcs_irix.S arcs.ld ../tests/common/sim.h
+	$(CC) $(ASFLAGS) $(ARCS_DEFS) -x assembler-with-cpp -c arcs_irix.S -o $@
+
+arcs_irix.elf: arcs_irix.o arcs.ld
+	$(LD) $(LDFLAGS) arcs_irix.o -o $@
+
+arcs_irix.bin: arcs_irix.elf
+	$(OBJCOPY) -O binary $< $@
+
+arcs_irix.dis: arcs_irix.elf
+	$(OBJDUMP) -d $< > $@
+
 clean:
-	rm -f arcs_fw.o arcs_fw.elf arcs_fw.bin arcs_fw.dis
+	rm -f arcs_fw.o arcs_fw.elf arcs_fw.bin arcs_fw.dis \
+	      arcs_irix.o arcs_irix.elf arcs_irix.bin arcs_irix.dis
