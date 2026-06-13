@@ -136,6 +136,11 @@ public:
    */
   bool silent = false;
 
+  /* True while executing a branch/jump delay-slot instruction.  An exception in
+   * a delay slot sets EPC = the branch pc and Cause.BD = 1 (matches the RTL,
+   * core.sv: n_epc = in_delay_slot ? pc-4 : pc; n_exc_in_delay = in_delay_slot). */
+  bool in_delay_slot = false;
+
   state_t(sparse_mem &mem) : mem(mem) {}
   ~state_t();
 };

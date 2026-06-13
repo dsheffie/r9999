@@ -134,15 +134,28 @@ static inline state_t::reg_t sext32(uint32_t v) {
   return (state_t::reg_t)(int64_t)(int32_t)v;
 }
 
+/* Set EPC + Cause.BD for an exception, accounting for the branch-delay-slot case
+ * (EPC = branch pc = pc-4, BD=1); matches the RTL.  Call before the ExcCode write
+ * (which preserves BD by masking only bits [6:2]). */
+static inline void set_exc_pc(state_t *s) {
+  if(s->in_delay_slot) {
+    s->cpr0[CPR0_EPC]    = (uint32_t)(s->pc - 4);
+    s->cpr0[CPR0_CAUSE] |=  (1u << 31);
+  } else {
+    s->cpr0[CPR0_EPC]    = (uint32_t)s->pc;
+    s->cpr0[CPR0_CAUSE] &= ~(1u << 31);
+  }
+}
+
 static void raise_adel(state_t *s) {
-  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (4u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(0xBFC00180u);
 }
 
 static void raise_ades(state_t *s) {
-  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (5u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(0xBFC00180u);
@@ -150,7 +163,7 @@ static void raise_ades(state_t *s) {
 
 /* Reserved Instruction exception setup (ExcCode=10), no diagnostic message. */
 static void take_exception_ri(state_t *s) {
-  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (10u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(0xBFC00180u);
@@ -160,6 +173,21 @@ static void raise_ri(state_t *s, uint32_t inst) {
   fprintf(stderr, "unimplemented: opcode=0x%02x funct=0x%02x @ pc=0x%08x\n",
           inst >> 26, inst & 0x3fu, (uint32_t)s->pc);
   take_exception_ri(s);
+}
+
+/* Execute a branch/jump delay-slot instruction.  Returns true iff the delay slot
+ * raised an exception (Status.EXL went 0->1, i.e. it vectored).  In that case the
+ * branch/jump must NOT be taken: the exception has already redirected pc to the
+ * handler with EPC = the branch pc (BD=1), and overwriting pc with the branch
+ * target would SWALLOW the delay-slot fault (the RTL takes it -> co-sim diverges). */
+template <bool EL>
+static inline bool run_delay_slot(state_t *s) {
+  bool exl_before = (s->cpr0[CPR0_SR] & SR_EXL) != 0;
+  bool saved = s->in_delay_slot;
+  s->in_delay_slot = true;
+  execMips<EL>(s);
+  s->in_delay_slot = saved;
+  return (!exl_before) && ((s->cpr0[CPR0_SR] & SR_EXL) != 0);
 }
 
 /* 64-bit operating mode, matching exec.sv:2640-2646:
@@ -195,14 +223,14 @@ static inline bool is_64b_gated(uint32_t inst) {
 }
 
 static void raise_overflow(state_t *s) {
-  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (12u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(0xBFC00180u);
 }
 
 static void raise_trap(state_t *s) {
-  s->cpr0[CPR0_EPC]   = (uint32_t)s->pc;
+  set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (13u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(0xBFC00180u);
@@ -517,20 +545,21 @@ void branch(uint32_t inst, state_t *s) {
   s->pc += 4;
   if(isLikely) {
     if(takeBranch) {
-      execMips<EL>(s);
-      s->pc = (imm+npc);
+      if(!run_delay_slot<EL>(s))
+	s->pc = (imm+npc);
     }
     else {
       s->pc += 4;
     }
   }
   else {
-    execMips<EL>(s);
+    bool ds_faulted = run_delay_slot<EL>(s);
     if(takeBranch){
       if(saveReturn) {
 	s->gpr[31] = sext32((uint32_t)(npc + 4));
       }
-      s->pc = (imm+npc);
+      if(!ds_faulted)
+	s->pc = (imm+npc);
     }
   }
 }
@@ -1664,18 +1693,18 @@ void execMips(state_t *s) {
       case 0x08: { /* jr */
 	state_t::reg_t jaddr = s->gpr[rs];
 	s->pc += 4;
-	execMips<EL>(s);
-	s->pc = jaddr;
-	s->insn_histo[mipsInsn::JR]++;	
+	if(!run_delay_slot<EL>(s))
+	  s->pc = jaddr;
+	s->insn_histo[mipsInsn::JR]++;
 	break;
       }
       case 0x09: { /* jalr */
 	state_t::reg_t jaddr = s->gpr[rs];
 	s->gpr[31] = sext32((uint32_t)(s->pc + 8));
 	s->pc += 4;
-	execMips<EL>(s);
-	s->pc = jaddr;
-	s->insn_histo[mipsInsn::JALR]++;	
+	if(!run_delay_slot<EL>(s))
+	  s->pc = jaddr;
+	s->insn_histo[mipsInsn::JALR]++;
 	break;
       }
       case 0x0C: /* syscall */
@@ -1996,8 +2025,8 @@ void execMips(state_t *s) {
       exit(-1);
     }
     jaddr |= (s->pc & (~static_cast<state_t::reg_t>((1<<28)-1)));
-    execMips<EL>(s);
-    s->pc = jaddr;
+    if(!run_delay_slot<EL>(s))
+      s->pc = jaddr;
     //printf("new pc = %lx\n", jaddr);
   }
   else if(isCoproc0) {
