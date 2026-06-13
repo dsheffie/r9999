@@ -1271,17 +1271,24 @@ module decode_mips(
 		       * I-ops nuke the whole L1I. Compute base+offset so the EA lands
 		       * in rob.data for the per-line D flush. */
 		 begin
-		    uop.op = CACHE_OP;
-		    uop.is_int = 1'b1;
-		    uop.serializing_op = 1'b1;
-		    uop.is_cache = 1'b1;
-		    uop.cache_is_d = insn[16];
-		    /* operation field insn[20:18]==3'b100 = Hit-Invalidate: drop the
-		     * D line WITHOUT writeback (DMA-in). Other D ops write back. */
-		    uop.cache_inval = (insn[20:18] == 3'b100);
-		    uop.srcA = rs;
-		    uop.srcA_valid = 1'b1;
-		    uop.imm = insn[15:0];
+		    if(in_kernel_mode)
+		      begin
+			 uop.op = CACHE_OP;
+			 uop.is_int = 1'b1;
+			 uop.serializing_op = 1'b1;
+			 uop.is_cache = 1'b1;
+			 uop.cache_is_d = insn[16];
+			 /* operation field insn[20:18]==3'b100 = Hit-Invalidate: drop the
+			  * D line WITHOUT writeback (DMA-in). Other D ops write back. */
+			 uop.cache_inval = (insn[20:18] == 3'b100);
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.imm = insn[15:0];
+		      end
+		    else
+		      begin
+			 uop.op = CPU; /* CACHE outside kernel mode -> Coprocessor Unusable */
+		      end
 		 end
 	       6'd48: /* LL */
 		 begin

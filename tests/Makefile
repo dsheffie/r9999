@@ -37,7 +37,8 @@ TESTS := hello/hello.elf \
          xtlb/test_prid.elf \
          cache/test_smc_hit.elf \
          cache/test_smc_index.elf \
-         cache/test_inval_nowb.elf
+         cache/test_inval_nowb.elf \
+         cache/test_cache_priv.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
@@ -133,6 +134,11 @@ cache/test_inval_nowb.elf: cache/test_inval_nowb.S $(STARTUP) $(COMMON)/sim.h $(
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_inval_nowb.S -o cache/test_inval_nowb.o
 	$(LD) $(LDFLAGS) $(STARTUP) cache/test_inval_nowb.o -o $@
 
+# user-mode CACHE -> CpU. Self-contained (own vectors, no crt0), RTL-only.
+cache/test_cache_priv.elf: cache/test_cache_priv.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_cache_priv.S -o cache/test_cache_priv.o
+	$(LD) $(LDFLAGS) cache/test_cache_priv.o -o $@
+
 # Code-coherence tests run under the co-sim checker (RTL must match the
 # coherent interpreter). inval_nowb is RTL-only (-c 0): the coherent interp
 # cannot model dirty-discard, so it is NOT checker-compatible.
@@ -146,6 +152,8 @@ run-cache: cache/test_smc_hit.elf cache/test_smc_index.elf cache/test_inval_nowb
 	cd .. && ./ooo_core --file tests/cache/test_smc_index.elf --checker true 2>&1 | grep -iE "PASS|FAIL|does not match"
 	@echo "== D-Hit-Inval no-WB, RTL-only (expect PASS) =="
 	cd .. && ./ooo_core --file tests/cache/test_inval_nowb.elf -c 0 2>&1 | grep -iE "PASS|FAIL|does not match"
+	@echo "== user-mode CACHE -> CpU, RTL-only (expect PASS) =="
+	cd .. && ./ooo_core --file tests/cache/test_cache_priv.elf -c 0 2>&1 | grep -iE "PASS|FAIL|does not match"
 
 # -----------------------------------------------------------------------
 # Generic disassembly rule
