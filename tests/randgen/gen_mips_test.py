@@ -43,6 +43,13 @@ def s16(): return random.randint(-32768, 32767)
 def u16(): return random.randint(0, 65535)
 def sa():  return random.randint(0, 31)
 
+# FP register pool: EVEN registers only -- gas under `.set mips3` rejects odd FP
+# regs ("float register should be even", its FR=0 assumption).  The RTL/checker
+# are flat FR=1 (32x64b), so even-only still exercises moves/ld/st/rename fully;
+# the odd-reg / double-aliasing FR=1 edge would need raw .word encodings (later).
+FPP    = list(range(0, 32, 2))                     # $f0,$f2,...,$f30
+def frd(): return random.choice(FPP)               # FP register
+
 # ---- instruction menus (edit to match what the core implements) ----------
 ALU_R  = ["addu", "subu", "and", "or", "xor", "nor", "slt", "sltu"]
 ALU_I  = ["addiu", "andi", "ori", "xori", "slti", "sltiu"]
@@ -56,6 +63,8 @@ MEM_LD  = ["lb", "lbu", "lh", "lhu", "lw", "lwu", "ld"]   # aligned (EA is 8-ali
 MEM_ST  = ["sb", "sh", "sw", "sd"]
 MEM_UNW = ["lwl", "lwr", "swl", "swr"]                    # unaligned word  (off 0..3)
 MEM_UND = ["ldl", "ldr", "sdl", "sdr"]                    # unaligned dword (off 0..7)
+FP_LD   = ["lwc1", "ldc1"]                                # FP load  (word / dword); 8-aligned EA
+FP_ST   = ["swc1", "sdc1"]                                # FP store (word / dword); 8-aligned EA
 
 class Gen:
     def __init__(self, n):
@@ -141,6 +150,27 @@ class Gen:
         for i, ln in enumerate(lines):
             self._emit(ln, labs if i == 0 else None)
 
+    # -- FP move / load / store (FR=1 flat regs; even-only so gas accepts) --
+    #    moves are address-less; FP ld/st mask the EA into scratch like mem().
+    #    The co-sim compares GPRs+memory, so mfc1 (-> GPR) and swc1/sdc1 (-> mem,
+    #    read back by a later int load) are what actually get validated.
+    def fp(self, labs):
+        r = random.random()
+        if r < 0.3:                                   # GPR -> FPR
+            self._emit(f"mtc1 ${rs()}, $f{frd()}", labs)
+        elif r < 0.6:                                 # FPR -> GPR (dst compared)
+            self._emit(f"mfc1 ${rd()}, $f{frd()}", labs)
+        else:                                         # FP load / store
+            base = rs()
+            lines = [f"andi ${AT}, ${base}, {OFFMASK}",   # 8-aligned offset
+                     f"daddu ${AT}, ${SB}, ${AT}"]        # EA in scratch (64-bit)
+            if r < 0.8:
+                lines.append(f"{random.choice(FP_LD)} $f{frd()}, 0(${AT})")
+            else:
+                lines.append(f"{random.choice(FP_ST)} $f{frd()}, 0(${AT})")
+            for i, ln in enumerate(lines):
+                self._emit(ln, labs if i == 0 else None)
+
     # -- forward branch + delay slot ---------------------------------------
     def branch(self, labs):
         k = random.randint(0, 5)
@@ -177,13 +207,14 @@ class Gen:
         while len(self.body) < self.n:
             labs = self._start_unit()               # labels for this unit start
             near_end = len(self.body) > self.n - 8
-            choices = ["alu"] * 5 + ["mem"] * 3 + ["muldiv"] * 2 + ["hazard"] * 1
+            choices = ["alu"] * 5 + ["mem"] * 3 + ["muldiv"] * 2 + ["hazard"] * 1 + ["fp"] * 3
             if not near_end:
                 choices += ["branch"] * 3
             c = random.choice(choices)
             if   c == "alu":    self._emit(self.alu(), labs)
             elif c == "muldiv": self.muldiv(labs)
             elif c == "mem":    self.mem(labs)
+            elif c == "fp":     self.fp(labs)
             elif c == "branch": self.branch(labs)
             elif c == "hazard": self.hazard(labs)
         # any branch target past the end lands on a final safe nop
@@ -214,6 +245,13 @@ class Gen:
             v = random.getrandbits(32)
             L.append(f"    lui   ${r}, 0x{(v>>16)&0xffff:04x}")
             L.append(f"    ori   ${r}, ${r}, 0x{v&0xffff:04x}")
+        # FP regs are not reset in HW -> init every even FP reg deterministically
+        # (mtc1 sign-extends bits[31:0]) so no mfc1/store ever reads an undefined reg.
+        for fr in FPP:
+            v = random.getrandbits(32)
+            L.append(f"    lui   ${AT}, 0x{(v>>16)&0xffff:04x}")
+            L.append(f"    ori   ${AT}, ${AT}, 0x{v&0xffff:04x}")
+            L.append(f"    mtc1  ${AT}, $f{fr}")
         L.append("    /* ---- random body ---- */")
         for it in self.body:
             for lab in it["labels"]:

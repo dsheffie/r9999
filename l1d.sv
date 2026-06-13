@@ -1661,6 +1661,9 @@ endfunction
 		    n_core_mem_rsp.data = r_req2.addr;
 		    n_core_mem_rsp.rob_ptr = r_req2.rob_ptr;
 		    n_core_mem_rsp.dst_ptr = r_req2.dst_ptr;
+		    /* port2 response routes to FP-vs-int by THIS port's req (the
+		     * default at the top uses r_req = port1, wrong for a port2 rsp) */
+		    n_core_mem_rsp.fp_dst = r_req2.fp_dst;
 		    if(drain_ds_complete)
 		      begin
 			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
