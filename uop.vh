@@ -228,6 +228,7 @@ typedef struct packed {
    logic 		       is_store;
    logic 		       is_cache;   /* MIPS CACHE op (serializing flush) */
    logic 		       cache_is_d; /* CACHE targets D-cache (per-line WB) vs I-cache (whole nuke) */
+   logic 		       cache_inval; /* CACHE Hit-Invalidate: drop the line WITHOUT writeback (DMA-in) */
    logic [`LG_PHT_SZ-1:0]      pht_idx;
    logic		       mode_when_fetched;
 `ifdef VERILATOR

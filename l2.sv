@@ -488,11 +488,22 @@ module l2(clk,
 			 n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 		      end
 		 end
+	       else if(r_opcode == MEM_INVL)
+		 begin
+		    /* CACHE D-Hit-Invalidate (DMA-in): drop the L2 line if present,
+		     * WITHOUT writing it back, then ack. On a miss, just ack. */
+		    if(w_hit)
+		      begin
+			 t_wr_valid = 1'b1; t_valid = 1'b0;
+		      end
+		    n_state = IDLE;
+		    n_rsp_valid = 1'b1;
+		 end
 	       else if(w_hit)
 		 begin
 		    n_reload = 1'b0;
 		    if(r_opcode == 5'd4)
-		      begin			 
+		      begin
 			 n_rsp_data =  w_d0;
 			 n_state = IDLE;
 			 n_rsp_valid = 1'b1;

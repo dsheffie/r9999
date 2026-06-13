@@ -37,6 +37,7 @@ module l1d(clk,
 	   flush_complete,
 	   flush_cl_req,
 	   flush_cl_addr,
+	   flush_cl_inval,
 	   //inputs from core
 	   core_mem_req_valid,
 	   core_mem_req,
@@ -97,6 +98,7 @@ module l1d(clk,
    
    input logic flush_cl_req;
    input logic [`M_WIDTH-1:0] flush_cl_addr;
+   input logic 		      flush_cl_inval;
    input logic 		      flush_req;
    output logic 	      flush_complete;
 
@@ -2126,14 +2128,29 @@ endfunction
 	    end
 	  FLUSH_CL:
 	    begin
-	       if(r_dirty_out)
+	       if(flush_cl_inval)
+		 begin
+		    /* CACHE D-Hit-Invalidate (DMA-in): drop the line WITHOUT writeback,
+		     * but only on a real hit (tag match) so we never discard a
+		     * different dirty line that happens to alias this index. Then tell
+		     * L2 to drop its copy too (caches are non-inclusive). */
+		    if(r_valid_out && (r_tag_out == flush_cl_addr[`PA_WIDTH-1:IDX_STOP]))
+		      t_mark_invalid = 1'b1;
+		    n_mem_req_addr = {flush_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_opcode = MEM_INVL;
+		    n_mem_req_cacheable = 1'b1;
+		    n_mem_req_mask = 16'hffff;
+		    n_mem_req_valid = 1'b1;
+		    n_state = FLUSH_CL_WAIT;
+		 end
+	       else if(r_dirty_out)
 		 begin
 		    n_mem_req_addr = {r_tag_out,r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
 	       n_mem_req_opcode = MEM_SW;
 	       n_mem_req_store_data = t_data;
 	       n_state = FLUSH_CL_WAIT;
 	       n_inhibit_write = 1'b1;
-	            n_mem_req_valid = 1'b1;	       
+	            n_mem_req_valid = 1'b1;
 		 end
 	       else
 		 begin

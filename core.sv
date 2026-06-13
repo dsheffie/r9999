@@ -63,6 +63,7 @@ module core(clk,
 	    flush_req_l1i,
 	    flush_cl_req,
 	    flush_cl_addr,
+	    flush_cl_inval,
 	    l1d_flush_complete,
 	    l1i_flush_complete,
 	    l2_flush_complete,
@@ -176,6 +177,7 @@ module core(clk,
    
    output logic flush_cl_req;
    output logic [(`M_WIDTH-1):0] flush_cl_addr;
+   output logic flush_cl_inval; /* per-line flush is an invalidate-no-writeback (DMA-in) */
 
    input logic			 l1d_flush_complete;
    input logic			 l1i_flush_complete;
@@ -496,6 +498,7 @@ module core(clk,
    
    logic 		     n_flush_cl_req, r_flush_cl_req;
    logic [(`M_WIDTH-1):0]    n_flush_cl_addr, r_flush_cl_addr;
+   logic 		     n_flush_cl_inval, r_flush_cl_inval;
    logic 		     r_ds_done, n_ds_done;
    
    logic 		     t_can_retire_rob_head;
@@ -577,6 +580,7 @@ module core(clk,
    assign flush_req_l1i = r_flush_req_l1i;
    assign flush_cl_req = r_flush_cl_req;
    assign flush_cl_addr = r_flush_cl_addr;
+   assign flush_cl_inval = r_flush_cl_inval;
 
    
    assign got_break = r_got_break;
@@ -724,6 +728,7 @@ module core(clk,
 	     r_flush_req_l1d <= 1'b0;
 	     r_flush_cl_req <= 1'b0;
 	     r_flush_cl_addr <= 'd0;
+	     r_flush_cl_inval <= 1'b0;
 	     r_restart_pc <= 'd0;
 	     r_restart_src_pc <= 'd0;
 	     r_restart_src_is_indirect <= 1'b0;
@@ -759,6 +764,7 @@ module core(clk,
 	     r_flush_req_l1i <= n_flush_req_l1i;
 	     r_flush_cl_req <= n_flush_cl_req;
 	     r_flush_cl_addr <= n_flush_cl_addr;
+	     r_flush_cl_inval <= n_flush_cl_inval;
 	     r_restart_pc <= n_restart_pc;
 	     r_restart_src_pc <= n_restart_src_pc;
 	     r_restart_src_is_indirect <= n_restart_src_is_indirect;
@@ -1114,6 +1120,7 @@ module core(clk,
 	n_flush_req_l1i = 1'b0;
 	n_flush_cl_req = 1'b0;
 	n_flush_cl_addr = r_flush_cl_addr;
+	n_flush_cl_inval = r_flush_cl_inval;
 	n_got_break = r_got_break;
 	n_pending_break = r_pending_break;
 	n_pending_ud = r_pending_ud;
@@ -1390,7 +1397,11 @@ module core(clk,
 			 if(t_rob_head.cache_is_d)
 			   begin
 			      n_flush_cl_req  = 1'b1;
-			      n_flush_cl_addr = t_rob_head.data;   /* base + offset */
+			      /* EA = base+offset, masked to a physical address (kseg0/kseg1
+			       * unmapped: PA = VA & 0x1fffffff) so L1D can tag-match it and
+			       * the L2 drop targets the right line. */
+			      n_flush_cl_addr = t_rob_head.data & 64'h1fffffff;
+			      n_flush_cl_inval = t_rob_head.cache_inval; /* Hit-Invalidate: drop, no WB */
 			      n_l1i_flush_complete = 1'b1;          /* not flushing L1I */
 			      n_l2_flush_complete  = 1'b1;          /* flush_cl bypasses the L2 flush */
 			   end
@@ -1890,6 +1901,7 @@ module core(clk,
 	t_rob_tail.is_syscall  = (t_alloc_uop.op == SYSCALL);
 	t_rob_tail.is_cache  = t_alloc_uop.is_cache;
 	t_rob_tail.cache_is_d = t_alloc_uop.cache_is_d;
+	t_rob_tail.cache_inval = t_alloc_uop.cache_inval;
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
 	t_rob_tail.is_tlbp = (t_alloc_uop.op == TLBP);
 	
@@ -1932,6 +1944,7 @@ module core(clk,
 	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);
 	t_rob_next_tail.is_cache = t_alloc_uop2.is_cache;
 	t_rob_next_tail.cache_is_d = t_alloc_uop2.cache_is_d;
+	t_rob_next_tail.cache_inval = t_alloc_uop2.cache_inval;
 	t_rob_next_tail.is_tlbp = (t_alloc_uop2.op == TLBP);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.overflow = 1'b0;

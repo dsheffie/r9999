@@ -1,24 +1,24 @@
 /*
  * test_inval_nowb.S  --  D-Hit-Invalidate (0x11) discards dirty data WITHOUT writeback
  *
- * This is the DMA-in semantics: a device wrote main memory behind the CPU's
- * back, so software invalidates the (now-stale) cached copy and must NOT write
- * the dirty cache line back over the fresh memory data.  0x11 must therefore
- * invalidate without writeback, and must never be promoted to WB-Invalidate.
+ * DMA-in semantics: a device wrote main memory behind the CPU's back, so
+ * software invalidates the (now-stale) cached copy and must NOT write the dirty
+ * cache line back over the fresh memory data. 0x11 must invalidate WITHOUT
+ * writeback at every level that could hold a stale copy (L1D and L2 -- the
+ * caches are non-inclusive).
  *
- * Sequence:
- *   1. store OLD (0xAAAA) and push it to memory   (sw + D-Hit-WB-Inval 0x15)
- *   2. store NEW (0xBBBB)  -> dirty in L1D, NOT in memory
- *   3. CACHE 0x11          -> discard the dirty NEW line (no writeback)
- *   4. load back           -> must read OLD (0xAAAA) from memory
+ * Model (no real device): seed OLD (0xAAAA) into MEMORY via the .data image,
+ * dirty the cached copy to NEW (0xBBBB), then 0x11, then read back:
+ *   1. store NEW    -> dirty in L1D (write-allocate brings OLD up through L2)
+ *   2. CACHE 0x11   -> drop the dirty L1D line (no WB) + drop the L2 copy
+ *   3. load         -> miss L1D, miss L2 -> memory -> OLD (0xAAAA)
  *
- *   correct 0x11           -> reads OLD  -> PASS
- *   CACHE == NOP           -> reads dirty NEW from L1D -> FAIL (TDD red)
- *   0x11 promoted to WB    -> NEW written to mem, reads NEW -> FAIL
+ *   correct 0x11        -> reads OLD  -> PASS
+ *   CACHE == NOP        -> reads dirty NEW from L1D -> FAIL (red)
+ *   0x11 promoted to WB -> NEW written down, reads NEW -> FAIL
  *
- * RTL SELF-CHECK ONLY (run with -c 0): the interpreter has flat coherent
- * memory and cannot model "discard dirty data", so it would read NEW and
- * diverge from a correct RTL.  Do NOT run this under --checker.
+ * RTL SELF-CHECK ONLY (-c 0): the coherent interpreter cannot model
+ * dirty-discard (it would read NEW), so do NOT run this under --checker.
  */
 
 #include "sim.h"
@@ -27,8 +27,7 @@
     .set    reorder
     .set    noat
 
-/* Magic-halt: -c 0 (no-checker) runs stop on a write to kseg1 0xBFD00000,
- * not on break (break would trap to the crt0 placeholder vector). */
+/* Magic-halt: -c 0 (no-checker) runs stop on a write to kseg1 0xBFD00000. */
     .macro  HALT
     li      $k0, 0xBFD00000
     li      $k1, 1
@@ -48,25 +47,19 @@ main:
     jal     puts_sim
     nop
 
-    la      $s0, scratch
+    la      $s0, scratch            /* memory at scratch already holds OLD=0xAAAA */
 
-    /* ---- 1. establish OLD in memory ---- */
-    li      $t0, 0xAAAA
-    sw      $t0, 0($s0)
-    cache   0x15, 0($s0)            /* D-Hit-WB-Inval: OLD -> L2/mem, line gone */
-    nop
-
-    /* ---- 2. write NEW: dirty in L1D only ---- */
+    /* ---- 1. dirty the cached copy to NEW ---- */
     li      $t1, 0xBBBB
-    sw      $t1, 0($s0)
+    sw      $t1, 0($s0)             /* NEW dirty in L1D; OLD still in memory */
 
-    /* ---- 3. discard the dirty line WITHOUT writeback ---- */
-    cache   0x11, 0($s0)            /* D-Hit-Invalidate (no writeback) */
+    /* ---- 2. D-Hit-Invalidate: discard the dirty line (no WB) + drop L2 ---- */
+    cache   0x11, 0($s0)
     nop
     nop
     nop
 
-    /* ---- 4. read back: must be OLD (NEW was discarded) ---- */
+    /* ---- 3. read back: must be OLD (NEW was discarded) ---- */
     lw      $v0, 0($s0)
     li      $t2, 0xAAAA
     bne     $v0, $t2, fail
@@ -99,7 +92,7 @@ puts_sim:
     .section .data
     .align  4
 scratch:
-    .word   0
+    .word   0x0000aaaa             /* OLD, lives in memory via the ELF image */
 
     .section .rodata
 msg_start:  .asciz "CACHE D-Hit-Invalidate (no-writeback / DMA-in) test\n"

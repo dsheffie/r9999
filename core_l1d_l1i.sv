@@ -214,6 +214,7 @@ module core_l1d_l1i(clk,
    wire 				  flush_req_l1i, flush_req_l1d;
    logic 				  flush_cl_req;
    logic [`M_WIDTH-1:0] 		  flush_cl_addr;
+   logic 				  flush_cl_inval;
    wire 				  l1d_flush_complete;
    wire 				  l1i_flush_complete;
 
@@ -556,6 +557,7 @@ module core_l1d_l1i(clk,
 	       .flush_req(flush_req_l1d),
 	       .flush_cl_req(flush_cl_req),
 	       .flush_cl_addr(flush_cl_addr),
+	       .flush_cl_inval(flush_cl_inval),
 	       .flush_complete(l1d_flush_complete),
 	       .core_mem_req_valid(core_mem_req_valid),
 	       .core_mem_req(core_mem_req),
@@ -662,7 +664,8 @@ module core_l1d_l1i(clk,
 	     .flush_req_l1d(flush_req_l1d),
 	     .flush_req_l1i(flush_req_l1i),	     
 	     .flush_cl_req(flush_cl_req),
-	     .flush_cl_addr(flush_cl_addr),	     
+	     .flush_cl_addr(flush_cl_addr),
+	     .flush_cl_inval(flush_cl_inval),
 	     .l1d_flush_complete(l1d_flush_complete),
 	     .l1i_flush_complete(l1i_flush_complete),
 	     .l2_flush_complete(w_l2_flush_complete),

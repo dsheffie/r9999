@@ -114,6 +114,7 @@ module decode_mips(
 	uop.is_store = 1'b0;
 	uop.is_cache = 1'b0;
 	uop.cache_is_d = 1'b0;
+	uop.cache_inval = 1'b0;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 	uop.fetch_cycle = fetch_cycle;
 `endif
@@ -1275,6 +1276,9 @@ module decode_mips(
 		    uop.serializing_op = 1'b1;
 		    uop.is_cache = 1'b1;
 		    uop.cache_is_d = insn[16];
+		    /* operation field insn[20:18]==3'b100 = Hit-Invalidate: drop the
+		     * D line WITHOUT writeback (DMA-in). Other D ops write back. */
+		    uop.cache_inval = (insn[20:18] == 3'b100);
 		    uop.srcA = rs;
 		    uop.srcA_valid = 1'b1;
 		    uop.imm = insn[15:0];
