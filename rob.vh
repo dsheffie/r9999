@@ -26,7 +26,6 @@ typedef struct packed {
    logic [(`LG_PRF_ENTRIES-1):0] old_pdst;
    logic [(`M_WIDTH-1):0] 	 pc;
    logic [(`M_WIDTH-1):0] 	 target_pc;
-   logic [(`M_WIDTH-1):0] pred_target;
    logic 			 is_br;
    logic 			 is_indirect;
    logic 			 take_br;

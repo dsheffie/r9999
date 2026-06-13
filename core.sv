@@ -1821,8 +1821,7 @@ module core(clk,
 	/* default to sequential next-PC so a serializing op restarts at pc+4;
 	 * branches overwrite this with the resolved target at completion (~1963). */
 	t_rob_tail.target_pc = (t_alloc_uop.op == J) ? t_alloc_uop.pred_target : (t_alloc_uop.pc + 'd4);
-	t_rob_tail.pred_target = t_alloc_uop.pred_target;
-	
+
 	t_rob_tail.is_call = t_alloc_uop.op == JAL || t_alloc_uop.op == JALR || t_alloc_uop.op == BAL;
 	t_rob_tail.is_irq = t_alloc_uop.op == IRQ;
 	t_rob_tail.is_ret = (t_alloc_uop.op == JR) && (t_uop.srcA == 'd31);
@@ -1861,7 +1860,6 @@ module core(clk,
 	t_rob_next_tail.old_pdst  = 'd0;
 	t_rob_next_tail.pc = t_alloc_uop2.pc;
 	t_rob_next_tail.target_pc = (t_alloc_uop2.op == J) ? t_alloc_uop2.pred_target : (t_alloc_uop2.pc + 'd4);
-	t_rob_next_tail.pred_target = t_alloc_uop2.pred_target;
 	t_rob_next_tail.opcode = t_alloc_uop2.op;
 	t_rob_next_tail.is_call = t_alloc_uop2.op == JAL || t_alloc_uop2.op == JALR || t_alloc_uop2.op == BAL;
 	t_rob_next_tail.is_irq = t_alloc_uop2.op == IRQ;
