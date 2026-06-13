@@ -1854,6 +1854,12 @@ module exec(clk,
 	       t_unimp_op = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
+	  CACHE_OP:
+	    begin
+	       /* CACHE: no datapath effect here -- just complete so the op can
+		* retire through the serialize funnel, which drives the flush. */
+	       t_alu_valid = 1'b1;
+	    end
 	  default:
 	    begin
 	       t_unimp_op = 1'b1;

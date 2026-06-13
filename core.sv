@@ -517,6 +517,7 @@ module core(clk,
 			     EXCEPTION_DRAIN = 'd11,
 			     SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd12,
 			     WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT = 'd13,
+			     CACHE_FLUSH = 'd14, // serializing CACHE op: nuke L1I/L1D/L2, then restart
 			     DEAD = 'd15
 			     } state_t;
    
@@ -1378,16 +1379,54 @@ module core(clk,
 	    begin
 	       if(t_rob_head_complete)
 		 begin
+		    if(t_rob_head.is_cache)
+		      begin
+			 /* CACHE op: pulse a whole-cache flush (L1I+L1D, which the
+			  * arbiter then chains into an L2 flush). Wait for it in
+			  * CACHE_FLUSH before restarting -- the restart is what
+			  * refetches, which is mandatory once L1I is nuked. */
+			 n_flush_req_l1d = 1'b1;
+			 n_flush_req_l1i = 1'b1;
+			 n_state = CACHE_FLUSH;
+		      end
+		    else
+		      begin
+			 t_clr_dq = 1'b1;
+			 n_restart_pc = t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
+			 n_restart_src_pc = t_rob_head.pc;
+			 n_restart_src_is_indirect = 1'b0;
+			 n_restart_valid = 1'b1;
+			 n_pending_fault = 1'b0;
+			 if(n_got_restart_ack)
+			   begin
+			      /* restart debug removed */
+			      n_state = ACTIVE;
+			   end
+		      end
+		 end
+	    end
+	  CACHE_FLUSH:
+	    begin
+	       /* hold until L1I, L1D and L2 flushes have all completed, then
+		* restart at the CACHE op's sequential target (refetch the I-stream
+		* now that L1I is empty). Mirrors WAIT_FOR_SERIALIZE_AND_RESTART.
+		* NB: keep the latched completes asserted until the restart is
+		* acked -- clearing them early drops the condition before the ack
+		* and deadlocks. */
+	       if(n_l1i_flush_complete && n_l1d_flush_complete && n_l2_flush_complete)
+		 begin
 		    t_clr_dq = 1'b1;
 		    n_restart_pc = t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
 		    n_restart_src_pc = t_rob_head.pc;
 		    n_restart_src_is_indirect = 1'b0;
 		    n_restart_valid = 1'b1;
-		    n_pending_fault = 1'b0;		    
+		    n_pending_fault = 1'b0;
 		    if(n_got_restart_ack)
 		      begin
-			 /* restart debug removed */
-			 n_state = ACTIVE;			 
+			 n_l1i_flush_complete = 1'b0;
+			 n_l1d_flush_complete = 1'b0;
+			 n_l2_flush_complete = 1'b0;
+			 n_state = ACTIVE;
 		      end
 		 end
 	    end
@@ -1836,7 +1875,8 @@ module core(clk,
 	t_rob_tail.is_irq = t_alloc_uop.op == IRQ;
 	t_rob_tail.is_ret = (t_alloc_uop.op == JR) && (t_uop.srcA == 'd31);
 	t_rob_tail.is_break  = (t_alloc_uop.op == BREAK);
-	t_rob_tail.is_syscall  = (t_alloc_uop.op == SYSCALL);	
+	t_rob_tail.is_syscall  = (t_alloc_uop.op == SYSCALL);
+	t_rob_tail.is_cache  = t_alloc_uop.is_cache;
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
 	t_rob_tail.is_tlbp = (t_alloc_uop.op == TLBP);
 	
@@ -1877,6 +1917,7 @@ module core(clk,
 	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop.srcA == 'd31);
 	t_rob_next_tail.is_break = (t_alloc_uop2.op == BREAK);
 	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);
+	t_rob_next_tail.is_cache = t_alloc_uop2.is_cache;
 	t_rob_next_tail.is_tlbp = (t_alloc_uop2.op == TLBP);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.overflow = 1'b0;

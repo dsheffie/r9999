@@ -112,6 +112,7 @@ module decode_mips(
 	uop.is_mem = 1'b0;
 	uop.is_int = 1'b0;
 	uop.is_store = 1'b0;
+	uop.is_cache = 1'b0;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 	uop.fetch_cycle = fetch_cycle;
 `endif
@@ -1262,10 +1263,15 @@ module decode_mips(
 		    uop.is_mem = 1'b1;
 		    uop.is_store = 1'b1;
 		 end
-	       6'd47: /* CACHE -- decoded as NOP for now */
+	       6'd47: /* CACHE -- serializing whole-cache flush (drain + nuke L1I/L1D/L2).
+		       * Op subfield insn[20:16] not yet decoded; every variant currently
+		       * does the conservative full flush (correct for code-coherence;
+		       * per-line flush_cl is the deferred perf refinement). */
 		 begin
-		    uop.op = NOP;
+		    uop.op = CACHE_OP;
 		    uop.is_int = 1'b1;
+		    uop.serializing_op = 1'b1;
+		    uop.is_cache = 1'b1;
 		 end
 	       6'd48: /* LL */
 		 begin

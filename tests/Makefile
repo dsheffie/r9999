@@ -34,11 +34,14 @@ TESTS := hello/hello.elf \
          xtlb/test_xtlb_nested.elf \
          xtlb/test_eret.elf \
          xtlb/test_cache.elf \
-         xtlb/test_prid.elf
+         xtlb/test_prid.elf \
+         cache/test_smc_hit.elf \
+         cache/test_smc_index.elf \
+         cache/test_inval_nowb.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
-.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb
+.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache
 
 all: $(STARTUP) $(TESTS) $(DISASMS)
 
@@ -112,6 +115,37 @@ xtlb/test_cache.elf: xtlb/test_cache.S $(COMMON)/sim.h $(COMMON)/link.ld
 xtlb/test_prid.elf: xtlb/test_prid.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_prid.S -o xtlb/test_prid.o
 	$(LD) $(LDFLAGS) xtlb/test_prid.o -o $@
+
+# -----------------------------------------------------------------------
+# CACHE instruction coherence tests (tests/cache/)
+#   smc_*  : self-modifying-code coherence -- co-sim safe (interp is coherent)
+#   inval_nowb : D-Hit-Invalidate no-writeback -- RTL self-check ONLY (-c 0)
+# -----------------------------------------------------------------------
+cache/test_smc_hit.elf: cache/test_smc_hit.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_smc_hit.S -o cache/test_smc_hit.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_smc_hit.o -o $@
+
+cache/test_smc_index.elf: cache/test_smc_index.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_smc_index.S -o cache/test_smc_index.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_smc_index.o -o $@
+
+cache/test_inval_nowb.elf: cache/test_inval_nowb.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_inval_nowb.S -o cache/test_inval_nowb.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_inval_nowb.o -o $@
+
+# Code-coherence tests run under the co-sim checker (RTL must match the
+# coherent interpreter). inval_nowb is RTL-only (-c 0): the coherent interp
+# cannot model dirty-discard, so it is NOT checker-compatible.
+# NB: the binary lives at ../ooo_core relative to this dir; after `cd ..` it is
+# ./ooo_core (the pre-existing run-* targets above use ../ooo_core post-cd and
+# are broken -- run the sim from r9999/ by hand or via this target).
+run-cache: cache/test_smc_hit.elf cache/test_smc_index.elf cache/test_inval_nowb.elf
+	@echo "== SMC Hit-form (expect PASS; red = 'does not match') =="
+	cd .. && ./ooo_core --file tests/cache/test_smc_hit.elf --checker true 2>&1 | grep -iE "PASS|FAIL|does not match"
+	@echo "== SMC Index-form (expect PASS; red = 'does not match') =="
+	cd .. && ./ooo_core --file tests/cache/test_smc_index.elf --checker true 2>&1 | grep -iE "PASS|FAIL|does not match"
+	@echo "== D-Hit-Inval no-WB, RTL-only (expect PASS) =="
+	cd .. && ./ooo_core --file tests/cache/test_inval_nowb.elf -c 0 2>&1 | grep -iE "PASS|FAIL|does not match"
 
 # -----------------------------------------------------------------------
 # Generic disassembly rule
