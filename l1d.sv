@@ -114,7 +114,7 @@ module l1d(clk,
    input logic 	mem_req_ack;
    
    output logic mem_req_valid;
-   output logic [(`M_WIDTH-1):0] mem_req_addr;
+   output logic [(`PA_WIDTH-1):0] mem_req_addr;
    output logic [L1D_CL_LEN_BITS-1:0] mem_req_store_data;
    output logic [4:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
@@ -132,7 +132,7 @@ module l1d(clk,
    localparam LG_DWORDS_PER_CL = `LG_L1D_CL_LEN - 3;
    
    localparam WORDS_PER_CL = 1<<(LG_WORDS_PER_CL);
-   localparam N_TAG_BITS = `M_WIDTH - `LG_L1D_NUM_SETS - `LG_L1D_CL_LEN;
+   localparam N_TAG_BITS = `PA_WIDTH - `LG_L1D_NUM_SETS - `LG_L1D_CL_LEN;
    localparam IDX_START = `LG_L1D_CL_LEN;
    localparam IDX_STOP  = `LG_L1D_CL_LEN + `LG_L1D_NUM_SETS;
    localparam WORD_START = 2;
@@ -373,14 +373,14 @@ endfunction
    logic [15:0]	t_mem_req_mask, r_mem_req_mask, n_mem_req_mask;
    
    logic	r_mem_req_valid, n_mem_req_valid;
-   logic [(`M_WIDTH-1):0] r_mem_req_addr, n_mem_req_addr;
+   logic [(`PA_WIDTH-1):0] r_mem_req_addr, n_mem_req_addr;
    logic [L1D_CL_LEN_BITS-1:0] r_mem_req_store_data, n_mem_req_store_data;
    
    logic [4:0] 		       r_mem_req_opcode, n_mem_req_opcode;
    logic [63:0] 	       n_cache_accesses, r_cache_accesses;
    logic [63:0] 	       n_cache_hits, r_cache_hits;
 
-   wire [`M_WIDTH-1:0]	       w_mapped_addr;   
+   wire [`PA_WIDTH-1:0]      w_mapped_addr;   
    
    
    logic [31:0] 			 r_cycle;
@@ -427,12 +427,12 @@ endfunction
    logic [N_ROB_ENTRIES-1:0] r_rob_inflight;
 
    logic r_link_reg_val;
-   logic [`M_WIDTH-1:0] r_link_reg;
+   logic [`PA_WIDTH-1:0] r_link_reg;
    wire w_match_link = r_link_reg_val &&
-                       (r_link_reg == {r_req.addr[`M_WIDTH-1:`LG_L1D_CL_LEN],
+                       (r_link_reg == {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],
                                        {`LG_L1D_CL_LEN{1'b0}}});
    wire w_match_link2 = r_link_reg_val &&
-                        (r_link_reg == {r_req2.addr[`M_WIDTH-1:`LG_L1D_CL_LEN],
+                        (r_link_reg == {r_req2.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],
                                         {`LG_L1D_CL_LEN{1'b0}}});
    logic r_sc_should_write;
 
@@ -484,7 +484,7 @@ endfunction
 	  begin
 	     /* LL/LLD response from port2 (direct cache hit) */
 	     r_link_reg_val <= 1'b1;
-	     r_link_reg <= {r_req2.addr[`M_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+	     r_link_reg <= {r_req2.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
 	  end
 	else if(n_core_mem_rsp_valid && r_got_req2 && (r_req2.op == MEM_SC || r_req2.op == MEM_SCD))
 	  begin
@@ -495,7 +495,7 @@ endfunction
 	  begin
 	     /* LL/LLD response from port1 (miss→reload path) */
 	     r_link_reg_val <= 1'b1;
-	     r_link_reg <= {r_req.addr[`M_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+	     r_link_reg <= {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
 	  end
      end
 
@@ -621,7 +621,7 @@ endfunction
    always_comb
      begin
 	t_remapped_req2 = r_req2;
-	t_remapped_req2.addr = w_mapped_addr;
+	t_remapped_req2.addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
      end
    
    always_ff@(posedge clk)
@@ -870,7 +870,7 @@ endfunction
       .rd_addr0(t_cache_idx),
       .rd_addr1(t_cache_idx2),
       .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
-      .wr_data(r_mem_req_addr[`M_WIDTH-1:IDX_STOP]),
+      .wr_data(r_mem_req_addr[`PA_WIDTH-1:IDX_STOP]),
       .wr_en(w_cacheable_mem_rsp_valid),
       .rd_data0(r_tag_out),
       .rd_data1(r_tag_out2)
@@ -1616,7 +1616,7 @@ endfunction
 	
 	t_cm_block = r_got_req && r_last_wr && 
 		     (r_cache_idx == core_mem_req.addr[IDX_STOP-1:IDX_START]) &&
-		     (r_cache_tag == core_mem_req.addr[`M_WIDTH-1:IDX_STOP]);
+		     (r_cache_tag == core_mem_req.addr[`PA_WIDTH-1:IDX_STOP]);
 
 
 	t_cm_block_stall = t_cm_block && !(r_did_reload||r_is_retry);//1'b0;
@@ -1671,7 +1671,7 @@ endfunction
 		      end
 		    else if(w_tlb_hit==1'b0)
 		       begin
-			  n_core_mem_rsp.data = w_mapped_addr;
+			  n_core_mem_rsp.data = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
 			  n_core_mem_rsp.dst_valid = 1'b0;
 			  n_core_mem_rsp.bad_addr = 1'b0;
 			  n_core_mem_rsp.tlb_refill = 1'b1;
@@ -1680,7 +1680,7 @@ endfunction
 		    else if(w_tlb_valid == 1'b0)
 		       begin
 			  /* R4400: matching entry, V=0 -> TLB Invalid (TLBL/TLBS), common vector */
-			  n_core_mem_rsp.data = w_mapped_addr;
+			  n_core_mem_rsp.data = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
 			  n_core_mem_rsp.dst_valid = 1'b0;
 			  n_core_mem_rsp.bad_addr = 1'b0;
 			  n_core_mem_rsp.tlb_invalid = 1'b1;
@@ -1691,7 +1691,7 @@ endfunction
 		    else if(r_req2.is_store && (w_tlb_dirty == 1'b0))
 		       begin
 			  /* R4400: store to valid-but-not-dirty page -> TLB Modified (Mod), common vector; no write */
-			  n_core_mem_rsp.data = w_mapped_addr;
+			  n_core_mem_rsp.data = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
 			  n_core_mem_rsp.dst_valid = 1'b0;
 			  n_core_mem_rsp.bad_addr = 1'b0;
 			  n_core_mem_rsp.tlb_modified = 1'b1;
@@ -1815,7 +1815,7 @@ endfunction
 			 n_state = r_req.is_store ? INJECT_UNCACHE_STORE : INJECT_UNCACHE_LOAD;
 			 n_mem_req_valid = 1'b1;
 			 n_mem_req_opcode = r_req.is_store ? MEM_SW : MEM_LW;
-			 n_mem_req_addr = {r_req.addr[`M_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+			 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
 			 n_mem_req_store_data = t_array_data;
 			 t_got_miss = 1'b1;
 			 if(r_req.is_store)
@@ -1912,7 +1912,7 @@ endfunction
 			    else
 			      begin
 				 n_lock_cache = 1'b0;
-				 n_mem_req_addr = {r_req.addr[`M_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+				 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
 				 n_mem_req_opcode = MEM_LW;				 
 				 n_state = INJECT_RELOAD;
 				 n_mem_req_valid = 1'b1;
@@ -1942,7 +1942,7 @@ endfunction
 				 n_req = t_mem_head;
 				 n_req.data = core_store_data.data;
 				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`M_WIDTH-1:IDX_STOP];
+				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:IDX_STOP];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
 				 n_is_retry = 1'b1;
@@ -1968,7 +1968,7 @@ endfunction
 				 n_req.data = core_store_data.data;
 				 core_store_data_ack = 1'b1;
 				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`M_WIDTH-1:IDX_STOP];
+				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:IDX_STOP];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
 				 n_is_retry = 1'b1;
@@ -1981,7 +1981,7 @@ endfunction
 			    t_pop_mq = 1'b1;
 			    n_req = t_mem_head;
 			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-			    t_cache_tag = t_mem_head.addr[`M_WIDTH-1:IDX_STOP];
+			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:IDX_STOP];
 			    t_addr = t_mem_head.addr;
 			    t_got_req = 1'b1;
 			    n_is_retry = 1'b1;
@@ -2011,7 +2011,7 @@ endfunction
 	       begin
 		  //use 2nd read port
 		  t_cache_idx2 = core_mem_req.addr[IDX_STOP-1:IDX_START];
-		  t_cache_tag2 = core_mem_req.addr[`M_WIDTH-1:IDX_STOP];
+		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:IDX_STOP];
 		  n_tlb_addr = core_mem_req.addr;
 		  n_req2 = core_mem_req;
 		  core_mem_req_ack = 1'b1;
@@ -2107,7 +2107,7 @@ endfunction
 		    n_uncache_wb_dirty = 1'b0;
 		    t_got_req = 1'b1;
 		    t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
-		    t_cache_tag = r_req.addr[`M_WIDTH-1:IDX_STOP];
+		    t_cache_tag = r_req.addr[`PA_WIDTH-1:IDX_STOP];
 		    t_addr = r_req.addr;
 		    n_state = ACTIVE;
 		 end
@@ -2115,7 +2115,7 @@ endfunction
 	  HANDLE_RELOAD:
 	    begin
 	       t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_req.addr[`M_WIDTH-1:IDX_STOP];
+	       t_cache_tag = r_req.addr[`PA_WIDTH-1:IDX_STOP];
 	       n_last_wr = n_req.is_store;
 	       t_got_req = 1'b1;
 	       //$display("firing got req at cycle %d, rob ptr %d from HANDLE_RELOAD for uuid %d", r_cycle, r_req.rob_ptr, r_req.uuid);

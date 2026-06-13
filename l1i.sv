@@ -132,7 +132,7 @@ module l1i(clk,
    localparam L1I_CL_LEN_BITS = 1 << (`LG_L1D_CL_LEN + 3);
    localparam LG_WORDS_PER_CL = `LG_L1D_CL_LEN - 2;
    localparam WORDS_PER_CL = 1<<LG_WORDS_PER_CL;
-   localparam N_TAG_BITS = `M_WIDTH - `LG_L1I_NUM_SETS - `LG_L1D_CL_LEN;
+   localparam N_TAG_BITS = `PA_WIDTH - `LG_L1I_NUM_SETS - `LG_L1D_CL_LEN;
    localparam IDX_START = `LG_L1D_CL_LEN;
    localparam IDX_STOP  = `LG_L1D_CL_LEN + `LG_L1I_NUM_SETS;
    localparam WORD_START = 2;
@@ -142,7 +142,7 @@ module l1i(clk,
    localparam PHT_ENTRIES = 1 << `LG_PHT_SZ;
    localparam BTB_ENTRIES = 1 << `LG_BTB_SZ;
 
-   output logic [(`M_WIDTH-1):0] mem_req_addr;
+   output logic [(`PA_WIDTH-1):0] mem_req_addr;
    output logic [4:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
    output logic [15:0]			  mem_req_mask;
@@ -176,7 +176,7 @@ module l1i(clk,
    logic [`LG_L1I_NUM_SETS-1:0] 	    t_cache_idx, r_cache_idx;   
    logic [L1I_CL_LEN_BITS-1:0] 		    r_array_out;   
    logic 				    r_mem_req_valid, n_mem_req_valid;
-   logic [(`M_WIDTH-1):0] 		    r_mem_req_addr, n_mem_req_addr;
+   logic [(`PA_WIDTH-1):0] r_mem_req_addr, n_mem_req_addr;
    logic				    r_mem_req_cacheable,n_mem_req_cacheable;
    
    
@@ -260,7 +260,7 @@ endfunction
 
    wire [`M_WIDTH-1:0]		  w_la_pc;
    logic [`M_WIDTH-1:0]		  r_la_pc, r_tlb_pc;
-   wire [`M_WIDTH-1:0]		  w_tlb_pc;
+   wire [`PA_WIDTH-1:0] w_tlb_pc;
    wire [1:0]		  w_seg;
    
    
@@ -483,7 +483,7 @@ endfunction
 		 );
 
    /* I-side TLB: translates kuseg/kseg2 fetch addresses */
-   wire [`M_WIDTH-1:0]  w_itlb_pa;
+   wire [`PA_WIDTH-1:0] w_itlb_pa;
    wire 		w_itlb_hit;
    wire 		w_itlb_valid;   /* V bit of matched page */
 
@@ -512,9 +512,9 @@ endfunction
      end
 
    /* For mapped (kuseg) addresses use TLB-translated PA; unmapped uses mipsseg output directly */
-   assign w_tlb_pc = (r_mapped && w_itlb_hit) ? w_itlb_pa : r_la_pc;
+   assign w_tlb_pc = (r_mapped && w_itlb_hit) ? w_itlb_pa : r_la_pc[`PA_WIDTH-1:0];
    
-   wire w_hit = (r_tag_out == w_tlb_pc[(`M_WIDTH-1):IDX_STOP]);
+   wire w_hit = (r_tag_out == w_tlb_pc[(`PA_WIDTH-1):IDX_STOP]);
    //always@(negedge clk)
    //begin
    //if(r_req)
@@ -556,8 +556,8 @@ endfunction
 	  end
 	else
 	  begin
-	     t_miss = r_req & !(r_valid_out & (r_tag_out == w_tlb_pc[`M_WIDTH-1:IDX_STOP]));
-	     t_hit  = r_req & (r_valid_out & (r_tag_out == w_tlb_pc[`M_WIDTH-1:IDX_STOP]));
+	     t_miss = r_req & !(r_valid_out & (r_tag_out == w_tlb_pc[`PA_WIDTH-1:IDX_STOP]));
+	     t_hit  = r_req & (r_valid_out & (r_tag_out == w_tlb_pc[`PA_WIDTH-1:IDX_STOP]));
 	  end
 
 	t_insn_idx = r_cache_pc[WORD_STOP-1:WORD_START];
@@ -651,7 +651,7 @@ endfunction
 	  ACTIVE:
 	    begin
 	       t_cache_idx = r_pc[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_pc[(`M_WIDTH-1):IDX_STOP];
+	       t_cache_tag = r_pc[(`PA_WIDTH-1):IDX_STOP];
 	       /* accessed with this address */
 	       n_cache_pc = r_pc;
 	       n_req = 1'b1;
@@ -702,7 +702,7 @@ endfunction
 	       else if(t_miss)
 		 begin
 		    n_state = INJECT_RELOAD;
-		    n_mem_req_addr = {w_tlb_pc[`M_WIDTH-1:`LG_L1D_CL_LEN],
+		    n_mem_req_addr = {w_tlb_pc[`PA_WIDTH-1:`LG_L1D_CL_LEN],
 				      {`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_cacheable = r_cached;
 		    n_mem_req_valid = 1'b1;
@@ -795,7 +795,7 @@ endfunction
 			      t_push_insn4 = 1'b1;
 			      t_cache_idx = r_cache_idx + 'd1;
 			      n_cache_pc = r_cache_pc + 'd16;
-			      t_cache_tag = n_cache_pc[(`M_WIDTH-1):IDX_STOP];
+			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):IDX_STOP];
 			      n_pc = r_cache_pc + 'd20;
 			   end
 			 else if(t_first_branch == 'd3 && !fq_full3)
@@ -803,7 +803,7 @@ endfunction
 			      t_push_insn3 = 1'b1;
 			      n_cache_pc = r_cache_pc + 'd12;
 			      n_pc = r_cache_pc + 'd16;
-			      t_cache_tag = n_cache_pc[(`M_WIDTH-1):IDX_STOP];
+			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):IDX_STOP];
 			      if(t_insn_idx != 0)
 				begin
 				   t_cache_idx = r_cache_idx + 'd1;
@@ -817,7 +817,7 @@ endfunction
 			      n_pc = r_cache_pc + 'd8;
 			      //guaranteed to end-up on another cacheline
 			      n_cache_pc = r_cache_pc + 'd8;
-			      t_cache_tag = n_cache_pc[(`M_WIDTH-1):IDX_STOP];
+			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):IDX_STOP];
 			      n_pc = r_cache_pc + 'd12;
 			      if(t_insn_idx == 2)
 				begin
@@ -856,7 +856,7 @@ endfunction
 	  RELOAD_TURNAROUND:
 	    begin
 	       t_cache_idx = r_miss_pc[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_miss_pc[(`M_WIDTH-1):IDX_STOP];
+	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):IDX_STOP];
 	       if(n_flush_req)
 		 begin
 		    n_flush_req = 1'b0;
@@ -895,7 +895,7 @@ endfunction
 	  WAIT_FOR_NOT_FULL:
 	    begin
 	       t_cache_idx = r_miss_pc[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_miss_pc[(`M_WIDTH-1):IDX_STOP];
+	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):IDX_STOP];
 	       n_cache_pc = r_miss_pc;
 	       if(!fq_full)
 		 begin
@@ -1139,7 +1139,7 @@ endfunction
 	   .clk(clk),
 	   .rd_addr(t_cache_idx),
 	   .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
-	   .wr_data(r_mem_req_addr[`M_WIDTH-1:IDX_STOP]),
+	   .wr_data(r_mem_req_addr[`PA_WIDTH-1:IDX_STOP]),
 	   .wr_en(mem_rsp_valid),
 	   .rd_data(r_tag_out)
 	   );

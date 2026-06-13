@@ -57,7 +57,7 @@ module l2(clk,
 
    input logic 	l1_mem_req_valid;
    output logic l1_mem_req_ack;
-   input logic [`M_WIDTH-1:0] l1_mem_req_addr;
+   input logic [`PA_WIDTH-1:0] l1_mem_req_addr;
    input logic	      l1_mem_req_cacheable;
    input logic [15:0] l1_mem_req_mask;
    
@@ -69,7 +69,7 @@ module l2(clk,
    
    input logic 	mem_req_ack;
    output logic mem_req_valid;
-   output logic [`M_WIDTH-1:0] mem_req_addr;
+   output logic [`PA_WIDTH-1:0] mem_req_addr;
    output logic [127:0] mem_req_store_data;
    output logic [4:0] 	mem_req_opcode;
    output logic [15:0]	mem_req_mask;
@@ -86,7 +86,7 @@ module l2(clk,
    localparam LG_L2_LINES = `LG_L2_NUM_SETS;
    localparam L2_LINES = 1<<LG_L2_LINES;
    
-   localparam TAG_BITS = `M_WIDTH - (LG_L2_LINES + 4);
+   localparam TAG_BITS = `PA_WIDTH - (LG_L2_LINES + 4);
 
    logic 		t_wr_dirty, t_wr_valid;
    logic 		t_wr_d0, t_wr_tag;
@@ -94,8 +94,8 @@ module l2(clk,
    logic 		t_valid, t_dirty;
    logic [LG_L2_LINES-1:0] t_idx, r_idx;
    logic [TAG_BITS-1:0]	   n_tag, r_tag;
-   logic [`M_WIDTH-1:0]	   n_addr, r_addr;
-   logic [`M_WIDTH-1:0]	   n_saveaddr, r_saveaddr;
+   logic [`PA_WIDTH-1:0]	   n_addr, r_addr;
+   logic [`PA_WIDTH-1:0]	   n_saveaddr, r_saveaddr;
    
    logic [4:0] 		   n_opcode, r_opcode;
 
@@ -396,9 +396,9 @@ module l2(clk,
 	  IDLE:
 	    begin
 	       t_idx = l1_mem_req_addr[LG_L2_LINES+3:4];
-	       n_tag = l1_mem_req_addr[`M_WIDTH-1:LG_L2_LINES+4];
-	       n_addr = {l1_mem_req_addr[`M_WIDTH-1:4], 4'd0};
-	       n_saveaddr = {l1_mem_req_addr[`M_WIDTH-1:4], 4'd0};
+	       n_tag = l1_mem_req_addr[`PA_WIDTH-1:LG_L2_LINES+4];
+	       n_addr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
+	       n_saveaddr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_opcode = l1_mem_req_opcode;
 	       n_store_data = l1_mem_req_store_data;
 	       n_store_mask = 16'h0;

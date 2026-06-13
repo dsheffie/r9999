@@ -25,7 +25,7 @@ module tlb(clk,
    input logic req;
    
    input logic [`M_WIDTH-1:0] va;
-   output logic [`M_WIDTH-1:0] pa;
+   output logic [`PA_WIDTH-1:0] pa;
    
    output logic	       hit;
    output logic [5:0]  hit_index;
@@ -102,7 +102,8 @@ module tlb(clk,
    wire                w_dirty   = w_odd ? r_tlb[w_hit_idx].d1   : r_tlb[w_hit_idx].d0;
    wire                w_valid   = w_odd ? r_tlb[w_hit_idx].v1   : r_tlb[w_hit_idx].v0;
    /* 4KB page only (pagemask=0): PA[39:12]=pfn[27:0], PA[11:0]=va[11:0] */
-   wire [`PA_WIDTH-1:0] w_pa4k   = {w_pfn, va[11:0]};
+   wire [27+12:0] w_pa4k_full = {w_pfn, va[11:0]};
+   wire [`PA_WIDTH-1:0] w_pa4k = w_pa4k_full[`PA_WIDTH-1:0];
 
    always_ff@(posedge clk)
      begin
@@ -110,7 +111,7 @@ module tlb(clk,
 	hit_index <= reset ? 'd0 : w_hit_idx;
 	dirty   <= reset ? 1'b0 : (active ? w_dirty : 1'b1);
 	valid <= reset ? 1'b0 : (active ? w_valid : 1'b1);
-	pa      <= active ? {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_pa4k} : va;
+	pa      <= active ? w_pa4k : va[`PA_WIDTH-1:0];
      end
 
 

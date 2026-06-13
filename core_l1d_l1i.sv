@@ -131,7 +131,7 @@ module core_l1d_l1i(clk,
    
    /* mem port */
    output logic 		 mem_req_valid;
-   output logic [`M_WIDTH-1:0] 	 mem_req_addr;
+   output logic [`PA_WIDTH-1:0] 	 mem_req_addr;
    output logic [127:0] 	 mem_req_store_data;
    output logic [4:0] 		 mem_req_opcode;
    output logic [15:0]		 mem_req_mask;
@@ -346,7 +346,7 @@ module core_l1d_l1i(clk,
    
    logic 				  l1d_mem_req_ack;
    logic 				  l1d_mem_req_valid;
-   logic [(`M_WIDTH-1):0] 		  l1d_mem_req_addr;
+   logic [(`PA_WIDTH-1):0] 		  l1d_mem_req_addr;
    logic [L1D_CL_LEN_BITS-1:0] 		  l1d_mem_req_store_data;
    logic [4:0] 				  l1d_mem_req_opcode;
    logic				  l1d_mem_req_cacheable;
@@ -355,7 +355,7 @@ module core_l1d_l1i(clk,
    logic 				  l1i_mem_req_ack;   
    logic 				  l1i_mem_req_valid;
    logic				  l1i_mem_req_cacheable;
-   logic [(`M_WIDTH-1):0]		  l1i_mem_req_addr;
+   logic [(`PA_WIDTH-1):0]		  l1i_mem_req_addr;
    logic [15:0]				  l1i_mem_req_mask;
    
    logic [L1D_CL_LEN_BITS-1:0] 		  l1i_mem_req_store_data;
@@ -373,7 +373,7 @@ module core_l1d_l1i(clk,
    insn_fetch_t insn, insn2;
 
 
-   logic [`M_WIDTH-1:0]			  t_l2_req_addr;
+   logic [`PA_WIDTH-1:0]			  t_l2_req_addr;
    logic [4:0] 				  t_l2_req_opcode;
    logic				  t_l2_req_cacheable;
    logic [15:0]				  t_l2_req_mask;

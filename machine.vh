@@ -93,7 +93,10 @@
 
 `define M_WIDTH (1 << `LG_M_WIDTH)
 
-`define PA_WIDTH 40
+/* Physical address width. VAs stay `M_WIDTH (64); physical addresses (cache tags,
+ * the memory bus, TLB PA, L2) are PA_WIDTH. R4000 = 36; IRIX/Indy needs only 29
+ * (kseg0 mask is 0x1fffffff = 29 bits). Shmoo {29,32,36} for the area/timing curve. */
+`define PA_WIDTH 36
 
 /* CP0 PRId (processor identification) values. imp field is bits [15:8];
  * the R4000 family shares imp=0x04 and is distinguished by the revision byte. */
