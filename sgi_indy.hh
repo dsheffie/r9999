@@ -7,6 +7,7 @@
 
 #include "sgi_mc.hh"
 #include "sgi_hpc.hh"
+#include "sgi_scc.hh"
 
 enum class mem_range_t {sys_mem_alias,
 			eisa_io,
@@ -19,6 +20,7 @@ enum class mem_range_t {sys_mem_alias,
 			gio64_slot1,
 			mc_regs,
 			hpc_regs,
+			scc_regs,
 			boot_rom,
 			high_local,
 			eisa_mem_2048M};
@@ -51,6 +53,10 @@ inline static mem_range_t compute_mem_range_type(uint32_t pa) {
   else if(pa >= 0x1fa00000 and pa <= 0x1fafffff) {
     return mem_range_t::mc_regs;
   }
+  else if(pa >= 0x1fbd9830 and pa <= 0x1fbd983f) {
+    /* IOC2 serial SCC (Z8530) -- carved out of the HPC region (checked first) */
+    return mem_range_t::scc_regs;
+  }
   else if(pa >= 0x1fb00000 and pa <= 0x1fbfffff) {
     return mem_range_t::hpc_regs;
   }
@@ -78,6 +84,7 @@ static const std::map<mem_range_t, std::string> rangeNames = {
   {mem_range_t::gio64_slot1, "gio64_slot1"},
   {mem_range_t::mc_regs, "mc_regs"},
   {mem_range_t::hpc_regs, "hpc_regs"},
+  {mem_range_t::scc_regs, "scc_regs"},
   {mem_range_t::boot_rom, "boot_rom"},
   {mem_range_t::high_local, "high_local"},
   {mem_range_t::eisa_mem_2048M, "eisa_mem_2048M"}
