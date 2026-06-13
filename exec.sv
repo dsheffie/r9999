@@ -2301,6 +2301,9 @@ module exec(clk,
    logic [31:0] r_count, n_count;
    /* CP0 register 11: Compare (timer fires when Count == Compare) */
    logic [31:0] r_compare, n_compare;
+   /* WatchLo/WatchHi (CP0 r18/r19): functional register interface only —
+    * store/read-back, no watch-match hardware, no Watch (ExcCode 23) delivery. */
+   logic [31:0] r_watchlo, n_watchlo, r_watchhi, n_watchhi;
    /* timer interrupt pending: set when Count==Compare, cleared by MTC0 Compare */
    logic        r_timer_ip, n_timer_ip;
    /* kernel - 00, supervisor - 01, user - 10 */
@@ -2575,6 +2578,8 @@ module exec(clk,
 	/* Count increments every cycle */
 	n_count = r_count + 32'd1;
 	n_compare = r_compare;
+	n_watchlo = r_watchlo;
+	n_watchhi = r_watchhi;
 	/* Timer IP: set when Count wraps to Compare, cleared by MTC0 Compare */
 	n_timer_ip = r_timer_ip | (n_count == r_compare);
 
@@ -2596,6 +2601,11 @@ module exec(clk,
 	  begin
 	     n_count = t_srcA[31:0];
 	  end
+	/* MTC0 reg 18/19: WatchLo/WatchHi — functional register only (no watch hw) */
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd18)
+	  n_watchlo = t_srcA[31:0];
+	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd19)
+	  n_watchhi = t_srcA[31:0];
 	/* MTC0 reg 11: write Compare and clear timer IP */
 	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd11)
 	  begin
@@ -2616,7 +2626,7 @@ module exec(clk,
 	     else
 	       n_sr_exl = 1'b0;
 	  end
-     end // always_ff@ (posedge clk)
+     end // always_comb
 
    always@(posedge clk)
      begin
@@ -2634,6 +2644,8 @@ module exec(clk,
 	r_random <= reset ? 'd47 : n_random;
 	r_count   <= reset ? 32'd0 : n_count;
 	r_compare <= reset ? 32'd0 : n_compare;
+	r_watchlo <= reset ? 32'd0 : n_watchlo;
+	r_watchhi <= reset ? 32'd0 : n_watchhi;
 	r_timer_ip <= reset ? 1'b0 : n_timer_ip;
      end
 
@@ -2759,6 +2771,14 @@ module exec(clk,
 	  'd14:
 	    begin
 	       t_csr0_val = r_epc;
+	    end
+	  'd18: /* WatchLo (functional register only; no watch hardware) */
+	    begin
+	       t_csr0_val = sign_extend32(r_watchlo);
+	    end
+	  'd19: /* WatchHi (functional register only; no watch hardware) */
+	    begin
+	       t_csr0_val = sign_extend32(r_watchhi);
 	    end
 	  'd15: /* PRId: read-only processor id */
 	    begin
