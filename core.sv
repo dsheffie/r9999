@@ -339,7 +339,12 @@ module core(clk,
    
    logic 				  r_got_restart_ack, n_got_restart_ack;
    
-   rob_entry_t r_rob[N_ROB_ENTRIES-1:0];
+   /* ROB banked even/odd by rob_ptr[0] (rv64core scheme): alloc writes 2 consecutive
+    * entries (tail, tail+1) which always differ in bit0 -> one to each bank, so each
+    * bank sees a single alloc write (instead of 2 write ports on one wide array).
+    * Retire reads head + head+1 -> one from each bank.  Bank index = rob_ptr[hi:1]. */
+   rob_entry_t r_rob_even[(N_ROB_ENTRIES/2)-1:0];
+   rob_entry_t r_rob_odd[(N_ROB_ENTRIES/2)-1:0];
    logic [`M_WIDTH-1:0 ] r_addrs[N_ROB_ENTRIES-1:0];
    
    
@@ -944,17 +949,20 @@ module core(clk,
 //`define DEBUG
 `ifdef VERILATOR
    logic [31:0] t_faults, t_branches;
+   rob_entry_t t_dbg_rob;
    always_comb
      begin
 	t_faults = 'd0;
 	t_branches = 'd0;
+	t_dbg_rob = '0;
 	for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
 	  begin
-	     if(r_rob_complete[i[`LG_ROB_ENTRIES-1:0]]  && r_rob[i[`LG_ROB_ENTRIES-1:0]].faulted)
+	     t_dbg_rob = i[0] ? r_rob_odd[i[`LG_ROB_ENTRIES-1:1]] : r_rob_even[i[`LG_ROB_ENTRIES-1:1]];
+	     if(r_rob_complete[i[`LG_ROB_ENTRIES-1:0]]  && t_dbg_rob.faulted)
 	       begin
 		  t_faults = t_faults + 'd1;
 	       end
-	     if(r_rob[i[`LG_ROB_ENTRIES-1:0]].is_br && r_rob_complete[i[`LG_ROB_ENTRIES-1:0]])
+	     if(t_dbg_rob.is_br && r_rob_complete[i[`LG_ROB_ENTRIES-1:0]])
 	       begin
 		  t_branches = t_branches + 'd1;
 	       end
@@ -970,6 +978,7 @@ module core(clk,
    
 //`define DUMP_ROB
 `ifdef DUMP_ROB
+   rob_entry_t t_dbg_dump;
    always_ff@(negedge clk)
      begin
  	if(r_cycle > 'd50)
@@ -991,12 +1000,13 @@ module core(clk,
 
 	     for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
 	       begin
+		  t_dbg_dump = i[0] ? r_rob_odd[i[`LG_ROB_ENTRIES-1:1]] : r_rob_even[i[`LG_ROB_ENTRIES-1:1]];
 		  $display("\trob entry %d, pc %x, complete %b, is br %b, faulted %b",
-			   i[`LG_ROB_ENTRIES-1:0], 
-			   r_rob[i[`LG_ROB_ENTRIES-1:0]].pc, 
+			   i[`LG_ROB_ENTRIES-1:0],
+			   t_dbg_dump.pc,
 			   r_rob_complete[i[`LG_ROB_ENTRIES-1:0]],
-			   r_rob[i[`LG_ROB_ENTRIES-1:0]].is_br,
-			   r_rob[i[`LG_ROB_ENTRIES-1:0]].faulted,
+			   t_dbg_dump.is_br,
+			   t_dbg_dump.faulted,
 			   );
 	       end
 	  end
@@ -2082,56 +2092,88 @@ module core(clk,
      begin
 	if(reset || t_clr_rob)
 	  begin
-	     for(integer i = 0; i < N_ROB_ENTRIES; i=i+1)
+	     for(integer i = 0; i < (N_ROB_ENTRIES/2); i=i+1)
 	       begin
-		  r_rob[i].faulted <= 1'b0;
+		  r_rob_even[i].faulted <= 1'b0;
+		  r_rob_odd[i].faulted <= 1'b0;
 	       end
 	  end
 	else
 	  begin
 	     if(t_alloc)
 	       begin
-		  r_rob[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_rob_tail;
+		  if(r_rob_tail_ptr[0])
+		    r_rob_odd[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_tail;
+		  else
+		    r_rob_even[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_tail;
 	       end
 	     if(t_alloc_two)
 	       begin
-		  r_rob[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_rob_next_tail;
+		  if(r_rob_next_tail_ptr[0])
+		    r_rob_odd[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_next_tail;
+		  else
+		    r_rob_even[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_next_tail;
 	       end
 	     if(t_complete_valid_1)
 	       begin
-		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].faulted <= t_complete_bundle_1.faulted;
-		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].target_pc <= t_complete_bundle_1.restart_pc;
-		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].is_ii <= t_complete_bundle_1.is_ii;
-		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].take_br <= t_complete_bundle_1.take_br;
-		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].data <= t_complete_bundle_1.data;
-		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].overflow <= t_complete_bundle_1.overflow;
-		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].trap <= t_complete_bundle_1.trap;		  
+		  if(t_complete_bundle_1.rob_ptr[0]) begin
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= t_complete_bundle_1.faulted;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].target_pc <= t_complete_bundle_1.restart_pc;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_ii <= t_complete_bundle_1.is_ii;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].take_br <= t_complete_bundle_1.take_br;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= t_complete_bundle_1.data;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].overflow <= t_complete_bundle_1.overflow;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].trap <= t_complete_bundle_1.trap;
 `ifdef ENABLE_CYCLE_ACCOUNTING
-		  r_rob[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]].complete_cycle <= r_cycle;
-`endif	    
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
+`endif
+		  end
+		  else begin
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= t_complete_bundle_1.faulted;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].target_pc <= t_complete_bundle_1.restart_pc;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_ii <= t_complete_bundle_1.is_ii;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].take_br <= t_complete_bundle_1.take_br;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= t_complete_bundle_1.data;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].overflow <= t_complete_bundle_1.overflow;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].trap <= t_complete_bundle_1.trap;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
+`endif
+		  end
 	       end
 	     if(core_mem_rsp_valid)
 	       begin
-		  r_rob[core_mem_rsp.rob_ptr].data <= core_mem_rsp.data;
-		  r_rob[core_mem_rsp.rob_ptr].faulted <= core_mem_rsp.bad_addr | core_mem_rsp.tlb_refill | core_mem_rsp.tlb_invalid | core_mem_rsp.tlb_modified;
-		  
-		  r_rob[core_mem_rsp.rob_ptr].tlb_refill <= core_mem_rsp.tlb_refill;
-		  r_rob[core_mem_rsp.rob_ptr].tlb_invalid <= core_mem_rsp.tlb_invalid;
-		  r_rob[core_mem_rsp.rob_ptr].tlb_modified <= core_mem_rsp.tlb_modified;		  
-
-		  r_rob[core_mem_rsp.rob_ptr].tlb_hit <= core_mem_rsp.tlb_hit;
-		  r_rob[core_mem_rsp.rob_ptr].tlb_index <= core_mem_rsp.tlb_index;
-		  
-		  r_rob[core_mem_rsp.rob_ptr].is_bad_addr <= core_mem_rsp.bad_addr;
+		  if(core_mem_rsp.rob_ptr[0]) begin
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= core_mem_rsp.data;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= core_mem_rsp.bad_addr | core_mem_rsp.tlb_refill | core_mem_rsp.tlb_invalid | core_mem_rsp.tlb_modified;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_refill <= core_mem_rsp.tlb_refill;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_invalid <= core_mem_rsp.tlb_invalid;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_modified <= core_mem_rsp.tlb_modified;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_hit <= core_mem_rsp.tlb_hit;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_index <= core_mem_rsp.tlb_index;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_bad_addr <= core_mem_rsp.bad_addr;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
+`endif
+		  end
+		  else begin
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= core_mem_rsp.data;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= core_mem_rsp.bad_addr | core_mem_rsp.tlb_refill | core_mem_rsp.tlb_invalid | core_mem_rsp.tlb_modified;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_refill <= core_mem_rsp.tlb_refill;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_invalid <= core_mem_rsp.tlb_invalid;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_modified <= core_mem_rsp.tlb_modified;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_hit <= core_mem_rsp.tlb_hit;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_index <= core_mem_rsp.tlb_index;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_bad_addr <= core_mem_rsp.bad_addr;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
+`endif
+		  end
 		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
 		  if(t_alloc && (t_uop.op == FETCH_TLB_MISS || t_uop.op == FETCH_TLB_INVALID || t_uop.op == FETCH_MISALIGNED))
 		    r_addrs[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.pc;
 		  if(t_alloc_two && (t_uop2.op == FETCH_TLB_MISS || t_uop2.op == FETCH_TLB_INVALID || t_uop2.op == FETCH_MISALIGNED))
 		    r_addrs[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.pc;
-
-`ifdef ENABLE_CYCLE_ACCOUNTING
-		  r_rob[core_mem_rsp.rob_ptr].complete_cycle <= r_cycle;
-`endif	    	     	     
 	       end
 	  end
      end // always_ff@ (posedge clk)
@@ -2271,8 +2313,8 @@ module core(clk,
 
    always_comb
      begin
-	t_rob_head = r_rob[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
-	t_rob_next_head = r_rob[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]];
+	t_rob_head = r_rob_head_ptr[0] ? r_rob_odd[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]] : r_rob_even[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]];
+	t_rob_next_head = r_rob_next_head_ptr[0] ? r_rob_odd[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]] : r_rob_even[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]];
 	
 	t_rob_head_complete = r_rob_sd_complete[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]] &
 			      r_rob_complete[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
