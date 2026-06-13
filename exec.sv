@@ -203,6 +203,11 @@ module exec(clk,
    /* FP register file (shared by the mem-pipe mover now, the FPU later).
     * 64-bit regs; FR=1/N32 model. */
    logic [`M_WIDTH-1:0] 	  r_fp_prf[N_INT_PRF_ENTRIES-1:0];
+   /* registered FP read ports (rf4r2w-style synchronous read): address presented
+    * from the combinational head, output aligned with mem_uq / mem_dq.  Matches the
+    * int PRF's registered-read pattern so synth maps cleanly (no async-read on a
+    * combinational BRAM read). srcB = mfc1 source; dq = FP store data. */
+   logic [`M_WIDTH-1:0] 	  r_fp_rd_srcB, r_fp_rd_dq;
    logic [N_INT_PRF_ENTRIES-1:0]  r_fp_prf_inflight, n_fp_prf_inflight;
 
    logic 			  t_wr_int_prf, t_wr_cpr0, t_wr_cpr0_64;
@@ -1142,9 +1147,16 @@ module exec(clk,
 	  end
      end // always_ff@ (posedge clk)
 
-   /* FP PRF write port: mem-pipe move / FP-load response (shared with the future FPU) */
+   /* FP PRF: one write port (mem-pipe move / FP-load response; shared with the future
+    * FPU) + two registered read ports (mfc1 source, FP store data).  Read address is
+    * the combinational head (t_mem_uq.srcB / t_mem_dq.src_ptr) so the registered output
+    * lands aligned with mem_uq / mem_dq -- exactly like the int PRF (rf4r2w).  The NBA
+    * read evaluates the pre-write array => read-old on a same-cycle RW collision (which
+    * the inflight pop-gating already prevents). */
    always_ff@(posedge clk)
      begin
+	r_fp_rd_srcB <= r_fp_prf[t_mem_uq.srcB];
+	r_fp_rd_dq   <= r_fp_prf[t_mem_dq.src_ptr];
 	if(mem_rsp_dst_valid & mem_rsp_fp_dst)
 	  r_fp_prf[mem_rsp_dst_ptr] <= mem_rsp_load_data;
      end
@@ -1972,9 +1984,8 @@ module exec(clk,
 
    wire w_mem_srcA_ready = t_mem_uq.srcA_valid ? (!r_prf_inflight[t_mem_uq.srcA] | t_fwd_int_mem_srcA | t_fwd_mem_mem_srcA) : 1'b1;
 
-   /* mfc1 reads its FP source from the FP PRF (carried as move data); gate the pop on it */
-   wire [`M_WIDTH-1:0] w_mem_fp_srcB = r_fp_prf[mem_uq.srcB];
-   /* mfc1 (FP src -> address/mem-pop) gates the address pop on its FP source; FP stores
+   /* mfc1's FP source is the registered FP read r_fp_rd_srcB (aligned with mem_uq).
+    * mfc1 (FP src -> address/mem-pop) gates the address pop on its FP source; FP stores
     * read the FP PRF through the store-data queue instead, so they don't gate here. */
    wire w_mem_fp_srcB_ready = (t_mem_uq.fp_srcB_valid && !t_mem_uq.is_store) ? !r_fp_prf_inflight[t_mem_uq.srcB] : 1'b1;
 
@@ -1995,7 +2006,7 @@ module exec(clk,
    always_comb
      begin
 	t_core_store_data.rob_ptr = mem_dq.rob_ptr;
-	t_core_store_data.data = mem_dq.fp ? r_fp_prf[mem_dq.src_ptr] : t_mem_srcB;
+	t_core_store_data.data = mem_dq.fp ? r_fp_rd_dq : t_mem_srcB;
 	core_store_data_ptr = mem_dq.rob_ptr;
 	core_store_data_ptr_valid = r_dq_ready;
      end
@@ -2270,7 +2281,7 @@ module exec(clk,
 	    begin
 	       /* FPR->GPR move (mips3/4): GPR[rt] = sign_extend32(FPR[fs][31:0]) */
 	       t_mem_tail.op = MEM_MOV;
-	       t_mem_tail.addr = {{32{w_mem_fp_srcB[31]}}, w_mem_fp_srcB[31:0]};
+	       t_mem_tail.addr = {{32{r_fp_rd_srcB[31]}}, r_fp_rd_srcB[31:0]};
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.fp_dst = 1'b0;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
