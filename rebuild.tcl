@@ -16,6 +16,30 @@ generate_target all [get_files $bd]
 export_ip_user_files -of_objects [get_files $bd] -no_script -sync -force -quiet
 update_compile_order -fileset sources_1
 
+# --- ipshared stale-cache guard ---------------------------------------------
+# generate_target frequently reports the BD "up-to-date" and does NOT refresh
+# the cached copy of the IP HDL under <proj>.gen/.../ipshared/<hash>/hdl/.  When
+# that happens synth/impl silently build STALE RTL (this cost a 37-min run + a
+# bogus result).  Force every cached HDL file to match the IP-repo source and
+# hard-abort if any still differs.  See the fpga_ipshared_stale note.
+set ip_hdl /home/dsheffie/fpga/ultra96v2-mipscore/ip_repo/axi_is_the_worst_1_0/hdl
+set gendir /home/dsheffie/fpga/ultra96v2-mipscore/BASELINE_2022.2/ultra96v2_oob.gen/sources_1/bd/ultra96v2_oob/ipshared
+set nrefresh 0
+foreach cached [glob -nocomplain $gendir/*/hdl/*.v] {
+    set src $ip_hdl/[file tail $cached]
+    if {![file exists $src]} { continue }
+    if {[catch {exec cmp -s $src $cached}]} {
+	puts "### ipshared guard: REFRESHING stale [file tail $cached]"
+	file copy -force $src $cached
+	incr nrefresh
+    }
+    if {[catch {exec cmp -s $src $cached}]} {
+	puts "### ipshared guard: FATAL -- $cached != $src after refresh; aborting"
+	exit 1
+    }
+}
+puts "### ipshared guard: OK (refreshed $nrefresh stale file(s))"
+
 reset_run synth_1
 launch_runs $run -to_step write_bitstream -jobs 12
 wait_on_run $run
