@@ -132,7 +132,8 @@ typedef enum logic [4:0] {
    MEM_LL   = 5'd21,   /* load-linked word  */
    MEM_LLD  = 5'd22,   /* load-linked dword */
    MEM_SCD  = 5'd23,   /* store-conditional dword */
-   MEM_INVL = 5'd24    /* L2 line invalidate (no writeback) -- CACHE DMA-in drop */
+   MEM_INVL = 5'd24,   /* L2 line invalidate (no writeback) -- CACHE DMA-in drop */
+   MEM_MOV  = 5'd25    /* GPR<->FPR move: data carried in req.addr, echoed by L1D (no memory access) */
 } mem_op_t;
 
 /* MIPS R10000 exception ordering 

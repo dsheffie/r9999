@@ -3,7 +3,7 @@
 
 `include "machine.vh"
 
-typedef enum logic [6:0] 
+typedef enum logic [7:0]
   {
    SLL = 'd0, //0
    SRL = 'd1, //1
@@ -133,7 +133,12 @@ typedef enum logic [6:0]
    TGE,
    TGEU,
    TLT,
-   TLTU
+   TLTU,
+   /* FP loads/stores */
+   LWC1,
+   SWC1,
+   LDC1,
+   SDC1
    } opcode_t;
 
 function logic is_mult(opcode_t op);
@@ -209,16 +214,21 @@ typedef struct packed {
    logic 		       fp_srcA_valid;
    logic [`LG_PRF_ENTRIES-1:0] srcB;
    logic 		       srcB_valid;
-   logic 		       fp_srcB_valid;   
+   logic 		       fp_srcB_valid;
+   logic [`LG_PRF_ENTRIES-1:0] srcC;
+   logic 		       srcC_valid;
+   logic 		       fp_srcC_valid;
    logic [`LG_PRF_ENTRIES-1:0] dst;
    logic 		       dst_valid;
    logic 		       fp_dst_valid;
+   logic 		       fcr_dst_valid;
 
    logic 		       hilo_dst_valid;
    logic [`LG_HILO_PRF_ENTRIES-1:0] hilo_dst;
 
    logic 			    hilo_src_valid;
    logic [`LG_HILO_PRF_ENTRIES-1:0] hilo_src;
+   logic 			    fcr_src_valid;
      
    logic 		       has_delay_slot;
    logic 		       has_nullifying_delay_slot;
@@ -238,6 +248,7 @@ typedef struct packed {
    logic 		       is_cache;   /* MIPS CACHE op (serializing flush) */
    logic 		       cache_is_d; /* CACHE targets D-cache (per-line WB) vs I-cache (whole nuke) */
    logic 		       cache_inval; /* CACHE Hit-Invalidate: drop the line WITHOUT writeback (DMA-in) */
+   logic 		       is_fp;   /* compute FP op (routes to the FP issue queue) */
    logic [`LG_PHT_SZ-1:0]      pht_idx;
    logic		       mode_when_fetched;
 `ifdef VERILATOR

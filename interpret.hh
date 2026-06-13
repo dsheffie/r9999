@@ -110,7 +110,9 @@ public:
   reg_t lo = 0;
   reg_t hi = 0;
   uint32_t cpr0[32] = {0};
-  uint32_t cpr1[32] = {0};
+  /* FR=1 (mips3/mips4): 32 independent 64-bit FP registers, NOT FR=0 even/odd
+   * 32-bit pairs.  Singles live in bits[31:0]; doubles use the full 64 bits. */
+  uint64_t cpr1[32] = {0};
   uint32_t fcr1[5] = {0};
   uint64_t icnt = 0;
   uint8_t brk = 0;

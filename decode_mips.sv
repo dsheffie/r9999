@@ -92,13 +92,19 @@ module decode_mips(
 	uop.srcB_valid = 1'b0;
 	uop.fp_srcA_valid = 1'b0;
 	uop.fp_srcB_valid = 1'b0;
+	uop.srcC = 'd0;
+	uop.srcC_valid = 1'b0;
+	uop.fp_srcC_valid = 1'b0;
+	uop.fcr_src_valid = 1'b0;
 	uop.hilo_dst_valid = 1'b0;
 	uop.hilo_src_valid = 1'b0;
 	uop.hilo_dst = 'd0;
 	uop.hilo_src = 'd0;
-	
+
 	uop.dst_valid = 1'b0;
 	uop.fp_dst_valid = 1'b0;
+	uop.fcr_dst_valid = 1'b0;
+	uop.is_fp = 1'b0;
 	
 	uop.has_delay_slot = 1'b0;
 	uop.has_nullifying_delay_slot = 1'b0;
@@ -1037,24 +1043,20 @@ module decode_mips(
 	       6'd17: /* coproc1 */
 		 begin
 		    if((insn[25:21]==5'd0) && (insn[10:0] == 11'd0))
-		      begin /* mfc1 */
+		      begin /* mfc1: GPR[rt] <- FPR[fs] (FR=1 flat) */
 			 uop.dst = rt;
 			 uop.dst_valid = 1'b1;
-			 uop.op = MFC1_MERGE;
-			 uop.srcB = {{ZP{1'b0}}, rd[4:1], 1'b0};
-			 uop.jmp_imm = { {(`M_WIDTH-17){1'b0}}, rd[0]};
+			 uop.op = MFC1;
+			 uop.srcB = fs;
 			 uop.fp_srcB_valid = 1'b1;
 			 uop.is_mem = 1'b1;
 		      end
 		    else if((insn[25:21]==5'd4) && (insn[10:0] == 11'd0))
-		      begin /* mtc1 */
+		      begin /* mtc1: FPR[fs] <- GPR[rt] (FR=1 flat) */
 			 uop.srcA = rt;
 			 uop.srcA_valid = 1'b1;
-			 uop.op = MTC1_MERGE;
-			 uop.dst = {{ZP{1'b0}}, rd[4:1], 1'b0};
-			 uop.srcB = {{ZP{1'b0}}, rd[4:1], 1'b0};
-			 uop.jmp_imm = { {(`M_WIDTH-17){1'b0}}, rd[0]};
-			 uop.fp_srcB_valid = 1;			 
+			 uop.op = MTC1;
+			 uop.dst = fs;
 			 uop.fp_dst_valid = 1'b1;
 			 uop.is_mem = 1'b1;
 		      end // if ((insn[25:21]==5'd4) && (insn[10:0] == 11'd0))
@@ -1426,10 +1428,58 @@ module decode_mips(
 			 uop.oldest_first = 1'b1;
 		      end
 		 end
+	       6'd49: /* LWC1: FPR[ft] <- mem[rs+off] (low 32b) */
+		 begin
+		    uop.op = LWC1;
+		    uop.srcA = rs;
+		    uop.srcA_valid = 1'b1;
+		    uop.dst = ft;
+		    uop.fp_dst_valid = 1'b1;
+		    uop.imm = insn[15:0];
+		    uop.is_mem = 1'b1;
+		 end
+	       6'd53: /* LDC1: FPR[ft] <- mem[rs+off] (64b) */
+		 begin
+		    if(w_in_64b_mode)
+		      begin
+			 uop.op = LDC1;
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.dst = ft;
+			 uop.fp_dst_valid = 1'b1;
+			 uop.imm = insn[15:0];
+			 uop.is_mem = 1'b1;
+		      end
+		 end
 	       6'd51: /* PREF */
 		 begin
 		    uop.op = NOP;
 		    uop.is_int = 1'b1;
+		 end
+	       6'd57: /* SWC1: mem[rs+off] <- FPR[ft] (low 32b) */
+		 begin
+		    uop.op = SWC1;
+		    uop.srcA = rs;
+		    uop.srcA_valid = 1'b1;
+		    uop.srcB = ft;
+		    uop.fp_srcB_valid = 1'b1;
+		    uop.imm = insn[15:0];
+		    uop.is_mem = 1'b1;
+		    uop.is_store = 1'b1;
+		 end
+	       6'd61: /* SDC1: mem[rs+off] <- FPR[ft] (64b) */
+		 begin
+		    if(w_in_64b_mode)
+		      begin
+			 uop.op = SDC1;
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.srcB = ft;
+			 uop.fp_srcB_valid = 1'b1;
+			 uop.imm = insn[15:0];
+			 uop.is_mem = 1'b1;
+			 uop.is_store = 1'b1;
+		      end
 		 end
 	       6'd55: /* LD */
 		 begin

@@ -17,6 +17,7 @@ typedef struct packed {
    logic       is_tlbp;
    logic       valid_dst;
    logic       valid_hilo_dst;
+   logic       valid_fp_dst;   /* dst is an FP physical reg (free into the FP free list at retire) */
    logic       has_delay_slot;
    logic       has_nullifying_delay_slot;
    logic       in_delay_slot;
@@ -91,6 +92,7 @@ typedef struct packed {
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic [`LG_PRF_ENTRIES-1:0] dst_ptr;
    logic 		       dst_valid;
+   logic 		       fp_dst;   /* result writes the FP PRF (vs int) — for moves/FP loads */
    logic [(`M_WIDTH-1):0]      data;
 `ifdef VERILATOR
    logic [(`M_WIDTH-1):0]      pc;
@@ -100,6 +102,7 @@ typedef struct packed {
 typedef struct packed {
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic [`LG_PRF_ENTRIES-1:0] src_ptr;
+   logic 		       fp;   /* store data comes from the FP PRF (swc1/sdc1) */
 } dq_t;
 
 typedef struct packed {
@@ -112,6 +115,7 @@ typedef struct packed {
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic [`LG_PRF_ENTRIES-1:0] dst_ptr;
    logic 		       dst_valid;
+   logic 		       fp_dst;   /* result writes the FP PRF (vs int) */
    logic 		       bad_addr;
    logic		       tlb_refill;
    logic		       tlb_invalid;
