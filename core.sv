@@ -1381,12 +1381,24 @@ module core(clk,
 		 begin
 		    if(t_rob_head.is_cache)
 		      begin
-			 /* CACHE op: pulse a whole-cache flush (L1I+L1D, which the
-			  * arbiter then chains into an L2 flush). Wait for it in
-			  * CACHE_FLUSH before restarting -- the restart is what
-			  * refetches, which is mandatory once L1I is nuked. */
-			 n_flush_req_l1d = 1'b1;
-			 n_flush_req_l1i = 1'b1;
+			 /* CACHE op: D-side does a surgical per-line writeback of the
+			  * addressed line to L2 (flush_cl at EA = rob.data); I-side
+			  * nukes the whole L1I (the arbiter chains an L2 flush). Fake
+			  * the completes of the caches we don't touch so CACHE_FLUSH's
+			  * uniform all-three wait still fires. Restart afterward to
+			  * refetch (mandatory once L1I is gone; harmless for D). */
+			 if(t_rob_head.cache_is_d)
+			   begin
+			      n_flush_cl_req  = 1'b1;
+			      n_flush_cl_addr = t_rob_head.data;   /* base + offset */
+			      n_l1i_flush_complete = 1'b1;          /* not flushing L1I */
+			      n_l2_flush_complete  = 1'b1;          /* flush_cl bypasses the L2 flush */
+			   end
+			 else
+			   begin
+			      n_flush_req_l1i = 1'b1;
+			      n_l1d_flush_complete = 1'b1;          /* not flushing L1D */
+			   end
 			 n_state = CACHE_FLUSH;
 		      end
 		    else
@@ -1877,6 +1889,7 @@ module core(clk,
 	t_rob_tail.is_break  = (t_alloc_uop.op == BREAK);
 	t_rob_tail.is_syscall  = (t_alloc_uop.op == SYSCALL);
 	t_rob_tail.is_cache  = t_alloc_uop.is_cache;
+	t_rob_tail.cache_is_d = t_alloc_uop.cache_is_d;
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
 	t_rob_tail.is_tlbp = (t_alloc_uop.op == TLBP);
 	
@@ -1918,6 +1931,7 @@ module core(clk,
 	t_rob_next_tail.is_break = (t_alloc_uop2.op == BREAK);
 	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);
 	t_rob_next_tail.is_cache = t_alloc_uop2.is_cache;
+	t_rob_next_tail.cache_is_d = t_alloc_uop2.cache_is_d;
 	t_rob_next_tail.is_tlbp = (t_alloc_uop2.op == TLBP);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.overflow = 1'b0;

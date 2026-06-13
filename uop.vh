@@ -226,7 +226,8 @@ typedef struct packed {
    logic 		       is_br;
    logic 		       is_mem;
    logic 		       is_store;
-   logic 		       is_cache;   /* MIPS CACHE op (serializing whole-cache flush) */
+   logic 		       is_cache;   /* MIPS CACHE op (serializing flush) */
+   logic 		       cache_is_d; /* CACHE targets D-cache (per-line WB) vs I-cache (whole nuke) */
    logic [`LG_PHT_SZ-1:0]      pht_idx;
    logic		       mode_when_fetched;
 `ifdef VERILATOR

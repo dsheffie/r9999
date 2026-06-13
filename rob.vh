@@ -31,7 +31,8 @@ typedef struct packed {
    logic 			 take_br;
    logic 			 is_break;
    logic			 is_syscall;
-   logic			 is_cache;   /* MIPS CACHE op (serializing whole-cache flush) */
+   logic			 is_cache;   /* MIPS CACHE op (serializing flush) */
+   logic			 cache_is_d; /* CACHE targets D-cache (per-line WB at .data) vs I-cache */
    logic [(`M_WIDTH-1):0]	 data;
    logic [6:0]			 opcode;
    logic [`LG_PHT_SZ-1:0] 	 pht_idx;

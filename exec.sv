@@ -1856,8 +1856,10 @@ module exec(clk,
 	    end
 	  CACHE_OP:
 	    begin
-	       /* CACHE: no datapath effect here -- just complete so the op can
-		* retire through the serialize funnel, which drives the flush. */
+	       /* CACHE: compute the effective address (base + signed offset) so the
+		* serialize funnel can drive a per-line D flush at flush_cl_addr =
+		* rob.data. No GPR writeback (CACHE has no architectural dst). */
+	       t_result = t_srcA + t_simm;
 	       t_alu_valid = 1'b1;
 	    end
 	  default:
