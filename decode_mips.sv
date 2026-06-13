@@ -880,6 +880,8 @@ module decode_mips(
 		 end
 	       6'd16: /* coproc0 */
 		 begin	
+		    if(in_kernel_mode)
+		    begin
 		    if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd1))
 		      begin
 			 uop.op = TLBR;
@@ -914,12 +916,16 @@ module decode_mips(
 		      end
 		    else if((insn[25:21] == 5'd1) & (insn[10:0] == 'd0)) /* dmfc0 */
 		      begin
-			 uop.op = DMFC0;
-			 uop.dst = rt;
-			 uop.dst_valid = 1'b1;
-			 uop.srcA = rd;
-			 uop.is_int = 1'b1;
-			 uop.oldest_first = 1'b1;
+			 if(w_in_64b_mode)
+			   begin
+			      uop.op = DMFC0;
+			      uop.dst = rt;
+			      uop.dst_valid = 1'b1;
+			      uop.srcA = rd;
+			      uop.is_int = 1'b1;
+			      uop.oldest_first = 1'b1;
+			   end
+			 /* else: 64-bit op in 32-bit mode -> op stays II (RI) */
 		      end
 		    else if((insn[25:21] == 5'd4) & (insn[10:0] == 'd0)) /* switch on RS */
 		      begin
@@ -951,6 +957,11 @@ module decode_mips(
 			 uop.oldest_first = 1'b1;
 			 uop.has_delay_slot = 1'b0;
 			 uop.is_int = 1'b1;
+		      end
+		    end // if(in_kernel_mode)
+		    else
+		      begin
+			 uop.op = CPU; /* CP0 instruction outside kernel mode -> Coprocessor Unusable */
 		      end
 		 end // case: 6'd16
 	       6'd17: /* coproc1 */

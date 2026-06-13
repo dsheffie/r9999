@@ -6,6 +6,7 @@
 typedef struct packed {
    logic       faulted;
    logic       is_ii;
+   logic       is_cpu;   /* coprocessor unusable (CpU, cause 11) */
    logic       overflow;
    logic       trap;
    logic       is_bad_addr;

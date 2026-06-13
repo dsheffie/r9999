@@ -1086,6 +1086,7 @@ module core(clk,
 		      t_uop.op == FETCH_MISALIGNED |
 		      t_uop.op == FETCH_TLB_MISS |
 		      t_uop.op == FETCH_TLB_INVALID |
+		      t_uop.op == CPU |
 		      t_uop.op == II);
 
 	t_fold_uop2 = (t_uop2.op == NOP |
@@ -1094,6 +1095,7 @@ module core(clk,
 		       t_uop2.op == FETCH_MISALIGNED |
 		       t_uop2.op == FETCH_TLB_MISS |
 		       t_uop2.op == FETCH_TLB_INVALID |
+		       t_uop2.op == CPU |
 		       t_uop2.op == II);
 	
 	n_ds_done = r_ds_done;
@@ -1141,7 +1143,8 @@ module core(clk,
 	t_arch_fault = t_rob_head.faulted & 
 		       (t_rob_head.is_break | 
 			t_rob_head.is_syscall | 
-			t_rob_head.is_ii | 
+			t_rob_head.is_ii |
+			t_rob_head.is_cpu |
 			t_rob_head.is_bad_addr | 
 			t_rob_head.overflow | 
 			t_rob_head.trap | 
@@ -1444,8 +1447,12 @@ module core(clk,
 		    if(t_rob_head.mode_when_fetched != w_in_64b_mode) $stop();  // P-mode-hazard ($stop in sim; formal assert below)
 `endif
 		    n_pending_ud = 1'b1;
-		    //$display("bad pc %x", t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);	     
+		    //$display("bad pc %x", t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);
 		    n_cause = 5'd10;
+		 end
+	       else if(t_rob_head.is_cpu)
+		 begin
+		    n_cause = 5'd11;  /* Coprocessor Unusable (CP0 access outside kernel; CE=0) */
 		 end
 	       else if(t_rob_head.opcode == FETCH_MISALIGNED)
 		 begin
@@ -1825,6 +1832,7 @@ module core(clk,
 	t_rob_tail.is_tlbp = (t_alloc_uop.op == TLBP);
 	
 	t_rob_tail.is_ii = 1'b0;
+	t_rob_tail.is_cpu = 1'b0;
 	t_rob_tail.overflow = 1'b0;
 	t_rob_tail.trap = 1'b0;
 	t_rob_tail.tlb_refill = 1'b0;
@@ -1872,6 +1880,7 @@ module core(clk,
 	t_rob_next_tail.tlb_index = 6'd0;
 	
 	t_rob_next_tail.is_ii = 1'b0;
+	t_rob_next_tail.is_cpu = 1'b0;
 	t_rob_next_tail.is_bad_addr = 1'b0;
 	t_rob_next_tail.take_br = 1'b0;
 	t_rob_next_tail.is_br = t_alloc_uop2.is_br;	
@@ -1928,6 +1937,11 @@ module core(clk,
 		    begin
 		       t_rob_tail.faulted = 1'b1;
 		       t_rob_tail.is_ii = 1'b1;
+		    end
+		  else if(t_uop.op == CPU)
+		    begin
+		       t_rob_tail.faulted = 1'b1;
+		       t_rob_tail.is_cpu = 1'b1;
 		    end
 		  else if(t_uop.op == FETCH_TLB_MISS)
 		    begin
@@ -1989,6 +2003,11 @@ module core(clk,
 		    begin
 		       t_rob_next_tail.faulted = 1'b1;
 		       t_rob_next_tail.is_ii = 1'b1;
+		    end
+		  else if(t_uop2.op == CPU)
+		    begin
+		       t_rob_next_tail.faulted = 1'b1;
+		       t_rob_next_tail.is_cpu = 1'b1;
 		    end
 		  else if(t_uop2.op == FETCH_TLB_MISS)
 		    begin

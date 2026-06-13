@@ -122,7 +122,8 @@ typedef enum logic [6:0]
    FETCH_TLB_MISS,
    FETCH_TLB_INVALID,
    II,
-   IRQ
+   IRQ,
+   CPU
    } opcode_t;
 
 function logic is_mult(opcode_t op);
