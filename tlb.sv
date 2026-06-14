@@ -78,7 +78,13 @@ module tlb(clk,
       for(genvar i = 0; i < N; i=i+1)
 	begin : hits
 	   assign w_addr_space_match[i] = (r_tlb[i].asid == asid) | (r_tlb[i].g0 & r_tlb[i].g1);
-	   assign w_hit8k[i] = (r_tlb[i].vpn == va[39:13]) && (r_tlb[i].r == va[63:62]);
+	   /* 32-bit-addressing match: compare the 32-bit VPN2 (va[31:13]) only, and
+	    * IGNORE the region bits R (va[63:62]) and the upper VPN bits (va[39:32]).
+	    * A 32-bit kseg VA sign-extends (va[63:62]=11, va[39:32]=ff) but mtc0
+	    * writes EntryHi.VPN2 zero-extended (exec.sv ~2568), so comparing the full
+	    * va[39:13]/R never matched a wired high-VA entry (the wirepda wall). The
+	    * low 19-bit VPN2 uniquely identifies a page in the 32-bit address space. */
+	   assign w_hit8k[i] = (r_tlb[i].vpn[18:0] == va[31:13]);
 	   assign w_hits[i] = w_addr_space_match[i] & w_hit8k[i];
 	end
    endgenerate
