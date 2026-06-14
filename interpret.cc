@@ -27,8 +27,6 @@ state_t::~state_t() {
   delete &mem;
 }
 
-static void execSpecial2(uint32_t inst, state_t *s);
-static void execSpecial3(uint32_t inst, state_t *s);
 static void execCoproc0(uint32_t inst, state_t *s);
 static void execCoproc2(uint32_t inst, state_t *s);
 
@@ -258,125 +256,6 @@ static void setConditionCode(state_t *s, uint32_t v, uint32_t cc) {
   s->fcr1[CP1_CR25] = (s->fcr1[CP1_CR25] & m1) | ((1U<<cc) & m2);
 }
 
-
-
-static void execSpecial2(uint32_t inst,state_t *s) {
-  uint32_t funct = inst & 63; 
-  uint32_t rs = (inst >> 21) & 31;
-  uint32_t rt = (inst >> 16) & 31;
-  uint32_t rd = (inst >> 11) & 31;
-
-  switch(funct)
-    {
-    case(0x0): /* madd */ {
-      int64_t y,acc;
-      acc = ((int64_t)(uint32_t)s->hi) << 32;
-      acc |= (uint32_t)s->lo;
-      y = (int64_t)s->gpr[rs] * (int64_t)s->gpr[rt];
-      y += acc;
-      s->lo = (int32_t)(y & 0xffffffff);
-      s->hi = (int32_t)(y >> 32);
-      s->insn_histo[mipsInsn::MADD]++;
-      break;
-    }
-    case 0x1: /* maddu */ {
-      uint64_t y,acc;
-      uint64_t uk0 = (uint64_t)(uint32_t)s->gpr[rs];
-      uint64_t uk1 = (uint64_t)(uint32_t)s->gpr[rt];
-      y = uk0*uk1;
-      acc = ((uint64_t)(uint32_t)s->hi) << 32;
-      acc |= (uint64_t)(uint32_t)s->lo;
-      y += acc;
-      s->lo = sext64((uint32_t)(y & 0xffffffff));
-      s->hi = sext64((uint32_t)(y >> 32));
-      s->insn_histo[mipsInsn::MADDU]++;
-      break;
-    }
-    case(0x2): /* mul */{
-      int64_t y = ((int64_t)s->gpr[rs]) * ((int64_t)s->gpr[rt]);
-      //printf("multiply: %x x %x -> %x\n", s->gpr[rs], s->gpr[rt], y);
-      s->gpr[rd] = (int32_t)y;
-      s->insn_histo[mipsInsn::MUL]++;
-      break;
-    }
-    case(0x4): /* msub */ {
-      int64_t y,acc;
-      acc = ((int64_t)s->hi) << 32;
-      acc |= ((int64_t)s->lo);
-      y = (int64_t)s->gpr[rs] * (int64_t)s->gpr[rt];
-      y = acc - y;
-      s->lo = (int32_t)(y & 0xffffffff);
-      s->hi = (int32_t)(y >> 32);
-      s->insn_histo[mipsInsn::MSUB]++;
-      break;
-    }
-    case(0x20): /* clz */
-      s->gpr[rd] = (s->gpr[rs]==0) ? 32 : __builtin_clz(s->gpr[rs]);
-      s->insn_histo[mipsInsn::CLZ]++;
-      break;
-    default:
-      printf("unhandled special2 instruction @ 0x%08x\n", s->pc); 
-      exit(-1);
-      break;
-    }
-  s->pc += 4;
-}
-
-static void execSpecial3(uint32_t inst,state_t *s) {
-  uint32_t funct = inst & 63;
-  uint32_t op = (inst>>6) & 31;
-  uint32_t rt = (inst >> 16) & 31; 
-  uint32_t rs = (inst >> 21) & 31;
-  uint32_t rd = (inst >> 11) & 31;
-  if(funct == 32) {
-    switch(op)
-      {
-      case 0x10: /* seb */
-	s->gpr[rd] = (int32_t)((int8_t)s->gpr[rt]);
-	s->insn_histo[mipsInsn::SEB]++;
-	break;
-      case 0x18: /* seh */
-	s->gpr[rd] = (int32_t)((int16_t)s->gpr[rt]);
-	s->insn_histo[mipsInsn::SEH]++;
-	break;
-      default:
-	printf("unhandled special3 instruction @ 0x%08x, opcode = %x\n", s->pc, funct); 
-	exit(-1);    
-	break;
-      }
-  }
-  else if(funct == 0) { /* ext */  
-    uint32_t pos = (inst >> 6) & 31;
-    uint32_t size = ((inst >> 11) & 31) + 1;
-    s->gpr[rt] = (s->gpr[rs] >> pos) & ((1<<size)-1);
-    s->insn_histo[mipsInsn::EXT]++;
-  }
-  else if(funct == 0x4) {/* ins */
-    uint32_t size = rd-op+1;
-    uint32_t mask = (1U<<size) -1;
-    uint32_t cmask = ~(mask << op);
-    uint32_t v = (s->gpr[rs] & mask) << op;
-    uint32_t c = (s->gpr[rt] & cmask) | v;
-    s->gpr[rt] = c;
-    s->insn_histo[mipsInsn::INS]++;    
-  }
-  else if(funct == 0x3b) { /* rdhwr */
-    switch(rd)
-      {
-      case 29:
-	s->gpr[rt] = s->cpr0[29];
-	s->insn_histo[mipsInsn::RDHWR]++;
-	break;
-      default:
-	abort();
-      }
-  }
-  else {
-    printf("unhandled special3 instruction @ 0x%08x\n", s->pc); 
-    exit(-1);    
-  }
-  s->pc += 4;
-}
 
 
 template <typename T>
@@ -2064,10 +1943,8 @@ void execMips(state_t *s) {
 	break;
       }
   }
-  else if(isSpecial2)
-    execSpecial2(inst,s);
-  else if(isSpecial3)
-    execSpecial3(inst,s);
+  else if(isSpecial2 || isSpecial3)
+    raise_ri(s, inst);   /* MIPS32 SPECIAL2/SPECIAL3 are not in MIPS-III (R4000) */
   else if(isJType) {
     state_t::reg_t jaddr = inst & ((1<<26)-1);
     jaddr <<= 2;

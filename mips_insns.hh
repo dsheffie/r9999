@@ -83,19 +83,10 @@
   X(TLTIU)					\
   X(TEQI)					\
   X(TNEI)					\
-  X(EXT)					\
-  X(INS)					\
-  X(MADD)					\
-  X(MADDU)					\
-  X(MUL)					\
-  X(MSUB)					\
-  X(CLZ)					\
   X(LWL)					\
   X(LWR)					\
   X(SWL)					\
   X(SWR)					\
-  X(SEB)					\
-  X(SEH)					\
   X(DADD)					\
   X(DADDU)					\
   X(DADDI)					\
@@ -126,7 +117,6 @@
   X(BGEZALL)					\
   X(BLTZAL)					\
   X(BLTZALL)					\
-  X(RDHWR)					\
   X(SC)						\
   X(SYNC)					\
   X(BREAK)					\
