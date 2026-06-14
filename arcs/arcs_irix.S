@@ -154,11 +154,15 @@ stub_mdesc:
 1:  jr      $ra
     move    $v0, $zero
 
-/* char *GetEnvironmentVariable(char *name): return NULL for now. */
+/* char *GetEnvironmentVariable(char *name): return a fixed eaddr (MAC) string.
+ * IRIX init_sysid does etoh(getenv("eaddr")); a NULL return -> etoh(NULL) ->
+ * lbu 0(0) -> fault.  Real PROM returns the EEPROM eaddr; we hand back an SGI
+ * MAC (08:00:69 = SGI OUI).  The kernel pulls little else from the romvec. */
     .globl  stub_getenv
 stub_getenv:
+    la      $v0, eaddr_str
     jr      $ra
-    move    $v0, $zero
+    nop
 
 /* COMPONENT *GetChild(COMPONENT *cur): root for NULL query, else NULL. */
     .globl  stub_child
@@ -218,3 +222,7 @@ root_component:
 
 arch_name:
     .asciz  "SGI-IP22"
+
+    .align  2
+eaddr_str:
+    .asciz  "08:00:69:12:34:56"     /* getenv("eaddr") -> SGI MAC (etoh parses this) */
