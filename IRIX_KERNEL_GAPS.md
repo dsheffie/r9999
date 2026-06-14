@@ -150,12 +150,103 @@ without faulting); no Watch-match hardware or ExcCode-23 delivery is required to
 r18/r19, read back on `mfc0`, reset 0; modeled on `Compare`) — a superset of RAZ/WI, so the kernel's
 `mtc0 zero` clears and any read-back work without faulting.
 
+## TLB / CP0 / physical-address requirements (MAME-session, dynamic + static, 2026-06-12/13)
+Measured by driving headless MAME (`indy_4610`, R4600/mips3) + breakpoints; harness in the MAME-session memory.
+
+- **TLB size:** 48 dual-entry JTLB on R4000/R4400/R4600/R4700/R5000/RM — **same 48**; only R10000/R12000
+  go to 64. (The separate `utlbmiss_r5000` handler is NOT about capacity.) `start` sets `Wired=8`.
+  r9999's 48-entry CAM matches.
+- **R5000 vs R4000 refill (why two handlers):** R4000/R4600 fast refill = **blind `tlbwr`** (load 2 PTEs
+  → `mtc0 entrylo0/1` → `tlbwr` → `eret`). R5000 does **`tlbp` first, `tlbwr` only if the entry is absent**
+  (if present → diverts to the general-exc vector) — a guard against a **duplicate TLB entry**, which the
+  R5000 mishandles. **r9999 = R4000 path** (blind tlbwr); just ensure r9999's CAM tolerates a duplicate
+  write (last-wins/overwrite) rather than asserting a machine-check.
+- **Page size: BOOT IS 4 KB-ONLY.** Fast refill is `utlbmiss_not_large_page` (Context-based, no large-page
+  branch). Dynamically: **3000 explicit TLB writes during boot → 100% `PageMask=0` (4 KB), zero large
+  pages.** Large-page machinery exists (`large_pages_enable`, `lpage_*`, `pmap_downgrade_*_page_size`) but
+  is **on-demand/under-load**, never triggered by a vanilla boot. ⇒ r9999 can **boot with a 4 KB-only TLB**;
+  variable-page-size CAM matching (16 KB…16 MB) is deferrable past boot. But `PageMask` is **not** RAZ/WI —
+  the kernel writes `PageMask=0` before each `tlbw` and reads it back; it must hold its value.
+- **Physical address width: 29 bits (512 MB) is the platform ceiling.** Highest PA the kernel forms is the
+  device/PROM region `0x1f000000–0x1fffffff` (kseg1, unmapped). RAM at `0x08000000` (≤256 MB → ≤`0x18000000`);
+  TLB-mapped PFNs observed only `0x0800_0000–~0x0900_0000` here (max `0x0881a000`, 28 bits). EntryLo PFN is
+  arch-24-bit (36-bit-PA capable) but only ~17 significant bits are ever used. ⇒ r9999 needs PA to
+  `0x1fffffff` only; cache/TLB physical tags need 29 bits (bits 31:29 always 0).
+- **CP0 timer:** steady-state timekeeping is on-chip `Count`/`Compare` (handler re-arms `Compare = Count +
+  ~0x25000` per tick) — confirmed live; not ARCS. (See `IRIX_CPU_REQUIREMENTS.md` P0-B/C.)
+- **Status.FR (bit 26): FR=1 IS used.** FR=0 for kernel/idle, **FR=1 once N32/N64 userland runs** (first
+  seen mid-boot, ~19% of samples by multiuser). ⇒ r9999's FP regfile must implement **FR=1 (32 independent
+  64-bit FP registers)**, not just FR=0 even/odd 32-bit pairs; the Status.FR bit must switch the regfile
+  aliasing. (Still no FP *arithmetic* in the kernel — this is the regfile mode for context save/restore +
+  userland.)
+
+## `cache` instruction — decode requirement + boot-execution histogram (MAME-session 2026-06-13)
+r9999 must **fully decode `cache`** (op 0x2f) and route by op field — NOT treat it as one blanket NOP.
+Measured by C++ instrumentation of MAME's mips3 interpreter (`g_cache_hist[32]` on the `case 0x2f`
+dispatch). **5,208,585 cache ops executed over a 120 s boot.** Decode: `op=instr[20:16]`,
+`cache_sel=op[1:0]` (0=I,1=D,2=SD,3=SI), `operation=op[4:2]`.
+
+| op | cache/operation | boot count | % |
+|----|----|----|----|
+| 0x01 | D Index-Writeback-Invalidate | 1,483,598 | 28.5% |
+| 0x00 | I Index-Invalidate | 1,481,976 | 28.5% |
+| 0x15 | D Hit-Writeback-Invalidate | 1,400,427 | 26.9% |
+| 0x10 | I Hit-Invalidate | 839,506 | 16.1% |
+| 0x08 / 0x09 | I/D Index-Store-Tag (cache init) | 1,025 / 1,025 | — |
+| 0x14 | I Fill | 512 | — |
+| 0x11 | **D Hit-Invalidate (NO writeback)** | 489 | — |
+| 0x19 | D Hit-Writeback | 21 | — |
+| 0x0b | secondary Index-Store-Tag (L2 probe) | 6 | — |
+
+**Four primary-cache ops = 99.94%. Secondary/L2 ops are ~0 (just the 6-hit probe) — this Indy has no
+L2, so the ~30 static `cache_sel=3` code sites never execute. No L2 modeling needed.**
+
+**r9999 cache reality (corrected 2026-06-13): caches are INCOHERENT → `cache`→NOP is a LATENT BUG.**
+r9999 has separate **L1i + L1d** (`l1i.sv`/`l1d.sv`) over an **L2 that IS transparent/coherent** and is
+hidden from the kernel via `Config.SC=1` (kernel sees "R4000PC", so the ~30 static `cache_sel=2/3`
+secondary ops are gated out — confirmed 0 dynamic). The live coherence axis is **L1i vs. D-side stores**:
+the kernel writes code (runtime CPU patching at boot — `R4000_jump_war`/`mtext_fixup`; loadable-module
+`doelfrelocs`) through L1d/L2, and L1i then holds a stale copy. So the I-cache `cache` ops **must** be
+honored, not NOP'd. (Early boot may get lucky if a patched line was never fetched into L1i yet — cold
+L1i fetches the patched copy from coherent L2 — but module loading / re-patch of executed code fails
+without it.) No DMA/snoop logic exists in L1d today, so the D-side DMA ops are moot **while I/O stays
+backdoored**.
+
+**Decode/handling obligations:**
+- Decode the full op field; **privilege-check** (`cache` is kernel/CU0-only → user-mode = Coproc-Unusable);
+  compute the EA (`base+signext(offset)`).
+- **I-cache ops (`0x10` Hit-Inval-I, `0x00` Index-Inval-I, + I-side of any others): drive the existing
+  L1i `flush_req`/`FLUSH_CACHE`.** The I-cache is never dirty, so a **whole-L1i flush is a correct
+  over-approximation of EVERY I-cache op** — simplest wiring: any I-cache `cache` op → `flush_req`. This
+  is the one real obligation today (it's a *wiring* task — the flush HW already exists in `l1i.sv`).
+- **D-cache ops (`0x01`/`0x15`/`0x11`/`0x19`): NOP-safe while there is no incoherent DMA** (no snoop logic
+  present). IF real incoherent DMA is ever added behind L1d, honor the invalidate-vs-writeback distinction
+  — esp. **`0x11` D-Hit-Invalidate must invalidate WITHOUT writeback** (DMA-in); do NOT promote it to a
+  writeback-invalidate or you reintroduce a dirty+stale-line corruption window over DMA'd data.
+- **Index-Store-Tag (`0x08`/`0x09`) / Fill (`0x14`): NOP** — r9999's caches reset clean (no power-on tag
+  scrub needed, unlike real R4000 silicon); cache *size* comes from `Config`, not the tag-probe.
+
 ## Serial console output — how IRIX prints (r9999 bring-up)
-Two phases:
-1. **Early boot = ARCS PROM console.** IRIX outputs via the ARCS firmware romvec (`arcs_write`,
-   `arcs_printf`, `call_prom_cached`). **Same hook our Linux `arcs_fw` already provides** — point the PROM
-   Write/ConsoleOut vector at the r9999 putchar (CP0 reg7 → FIFO → stdout) and IRIX's early console comes
-   out for free. First "IRIX is alive" output is achievable with the infra we have.
+**MEASURED 2026-06-13 (graphics-console boot): the kernel does NOT route console through ARCS.**
+Breakpoint-counted over a full boot: `arcs_write`=**0**, romvec[Write]=**0**, `du_putchar`=**0** (serial
+not the console here), `call_prom_cached`=**2** (a non-console early PROM query). The boot text is produced
+**directly by the kernel's own console driver** — the **graphics** console driver (framebuffer over GIO64)
+for `console=g`, which MAME runs. So the static-symbol "Phase 1 = ARCS console" idea below is NOT what a
+normal boot does.
+1. ~~**Early boot = ARCS PROM console**~~ — `arcs_write`/`call_prom_cached` exist but are **not exercised**
+   during boot (arcs_write=0 calls). IRIX's own console comes up early enough that ARCS console isn't used.
+   **RESOLVED (serial boot measured 2026-06-13, `console=d`, graphics-less):** still **`arcs_write`=0,
+   `call_prom_cached`=2 (non-console)** — so there is **NO early ARCS console window**. Captured the full
+   serial console via a C++ hook on the IOC2 SCC TX register (`scc_dc_w` in `ioc2.cpp` — 972 console bytes;
+   the kernel's `du_putchar`/`ducons_write` entry-breakpoints undercount because TX is buffered/interrupt-
+   driven, but the SCC-write hook is ground truth). The PROM phase ("Running power-on diagnostics… press
+   <Esc>") is **PROM code writing the Z8530 directly**; the IRIX phase ("IRIX Release 6.5 IP22…") is the
+   **kernel's own serial driver writing the Z8530 directly**. **Conclusion for r9999:** the "free output via
+   the ARCS Write hook (`arcs_fw`)" path does **NOT** work for IRIX kernel console — r9999 must **emulate a
+   minimal Z8530/SCC** (TX data reg + RR0 Tx-empty status) at the IOC2 SCC address to capture IRIX serial
+   console. (r9999 is sash-less/PROM-less, so the PROM-phase path is moot anyway.) How to get a graphics-less
+   serial boot in MAME + capture: see the MAME-session memory [[mame-headless-harness]]. Reconstructed
+   console saved at `~/code/mame/irix_serial_console.txt`.
 2. **After console init = IRIX DUART driver → Z8530 SCC.** The `cn*` console subsystem dispatches to the
    serial driver `du_*` (`du_putchar`/`ducons_write`/`du_console`), which drives the **SCC85230 (Zilog
    Z8530-family)** in the **IOC2/INT2** ASIC. MAME: `src/mame/sgi/ioc2.cpp` `m_scc` (scc85230), mapped at
