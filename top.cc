@@ -624,9 +624,18 @@ int main(int argc, char **argv) {
 
     { static uint32_t psr = 0xffffffffu;
       if(tb->status_reg != psr) {
+        bool exl_rise = ((tb->status_reg>>1)&1) && !((psr>>1)&1);
         printf("[sr] cyc %lu sr=%08x KX=%d KSU=%d EXL=%d ERL=%d\n",
                (unsigned long)globals::cycle, tb->status_reg, (tb->status_reg>>7)&1,
                (tb->status_reg>>3)&3, (tb->status_reg>>1)&1, (tb->status_reg>>2)&1);
+        if(exl_rise) {
+          uint32_t e = (uint32_t)tb->epc;
+          uint32_t fi = get_insn(e & 0x1fffffffu, s);
+          printf("[exc] cyc %lu EPC=%08x insn=%08x : %s\n",
+                 (unsigned long)globals::cycle, e, fi,
+                 getAsmString(fi, e).c_str());
+          fflush(stdout);
+        }
         psr = tb->status_reg;
       } }
 
