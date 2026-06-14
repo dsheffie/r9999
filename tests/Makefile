@@ -29,6 +29,7 @@ TESTS := hello/hello.elf \
          dside_tlb/test_dside_tlb.elf \
          except/test_except.elf \
          except/test_overflow.elf \
+         except/test_traps.elf \
          unaligned/test_unaligned.elf \
          xtlb/test_xtlb64.elf \
          xtlb/test_xtlb32.elf \
@@ -43,7 +44,7 @@ TESTS := hello/hello.elf \
 
 DISASMS := $(TESTS:.elf=.dis)
 
-.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow
+.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow run-traps
 
 all: $(STARTUP) $(TESTS) $(DISASMS)
 
@@ -81,6 +82,10 @@ except/test_except.elf: except/test_except.S $(COMMON)/sim.h $(COMMON)/link.ld
 except/test_overflow.elf: except/test_overflow.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_overflow.S -o except/test_overflow.o
 	$(LD) $(LDFLAGS) except/test_overflow.o -o $@
+
+except/test_traps.elf: except/test_traps.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_traps.S -o except/test_traps.o
+	$(LD) $(LDFLAGS) except/test_traps.o -o $@
 
 # -----------------------------------------------------------------------
 # Unaligned load test (lwl / lwr)
@@ -196,6 +201,12 @@ run-overflow: except/test_overflow.elf
 	cd .. && $(SIM) --file tests/except/test_overflow.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
 	@echo "== same under co-sim (expect no 'does not match') =="
 	cd .. && $(SIM) --file tests/except/test_overflow.elf --checker true 2>&1 | grep -i 'does not match' || echo "  ok (no divergence)"
+
+run-traps: except/test_traps.elf
+	@echo "== traps + branch-and-link, self-check (expect P) =="
+	cd .. && $(SIM) --file tests/except/test_traps.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
+	@echo "== same under co-sim (expect no 'does not match') =="
+	cd .. && $(SIM) --file tests/except/test_traps.elf --checker true 2>&1 | grep -i 'does not match' || echo "  ok (no divergence)"
 
 run-unaligned: unaligned/test_unaligned.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1

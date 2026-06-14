@@ -523,6 +523,23 @@ void branch(uint32_t inst, state_t *s) {
       s->insn_histo[mipsInsn::BGEZAL]++;
       saveReturn = true;
       break;
+    case branch_type::bltzal:
+      takeBranch = (s->gpr[rs] < 0);
+      s->insn_histo[mipsInsn::BLTZAL]++;
+      saveReturn = true;
+      break;
+    case branch_type::bgezall:
+      isLikely = true;
+      takeBranch = (s->gpr[rs] >= 0);
+      s->insn_histo[mipsInsn::BGEZALL]++;
+      saveReturn = true;
+      break;
+    case branch_type::bltzall:
+      isLikely = true;
+      takeBranch = (s->gpr[rs] < 0);
+      s->insn_histo[mipsInsn::BLTZALL]++;
+      saveReturn = true;
+      break;
     case branch_type::bc1tl:
       isLikely = true;
       takeBranch = getConditionCode(s,((inst>>18)&7))==1;
@@ -548,6 +565,8 @@ void branch(uint32_t inst, state_t *s) {
   s->pc += 4;
   if(isLikely) {
     if(takeBranch) {
+      if(saveReturn)
+	s->gpr[31] = sext32((uint32_t)(npc + 4));
       if(!run_delay_slot<EL>(s))
 	s->pc = (imm+npc);
     }
@@ -587,7 +606,32 @@ void _bgez_bltz(uint32_t inst, state_t *s) {
     case 17:
       branch<EL,branch_type::bgezal>(inst, s);
       break;
-    default:      
+    case 16:
+      branch<EL,branch_type::bltzal>(inst, s);
+      break;
+    case 18:
+      branch<EL,branch_type::bltzall>(inst, s);
+      break;
+    case 19:
+      branch<EL,branch_type::bgezall>(inst, s);
+      break;
+    case 8: case 9: case 10: case 11: case 12: case 14: { /* trap-immediates */
+      uint32_t rs = (inst >> 21) & 31;
+      int64_t a = (int64_t)s->gpr[rs];
+      int64_t simm = (int64_t)(int16_t)(inst & 0xffff);
+      bool trap = false;
+      switch(rt) {
+      case 8:  trap = (a >= simm);                           s->insn_histo[mipsInsn::TGEI]++;  break;
+      case 9:  trap = ((uint64_t)a >= (uint64_t)simm);       s->insn_histo[mipsInsn::TGEIU]++; break;
+      case 10: trap = (a < simm);                            s->insn_histo[mipsInsn::TLTI]++;  break;
+      case 11: trap = ((uint64_t)a < (uint64_t)simm);        s->insn_histo[mipsInsn::TLTIU]++; break;
+      case 12: trap = (a == simm);                           s->insn_histo[mipsInsn::TEQI]++;  break;
+      case 14: trap = (a != simm);                           s->insn_histo[mipsInsn::TNEI]++;  break;
+      }
+      if(trap) raise_trap(s); else s->pc += 4;
+      break;
+    }
+    default:
       std::cerr << "case " << rt << " not handled!\n";
       exit(-1);
     }
@@ -1903,6 +1947,18 @@ void execMips(state_t *s) {
 	s->pc += 4;
 	s->insn_histo[mipsInsn::MOVZ]++;	
 	break;
+      case 0x30: /* tge  */
+	if((int64_t)s->gpr[rs] >= (int64_t)s->gpr[rt]) { raise_trap(s); return; }
+	s->pc += 4; s->insn_histo[mipsInsn::TGE]++; break;
+      case 0x31: /* tgeu */
+	if((uint64_t)s->gpr[rs] >= (uint64_t)s->gpr[rt]) { raise_trap(s); return; }
+	s->pc += 4; s->insn_histo[mipsInsn::TGEU]++; break;
+      case 0x32: /* tlt  */
+	if((int64_t)s->gpr[rs] < (int64_t)s->gpr[rt]) { raise_trap(s); return; }
+	s->pc += 4; s->insn_histo[mipsInsn::TLT]++; break;
+      case 0x33: /* tltu */
+	if((uint64_t)s->gpr[rs] < (uint64_t)s->gpr[rt]) { raise_trap(s); return; }
+	s->pc += 4; s->insn_histo[mipsInsn::TLTU]++; break;
       case 0x34: /* teq */
 	if(s->gpr[rs] == s->gpr[rt]) {
 	  raise_trap(s);

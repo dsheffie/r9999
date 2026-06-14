@@ -73,6 +73,16 @@
   X(MOVZ)					\
   X(TEQ)					\
   X(TNE)					\
+  X(TGE)					\
+  X(TGEU)					\
+  X(TLT)					\
+  X(TLTU)					\
+  X(TGEI)					\
+  X(TGEIU)					\
+  X(TLTI)					\
+  X(TLTIU)					\
+  X(TEQI)					\
+  X(TNEI)					\
   X(EXT)					\
   X(INS)					\
   X(MADD)					\
@@ -114,6 +124,8 @@
   X(BAL)					\
   X(BGEZAL)					\
   X(BGEZALL)					\
+  X(BLTZAL)					\
+  X(BLTZALL)					\
   X(RDHWR)					\
   X(SC)						\
   X(SYNC)					\

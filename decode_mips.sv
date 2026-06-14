@@ -647,6 +647,34 @@ module decode_mips(
 				uop.is_int = 1'b1;
 			     end
 			end
+		      6'd48: /* tge  */
+			begin
+			   uop.op = TGE;
+			   uop.srcA = rs; uop.srcA_valid = 1'b1;
+			   uop.srcB = rt; uop.srcB_valid = 1'b1;
+			   uop.is_int = 1'b1;
+			end
+		      6'd49: /* tgeu */
+			begin
+			   uop.op = TGEU;
+			   uop.srcA = rs; uop.srcA_valid = 1'b1;
+			   uop.srcB = rt; uop.srcB_valid = 1'b1;
+			   uop.is_int = 1'b1;
+			end
+		      6'd50: /* tlt  */
+			begin
+			   uop.op = TLT;
+			   uop.srcA = rs; uop.srcA_valid = 1'b1;
+			   uop.srcB = rt; uop.srcB_valid = 1'b1;
+			   uop.is_int = 1'b1;
+			end
+		      6'd51: /* tltu */
+			begin
+			   uop.op = TLTU;
+			   uop.srcA = rs; uop.srcA_valid = 1'b1;
+			   uop.srcB = rt; uop.srcB_valid = 1'b1;
+			   uop.is_int = 1'b1;
+			end
 		      6'd52: /* teq */
 			begin
 			   uop.op = TEQ;
@@ -709,6 +737,41 @@ module decode_mips(
 			   uop.srcB = 'd31;
 			   uop.srcB_valid = (rs == 'd0) ? 1'b0 : 1'b1;
 			end
+		      'd16:
+			begin /* BLTZAL */
+			   uop.op = BLTZAL;
+			   uop.dst_valid = 1'b1;
+			   uop.dst = 'd31;
+			   uop.srcB = 'd31;
+			   uop.srcB_valid = 1'b1;
+			end
+		      'd18:
+			begin /* BLTZALL (likely) */
+			   uop.op = BLTZALL;
+			   uop.has_nullifying_delay_slot = 1'b1;
+			   uop.dst_valid = 1'b1;
+			   uop.dst = 'd31;
+			   uop.srcB = 'd31;
+			   uop.srcB_valid = 1'b1;
+			end
+		      'd19:
+			begin /* BGEZALL (likely) */
+			   uop.op = BGEZALL;
+			   uop.has_nullifying_delay_slot = 1'b1;
+			   uop.dst_valid = 1'b1;
+			   uop.dst = 'd31;
+			   uop.srcB = 'd31;
+			   uop.srcB_valid = 1'b1;
+			end
+		      /* trap-immediates: srcA=rs (set above), compare vs sign-ext imm;
+		       * reuse the register-trap ops with srcB_valid=0.  These are NOT
+		       * branches -> undo the branch fields the common block set. */
+		      'd8:  begin uop.op = TGE;  uop.has_delay_slot=1'b0; uop.is_br=1'b0; end /* tgei  */
+		      'd9:  begin uop.op = TGEU; uop.has_delay_slot=1'b0; uop.is_br=1'b0; end /* tgeiu */
+		      'd10: begin uop.op = TLT;  uop.has_delay_slot=1'b0; uop.is_br=1'b0; end /* tlti  */
+		      'd11: begin uop.op = TLTU; uop.has_delay_slot=1'b0; uop.is_br=1'b0; end /* tltiu */
+		      'd12: begin uop.op = TEQ;  uop.has_delay_slot=1'b0; uop.is_br=1'b0; end /* teqi  */
+		      'd14: begin uop.op = TNE;  uop.has_delay_slot=1'b0; uop.is_br=1'b0; end /* tnei  */
 		      default:
 			begin
 			   uop.op = II;

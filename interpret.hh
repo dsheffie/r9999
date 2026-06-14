@@ -95,7 +95,7 @@ enum class branch_type {
   beq, bne, blez, bgtz,
   beql, bnel, blezl, bgtzl,
   bgez, bgezl, bltz, bltzl,
-  bgezal,
+  bgezal, bltzal, bgezall, bltzall,
   bc1f, bc1t, bc1fl, bc1tl
 };
 

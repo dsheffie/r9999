@@ -124,7 +124,16 @@ typedef enum logic [6:0]
    II,
    IRQ,
    CPU,
-   CACHE_OP   /* MIPS CACHE: completes benignly in the ALU, then serializes to flush */
+   CACHE_OP,  /* MIPS CACHE: completes benignly in the ALU, then serializes to flush */
+   /* branch-and-link REGIMM variants (BGEZAL/BGEZALL already above) */
+   BLTZAL,
+   BLTZALL,
+   /* register/immediate traps (the immediate forms reuse these ops with
+    * srcB_valid=0 and compare against the sign-extended imm; TEQ/TNE reused) */
+   TGE,
+   TGEU,
+   TLT,
+   TLTU
    } opcode_t;
 
 function logic is_mult(opcode_t op);

@@ -1685,6 +1685,33 @@ module exec(clk,
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
 	       t_alu_valid = 1'b1;
 	    end
+	  BLTZAL:
+	    begin
+	       t_take_br = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}}));
+	       t_mispred_br = int_uop.br_pred != t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_take_br ? int_uop.pc[`M_WIDTH-1:0] + 'd8 : t_srcB;
+	       t_alu_valid = 1'b1;
+	       t_wr_int_prf = 1'b1;
+	    end
+	  BLTZALL:
+	    begin
+	       t_take_br = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}}));
+	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_take_br ? int_uop.pc[`M_WIDTH-1:0] + 'd8 : t_srcB;
+	       t_alu_valid = 1'b1;
+	       t_wr_int_prf = 1'b1;
+	    end
+	  BGEZALL:
+	    begin
+	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
+	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_take_br ? int_uop.pc[`M_WIDTH-1:0] + 'd8 : t_srcB;
+	       t_alu_valid = 1'b1;
+	       t_wr_int_prf = 1'b1;
+	    end
 	  // J:
 	  //   begin
 	  //      t_take_br = 1'b1;
@@ -1820,16 +1847,42 @@ module exec(clk,
 		* implemented -> fall back to EPC); otherwise EPC. */
 	       t_pc = r_epc;
 	    end
+	  /* traps: B operand is the register (srcB) or, for the immediate forms
+	   * (srcB_valid=0), the sign-extended immediate. */
 	  TEQ:
 	    begin
-	       t_trap = (t_srcA == t_srcB);
-	       t_fault = (t_srcA == t_srcB);
+	       t_trap = (t_srcA == (int_uop.srcB_valid ? t_srcB : t_simm));
+	       t_fault = t_trap;
 	       t_alu_valid = 1'b1;
 	    end
 	  TNE:
 	    begin
-	       t_trap = (t_srcA != t_srcB);
-	       t_fault = (t_srcA != t_srcB);
+	       t_trap = (t_srcA != (int_uop.srcB_valid ? t_srcB : t_simm));
+	       t_fault = t_trap;
+	       t_alu_valid = 1'b1;
+	    end
+	  TGE:
+	    begin
+	       t_trap = ($signed(t_srcA) >= $signed(int_uop.srcB_valid ? t_srcB : t_simm));
+	       t_fault = t_trap;
+	       t_alu_valid = 1'b1;
+	    end
+	  TGEU:
+	    begin
+	       t_trap = (t_srcA >= (int_uop.srcB_valid ? t_srcB : t_simm));
+	       t_fault = t_trap;
+	       t_alu_valid = 1'b1;
+	    end
+	  TLT:
+	    begin
+	       t_trap = ($signed(t_srcA) < $signed(int_uop.srcB_valid ? t_srcB : t_simm));
+	       t_fault = t_trap;
+	       t_alu_valid = 1'b1;
+	    end
+	  TLTU:
+	    begin
+	       t_trap = (t_srcA < (int_uop.srcB_valid ? t_srcB : t_simm));
+	       t_fault = t_trap;
 	       t_alu_valid = 1'b1;
 	    end
 	  TLBWI:
