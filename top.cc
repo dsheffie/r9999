@@ -53,6 +53,8 @@ static std::map<int,uint64_t> fault_to_restart_distribution;
 static bool sgi_indy = false;
 static sgi_mc *mc = nullptr;
 static sgi_hpc *hpc = nullptr;
+static sgi_scc *scc = nullptr;
+static const uint32_t SCC_BASE = 0x1fbd9830u;  /* IOC2 serial SCC window base */
 
 
 static const char* l1d_stall_str[8] =
@@ -273,6 +275,16 @@ static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
 	d = mc->read(addr & 0x1ffff, 4);
       }
       break;
+    case mem_range_t::scc_regs:
+      /* IOC2 serial SCC -- byte-granular (control reads = RR0 status) */
+      for(int j = 0; j < 4; j++) {
+	if( ((m >> k) & 1) ) {
+	  uint32_t by = scc->read((addr+j) - SCC_BASE);
+	  d |= (by << (j*8));
+	}
+	k++;
+      }
+      break;
     default:
       /* everything else (sys_mem_alias, low/high_local, boot_rom, eisa, ...)
        * is plain physical memory */
@@ -327,6 +339,16 @@ static void perform_word_store(state_t *s, uint32_t addr, uint16_t m, uint32_t d
     case mem_range_t::hpc_regs:
       if(wm == 15) {
 	hpc->write(addr & 0x7ffff, d, 4);
+      }
+      break;
+    case mem_range_t::scc_regs:
+      /* IOC2 serial SCC -- byte-granular (data writes transmit to stdout) */
+      for(int j = 0; j < 4; j++) {
+	if(((m >> k) & 1)) {
+	  uint8_t by = (d>>(8*j)) & 0xff;
+	  scc->write((addr+j) - SCC_BASE, by);
+	}
+	k++;
       }
       break;
     default:
@@ -470,6 +492,7 @@ int main(int argc, char **argv) {
        * --indy ROM path): the IP22 kernel probes the MC for the memory map. */
       mc  = new sgi_mc(s);
       hpc = new sgi_hpc(s);
+      scc = new sgi_scc(s);
     }
   }
   else {
@@ -495,7 +518,8 @@ int main(int argc, char **argv) {
     s->pc = 0xbfc00000;
     close(fd);
     mc = new sgi_mc(s);
-    hpc = new sgi_hpc(s);    
+    hpc = new sgi_hpc(s);
+    scc = new sgi_scc(s);
   }
   
   
