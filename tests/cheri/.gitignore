@@ -1,0 +1,10 @@
+# build + run artifacts
+*.elf
+*.o
+*.dis
+__pycache__/
+.pytest_cache/
+# scratch logs
+log.txt
+pushout.txt
+branch_info.txt

@@ -1,0 +1,78 @@
+#-
+# Copyright (c) 2011 Robert N. M. Watson
+# All rights reserved.
+#
+# This software was developed by SRI International and the University of
+# Cambridge Computer Laboratory under DARPA/AFRL contract FA8750-10-C-0237
+# ("CTSRD"), as part of the DARPA CRASH research programme.
+#
+# @BERI_LICENSE_HEADER_START@
+#
+# Licensed to BERI Open Systems C.I.C. (BERI) under one or more contributor
+# license agreements.  See the NOTICE file distributed with this work for
+# additional information regarding copyright ownership.  BERI licenses this
+# file to you under the BERI Hardware-Software License, Version 1.0 (the
+# "License"); you may not use this file except in compliance with the
+# License.  You may obtain a copy of the License at:
+#
+#   http://www.beri-open-systems.org/legal/license-1-0.txt
+#
+# Unless required by applicable law or agreed to in writing, Work distributed
+# under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations under the License.
+#
+# @BERI_LICENSE_HEADER_END@
+#
+
+from beritest_tools import BaseBERITestCase
+from beritest_tools import attr
+
+@attr('comparereg')
+@attr('countrate')
+class test_cp0_compare(BaseBERITestCase):
+    def test_compare_readback(self):
+        '''Test that CP0 compare register write succeeded.'''
+        self.assertRegisterEqual(self.MIPS.a0, self.MIPS.a1, "CP0 compare register write failed.")
+
+    def test_cycle_count(self):
+        '''Test that cycle counter interrupted CPU at the right moment.'''
+        self.assertRegisterInRange(self.MIPS.a2, self.MIPS.a0 - 60, self.MIPS.a0 + 60, "Unexpected CP0 count cycle register value before compare register interrupt.")
+
+    @attr('cached')
+    def test_cycle_count_cached(self):
+        ''' Test that cycle counter interrupted CPU at the right moment.'''
+        self.assertRegisterInRange(self.MIPS.a2, self.MIPS.a0 - 30, self.MIPS.a0 + 30, "Unexpected CP0 count cycle register value before compare register interrupt.")
+
+    def test_aaa_interrupt_fired(self):
+        '''Test that compare register triggered interrupt.'''
+        self.assertRegisterEqual(self.MIPS.a5, 1, "Exception didn't fire.")
+
+    def test_aaa_eret_happened(self):
+        '''Test that eret occurred.'''
+        self.assertRegisterEqual(self.MIPS.a3, 1, "Exception didn't return.")
+
+#    def test_cause_bd(self):
+#        '''Test that branch-delay slot flag in cause register not set in exception'''
+#        self.assertRegisterEqual((self.MIPS.a7 >> 31) & 0x1, 0, "Branch delay (BD) flag set")
+
+    def test_cause_ip(self):
+        '''Test that interrupt pending (IP) bit set in cause register.'''
+        self.assertRegisterMaskEqual(self.MIPS.a7, 0xff << 8, 0x80 << 8, "IP7 flag not set.")
+
+    def test_aaa_cause_code(self):
+        '''Test that exception code is set to "interrupt".'''
+        self.assertRegisterMaskEqual(self.MIPS.a7, 0x1f << 2, 0 << 2, "Code not set to Int.")
+
+    def test_aaa_exl_in_handler(self):
+        '''Test that EXL is set in the interrupt handler.'''
+        self.assertRegisterMaskEqual(self.MIPS.a6, 0x1 << 1, 1 << 1, "EXL not set in exception handler.")
+
+    def test_cause_ip_cleared(self):
+        '''Test that writing to the CP0 compare register cleared IP7.'''
+        self.assertRegisterMaskEqual(self.MIPS.s0, 0xff << 8, 0 << 8, "IP7 flag not cleared.")
+
+    def test_aaa_not_exl_after_handler(self):
+        '''Test that EXL is not set after ERET.'''
+        self.assertRegisterMaskEqual(self.MIPS.a4, 0x1 << 1, 0 << 1, "EXL still set after ERET")
+
