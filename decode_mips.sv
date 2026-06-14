@@ -116,6 +116,9 @@ module decode_mips(
 	uop.is_mem = 1'b0;
 	uop.is_int = 1'b0;
 	uop.is_store = 1'b0;
+	uop.is_cache = 1'b0;
+	uop.cache_is_d = 1'b0;
+	uop.cache_inval = 1'b0;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 	uop.fetch_cycle = fetch_cycle;
 `endif
@@ -1266,10 +1269,30 @@ module decode_mips(
 		    uop.is_mem = 1'b1;
 		    uop.is_store = 1'b1;
 		 end
-	       6'd47: /* CACHE -- decoded as NOP for now */
+	       6'd47: /* CACHE -- serializing flush. Op subfield insn[20:16]:
+		       * bit[16] selects cache (0=I, 1=D). D-ops do a per-line
+		       * writeback (flush_cl at EA=base+offset, pushing the line to L2);
+		       * I-ops nuke the whole L1I. Compute base+offset so the EA lands
+		       * in rob.data for the per-line D flush. */
 		 begin
-		    uop.op = NOP;
-		    uop.is_int = 1'b1;
+		    if(in_kernel_mode)
+		      begin
+			 uop.op = CACHE_OP;
+			 uop.is_int = 1'b1;
+			 uop.serializing_op = 1'b1;
+			 uop.is_cache = 1'b1;
+			 uop.cache_is_d = insn[16];
+			 /* operation field insn[20:18]==3'b100 = Hit-Invalidate: drop the
+			  * D line WITHOUT writeback (DMA-in). Other D ops write back. */
+			 uop.cache_inval = (insn[20:18] == 3'b100);
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.imm = insn[15:0];
+		      end
+		    else
+		      begin
+			 uop.op = CPU; /* CACHE outside kernel mode -> Coprocessor Unusable */
+		      end
 		 end
 	       6'd48: /* LL */
 		 begin

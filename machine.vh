@@ -131,7 +131,8 @@ typedef enum logic [4:0] {
    MEM_SDR  = 5'd20,
    MEM_LL   = 5'd21,   /* load-linked word  */
    MEM_LLD  = 5'd22,   /* load-linked dword */
-   MEM_SCD  = 5'd23    /* store-conditional dword */
+   MEM_SCD  = 5'd23,   /* store-conditional dword */
+   MEM_INVL = 5'd24    /* L2 line invalidate (no writeback) -- CACHE DMA-in drop */
 } mem_op_t;
 
 /* MIPS R10000 exception ordering 

@@ -123,7 +123,8 @@ typedef enum logic [6:0]
    FETCH_TLB_INVALID,
    II,
    IRQ,
-   CPU
+   CPU,
+   CACHE_OP   /* MIPS CACHE: completes benignly in the ALU, then serializes to flush */
    } opcode_t;
 
 function logic is_mult(opcode_t op);
@@ -225,6 +226,9 @@ typedef struct packed {
    logic 		       is_br;
    logic 		       is_mem;
    logic 		       is_store;
+   logic 		       is_cache;   /* MIPS CACHE op (serializing flush) */
+   logic 		       cache_is_d; /* CACHE targets D-cache (per-line WB) vs I-cache (whole nuke) */
+   logic 		       cache_inval; /* CACHE Hit-Invalidate: drop the line WITHOUT writeback (DMA-in) */
    logic [`LG_PHT_SZ-1:0]      pht_idx;
    logic		       mode_when_fetched;
 `ifdef VERILATOR
