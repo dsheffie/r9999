@@ -1589,6 +1589,7 @@ endfunction
 	n_core_mem_rsp.rob_ptr = r_req.rob_ptr;
 	n_core_mem_rsp.dst_ptr = r_req.dst_ptr;
 	n_core_mem_rsp.dst_valid = 1'b0;
+	n_core_mem_rsp.fp_dst = r_req.fp_dst;
 	n_core_mem_rsp.bad_addr = 1'b0;
 	
 	n_core_mem_rsp.tlb_refill = 1'b0;
@@ -1660,10 +1661,21 @@ endfunction
 		    n_core_mem_rsp.data = r_req2.addr;
 		    n_core_mem_rsp.rob_ptr = r_req2.rob_ptr;
 		    n_core_mem_rsp.dst_ptr = r_req2.dst_ptr;
+		    /* port2 response routes to FP-vs-int by THIS port's req (the
+		     * default at the top uses r_req = port1, wrong for a port2 rsp) */
+		    n_core_mem_rsp.fp_dst = r_req2.fp_dst;
 		    if(drain_ds_complete)
 		      begin
 			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
+			 n_core_mem_rsp_valid = 1'b1;
+		      end
+		    else if(r_req2.op == MEM_MOV)
+		      begin
+			 /* GPR<->FPR move: no memory access; echo the
+			  * carried data (r_req2.addr) to the dst PRF */
+			 n_core_mem_rsp.fp_dst = r_req2.fp_dst;
+			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
 			 n_core_mem_rsp_valid = 1'b1;
 		      end
 		    else if(r_req2.op == MEM_TLBP)
@@ -1758,6 +1770,7 @@ endfunction
 `endif
 			 n_core_mem_rsp.data = t_rsp_data2[`M_WIDTH-1:0];
                          n_core_mem_rsp.dst_valid = t_rsp_dst_valid2;
+			 n_core_mem_rsp.fp_dst = r_req2.fp_dst;   /* port2: route FP loads to the FP PRF */
                          n_cache_hits = r_cache_hits + 'd1;
                          n_core_mem_rsp_valid = 1'b1;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;

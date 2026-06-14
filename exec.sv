@@ -77,6 +77,7 @@ module exec(clk,
 	    core_store_data_ptr_valid,
 	    mem_rsp_dst_ptr,
 	    mem_rsp_dst_valid,
+	    mem_rsp_fp_dst,
 	    mem_rsp_rob_ptr,
 	    mem_rsp_load_data,
 	    tlb_entry_out,
@@ -167,8 +168,15 @@ module exec(clk,
    
    input logic [`LG_PRF_ENTRIES-1:0] mem_rsp_dst_ptr;
    input logic 			     mem_rsp_dst_valid;
+   input logic 			     mem_rsp_fp_dst;
    input logic [`M_WIDTH-1:0]	     mem_rsp_load_data;
    input logic [`LG_ROB_ENTRIES-1:0] mem_rsp_rob_ptr;
+
+   /* int-domain mem writeback: an FP mem result (mem_rsp_fp_dst) writes the FP
+    * PRF, not the int PRF.  int/FP physical reg numbers OVERLAP, so int-domain
+    * wakeup/bypass must gate on this -- else an FP load whose FP pdst happens to
+    * equal an int op's source pdst would falsely forward FP data into the int op. */
+   wire w_mem_rsp_int_valid = mem_rsp_dst_valid & ~mem_rsp_fp_dst;
    
 
    output tlb_data_t	             tlb_entry_out;
@@ -191,8 +199,19 @@ module exec(clk,
       
    logic [N_INT_PRF_ENTRIES-1:0]  r_prf_inflight, n_prf_inflight;
    logic [N_HILO_PRF_ENTRIES-1:0] r_hilo_inflight, n_hilo_inflight;
-   
+
+   /* FP register file (shared by the mem-pipe mover now, the FPU later).
+    * 64-bit regs; FR=1/N32 model. */
+   logic [`M_WIDTH-1:0] 	  r_fp_prf[N_INT_PRF_ENTRIES-1:0];
+   /* registered FP read ports (rf4r2w-style synchronous read): address presented
+    * from the combinational head, output aligned with mem_uq / mem_dq.  Matches the
+    * int PRF's registered-read pattern so synth maps cleanly (no async-read on a
+    * combinational BRAM read). srcB = mfc1 source; dq = FP store data. */
+   logic [`M_WIDTH-1:0] 	  r_fp_rd_srcB, r_fp_rd_dq;
+   logic [N_INT_PRF_ENTRIES-1:0]  r_fp_prf_inflight, n_fp_prf_inflight;
+
    logic 			  t_wr_int_prf, t_wr_cpr0, t_wr_cpr0_64;
+   logic 			  t_wr_fcsr;
    logic [`M_WIDTH-1:0]		  t_csr0_val, t_csr0_64_val;
    
    logic 	t_wr_hilo;
@@ -411,6 +430,11 @@ module exec(clk,
    
    
 
+   /* a mem uop carries store data (-> store-data queue) when it has an int srcB
+    * (stores + merge-loads) or is an FP store reading the FP PRF (swc1/sdc1). */
+   wire w_uop_has_sdata  = uq_uop.is_mem     && (uq_uop.srcB_valid     || (uq_uop.fp_srcB_valid     && uq_uop.is_store));
+   wire w_uop2_has_sdata = uq_uop_two.is_mem && (uq_uop_two.srcB_valid || (uq_uop_two.fp_srcB_valid && uq_uop_two.is_store));
+
    always_comb
      begin
 	n_mem_uq_head_ptr = r_mem_uq_head_ptr;
@@ -444,12 +468,11 @@ module exec(clk,
 	t_push_two_mem = uq_push && uq_push_two && uq_uop.is_mem && uq_uop_two.is_mem;
 	t_push_one_mem = ((uq_push && uq_uop.is_mem) || (uq_push_two && uq_uop_two.is_mem)) && !t_push_two_mem;
 
-	t_push_two_dq = uq_push && uq_push_two && 
-			uq_uop.is_mem && uq_uop.srcB_valid && 
-			uq_uop_two.is_mem && uq_uop_two.srcB_valid;
-	
-	t_push_one_dq = (uq_push_two && uq_uop_two.is_mem && uq_uop_two.srcB_valid) || 
-			(uq_push && uq_uop.is_mem && uq_uop.srcB_valid);
+	t_push_two_dq = uq_push && uq_push_two &&
+			w_uop_has_sdata && w_uop2_has_sdata;
+
+	t_push_one_dq = (uq_push_two && w_uop2_has_sdata) ||
+			(uq_push && w_uop_has_sdata);
 	
 	
 	if(t_push_two_dq)
@@ -559,10 +582,12 @@ module exec(clk,
 
    always_comb     
      begin
-	t_dq0.rob_ptr = uq_uop.rob_ptr;	
+	t_dq0.rob_ptr = uq_uop.rob_ptr;
 	t_dq0.src_ptr = uq_uop.srcB;
+	t_dq0.fp = uq_uop.fp_srcB_valid;
 	t_dq1.rob_ptr = uq_uop_two.rob_ptr;
 	t_dq1.src_ptr = uq_uop_two.srcB;
+	t_dq1.fp = uq_uop_two.fp_srcB_valid;
      end
 
        
@@ -577,7 +602,7 @@ module exec(clk,
 	  end
 	else if(t_push_one_dq)
 	  begin
-	     r_mem_dq[r_mem_dq_tail_ptr[`LG_MEM_DQ_ENTRIES-1:0]] <= uq_uop.is_mem && uq_uop.srcB_valid ? t_dq0 : t_dq1;
+	     r_mem_dq[r_mem_dq_tail_ptr[`LG_MEM_DQ_ENTRIES-1:0]] <= w_uop_has_sdata ? t_dq0 : t_dq1;
 	  end	
      end
    
@@ -791,11 +816,11 @@ module exec(clk,
      begin
 	//allocation forwarding
 	t_alu_alloc_srcA_match = uq.srcA_valid && (
-						   (mem_rsp_dst_valid & (mem_rsp_dst_ptr == uq.srcA)) ||
+						   (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq.srcA)) ||
 						   (r_start_int && t_wr_int_prf & (int_uop.dst == uq.srcA))
 						   );
 	t_alu_alloc_srcB_match = uq.srcB_valid && (
-						   (mem_rsp_dst_valid & (mem_rsp_dst_ptr == uq.srcB)) ||
+						   (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq.srcB)) ||
 						   (r_start_int && t_wr_int_prf & (int_uop.dst == uq.srcB))
 						   );
 
@@ -852,11 +877,11 @@ module exec(clk,
 	   always_comb
 	     begin
 		t_alu_srcA_match[i] = r_alu_sched_uops[i].srcA_valid && (
-									 (mem_rsp_dst_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcA)) ||
+									 (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcA)) ||
 									 (r_start_int && t_wr_int_prf & (int_uop.dst == r_alu_sched_uops[i].srcA))
 									 );
 		t_alu_srcB_match[i] = r_alu_sched_uops[i].srcB_valid && (
-									 (mem_rsp_dst_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcB)) ||
+									 (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcB)) ||
 									 (r_start_int && t_wr_int_prf & (int_uop.dst == r_alu_sched_uops[i].srcB))
 									 );
 		
@@ -1113,20 +1138,37 @@ module exec(clk,
 	  begin
 	     r_prf_inflight <= 'd0;
 	     r_hilo_inflight <= 'd0;
+	     r_fp_prf_inflight <= 'd0;
 	  end
 	else
 	  begin
 	     r_prf_inflight <= ds_done ? 'd0 : n_prf_inflight;
 	     r_hilo_inflight <= ds_done ? 'd0 : n_hilo_inflight;
+	     r_fp_prf_inflight <= ds_done ? 'd0 : n_fp_prf_inflight;
 	  end
      end // always_ff@ (posedge clk)
+
+   /* FP PRF: one write port (mem-pipe move / FP-load response; shared with the future
+    * FPU) + two registered read ports (mfc1 source, FP store data).  Read address is
+    * the combinational head (t_mem_uq.srcB / t_mem_dq.src_ptr) so the registered output
+    * lands aligned with mem_uq / mem_dq -- exactly like the int PRF (rf4r2w).  The NBA
+    * read evaluates the pre-write array => read-old on a same-cycle RW collision (which
+    * the inflight pop-gating already prevents). */
+   always_ff@(posedge clk)
+     begin
+	r_fp_rd_srcB <= r_fp_prf[t_mem_uq.srcB];
+	r_fp_rd_dq   <= r_fp_prf[t_mem_dq.src_ptr];
+	if(mem_rsp_dst_valid & mem_rsp_fp_dst)
+	  r_fp_prf[mem_rsp_dst_ptr] <= mem_rsp_load_data;
+     end
 
    
    always_comb
      begin
 	n_prf_inflight = r_prf_inflight;
+	n_fp_prf_inflight = r_fp_prf_inflight;
 
-	
+
 	if(uq_push && uq_uop.dst_valid)
 	  begin
 	     n_prf_inflight[uq_uop.dst] = 1'b1;
@@ -1135,11 +1177,18 @@ module exec(clk,
 	  begin
 	     n_prf_inflight[uq_uop_two.dst] = 1'b1;
 	  end
-	
-	
+	/* FP dst allocation marks the FP physical reg inflight */
+	if(uq_push && uq_uop.fp_dst_valid)
+	  n_fp_prf_inflight[uq_uop.dst] = 1'b1;
+	if(uq_push_two && uq_uop_two.fp_dst_valid)
+	  n_fp_prf_inflight[uq_uop_two.dst] = 1'b1;
+
 	if(mem_rsp_dst_valid)
 	  begin
-	     n_prf_inflight[mem_rsp_dst_ptr] = 1'b0;
+	     if(mem_rsp_fp_dst)
+	       n_fp_prf_inflight[mem_rsp_dst_ptr] = 1'b0;
+	     else
+	       n_prf_inflight[mem_rsp_dst_ptr] = 1'b0;
 	  end
 	if(r_start_int && t_wr_int_prf)
 	  begin
@@ -1273,6 +1322,7 @@ module exec(clk,
 	t_wr_int_prf = 1'b0;
 	t_wr_cpr0 = 1'b0;
 	t_wr_cpr0_64 = 1'b0;
+	t_wr_fcsr = 1'b0;
 	t_take_br = 1'b0;
 	t_mispred_br = 1'b0;
 	t_jaddr = {int_uop.jmp_imm[9:0],int_uop.imm,2'd0};
@@ -1838,6 +1888,21 @@ module exec(clk,
 	       t_wr_cpr0_64 = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
+	  CFC1:
+	    begin
+	       /* fs in srcA[4:0]: FCR0=FIR (read-only R4000 id), FCR31=FCSR */
+	       t_result = (int_uop.srcA[4:0] == 5'd0) ?
+			  sign_extend32(32'h00000500) : /* FIR: imp=0x05 (R4000 FPU), rev 0 */
+			  sign_extend32(r_fcsr);
+	       t_alu_valid = 1'b1;
+	       t_wr_int_prf = 1'b1;
+	    end
+	  CTC1:
+	    begin
+	       /* only FCR31 (FCSR) is writable; fs in dst */
+	       t_wr_fcsr = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  ERET:
 	    begin
 	       t_eret = 1'b1;
@@ -1936,12 +2001,17 @@ module exec(clk,
 
    wire w_mem_srcA_ready = t_mem_uq.srcA_valid ? (!r_prf_inflight[t_mem_uq.srcA] | t_fwd_int_mem_srcA | t_fwd_mem_mem_srcA) : 1'b1;
 
+   /* mfc1's FP source is the registered FP read r_fp_rd_srcB (aligned with mem_uq).
+    * mfc1 (FP src -> address/mem-pop) gates the address pop on its FP source; FP stores
+    * read the FP PRF through the store-data queue instead, so they don't gate here. */
+   wire w_mem_fp_srcB_ready = (t_mem_uq.fp_srcB_valid && !t_mem_uq.is_store) ? !r_fp_prf_inflight[t_mem_uq.srcB] : 1'b1;
 
-   wire w_dq_ready = !r_prf_inflight[t_mem_dq.src_ptr] | t_fwd_int_mem_srcB | t_fwd_mem_mem_srcB;
-   	
+   wire w_dq_ready = t_mem_dq.fp ? !r_fp_prf_inflight[t_mem_dq.src_ptr] :
+		     (!r_prf_inflight[t_mem_dq.src_ptr] | t_fwd_int_mem_srcB | t_fwd_mem_mem_srcB);
+
    always_comb
      begin
-	t_pop_mem_uq = (!t_mem_uq_empty) && (!(mem_q_next_full||mem_q_full)) && w_mem_srcA_ready && !t_flash_clear;
+	t_pop_mem_uq = (!t_mem_uq_empty) && (!(mem_q_next_full||mem_q_full)) && w_mem_srcA_ready && w_mem_fp_srcB_ready && !t_flash_clear;
 
 	t_pop_mem_dq = (!t_mem_dq_empty) && !mem_dq_clr && w_dq_ready
 		       && (!(mem_mdq_next_full||mem_mdq_full)) ;
@@ -1953,7 +2023,7 @@ module exec(clk,
    always_comb
      begin
 	t_core_store_data.rob_ptr = mem_dq.rob_ptr;
-	t_core_store_data.data = t_mem_srcB;
+	t_core_store_data.data = mem_dq.fp ? r_fp_rd_dq : t_mem_srcB;
 	core_store_data_ptr = mem_dq.rob_ptr;
 	core_store_data_ptr_valid = r_dq_ready;
      end
@@ -2037,6 +2107,7 @@ module exec(clk,
 	t_mem_tail.addr = w_agu_la;
 	t_mem_tail.rob_ptr = mem_uq.rob_ptr;
 	t_mem_tail.dst_valid = 1'b0;
+	t_mem_tail.fp_dst = 1'b0;
 	t_mem_tail.dst_ptr = mem_uq.dst;
 	t_mem_tail.is_store = 1'b0;
 	t_mem_tail.is_atomic = 1'b0;
@@ -2212,6 +2283,82 @@ module exec(clk,
 	       t_mem_tail.addr = {r_entryhi_r, 22'd0, r_entryhi_vpn2, 13'd0};
 	       t_mem_tail.mapped = 1'b1;
 	    end
+	  MTC1:
+	    begin
+	       /* GPR->FPR move (mips3/4): FPR[fs] = sign_extend32(GPR[rt][31:0]) */
+	       t_mem_tail.op = MEM_MOV;
+	       t_mem_tail.addr = {{32{t_mem_srcA[31]}}, t_mem_srcA[31:0]};
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.fp_dst = 1'b1;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.mapped = 1'b0;
+	       t_mem_tail.cached = 1'b1;
+	    end
+	  MFC1:
+	    begin
+	       /* FPR->GPR move (mips3/4): GPR[rt] = sign_extend32(FPR[fs][31:0]) */
+	       t_mem_tail.op = MEM_MOV;
+	       t_mem_tail.addr = {{32{r_fp_rd_srcB[31]}}, r_fp_rd_srcB[31:0]};
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.fp_dst = 1'b0;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.mapped = 1'b0;
+	       t_mem_tail.cached = 1'b1;
+	    end
+	  DMTC1:
+	    begin
+	       /* GPR->FPR 64-bit move: FPR[fs] = GPR[rt] (full register, no sign-ext) */
+	       t_mem_tail.op = MEM_MOV;
+	       t_mem_tail.addr = t_mem_srcA;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.fp_dst = 1'b1;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.mapped = 1'b0;
+	       t_mem_tail.cached = 1'b1;
+	    end
+	  DMFC1:
+	    begin
+	       /* FPR->GPR 64-bit move: GPR[rt] = FPR[fs] (full register) */
+	       t_mem_tail.op = MEM_MOV;
+	       t_mem_tail.addr = r_fp_rd_srcB;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.fp_dst = 1'b0;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.mapped = 1'b0;
+	       t_mem_tail.cached = 1'b1;
+	    end
+	  LWC1:
+	    begin
+	       /* FP load (word): normal L1D load, result writes the FP PRF */
+	       t_mem_tail.op = MEM_LW;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.fp_dst = 1'b1;
+	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
+	    end
+	  LDC1:
+	    begin
+	       /* FP load (dword): normal L1D load, result writes the FP PRF */
+	       t_mem_tail.op = MEM_LD;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.fp_dst = 1'b1;
+	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
+	    end
+	  SWC1:
+	    begin
+	       /* FP store (word): store data comes from the FP PRF via the dq */
+	       t_mem_tail.op = MEM_SW;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
+	    end
+	  SDC1:
+	    begin
+	       /* FP store (dword): store data comes from the FP PRF via the dq */
+	       t_mem_tail.op = MEM_SD;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
+	    end
 	  default:
 	    begin
 	    end
@@ -2233,8 +2380,8 @@ module exec(clk,
      begin
 	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf &&(t_mem_uq.srcA == int_uop.dst);
 	t_fwd_int_mem_srcB = r_start_int && t_wr_int_prf &&(t_mem_dq.src_ptr == int_uop.dst);
-	t_fwd_mem_mem_srcA = mem_rsp_dst_valid && (t_mem_uq.srcA == mem_rsp_dst_ptr);
-	t_fwd_mem_mem_srcB = mem_rsp_dst_valid && (t_mem_dq.src_ptr == mem_rsp_dst_ptr);
+	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_mem_uq.srcA == mem_rsp_dst_ptr);
+	t_fwd_mem_mem_srcB = w_mem_rsp_int_valid && (t_mem_dq.src_ptr == mem_rsp_dst_ptr);
      end
    
    always_ff@(posedge clk)
@@ -2247,8 +2394,8 @@ module exec(clk,
 	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (t_picked_uop.srcA == int_uop.dst);
 	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (t_picked_uop.srcB == int_uop.dst);
 	
-	r_fwd_mem_srcA <= mem_rsp_dst_valid && (t_picked_uop.srcA == mem_rsp_dst_ptr);
-	r_fwd_mem_srcB <= mem_rsp_dst_valid && (t_picked_uop.srcB == mem_rsp_dst_ptr);
+	r_fwd_mem_srcA <= w_mem_rsp_int_valid && (t_picked_uop.srcA == mem_rsp_dst_ptr);
+	r_fwd_mem_srcB <= w_mem_rsp_int_valid && (t_picked_uop.srcB == mem_rsp_dst_ptr);
 
 	r_fwd_hilo_int <= r_start_int && t_wr_hilo && (t_picked_uop.hilo_src == int_uop.hilo_dst);
 	r_fwd_hilo_mul <= t_hilo_prf_ptr_val_out && (t_picked_uop.hilo_src == t_hilo_prf_ptr_out);
@@ -2265,7 +2412,7 @@ module exec(clk,
 	   .wrptr0(int_uop.dst),
 	   .wrptr1(mem_rsp_dst_ptr),
 	   .wen0(r_start_int && t_wr_int_prf),
-	   .wen1(mem_rsp_dst_valid),
+	   .wen1(mem_rsp_dst_valid & ~mem_rsp_fp_dst),
 	   .wr0(t_result),
 	   .wr1(mem_rsp_load_data),
 	   .rd0(w_srcA),
@@ -2363,6 +2510,10 @@ module exec(clk,
    logic r_sr_exl, n_sr_exl;
    /* error level */
    logic r_sr_erl, n_sr_erl;
+
+   /* FP control/status register FCR31 (FCSR). No FP arithmetic is implemented,
+    * so this is a plain holding register: ctc1 writes it, cfc1 reads it. */
+   logic [31:0] r_fcsr, n_fcsr;
 
    /* CP0 register 9: Count (free-running, increments each cycle) */
    logic [31:0] r_count, n_count;
@@ -2647,6 +2798,10 @@ module exec(clk,
 	n_compare = r_compare;
 	n_watchlo = r_watchlo;
 	n_watchhi = r_watchhi;
+	/* CTC1: write FCSR (FCR31) */
+	n_fcsr = r_fcsr;
+	if(r_start_int & t_wr_fcsr)
+	  n_fcsr = t_srcA[31:0];
 	/* Timer IP: set when Count wraps to Compare, cleared by MTC0 Compare */
 	n_timer_ip = r_timer_ip | (n_count == r_compare);
 
@@ -2711,6 +2866,7 @@ module exec(clk,
 	r_random <= reset ? 'd47 : n_random;
 	r_count   <= reset ? 32'd0 : n_count;
 	r_compare <= reset ? 32'd0 : n_compare;
+	r_fcsr <= reset ? 32'd0 : n_fcsr;
 	r_watchlo <= reset ? 32'd0 : n_watchlo;
 	r_watchhi <= reset ? 32'd0 : n_watchhi;
 	r_timer_ip <= reset ? 1'b0 : n_timer_ip;

@@ -52,6 +52,10 @@
   X(DMTC0)					\
   X(MFC1)					\
   X(MTC1)					\
+  X(DMFC1)					\
+  X(DMTC1)					\
+  X(CFC1)					\
+  X(CTC1)					\
   X(LW)						\
   X(LWU)					\
   X(LB)						\

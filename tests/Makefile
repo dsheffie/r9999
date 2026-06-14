@@ -44,7 +44,7 @@ TESTS := hello/hello.elf \
 
 DISASMS := $(TESTS:.elf=.dis)
 
-.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow run-traps
+.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow run-traps run-fpu
 
 all: $(STARTUP) $(TESTS) $(DISASMS)
 
@@ -164,6 +164,22 @@ run-cache: cache/test_smc_hit.elf cache/test_smc_index.elf cache/test_inval_nowb
 	cd .. && ./ooo_core --file tests/cache/test_inval_nowb.elf -c 0 2>&1 | grep -iE "PASS|FAIL|does not match"
 	@echo "== user-mode CACHE -> CpU, RTL-only (expect PASS) =="
 	cd .. && ./ooo_core --file tests/cache/test_cache_priv.elf -c 0 2>&1 | grep -iE "PASS|FAIL|does not match"
+
+# -----------------------------------------------------------------------
+# FP (COP1) directed tests — run under the co-sim checker (RTL must match
+# the interpreter).  Each prints 'P' on the functional self-check; a co-sim
+# divergence prints 'does not match'.
+# -----------------------------------------------------------------------
+fpu/%.elf: fpu/%.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/$*.S -o fpu/$*.o
+	$(LD) $(LDFLAGS) $(STARTUP) fpu/$*.o -o $@
+
+run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf
+	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst; do \
+	  echo "== fpu/$$t (co-sim; expect 'P' and no 'does not match') =="; \
+	  ( cd .. && ./ooo_core --file tests/fpu/$$t.elf --checker true 2>&1 \
+	      | grep -iE "does not match|FAIL" ) || echo "  ok (no divergence)"; \
+	done
 
 # -----------------------------------------------------------------------
 # Generic disassembly rule

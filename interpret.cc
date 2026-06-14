@@ -679,19 +679,71 @@ static void _sb(uint32_t inst, state_t *s) {
 }
 
 static void _mtc1(uint32_t inst, state_t *s) {
-  uint32_t rd = (inst>>11) & 31;
+  uint32_t fs = (inst>>11) & 31;
   uint32_t rt = (inst>>16) & 31;
-  s->cpr1[rd] = s->gpr[rt];
+  /* mips3/4 FR=1: FPR[fs] = sign_extend32(GPR[rt][31:0]) */
+  s->cpr1[fs] = (uint64_t)(int64_t)(int32_t)(uint32_t)s->gpr[rt];
   s->pc += 4;
-  s->insn_histo[mipsInsn::MTC1]++;  
+  s->insn_histo[mipsInsn::MTC1]++;
 }
 
 static void _mfc1(uint32_t inst, state_t *s) {
-  uint32_t rd = (inst>>11) & 31;
+  uint32_t fs = (inst>>11) & 31;
   uint32_t rt = (inst>>16) & 31;
-  s->gpr[rt] = s->cpr1[rd];
+  /* mips3/4 FR=1: GPR[rt] = sign_extend32(FPR[fs][31:0]) */
+  s->gpr[rt] = (int64_t)(int32_t)(uint32_t)s->cpr1[fs];
   s->pc +=4;
   s->insn_histo[mipsInsn::MFC1]++;
+}
+
+static void _dmtc1(uint32_t inst, state_t *s) {
+  uint32_t fs = (inst>>11) & 31;
+  uint32_t rt = (inst>>16) & 31;
+  /* FR=1: FPR[fs] = GPR[rt] (full 64-bit, no sign-ext) */
+  s->cpr1[fs] = s->gpr[rt];
+  s->pc += 4;
+  s->insn_histo[mipsInsn::DMTC1]++;
+}
+
+static void _dmfc1(uint32_t inst, state_t *s) {
+  uint32_t fs = (inst>>11) & 31;
+  uint32_t rt = (inst>>16) & 31;
+  /* FR=1: GPR[rt] = FPR[fs] (full 64-bit) */
+  s->gpr[rt] = s->cpr1[fs];
+  s->pc += 4;
+  s->insn_histo[mipsInsn::DMFC1]++;
+}
+
+/* map a raw FP control-register number to the compact fcr1[] index */
+static inline int fcr_index(uint32_t cr) {
+  switch(cr) {
+  case 0:  return CP1_CR0;   /* FIR  */
+  case 31: return CP1_CR31;  /* FCSR */
+  case 25: return CP1_CR25;
+  case 26: return CP1_CR26;
+  case 28: return CP1_CR28;
+  default: return CP1_CR31;
+  }
+}
+
+static void _cfc1(uint32_t inst, state_t *s) {
+  uint32_t cr = (inst>>11) & 31;
+  uint32_t rt = (inst>>16) & 31;
+  /* GPR[rt] = sign_extend32(FCR[cr]); FCR0 is the read-only FIR */
+  uint32_t v = (cr == 0) ? 0x00000500u : (uint32_t)s->fcr1[fcr_index(cr)];
+  s->gpr[rt] = (int64_t)(int32_t)v;
+  s->pc += 4;
+  s->insn_histo[mipsInsn::CFC1]++;
+}
+
+static void _ctc1(uint32_t inst, state_t *s) {
+  uint32_t cr = (inst>>11) & 31;
+  uint32_t rt = (inst>>16) & 31;
+  /* FCR[cr] = GPR[rt][31:0]; FCR0 (FIR) is read-only */
+  if(cr != 0)
+    s->fcr1[fcr_index(cr)] = (uint32_t)s->gpr[rt];
+  s->pc += 4;
+  s->insn_histo[mipsInsn::CTC1]++;
 }
 
 
@@ -956,7 +1008,8 @@ void _ldc1(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
-  *reinterpret_cast<int64_t*>(s->cpr1 + ft) = bswap<EL>(s->mem.get<int64_t>(ea));
+  /* FR=1: the whole 64-bit register ft (no even/odd pair) */
+  s->cpr1[ft] = bswap<EL>(s->mem.get<uint64_t>(ea));
   s->pc += 4;
   s->insn_histo[mipsInsn::LDC1]++;
 }
@@ -968,9 +1021,9 @@ void _sdc1(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
-  s->mem.set<int64_t>(ea,  bswap<EL>((*(int64_t*)(s->cpr1 + ft))));
+  s->mem.set<uint64_t>(ea, bswap<EL>(s->cpr1[ft]));
   s->pc += 4;
-  s->insn_histo[mipsInsn::SDC1]++;  
+  s->insn_histo[mipsInsn::SDC1]++;
 }
 
 template <bool EL>
@@ -980,8 +1033,9 @@ void _lwc1(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
-  uint32_t v = bswap<EL>(s->mem.get<uint32_t>(ea)); 
-  *((float*)(s->cpr1 + ft)) = *((float*)&v);
+  uint32_t v = bswap<EL>(s->mem.get<uint32_t>(ea));
+  /* FR=1: load the word into bits[31:0]; RTL's MEM_LW sign-extends to 64b */
+  s->cpr1[ft] = (uint64_t)(int64_t)(int32_t)v;
   s->pc += 4;
   s->insn_histo[mipsInsn::LWC1]++;
 }
@@ -993,7 +1047,7 @@ void _swc1(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
-  uint32_t v = *((uint32_t*)(s->cpr1+ft));
+  uint32_t v = (uint32_t)s->cpr1[ft];   /* bits[31:0] */
   s->mem.set<uint32_t>(ea, bswap<EL>(v));
   s->pc += 4;
   s->insn_histo[mipsInsn::SWC1]++;
@@ -1010,11 +1064,7 @@ static void _truncw(uint32_t inst, state_t *s) {
   uint32_t fs = (inst>>11) & 31;
   float f;
   double d;
-  int32_t *ptr = ((int32_t*)(s->cpr1 + fd));
-  if(currFpMode != fpMode::mips32) {
-    assert((fd & 1) == 0);
-    assert((fs & 1) == 0);
-  }  
+  int32_t *ptr = ((int32_t*)(s->cpr1 + fd));   /* result word -> FPR[fd][31:0] (FR=1) */
   switch(fmt)
     {
     case FMT_S:
@@ -1026,7 +1076,7 @@ static void _truncw(uint32_t inst, state_t *s) {
     case FMT_D:
       d = (*((double*)(s->cpr1 + fs)));
       *ptr = (int32_t)d;
-      s->insn_histo[mipsInsn::TRUNC_DP_W]++;      
+      s->insn_histo[mipsInsn::TRUNC_DP_W]++;
       //printf("id=%d\n", *ptr);
       break;
     default:
@@ -1034,9 +1084,6 @@ static void _truncw(uint32_t inst, state_t *s) {
       exit(-1);
       break;
     }
-  if(currFpMode != fpMode::mips32) {
-    s->cpr1[fd + 1] = 0;
-  }      
   s->pc += 4;
 }
 
@@ -1045,8 +1092,7 @@ static void _movnd(uint32_t inst, state_t *s) {
   uint32_t fs = (inst>>11) & 31;
   uint32_t rt = (inst>>16) & 31;
   bool notZero = (s->gpr[rt] != 0);
-  s->cpr1[fd+0] = notZero ? s->cpr1[fs+0] : s->cpr1[fd+0];
-  s->cpr1[fd+1] = notZero ? s->cpr1[fs+1] : s->cpr1[fd+1];
+  s->cpr1[fd] = notZero ? s->cpr1[fs] : s->cpr1[fd];
   s->pc += 4;
 }
 
@@ -1064,8 +1110,7 @@ static void _movzd(uint32_t inst, state_t *s) {
   uint32_t fs = (inst>>11) & 31;
   uint32_t rt = (inst>>16) & 31;
  
-  s->cpr1[fd+0] = (s->gpr[rt] == 0) ? s->cpr1[fs+0] : s->cpr1[fd+0];
-  s->cpr1[fd+1] = (s->gpr[rt] == 0) ? s->cpr1[fs+1] : s->cpr1[fd+1];
+  s->cpr1[fd] = (s->gpr[rt] == 0) ? s->cpr1[fs] : s->cpr1[fd];
   s->pc += 4;
 }
 
@@ -1086,17 +1131,15 @@ static void _movcd(uint32_t inst, state_t *s) {
 
   if(tf==0) {
     if(getConditionCode(s,cc)==0) {
-      s->cpr1[fd+0] = s->cpr1[fs+0];
-      s->cpr1[fd+1] = s->cpr1[fs+1];
+      s->cpr1[fd] = s->cpr1[fs];
     }
-    s->insn_histo[mipsInsn::FP_MOVF];    
+    s->insn_histo[mipsInsn::FP_MOVF];
   }
   else {
     if(getConditionCode(s,cc)==1) {
-      s->cpr1[fd+0] = s->cpr1[fs+0];
-      s->cpr1[fd+1] = s->cpr1[fs+1];
+      s->cpr1[fd] = s->cpr1[fs];
     }
-    s->insn_histo[mipsInsn::FP_MOVT];    
+    s->insn_histo[mipsInsn::FP_MOVT];
   }
   s->pc += 4;
 }
@@ -1140,24 +1183,14 @@ static void _cvts(uint32_t inst, state_t *s) {
   uint32_t fmt = (inst >> 21) & 31;
   uint32_t fd = (inst>>6) & 31;
   uint32_t fs = (inst>>11) & 31;
-  if(currFpMode != fpMode::mips32) {
-    assert((fd & 1) == 0);
-    assert((fs & 1) == 0);
-  }
   switch(fmt)
     {
     case FMT_D:
       *((float*)(s->cpr1 + fd)) = (float)(*((double*)(s->cpr1 + fs)));
-      if(currFpMode != fpMode::mips32) {
-	s->cpr1[fd+1] = 0;
-      }
-      s->cpr1_state[fd] = fp_reg_state::sp;      
+      s->cpr1_state[fd] = fp_reg_state::sp;
       break;
     case FMT_W:
       *((float*)(s->cpr1 + fd)) = (float)(*((int32_t*)(s->cpr1 + fs)));
-      if(currFpMode != fpMode::mips32) {
-	*((float*)(s->cpr1 + fd + 1)) = 0;
-      }
       break;
     default:
       printf("%s @ %d\n", __func__, __LINE__);
@@ -1377,12 +1410,9 @@ template <fpOperation op>
 void do_fp_op(uint32_t inst, state_t *s) {
   int fd=(inst>>6)&31;
   switch((inst>>21)&31) {
-  case FMT_S: 
-    assert((fd&1) == 0);
+  case FMT_S:
     execFP<float,op>(inst,s);
-    s->cpr1[fd+1] = 0;
     s->cpr1_state[fd] = fp_reg_state::sp;
-    s->cpr1_state[fd+1] = fp_reg_state::unknown;
     break;
   case FMT_D:
     execFP<double,op>(inst,s);
@@ -1424,7 +1454,9 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	}
       /*BRANCH*/
     }
-  else if((lowbits == 0) && ((functField==0x0) || (functField==0x4)))
+  else if((lowbits == 0) && ((functField==0x0) || (functField==0x4) ||
+			     (functField==0x2) || (functField==0x6) ||
+			     (functField==0x1) || (functField==0x5)))
     {
       if(functField == 0x0)
 	{
@@ -1435,6 +1467,26 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	{
 	  /* move to coprocessor */
 	  _mtc1(inst,s);
+	}
+      else if(functField == 0x1)
+	{
+	  /* doubleword move from coprocessor (dmfc1) */
+	  _dmfc1(inst,s);
+	}
+      else if(functField == 0x5)
+	{
+	  /* doubleword move to coprocessor (dmtc1) */
+	  _dmtc1(inst,s);
+	}
+      else if(functField == 0x2)
+	{
+	  /* move from control coprocessor (cfc1) */
+	  _cfc1(inst,s);
+	}
+      else if(functField == 0x6)
+	{
+	  /* move to control coprocessor (ctc1) */
+	  _ctc1(inst,s);
 	}
     }
   else
