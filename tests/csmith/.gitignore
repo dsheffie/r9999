@@ -1,0 +1,6 @@
+# build cache + generated artifacts from the FPGA-soak tooling
+.support/
+*.elf
+*.c
+manifest.txt
+qemu_refs.txt
