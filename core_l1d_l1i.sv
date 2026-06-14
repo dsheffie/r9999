@@ -155,8 +155,8 @@ module core_l1d_l1i(clk,
    output logic [(`M_WIDTH-1):0] 	  retire_pc;
    output logic [(`M_WIDTH-1):0] 	  retire_two_pc;
 
-   output logic [6:0]			  retire_op;
-   output logic [6:0]			  retire_two_op;   
+   output logic [7:0]			  retire_op;
+   output logic [7:0]			  retire_two_op;   
    
    logic 				  retired_call;
    logic 				  retired_ret;
