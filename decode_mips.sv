@@ -1056,6 +1056,19 @@ module decode_mips(
 		    uop.br_pred = insn_pred;
 		    uop.is_int = 1'b1;
 		 end // case: 6'd23
+	       6'd24: /* daddi (traps on 64-bit overflow) */
+		 begin
+		    if(w_in_64b_mode)
+		      begin
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.dst = rt;
+			 uop.dst_valid = (rt != 'd0);
+			 uop.op = DADDI;
+			 uop.imm = insn[15:0];
+			 uop.is_int = 1'b1;
+		      end
+		 end
 	       6'd25: /* daddiu */
 		 begin
 		    if(w_in_64b_mode)
