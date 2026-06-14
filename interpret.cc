@@ -213,6 +213,8 @@ static inline bool is_64b_gated(uint32_t inst) {
   uint32_t op = inst >> 26;
   if(op == 0x18) return true;                  /* daddi  */
   if(op == 0x19) return true;                  /* daddiu */
+  if(op == 0x34) return true;                  /* lld    */
+  if(op == 0x3c) return true;                  /* scd    */
   if(op != 0) return false;
   switch(inst & 0x3fu) {
     case 0x14: case 0x16: case 0x17:            /* dsllv dsrlv dsrav        */
@@ -649,6 +651,33 @@ void _sc(uint32_t inst, state_t *s) {
   s->gpr[rt] = 1;
   s->pc += 4;
   s->insn_histo[mipsInsn::SC]++;
+}
+
+template <bool EL>
+void _lld(uint32_t inst, state_t *s) {
+  uint32_t rt = (inst >> 16) & 31;
+  uint32_t rs = (inst >> 21) & 31;
+  int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 7) { raise_adel(s); return; }
+  /* load-linked doubleword: 64-bit load (link bit is a no-op in a functional sim) */
+  s->gpr[rt] = bswap<EL>(s->mem.get<int64_t>(ea));
+  s->pc += 4;
+  s->insn_histo[mipsInsn::LLD]++;
+}
+
+template <bool EL>
+void _scd(uint32_t inst, state_t *s) {
+  uint32_t rt = (inst >> 16) & 31;
+  uint32_t rs = (inst >> 21) & 31;
+  int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
+  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  if(ea & 7) { raise_ades(s); return; }
+  /* store-cond doubleword: 64-bit store, always succeeds (uncontended) -> rt=1 */
+  s->mem.set<int64_t>(ea, bswap<EL>(s->gpr[rt]));
+  s->gpr[rt] = 1;
+  s->pc += 4;
+  s->insn_histo[mipsInsn::SCD]++;
 }
 
 
@@ -1612,8 +1641,8 @@ void execMips(state_t *s) {
   bool isCoproc2 = (opcode == 0x12);
   bool isSpecial2 = (opcode == 0x1c); 
   bool isSpecial3 = (opcode == 0x1f);
-  bool isLoadLinked = (opcode == 0x30);
-  bool isStoreCond = (opcode == 0x38);
+  bool isLoadLinked = (opcode == 0x30) || (opcode == 0x34);
+  bool isStoreCond = (opcode == 0x38) || (opcode == 0x3c);
   uint32_t rs = (inst >> 21) & 31;
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rd = (inst >> 11) & 31;
@@ -2190,10 +2219,14 @@ void execMips(state_t *s) {
   else if(isCoproc2) {
     printf("coproc2 unimplemented\n");  exit(-1);
   }
-  else if(isLoadLinked)
-    _lw<EL>(inst, s);
-  else if(isStoreCond)
-    _sc<EL>(inst, s);
+  else if(isLoadLinked) {
+    if(opcode == 0x34) _lld<EL>(inst, s);   /* lld = 64-bit */
+    else               _lw<EL>(inst, s);    /* ll  = 32-bit */
+  }
+  else if(isStoreCond) {
+    if(opcode == 0x3c) _scd<EL>(inst, s);   /* scd = 64-bit */
+    else               _sc<EL>(inst, s);    /* sc  = 32-bit */
+  }
   else { /* itype */
     uint32_t uimm32 = inst & ((1<<16) - 1);
     int16_t simm16 = (int16_t)uimm32;

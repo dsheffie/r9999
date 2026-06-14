@@ -30,6 +30,7 @@ TESTS := hello/hello.elf \
          except/test_except.elf \
          except/test_overflow.elf \
          except/test_traps.elf \
+         atomic/test_atomic.elf \
          unaligned/test_unaligned.elf \
          xtlb/test_xtlb64.elf \
          xtlb/test_xtlb32.elf \
@@ -44,7 +45,7 @@ TESTS := hello/hello.elf \
 
 DISASMS := $(TESTS:.elf=.dis)
 
-.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow run-traps run-fpu
+.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow run-traps run-atomic run-fpu
 
 all: $(STARTUP) $(TESTS) $(DISASMS)
 
@@ -82,6 +83,10 @@ except/test_except.elf: except/test_except.S $(COMMON)/sim.h $(COMMON)/link.ld
 except/test_overflow.elf: except/test_overflow.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_overflow.S -o except/test_overflow.o
 	$(LD) $(LDFLAGS) except/test_overflow.o -o $@
+
+atomic/test_atomic.elf: atomic/test_atomic.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c atomic/test_atomic.S -o atomic/test_atomic.o
+	$(LD) $(LDFLAGS) $(STARTUP) atomic/test_atomic.o -o $@
 
 except/test_traps.elf: except/test_traps.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_traps.S -o except/test_traps.o
@@ -223,6 +228,12 @@ run-traps: except/test_traps.elf
 	cd .. && $(SIM) --file tests/except/test_traps.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
 	@echo "== same under co-sim (expect no 'does not match') =="
 	cd .. && $(SIM) --file tests/except/test_traps.elf --checker true 2>&1 | grep -i 'does not match' || echo "  ok (no divergence)"
+
+run-atomic: atomic/test_atomic.elf
+	@echo "== LL/SC + LLD/SCD round-trip, self-check (expect P) =="
+	cd .. && $(SIM) --file tests/atomic/test_atomic.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
+	@echo "== same under co-sim (expect no 'does not match') =="
+	cd .. && $(SIM) --file tests/atomic/test_atomic.elf --checker true 2>&1 | grep -i 'does not match' || echo "  ok (no divergence)"
 
 run-unaligned: unaligned/test_unaligned.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1

@@ -122,6 +122,8 @@
   X(BLTZAL)					\
   X(BLTZALL)					\
   X(SC)						\
+  X(LLD)					\
+  X(SCD)					\
   X(SYNC)					\
   X(BREAK)					\
   X(SDC1)					\
