@@ -1482,8 +1482,6 @@ module decode_mips(
 		 end
 	       6'd53: /* LDC1: FPR[ft] <- mem[rs+off] (64b) */
 		 begin
-		    if(w_in_64b_mode)
-		      begin
 			 uop.op = LDC1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
@@ -1491,7 +1489,6 @@ module decode_mips(
 			 uop.fp_dst_valid = 1'b1;
 			 uop.imm = insn[15:0];
 			 uop.is_mem = 1'b1;
-		      end
 		 end
 	       6'd51: /* PREF */
 		 begin
@@ -1511,8 +1508,6 @@ module decode_mips(
 		 end
 	       6'd61: /* SDC1: mem[rs+off] <- FPR[ft] (64b) */
 		 begin
-		    if(w_in_64b_mode)
-		      begin
 			 uop.op = SDC1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
@@ -1521,7 +1516,6 @@ module decode_mips(
 			 uop.imm = insn[15:0];
 			 uop.is_mem = 1'b1;
 			 uop.is_store = 1'b1;
-		      end
 		 end
 	       6'd55: /* LD */
 		 begin
