@@ -211,6 +211,7 @@ module exec(clk,
    logic [N_INT_PRF_ENTRIES-1:0]  r_fp_prf_inflight, n_fp_prf_inflight;
 
    logic 			  t_wr_int_prf, t_wr_cpr0, t_wr_cpr0_64;
+   logic 			  t_wr_fcsr;
    logic [`M_WIDTH-1:0]		  t_csr0_val, t_csr0_64_val;
    
    logic 	t_wr_hilo;
@@ -1321,6 +1322,7 @@ module exec(clk,
 	t_wr_int_prf = 1'b0;
 	t_wr_cpr0 = 1'b0;
 	t_wr_cpr0_64 = 1'b0;
+	t_wr_fcsr = 1'b0;
 	t_take_br = 1'b0;
 	t_mispred_br = 1'b0;
 	t_jaddr = {int_uop.jmp_imm[9:0],int_uop.imm,2'd0};
@@ -1884,6 +1886,21 @@ module exec(clk,
 	    begin
 	       t_wr_cpr0 = 1'b1;
 	       t_wr_cpr0_64 = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  CFC1:
+	    begin
+	       /* fs in srcA[4:0]: FCR0=FIR (read-only R4000 id), FCR31=FCSR */
+	       t_result = (int_uop.srcA[4:0] == 5'd0) ?
+			  sign_extend32(32'h00000500) : /* FIR: imp=0x05 (R4000 FPU), rev 0 */
+			  sign_extend32(r_fcsr);
+	       t_alu_valid = 1'b1;
+	       t_wr_int_prf = 1'b1;
+	    end
+	  CTC1:
+	    begin
+	       /* only FCR31 (FCSR) is writable; fs in dst */
+	       t_wr_fcsr = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
 	  ERET:
@@ -2472,6 +2489,10 @@ module exec(clk,
    /* error level */
    logic r_sr_erl, n_sr_erl;
 
+   /* FP control/status register FCR31 (FCSR). No FP arithmetic is implemented,
+    * so this is a plain holding register: ctc1 writes it, cfc1 reads it. */
+   logic [31:0] r_fcsr, n_fcsr;
+
    /* CP0 register 9: Count (free-running, increments each cycle) */
    logic [31:0] r_count, n_count;
    /* CP0 register 11: Compare (timer fires when Count == Compare) */
@@ -2755,6 +2776,10 @@ module exec(clk,
 	n_compare = r_compare;
 	n_watchlo = r_watchlo;
 	n_watchhi = r_watchhi;
+	/* CTC1: write FCSR (FCR31) */
+	n_fcsr = r_fcsr;
+	if(r_start_int & t_wr_fcsr)
+	  n_fcsr = t_srcA[31:0];
 	/* Timer IP: set when Count wraps to Compare, cleared by MTC0 Compare */
 	n_timer_ip = r_timer_ip | (n_count == r_compare);
 
@@ -2819,6 +2844,7 @@ module exec(clk,
 	r_random <= reset ? 'd47 : n_random;
 	r_count   <= reset ? 32'd0 : n_count;
 	r_compare <= reset ? 32'd0 : n_compare;
+	r_fcsr <= reset ? 32'd0 : n_fcsr;
 	r_watchlo <= reset ? 32'd0 : n_watchlo;
 	r_watchhi <= reset ? 32'd0 : n_watchhi;
 	r_timer_ip <= reset ? 1'b0 : n_timer_ip;

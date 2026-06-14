@@ -696,6 +696,38 @@ static void _mfc1(uint32_t inst, state_t *s) {
   s->insn_histo[mipsInsn::MFC1]++;
 }
 
+/* map a raw FP control-register number to the compact fcr1[] index */
+static inline int fcr_index(uint32_t cr) {
+  switch(cr) {
+  case 0:  return CP1_CR0;   /* FIR  */
+  case 31: return CP1_CR31;  /* FCSR */
+  case 25: return CP1_CR25;
+  case 26: return CP1_CR26;
+  case 28: return CP1_CR28;
+  default: return CP1_CR31;
+  }
+}
+
+static void _cfc1(uint32_t inst, state_t *s) {
+  uint32_t cr = (inst>>11) & 31;
+  uint32_t rt = (inst>>16) & 31;
+  /* GPR[rt] = sign_extend32(FCR[cr]); FCR0 is the read-only FIR */
+  uint32_t v = (cr == 0) ? 0x00000500u : (uint32_t)s->fcr1[fcr_index(cr)];
+  s->gpr[rt] = (int64_t)(int32_t)v;
+  s->pc += 4;
+  s->insn_histo[mipsInsn::CFC1]++;
+}
+
+static void _ctc1(uint32_t inst, state_t *s) {
+  uint32_t cr = (inst>>11) & 31;
+  uint32_t rt = (inst>>16) & 31;
+  /* FCR[cr] = GPR[rt][31:0]; FCR0 (FIR) is read-only */
+  if(cr != 0)
+    s->fcr1[fcr_index(cr)] = (uint32_t)s->gpr[rt];
+  s->pc += 4;
+  s->insn_histo[mipsInsn::CTC1]++;
+}
+
 
 template <bool EL>
 void _swl(uint32_t inst, state_t *s) {
@@ -1404,7 +1436,8 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	}
       /*BRANCH*/
     }
-  else if((lowbits == 0) && ((functField==0x0) || (functField==0x4)))
+  else if((lowbits == 0) && ((functField==0x0) || (functField==0x4) ||
+			     (functField==0x2) || (functField==0x6)))
     {
       if(functField == 0x0)
 	{
@@ -1415,6 +1448,16 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	{
 	  /* move to coprocessor */
 	  _mtc1(inst,s);
+	}
+      else if(functField == 0x2)
+	{
+	  /* move from control coprocessor (cfc1) */
+	  _cfc1(inst,s);
+	}
+      else if(functField == 0x6)
+	{
+	  /* move to control coprocessor (ctc1) */
+	  _ctc1(inst,s);
 	}
     }
   else

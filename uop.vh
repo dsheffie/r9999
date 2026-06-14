@@ -138,7 +138,9 @@ typedef enum logic [7:0]
    LWC1,
    SWC1,
    LDC1,
-   SDC1
+   SDC1,
+   CFC1,  /* move from FP control reg (FCR0=FIR / FCR31=FCSR) -> GPR */
+   CTC1   /* move GPR -> FP control reg (FCR31=FCSR) */
    } opcode_t;
 
 function logic is_mult(opcode_t op);

@@ -1060,6 +1060,24 @@ module decode_mips(
 			 uop.fp_dst_valid = 1'b1;
 			 uop.is_mem = 1'b1;
 		      end // if ((insn[25:21]==5'd4) && (insn[10:0] == 11'd0))
+		    else if((insn[25:21]==5'd2) && (insn[10:0] == 11'd0))
+		      begin /* cfc1: GPR[rt] <- FCR[fs] (fs=insn[15:11]: 0=FIR, 31=FCSR) */
+			 uop.op = CFC1;
+			 uop.dst = rt;
+			 uop.dst_valid = 1'b1;
+			 uop.srcA = fs;        /* carry the FCR number (NOT a PRF read) */
+			 uop.is_int = 1'b1;
+			 uop.oldest_first = 1'b1;
+		      end
+		    else if((insn[25:21]==5'd6) && (insn[10:0] == 11'd0))
+		      begin /* ctc1: FCR[fs] <- GPR[rt] (only FCR31 is writable) */
+			 uop.op = CTC1;
+			 uop.dst = fs;         /* carry the FCR number (NOT a PRF write) */
+			 uop.srcA = rt;
+			 uop.srcA_valid = 1'b1;
+			 uop.is_int = 1'b1;
+			 uop.serializing_op = 1'b1;
+		      end
 		 end // case: 6'd17
 	       6'd20: /* BEQL */
 		 begin
