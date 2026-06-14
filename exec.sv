@@ -1214,8 +1214,13 @@ module exec(clk,
    wire [31:0] w_add_srcB = w_s_sub32;
 
    wire [31:0] w_add32 = w_add_srcA + w_add_srcB;
-   wire	       w_add32_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] == w_srcB[31]);
-   wire	       w_sub32_overflow = (w_add32[31] != w_srcB[31]) & (w_srcA[31] != w_srcB[31]);   
+   /* Overflow must use the SAME (forwarded) operands the adder used: t_srcA and
+    * the effective addend (the immediate for ADDI/ADDIU, else t_srcB).  The raw
+    * PRF reads w_srcA/w_srcB hold stale values on same-cycle forwarding. */
+   wire [31:0] w_ovf_srcB = (int_uop.op == ADDIU | int_uop.op == ADDI) ? w_imm32 : t_srcB[31:0];
+   wire	       w_add32_overflow = (w_add32[31] != w_ovf_srcB[31]) & (t_srcA[31] == w_ovf_srcB[31]);
+   /* A - B overflows iff A,B differ in sign AND the result sign differs from A (the minuend). */
+   wire	       w_sub32_overflow = (w_add32[31] != t_srcA[31]) & (t_srcA[31] != w_ovf_srcB[31]);
 
    wire [`M_WIDTH-1:0] w_add64;
    wire	       w_add64_overflow, w_sub64_overflow;
@@ -1232,8 +1237,9 @@ module exec(clk,
 	   wire [63:0] w_add64_srcA = {w_c_sub64[62:0], 1'b0};
 	   wire [63:0] w_add64_srcB = w_s_sub64;
 	   assign w_add64 = w_add64_srcA + w_add64_srcB;
-	   assign w_add64_overflow = (w_add64[63] != w_srcB[63]) & (w_srcA[63] == w_srcB[63]);
-	   assign w_sub64_overflow = (w_add64[63] != w_srcB[63]) & (w_srcA[63] != w_srcB[63]);   	   
+		   wire [63:0] w_ovf64_srcB = (int_uop.op == DADDIU | int_uop.op == DADDI) ? w_imm64 : t_srcB;
+	   assign w_add64_overflow = (w_add64[63] != w_ovf64_srcB[63]) & (t_srcA[63] == w_ovf64_srcB[63]);
+	   assign w_sub64_overflow = (w_add64[63] != t_srcA[63]) & (t_srcA[63] != w_ovf64_srcB[63]);   	   
 	end
       else
 	begin

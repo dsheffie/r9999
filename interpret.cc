@@ -1840,9 +1840,9 @@ void execMips(state_t *s) {
 	uint32_t u_rs = (uint32_t)s->gpr[rs];
 	uint32_t u_rt = (uint32_t)s->gpr[rt];
 	uint32_t result = u_rs - u_rt;
-	/* Overflow iff operands have different signs AND result sign != rs sign.
-	 * Matches RTL: w_sub32_overflow = (result[31]!=rt[31]) & (rs[31]!=rt[31]) */
-	if (((result >> 31) != (u_rt >> 31)) && ((u_rs >> 31) != (u_rt >> 31))) {
+	/* A-B overflows iff operands differ in sign AND result sign != rs (minuend).
+	 * Matches RTL: w_sub32_overflow = (result[31]!=rs[31]) & (rs[31]!=rt[31]) */
+	if (((result >> 31) != (u_rs >> 31)) && ((u_rs >> 31) != (u_rt >> 31))) {
 	  raise_overflow(s);
 	  break;
 	}
@@ -1942,8 +1942,9 @@ void execMips(state_t *s) {
 	uint64_t u_rs = (uint64_t)s->gpr[rs];
 	uint64_t u_rt = (uint64_t)s->gpr[rt];
 	uint64_t result = u_rs - u_rt;
-	/* Matches RTL: w_sub64_overflow = (result[63]!=rt[63]) & (rs[63]!=rt[63]) */
-	if (((result >> 63) != (u_rt >> 63)) && ((u_rs >> 63) != (u_rt >> 63))) {
+	/* A-B overflows iff operands differ in sign AND result sign != rs (minuend).
+	 * Matches RTL: w_sub64_overflow = (result[63]!=rs[63]) & (rs[63]!=rt[63]) */
+	if (((result >> 63) != (u_rs >> 63)) && ((u_rs >> 63) != (u_rt >> 63))) {
 	  raise_overflow(s);
 	  break;
 	}

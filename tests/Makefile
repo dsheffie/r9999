@@ -28,6 +28,7 @@ TESTS := hello/hello.elf \
          tlb/test_tlb.elf \
          dside_tlb/test_dside_tlb.elf \
          except/test_except.elf \
+         except/test_overflow.elf \
          unaligned/test_unaligned.elf \
          xtlb/test_xtlb64.elf \
          xtlb/test_xtlb32.elf \
@@ -42,7 +43,7 @@ TESTS := hello/hello.elf \
 
 DISASMS := $(TESTS:.elf=.dis)
 
-.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache
+.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow
 
 all: $(STARTUP) $(TESTS) $(DISASMS)
 
@@ -76,6 +77,10 @@ tlb/test_tlb.elf: tlb/test_tlb.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 except/test_except.elf: except/test_except.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_except.S -o except/test_except.o
 	$(LD) $(LDFLAGS) except/test_except.o -o $@
+
+except/test_overflow.elf: except/test_overflow.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_overflow.S -o except/test_overflow.o
+	$(LD) $(LDFLAGS) except/test_overflow.o -o $@
 
 # -----------------------------------------------------------------------
 # Unaligned load test (lwl / lwr)
@@ -185,6 +190,12 @@ run-dside-tlb: dside_tlb/test_dside_tlb.elf
 
 run-except: except/test_except.elf
 	cd .. && $(SIM) --file tests/$< -c 0 2>&1
+
+run-overflow: except/test_overflow.elf
+	@echo "== add/addi/sub signed overflow, self-check (expect P) =="
+	cd .. && $(SIM) --file tests/except/test_overflow.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
+	@echo "== same under co-sim (expect no 'does not match') =="
+	cd .. && $(SIM) --file tests/except/test_overflow.elf --checker true 2>&1 | grep -i 'does not match' || echo "  ok (no divergence)"
 
 run-unaligned: unaligned/test_unaligned.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
