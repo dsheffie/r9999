@@ -25,12 +25,21 @@ __gpr_snapshot:
 	.text
 
 # putchar: low byte of $a0 -> console.  Encoded as a literal mtc0 $4,$7 so the
-# macro override of `mtc0` in macros.s does not recurse.  Clobbers nothing.
+# macro override of `mtc0` in macros.s does not recurse.  Clobbers $1/$at.
+# Spins on the FIFO-full flag first: `mfc0 $7` returns {31'd0, fifo_full} (the
+# 8-deep putchar FIFO).  Without this backpressure a bulk dump (~640 chars)
+# overflows the FIFO on silicon, where the AXI driver drains far slower than the
+# core pushes (invisible in ooo_core, which drains the FIFO instantly).
 	.set push
 	.set noreorder
+	.set noat
 .global __putc
 .ent __putc
 __putc:
+1:	mfc0	$1, $7			# bit0 = putchar-FIFO full flag
+	andi	$1, $1, 1
+	bnez	$1, 1b			# spin while full (8-deep FIFO backpressure)
+	nop
 	.word 0x40843800		# mtc0 $4, $7  (0x40800000 | 4<<16 | 7<<11)
 	jr $ra
 	nop

@@ -2,6 +2,8 @@
 *.elf
 *.o
 *.dis
+# generated FPGA-standalone batch (ELFs + ooo_core goldens + manifest)
+fpga/batch/
 __pycache__/
 .pytest_cache/
 # scratch logs
