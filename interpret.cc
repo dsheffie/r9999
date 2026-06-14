@@ -211,6 +211,7 @@ static inline bool in_64b_mode(state_t *s) {
  * or 64-bit loads/stores, so neither do we). */
 static inline bool is_64b_gated(uint32_t inst) {
   uint32_t op = inst >> 26;
+  if(op == 0x18) return true;                  /* daddi  */
   if(op == 0x19) return true;                  /* daddiu */
   if(op != 0) return false;
   switch(inst & 0x3fu) {
@@ -2269,6 +2270,20 @@ void execMips(state_t *s) {
       case 0x17:
 	branch<EL,branch_type::bgtzl>(inst, s);
 	break;
+      case 0x18: { /* daddi: 64-bit add-immediate, TRAPS on signed overflow */
+	int64_t a = s->gpr[rs];
+	int64_t b = (int64_t)simm32;            /* sign-extended 16-bit imm */
+	int64_t result = (int64_t)((uint64_t)a + (uint64_t)b);
+	/* matches RTL w_add64_overflow: operands same sign AND result sign differs */
+	if(((result >> 63) != (b >> 63)) && ((a >> 63) == (b >> 63))) {
+	  raise_overflow(s);
+	  return;
+	}
+	s->gpr[rt] = result;
+	s->pc += 4;
+	s->insn_histo[mipsInsn::DADDI]++;
+	break;
+      }
       case 0x19: /* daddiu */
 	s->gpr[rt] = s->gpr[rs] + simm32;
 	s->pc += 4;

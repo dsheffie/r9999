@@ -110,6 +110,31 @@ _start:
     bne     $2, $3, fail
     nop
 
+    /* ---- daddi (64-bit add-immediate): non-overflow takes no trap ---- */
+    sw      $0, 0($19)
+    li      $12, 5
+    daddi   $14, $12, 3         /* 5 + 3 = 8; must NOT trap */
+    lw      $2, 0($19)
+    bne     $2, $0, fail
+    nop
+    li      $3, 8
+    bne     $14, $3, fail
+    nop
+
+    /* ---- daddi 64-bit overflow MUST trap (cause 12): 0x7fff..ff + 1 ---- */
+    sw      $0, 0($19)
+    li      $12, -1             /* 0xffffffffffffffff */
+    dsrl    $12, $12, 1         /* 0x7fffffffffffffff = INT64_MAX */
+    daddi   $15, $12, 1         /* MUST overflow */
+    lw      $2, 0($19)
+    beq     $2, $0, fail        /* flag NOT set -> overflow missed */
+    nop
+    la      $4, ov_code
+    lw      $2, 0($4)
+    li      $3, 12
+    bne     $2, $3, fail
+    nop
+
     li      $25, 0x50           /* 'P' */
     mtc0    $25, $7
     HALT
