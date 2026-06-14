@@ -1078,6 +1078,30 @@ module decode_mips(
 			 uop.is_int = 1'b1;
 			 uop.serializing_op = 1'b1;
 		      end
+		    else if((insn[25:21]==5'd1) && (insn[10:0] == 11'd0))
+		      begin /* dmfc1: GPR[rt] <- FPR[fs] (full 64b) */
+			 if(w_in_64b_mode)
+			   begin
+			      uop.op = DMFC1;
+			      uop.dst = rt;
+			      uop.dst_valid = 1'b1;
+			      uop.srcB = fs;
+			      uop.fp_srcB_valid = 1'b1;
+			      uop.is_mem = 1'b1;
+			   end
+		      end
+		    else if((insn[25:21]==5'd5) && (insn[10:0] == 11'd0))
+		      begin /* dmtc1: FPR[fs] <- GPR[rt] (full 64b) */
+			 if(w_in_64b_mode)
+			   begin
+			      uop.srcA = rt;
+			      uop.srcA_valid = 1'b1;
+			      uop.op = DMTC1;
+			      uop.dst = fs;
+			      uop.fp_dst_valid = 1'b1;
+			      uop.is_mem = 1'b1;
+			   end
+		      end
 		 end // case: 6'd17
 	       6'd20: /* BEQL */
 		 begin

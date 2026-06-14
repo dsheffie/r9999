@@ -696,6 +696,24 @@ static void _mfc1(uint32_t inst, state_t *s) {
   s->insn_histo[mipsInsn::MFC1]++;
 }
 
+static void _dmtc1(uint32_t inst, state_t *s) {
+  uint32_t fs = (inst>>11) & 31;
+  uint32_t rt = (inst>>16) & 31;
+  /* FR=1: FPR[fs] = GPR[rt] (full 64-bit, no sign-ext) */
+  s->cpr1[fs] = s->gpr[rt];
+  s->pc += 4;
+  s->insn_histo[mipsInsn::DMTC1]++;
+}
+
+static void _dmfc1(uint32_t inst, state_t *s) {
+  uint32_t fs = (inst>>11) & 31;
+  uint32_t rt = (inst>>16) & 31;
+  /* FR=1: GPR[rt] = FPR[fs] (full 64-bit) */
+  s->gpr[rt] = s->cpr1[fs];
+  s->pc += 4;
+  s->insn_histo[mipsInsn::DMFC1]++;
+}
+
 /* map a raw FP control-register number to the compact fcr1[] index */
 static inline int fcr_index(uint32_t cr) {
   switch(cr) {
@@ -1437,7 +1455,8 @@ static void execCoproc1(uint32_t inst, state_t *s) {
       /*BRANCH*/
     }
   else if((lowbits == 0) && ((functField==0x0) || (functField==0x4) ||
-			     (functField==0x2) || (functField==0x6)))
+			     (functField==0x2) || (functField==0x6) ||
+			     (functField==0x1) || (functField==0x5)))
     {
       if(functField == 0x0)
 	{
@@ -1448,6 +1467,16 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	{
 	  /* move to coprocessor */
 	  _mtc1(inst,s);
+	}
+      else if(functField == 0x1)
+	{
+	  /* doubleword move from coprocessor (dmfc1) */
+	  _dmfc1(inst,s);
+	}
+      else if(functField == 0x5)
+	{
+	  /* doubleword move to coprocessor (dmtc1) */
+	  _dmtc1(inst,s);
 	}
       else if(functField == 0x2)
 	{

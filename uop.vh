@@ -140,7 +140,9 @@ typedef enum logic [7:0]
    LDC1,
    SDC1,
    CFC1,  /* move from FP control reg (FCR0=FIR / FCR31=FCSR) -> GPR */
-   CTC1   /* move GPR -> FP control reg (FCR31=FCSR) */
+   CTC1,  /* move GPR -> FP control reg (FCR31=FCSR) */
+   DMTC1, /* 64-bit GPR -> FPR move (full reg, no sign-ext) */
+   DMFC1  /* 64-bit FPR -> GPR move (full reg) */
    } opcode_t;
 
 function logic is_mult(opcode_t op);

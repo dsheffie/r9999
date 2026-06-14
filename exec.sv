@@ -2305,6 +2305,28 @@ module exec(clk,
 	       t_mem_tail.mapped = 1'b0;
 	       t_mem_tail.cached = 1'b1;
 	    end
+	  DMTC1:
+	    begin
+	       /* GPR->FPR 64-bit move: FPR[fs] = GPR[rt] (full register, no sign-ext) */
+	       t_mem_tail.op = MEM_MOV;
+	       t_mem_tail.addr = t_mem_srcA;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.fp_dst = 1'b1;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.mapped = 1'b0;
+	       t_mem_tail.cached = 1'b1;
+	    end
+	  DMFC1:
+	    begin
+	       /* FPR->GPR 64-bit move: GPR[rt] = FPR[fs] (full register) */
+	       t_mem_tail.op = MEM_MOV;
+	       t_mem_tail.addr = r_fp_rd_srcB;
+	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.fp_dst = 1'b0;
+	       t_mem_tail.dst_ptr = mem_uq.dst;
+	       t_mem_tail.mapped = 1'b0;
+	       t_mem_tail.cached = 1'b1;
+	    end
 	  LWC1:
 	    begin
 	       /* FP load (word): normal L1D load, result writes the FP PRF */
