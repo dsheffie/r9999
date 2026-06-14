@@ -382,7 +382,12 @@ endfunction
    logic [63:0] 	       n_cache_accesses, r_cache_accesses;
    logic [63:0] 	       n_cache_hits, r_cache_hits;
 
-   wire [`PA_WIDTH-1:0]      w_mapped_addr;   
+   wire [`PA_WIDTH-1:0]      w_mapped_addr;
+   /* port-2 tag is the TLB-TRANSLATED physical tag (w_mapped_addr), not the VA
+    * tag (r_cache_tag2).  For unmapped accesses w_mapped_addr == va (1:1) so this
+    * is equivalent; for mapped accesses it is the real physical tag.  Aligned
+    * with r_tag_out2/r_req2 (both clocked off the same port-2 request). */
+   wire [N_TAG_BITS-1:0]     w_tlb_tag2 = w_mapped_addr[`PA_WIDTH-1:IDX_STOP];
    
    
    logic [31:0] 			 r_cycle;
@@ -624,13 +629,17 @@ endfunction
      begin
 	t_remapped_req2 = r_req2;
 	t_remapped_req2.addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
+	/* the queued/replayed req now carries the TLB-translated PHYSICAL address;
+	 * mark it unmapped so the replay refills from / re-tags with the PA and
+	 * does NOT translate it a second time. */
+	t_remapped_req2.mapped = 1'b0;
      end
-   
+
    always_ff@(posedge clk)
      begin
 	if(t_push_miss)
 	  begin
-	     r_mem_q[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0] ] <= r_req2;
+	     r_mem_q[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0] ] <= t_remapped_req2;
 	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_remapped_req2.addr[IDX_STOP-1:IDX_START];
 	  end
      end
@@ -976,7 +985,7 @@ endfunction
 	t_w32_2 = (select_cl32(t_data2, r_req2.addr[WORD_STOP-1:WORD_START]));
 	t_bswap_w32_2 = bswap32(t_w32_2);
 
-	t_hit_cache2 = r_valid_out2 && (r_tag_out2 == r_cache_tag2) && r_got_req2 && 
+	t_hit_cache2 = r_valid_out2 && (r_tag_out2 == w_tlb_tag2) && r_got_req2 && 
 		      (r_state == ACTIVE);
 	t_rsp_dst_valid2 = 1'b0;
 	t_rsp_fp_dst_valid2 = 1'b0;
@@ -1536,7 +1545,7 @@ endfunction
    always_comb
      begin
 	t_got_rd_retry = 1'b0;
-	t_port2_hit_cache = r_valid_out2 && (r_tag_out2 == r_cache_tag2);
+	t_port2_hit_cache = r_valid_out2 && (r_tag_out2 == w_tlb_tag2);
 	t_mem_req_mask = make_mask(r_req);
 	n_state = r_state;
 	t_miss_idx = r_miss_idx;
