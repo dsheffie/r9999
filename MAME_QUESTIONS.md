@@ -138,3 +138,164 @@ the unmapped page table.
 model those initial wired entries (in interp_mips's ARCS/PROM setup, and r9999's reset state). If instead IRIX
 backs the linear page table with real physical memory it populates earlier, we'll find the populating step we're
 skipping.
+
+---
+
+### ANSWER to Q2 (MAME session, 2026-06-14) — PROM leaves an EMPTY TLB; the real mechanism is the self-mapped kptebase linear page table backed by physical memory (NOT pre-wired PROM slots)
+
+**Measured on MAME (`indy_4610`, `-nodrc`) with C++ instrumentation in `mips3.cpp`: a full TLB snapshot at
+kernel entry, plus a sequence/fault trace (instruction-count timestamps for `init_pmap`, `a0` at every
+`bzero`, and `BadVAddr` of the first TLB-miss exceptions).**
+
+**#1 / #2 / #3 — what the PROM hands the kernel at `0x88005960`:** **the TLB is EMPTY.** All 48 entries
+invalid (V=0), **`Wired=0`** (`valid_tlb_entries=0`).
+- ⇒ **The PROM does NOT pre-load wired slots 1-7. dsheffie's hypothesis is REFUTED.** There are no wired
+  slots to model. The kernel inherits a blank TLB, sets `Wired=8` itself later, and builds all mappings
+  **dynamically via the refill / tlbmiss handlers** as faults occur. (interp_mips's "only slot 0 valid,
+  slots 1-47 empty" is therefore the *correct* state, not a missing-PROM-setup symptom.)
+
+**#5 — ordering (`init_pmap` vs the `0xc0000000` access): NOT a divergence.** In MAME the first
+`bzero(a0=0xc0000000)` is at `ic=1094006407`; `init_pmap` (`0x881295a8`) is at `ic=1094184647` — i.e.
+**`c0000000` is accessed BEFORE `init_pmap` in MAME too.** So "init_pmap hasn't run yet" at the fault is the
+real boot order, not evidence of divergence.
+
+**#4 — does the `c0000000` bzero miss, and where is the PTE read from? YES — and MAME takes the SAME nested
+fault chain interp_mips does, then RESOLVES it:**
+- `bzero` store to `0xc0000000` → **`TLBSTORE_FILL`** miss (EXL=0 → fast-refill vector `0x80000000`).
+- the refill handler at **`0x8000000c`** loads the PTE from the linear page table at **`0xffb00000`**
+  (= kptebase `0xff800000` + (`0xc0000`<<2)) → **nested `TLBLOAD` miss** (EXL=1 → general vector
+  `0x80000180`). **This is byte-for-byte interp_mips's chain — same `0x8000000c`, same `~0xff800000`.**
+- **The difference:** MAME's general-vector `tlbmiss` handler **resolves** the `0xffb00000` fault (the
+  page-table page *is* backed by physical memory), the refill completes, and the `c0000000` store **retries
+  and succeeds** (next `bzero a0=c0000000` at `ic=1094006503`). interp_mips **panics**
+  "TLBMISS: KERNEL FAULT, Bad addr 0xff800000" at exactly this point.
+
+**⇒ THE answer (your hypothesis's *second* branch was the right one):** the mechanism is a **self-mapped
+linear page table at `kptebase = 0xff800000`, backed by real physical memory**, built by the kernel before
+the first kseg2 access. interp_mips panics because **its page table isn't backed** — when the refill
+handler reads the PTE at `0xffb00000`, there is no valid PTE there. **The missing piece is the physical
+backing of the kptebase page-table pages (and the recursive self-map), NOT a PROM-installed wired entry.**
+
+**kptebase math (for replication):** `kptebase = 0xff800000`; `PTE(va) @ kptebase + (va>>12)*4`. For
+`va=0xc0000000` → `0xffb00000` (matches the measured nested-fault `BadVAddr`).
+
+**⚠ Possible earlier divergence (worth checking):** MAME reaches the `c0000000` access ~70M *kernel*
+instructions after entry (`ic` 1.024B→1.094B; the PROM POST is the first ~1.02B); interp_mips hits it at
+~10.5M. The ~7× gap hints interp_mips may be reaching `c0000000` via a shorter/divergent path that skips the
+kernel work which backs the page table. Suggest diffing the kernel instruction trace (MAME vs interp_mips)
+from kernel entry to the first `c0000000` store.
+
+### Round-3 (MAME session, 2026-06-14) — the actual page-table backing + the `kmiss` kernel TLB-miss handler
+
+**Measured: full valid-TLB dump *at* the `c0000000` access, plus a trace of every TLB write that maps the
+kseg2/3 page-table region (`Q2_PTW`, with installing PC + backing PA).**
+
+- **At the `c0000000` access the TLB holds ONLY the wired PDA** (idx 0, `hi=ffffa000 lo0=20e39f`); **slots
+  1-7 are empty** (`Wired=8` but unused). **Identical to interp_mips — so it was never about pre-wired
+  slots.** Confirmed: the bootstrap is *purely dynamic*.
+- **The page-table page is backed by physical RAM and mapped on demand by the kernel TLB-miss handler:**
+  ```
+  Q2_PTW WR pc=880165b8 va=ffb00000 pa0=08392000 pa1=08393000 lo0=20e49f lo1=20e4df   (page-table page)
+  Q2_PTW WR pc=8000002c va=c0000000 pa0=083d8000 pa1=083d7000 lo0=20f61f lo1=20f5df   (the leaf)
+  ```
+  `0x880165b8` = **`kmissnxt+0xbc`** (in `kmiss`/`kmissnxt`, the kernel-address TLB-miss handler reached via
+  the general vector `0x80000180`). It resolves `0xffb00000` by walking the **real pmap in physical memory**
+  (NOT the self-mapped linear table, so no recursion), and the page-table page lives at **PA `0x08392000`**.
+  The leaf `c0000000 → 0x083d8000` is then installed by the runtime-built fast-refill at `0x8000002c`.
+- **`kmissnxt` addresses through the wired PDA** — the two instructions are
+  `ld at,-24536(zero)` (= VA `0xFFFFA028` = **PDA+0x28**, the per-CPU PTE scratch) then `tlbwr`. **This is
+  why Q1's wired PDA is load-bearing for the kernel's own miss path**, not just for `mlsetup`.
+
+**⇒ THE round-3 answer:** kernel-VA misses are served by **`kmiss`/`kmissnxt` walking the pmap in physical
+memory**, stashing the PTE in the wired PDA, and `tlbwr`-ing it. interp_mips panics because **when `kmiss`
+runs for `0xffb00000`, its pmap has no valid PTE** — the page-table pages aren't backed in physical memory
+yet. **What to replicate / fix in interp_mips:**
+1. The kernel code that **allocates + populates the page-table pages** (so a `kmiss` walk for `0xffb00000`
+   finds a valid PTE pointing at real RAM, e.g. MAME's `0x08392000`). This runs **before** the first kseg2
+   access.
+2. Make sure your `kmiss`/`kmissnxt` path matches: read the looked-up PTE from **PDA+0x28** and `tlbwr`.
+3. Chase the **earlier divergence**: interp_mips reaches `c0000000` ~7× sooner (10.5M vs MAME's ~70M kernel
+   instructions). It is likely skipping the pmap/page-table-allocation work and hitting `c0000000`
+   prematurely — diff the kernel instruction trace from kernel entry to the first `c0000000` store.
+
+### Round-3b (MAME session, 2026-06-14) — where the page-table pages are allocated + initialized: `mlsetup`
+
+**Measured: physical-address tap on writes into the page-table page (PA `0x08392000`), plus `$ra` of the
+arena `bzero`. PCs symbolized against `chd-dumper/extracted/unix`.**
+
+**It's `mlsetup` (the early machine/VM bootstrap, @ `0x8814a0d0`), right after kernel entry — well before
+`init_pmap`.** Two steps:
+
+1. **Arena allocation + zero.** `bzero(a0=0x88392000, a1=0x00c6e000)` — a **~13 MB physical arena at PA
+   `0x08392000`** (kseg0 `0x88392000`) is zeroed; caller `$ra=0x8814a984` (`pagecoloralign+0x40c`, the
+   page-color-aware allocator in mlsetup's VM bootstrap). The page-table pages are carved from here.
+2. **Page-table initialization.** A leaf loop in `mlsetup` (`0x8814a48c`–`0x8814a4b0`: `li a3,1;
+   sw a3,0(a0); sw a3,4(a0); …`) writes **`0x00000001` to every PTE slot** in the page-table page — i.e.
+   **PTE = G=1, V=0 ("global, invalid")**. So the page table starts as all-invalid-but-global entries.
+
+Later, when a kseg2 page is faulted in, the fault path overwrites the relevant slot with a **valid** PTE
+(e.g. `c0000000`'s PTE becomes `0x20f61f` → PA `0x083d8000`), and `kmiss` reads it (round-3).
+
+**Ordering (same boot):** `kentry` (ic 1017.5M) → arena `bzero` (1017.7M) → page-table PTE-init (1020.1M) →
+… → `init_pmap` (1087.6M) → first `c0000000` access. **mlsetup builds the page-table arena ~67M
+instructions before the first kseg2 access.**
+
+**⇒ What interp_mips is missing:** the **`mlsetup` page-table-arena step** — (a) the ~13 MB physical arena
+at PA `0x08392000` and (b) the loop that pre-fills every PTE with `0x00000001` (global/invalid). Without
+the initialized page-table pages backed in physical memory, `kmiss` finds no PTE for `0xffb00000` and
+panics. The fix lives in `mlsetup`'s VM bootstrap (the `pagecoloralign` arena alloc + the PTE-init loop),
+**before** `init_pmap`. If interp_mips's `mlsetup` is diverging early (the 7× instruction gap), that
+divergence is almost certainly in/around this arena setup.
+
+---
+
+## Q3 (2026-06-14, interp_mips session): we DO run mlsetup arena+PTE-init, but `init_pmap` is NEVER called before `c0000000`. Where does MAME call it? (the divergence hunt)
+
+**New data — interp_mips actually runs the `mlsetup` page-table setup** (refuting "we skip it"):
+| milestone | MAME (kernel ic) | interp_mips (icnt) |
+|---|---|---|
+| `mlsetup` entry `0x8814a0d0` | — | 73 |
+| arena alloc `pagecoloralign+0x40c` | ~1017.7M | 6.39M — `a0=0x8a396000 a1=0x0200_0000` (**32 MB**, vs MAME's ~13 MB @ `0x08392000`) |
+| PTE-init loop `0x8814a48c` | ~1020.1M | 6.40M (writes `0x1`) |
+| `init_pmap` `0x881295a8` | ~1087.6M | **NEVER (0 calls before the panic)** |
+| first `c0000000` access | ~1094M | ~10.5M → **PANIC** |
+
+**Our call sequence (function first-entry order), PTE-init → panic** (jal/jalr trace, symbolized vs `/unix`):
+```
+6.39M  flush_cache, __cache_wb_inval, pagecoloralign, mlsetup+0x3b0
+6.51M  init_sv, init_sema, init_bitlock, low_mem_alloc, bzero
+6.54M  readadapters, pmem_getfirstclick, node_meminit, node_getmaxclick,
+       spinlock_init, is_specified, strlen, setupbadmem, bset
+6.55M→10.32M  *** ~3.77M-instruction loop: node_meminit+0x434 -> bset, ~1.8M times
+              (memory-bitmap init, sized by RAM) — NO new functions ***
+10.32M meminit, tune_sanity, global_freemem_init, init_global_pool, unreservemem,
+       splvme, vm_pool_wakeup, lpage_init, lpage_free_contig_physmem,
+       init_kheap, init_gzone, kmem_gzone_init, zoneuser_name_lookup,
+       (sprintf/vsprintf to build a zone name) ...
+10.34M kmem_alloc, kvpalloc, reservemem ...  -> bzero(0xc0000000)
+10.5M  TLBMISS on c0000000 -> nested miss in page-table region -> page_validate_pfdat
+       -> cmn_err -> panic (panic+0x1c4 -> cn_write/du_putchar, dumptlb, silence_all_audio)
+```
+**`init_pmap` (0x881295a8) appears nowhere in this sequence.** In MAME it runs at ic ~1087.6M (just before
+`c0000000`). So interp_mips reaches `kvpalloc(0xc0000000)` (heap/gzone init) **without** the pmap being
+initialized — `kmiss`'s walk for `0xffb00000` finds no PTE → panic.
+
+**THE key questions:**
+1. **Where/when is `init_pmap` (0x881295a8) called in MAME, and by whom?** Give the function-call (first-entry)
+   sequence from PTE-init (ic ~1020M) to the `c0000000` access (ic ~1094M), so we can line it up against ours
+   and find the first point we diverge. Specifically: is `init_pmap` called *before* `meminit` /
+   `init_kheap` / `init_gzone` / `kmem_gzone_init`? What function calls it, and what immediately precedes that
+   call?
+2. **The big post-PTE-init loop:** between `setupbadmem`/`node_meminit` and `meminit` we spend ~3.77M insns in
+   `node_meminit -> bset` (~1.8M iterations). How many iterations / how long does MAME's equivalent run, and is
+   it the same `node_meminit`/`bset`? (Iteration count ∝ RAM size — a memory-size mismatch could be steering the
+   whole path.)
+3. **Memory config:** our arena is **32 MB @ PA 0x0a396000** vs MAME's **~13 MB @ 0x08392000**. What total RAM /
+   memory layout does MAME's kernel compute (and from where — MC memcfg regs, ARCS memory descriptors)? We want
+   to know if interp_mips is reporting a different memory size that diverts the VM-init path (and skips/reorders
+   `init_pmap`).
+4. Does MAME also go `meminit → init_kheap → init_gzone → kmem_gzone_init → kvpalloc(c0000000)`? If so, what
+   makes `kvpalloc`'s `c0000000` resolve there (the pmap entry init_pmap installed) that we're missing?
+
+**What we'll do with it:** find the first diverging call (likely a missing/reordered `init_pmap`, or an earlier
+wrong branch driven by a memory-size/CPU-semantics bug), then fix that root cause rather than the symptom.
