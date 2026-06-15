@@ -163,23 +163,30 @@ path is not consulted).
 The interpreter (`interpret.cc`) mirrors both models so the co-sim agrees.
 
 **Known remaining (quarantined xfail, conftest.py): `lldscd_span::lld_sd_scd_value_1/2`.**
-These fire THREE SC/SCD back-to-back in ~30 cycles.  The link is broken correctly (the SC's
-check sees `match2=0`), but the SC **write-enable `r_sc_should_write` is a single flop** set
-at the SC's port2 response and consumed at its deferred port1 (graduated) cache write
-(`l1d.sv:1436/1443`) — so it is not paired per-SC when SCs overlap in the L1D, and a wrong
-result can gate the write.  Real code never overlaps SCs (0/2781 above ⇒ one SC in flight at
-a time), so the single flop is correct in practice.
+`lld $t2,0; sb $t2,1; scd $t0,0; ld $a3,0` — the `sb` is to the linked line, so the SCD must
+fail and not store; the test asserts the loaded-back value is not the SCD's data.  On r9999
+it reads back the SCD's data anyway.
 
-TRIED + REVERTED: serializing atomics at ingress (block a new atomic while an SC/SCD is on
-the port stages — `is_atomic ? (mem_q_empty && !w_sc_inflight)`).  Did NOT fix it: the
-corrupting SCD is already in `mem_q` before the gate would act, and the race is the SCD's OWN
-port1 write consuming the shared flop relative to its own port2-response / mem_q replay, not
-an inter-SC ingress race — blocking the *next* atomic can't help an already-in-flight SCD.
+**Root cause (traced — and it is NOT the reservation logic).** The reservation works: the SCD
+sees the broken link (`w_match_link2=0`) and its **L1 array write is correctly gated off**
+(`t_wr_array = t_hit_cache && (r_is_retry||r_did_reload) && r_sc_should_write` = 0).  Verified
+by instrumenting the SCD's port1 write.  The data nonetheless lands in the line via a SECOND,
+**ungated** write path: `l1d.sv:865` `t_array_wr_en = w_cacheable_mem_rsp_valid || t_wr_array`
+— the cache array is also written on a **refill** (`w_cacheable_mem_rsp_valid`), and the write
+data `t_array_data` is the **SCD-merged** value (`merge_cl64(t_data, r_req.data, ...)`),
+computed for the SCD **regardless of `sc_should_write`**.  So a failed SCD's data is merged
+into the refill write.  The fix is to gate the *data merge* (or the refill-write of an SC
+line) on the reservation too — not just `t_wr_array`.
 
-The real fix = make the SC write-enable per-in-flight-SC: capture `w_match_link2` into the
-SCD's mem-queue entry at the point the link is checked (a new `mem_req_t` field) and have the
-port1 write use `r_req.<field>` instead of the single `r_sc_should_write` flop.  NOT fixed —
-torture-only, tracked here.
+DEAD ENDS (do not retry — both proven ineffective by tracing):
+- #1 serialize atomics at ingress (`is_atomic ? (mem_q_empty && !w_sc_inflight)`): the
+  corrupting SCD is already in `mem_q`, and it is not an inter-SC race.
+- #2 per-in-flight-SC write-enable (carry `w_match_link2` in the `mem_req_t` entry, port1 uses
+  it): the per-SC gate is correct but changes nothing — `t_wr_array` was *already* 0 for the
+  failed SCD.  The shared-flop hypothesis was wrong; the bug is the ungated refill/merge path.
+
+NOT fixed — torture-only (real code never does lld/sb/scd to the same line; 0/2781 kernel
+pairs have any intervening access).
 
 (Still genuinely missing in both models, for any future MP/DMA: external
 invalidation/eviction of the linked block.  No external coherence on the single-core FPGA.)
