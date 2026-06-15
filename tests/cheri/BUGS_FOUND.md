@@ -168,9 +168,18 @@ check sees `match2=0`), but the SC **write-enable `r_sc_should_write` is a singl
 at the SC's port2 response and consumed at its deferred port1 (graduated) cache write
 (`l1d.sv:1436/1443`) — so it is not paired per-SC when SCs overlap in the L1D, and a wrong
 result can gate the write.  Real code never overlaps SCs (0/2781 above ⇒ one SC in flight at
-a time), so the single flop is correct in practice.  A real fix = make the SC write-enable
-per-in-flight-SC (e.g. carry it in the mem-queue entry / rob_ptr-indexed) rather than one
-shared flop.  NOT fixed — torture-only, tracked here.
+a time), so the single flop is correct in practice.
+
+TRIED + REVERTED: serializing atomics at ingress (block a new atomic while an SC/SCD is on
+the port stages — `is_atomic ? (mem_q_empty && !w_sc_inflight)`).  Did NOT fix it: the
+corrupting SCD is already in `mem_q` before the gate would act, and the race is the SCD's OWN
+port1 write consuming the shared flop relative to its own port2-response / mem_q replay, not
+an inter-SC ingress race — blocking the *next* atomic can't help an already-in-flight SCD.
+
+The real fix = make the SC write-enable per-in-flight-SC: capture `w_match_link2` into the
+SCD's mem-queue entry at the point the link is checked (a new `mem_req_t` field) and have the
+port1 write use `r_req.<field>` instead of the single `r_sc_should_write` flop.  NOT fixed —
+torture-only, tracked here.
 
 (Still genuinely missing in both models, for any future MP/DMA: external
 invalidation/eviction of the linked block.  No external coherence on the single-core FPGA.)
