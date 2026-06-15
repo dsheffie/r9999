@@ -87,3 +87,54 @@ missing mapping. (Caller is `mlsetup` @ 0x8814a0d0; wirepda returns to mlsetup+0
 EntryLo0=0x20E39F, EntryLo1=0x00000001, PageMask=0) at Index 0; churn the TLB with many `tlbwr` + change
 ASID; then **store to 0xFFFFFFFF_FFFFA240 and load it back** — must hit PA 0x0838E240 with no miss. This
 reproduces the bug if either suspect is real.
+
+---
+
+## Q2 (2026-06-14, from the interp_mips/analyzer session): what's in wired TLB slots 1-7, and who installs them? (the KPTEBASE / linear-page-table bootstrap)
+
+**Context / progress.** Corroborating Q1: the **interp_mips functional sim now sails past `wirepda`** (real TLB,
+DADDI/LLD/SCD implemented) and boots to **~10.5M instructions** before hitting the **next** VM wall. So `wirepda`
+is fine; this is the step after it.
+
+**The new wall (precise).** An early **mapped kernel-virtual access** in `mlsetup` (per the call stack, `bzero`
+@ `0x8801a83c`, the store `sdl`/`sw` @ `~0x8801a860`, zeroing a `kvalloc`'d region ~`0xc0000000`) misses the
+TLB. The runtime-built TLB-refill handler at `0x80000000` (`utlbmiss`: `lw k1,0(k0); lw k0,4(k0); … tlbwr; eret`,
+self-mapped linear page table, k0 from `Context`) then **nested-faults at `0x8000000c` reading the PTE from the
+page-table region (`~0xff800000`, kseg2)** — EXL=1 → general vector `0x80000180` → `tlbmiss` →
+`page_validate_pfdat` → **`cmn_err` PANIC "TLBMISS: KERNEL FAULT, Bad addr 0xff800000"** (the giant
+`delayloop`/`us_delay` after it is just the panic's reboot delay).
+
+**Our TLB state at that fault (interp_mips KPTEDBG dump):** **only slot 0 is valid — the PDA**
+(`hi=0xffffa000, lo0=0x20e49f, lo1=1`). **Slots 1-47 are all empty.** The entire page-table region
+(`0xff000000-0xffffffff`) is unmapped, and **`init_pmap` (0x881295a8) has NOT run yet**. In our whole boot only
+**two `tlbwired` calls** happen — both the PDA (slot 0). So nothing maps the linear page table when the refill
+handler tries to read it.
+
+**The lead from your Q1 answer:** you measured **`Wired = 8`** but only dumped slot 0 (PDA). **What is in wired
+slots 1-7?** If those hold mappings for the kernel page table / `0xff800000` region, that's exactly what we're
+missing. And since IRIX only `tlbwired`s the PDA, **slots 1-7 must come from somewhere else — most likely the
+PROM pre-loads them before kernel entry** (dsheffie's hypothesis). Our stub ARCS doesn't, which would explain
+the unmapped page table.
+
+**THE key questions:**
+1. **Dump ALL wired TLB slots 0-7** (EntryHi/EntryLo0/EntryLo1/PageMask each) at an early-boot point (e.g. right
+   at the kernel entry `0x88005960`, and again just before the first mapped-kvaddr access in `mlsetup`). Does any
+   slot map the **page-table region `0xff000000-0xffffffff`** or otherwise let `0xc0000000` / `0xff800000`
+   resolve?
+2. **Who installs slots 1-7?** Trace every `tlbwi`/`tlbwr`/`tlbwired` and every `Wired`-register write from kernel
+   entry to the first mapped-kvaddr access. Are slots 1-7 already populated **at the kernel's very first
+   instruction `0x88005960`** (⇒ the PROM installed them, IRIX inherits)? Or does IRIX install them via a path
+   we're not reaching?
+3. **Dump the TLB + Wired at the kernel's first instruction `0x88005960`** — i.e. exactly what the SGI PROM
+   leaves the kernel. (This is the direct test of the "initial page tables / wired entries come from ROM"
+   hypothesis.)
+4. When the early `bzero` store to `~0xc0000000` happens in MAME, **does it miss?** If it refills, what entry
+   resolves it and **where is the PTE read from** (a wired slot, or a populated page-table page in physical
+   memory)? If the page table is backed by real memory, what PA, and who wrote it?
+5. **Ordering:** does `init_pmap` (0x881295a8) run **before** that first `bzero(~0xc0000000)` in MAME? (We hit
+   the access with `init_pmap` not yet run — need to know if that's the real order or a sign we diverged.)
+
+**What we'll do with it:** if the PROM pre-loads wired slots 1-7 (incl. page-table/KPTEBASE mappings), we'll
+model those initial wired entries (in interp_mips's ARCS/PROM setup, and r9999's reset state). If instead IRIX
+backs the linear page table with real physical memory it populates earlier, we'll find the populating step we're
+skipping.
