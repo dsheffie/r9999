@@ -135,22 +135,42 @@ behavior on an R4000/R10000-class core. `mem_test_raw_scd_uncached` relies on a 
 guarantee r9999 does not (and per the architecture need not) make. **Permanently quarantined**
 in tests/cheri/fpga/build_batch.sh; no RTL action.
 
-## OPEN — LL/SC link register is cleared on too FEW conditions (conformance gap)
+## RESOLVED (model is now selectable) — LL/SC link clearing on intervening access
 
-While confirming the above, audited r9999's reservation (`l1d.sv` `r_link_reg`/`r_link_reg_val`,
-set on LL/LLD response, checked by SC via `w_match_link`). It is cleared ONLY by: reset,
-SC/SCD itself, and `clr_link_reg` — which `core.sv:677` pulses **only** on exception entry
-(`WRITE_EPC`) and ERET retirement.
+Originally r9999 cleared the link (`l1d.sv` `r_link_reg`) ONLY on reset, SC/SCD, and
+`clr_link_reg` (`core.sv:677` = exception entry + ERET) — never on the processor's own
+intervening loads/stores. The two manuals disagree on what SHOULD break it, and neither
+matches cheritest:
 
-The R10000 (p.27) breaks the link on a larger set; any of these between LL and SC must fail SC:
-exception ✓, ERET ✓, **intervening load ✗, intervening store ✗, SYNC ✗, CACHE op ✗, PREF ✗,
-external intervention/invalidate to the linked block ✗** (also implicitly: eviction of the
-linked line). r9999 honors only exception+ERET. The architecture's extra conditions are
-*conservative* (failing SC too eagerly is always safe — software retries the LL/SC loop;
-spuriously SUCCEEDING is the dangerous direction). r9999's leniency means SC can spuriously
-SUCCEED when, e.g., the linked line was CACHE-invalidated/evicted, or (for any future
-MP/DMA) externally written, between LL and SC. Benign for the current single-core FPGA test
-set (all LL/SC tests except the uncached one pass), but a real conformance gap. Cheapest
-correctness-preserving fix: also clear the link on invalidation/eviction of the linked
-block and on a CACHE op hitting it; optionally adopt the R10000 conservative model (clear on
-any intervening load/store/SYNC/PREF). NOT fixed here — tracking only.
+| event between LL and SC | R4400 p.289 | R10000 p.27 | BERI/CHERI (cheritest) |
+|---|---|---|---|
+| exception / ERET | yes | yes | yes |
+| **own load** | no | yes | **no** |
+| **own store to the linked line** | (external only) | yes | **yes** (tag invalidate) |
+| external invalidate/snoop/intervention | yes | yes | yes |
+
+**Empirical:** scanning Linux `vmlinux.32` found **2781 LL/SC pairs, 0 with any intervening
+load or store** (span 1–7 insns). Real code never puts a memory op between LL and SC, so the
+model choice is moot for real software — it only affects torture tests.
+
+**Implemented (selectable via `machine.vh` `LLSC_BREAK_ON_LOAD`, mirrored in `interpret.hh`):**
+the link is now tracked at the **in-order first pass** (port2, `l1d.sv`; the OOO retry/port1
+path is not consulted).
+- **default = BERI/CHERI**: a STORE to the linked line breaks the link (`w_req2_is_store &&
+  w_match_link2`); loads and stores to other lines do not.  Passes cheri `scd_alias`,
+  `lld_ld_scd`, `raw_scd`, `raw_lld`.
+- **`LLSC_BREAK_ON_LOAD`** = R10000 conservative: any intervening load/store breaks it.
+The interpreter (`interpret.cc`) mirrors both models so the co-sim agrees.
+
+**Known remaining (quarantined xfail, conftest.py): `lldscd_span::lld_sd_scd_value_1/2`.**
+These fire THREE SC/SCD back-to-back in ~30 cycles.  The link is broken correctly (the SC's
+check sees `match2=0`), but the SC **write-enable `r_sc_should_write` is a single flop** set
+at the SC's port2 response and consumed at its deferred port1 (graduated) cache write
+(`l1d.sv:1436/1443`) — so it is not paired per-SC when SCs overlap in the L1D, and a wrong
+result can gate the write.  Real code never overlaps SCs (0/2781 above ⇒ one SC in flight at
+a time), so the single flop is correct in practice.  A real fix = make the SC write-enable
+per-in-flight-SC (e.g. carry it in the mem-queue entry / rob_ptr-indexed) rather than one
+shared flop.  NOT fixed — torture-only, tracked here.
+
+(Still genuinely missing in both models, for any future MP/DMA: external
+invalidation/eviction of the linked block.  No external coherence on the single-core FPGA.)

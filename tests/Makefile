@@ -272,3 +272,11 @@ clean:
 	      dside_tlb/test_dside_tlb.o dside_tlb/test_dside_tlb.elf dside_tlb/test_dside_tlb.dis \
 	      except/test_except.o except/test_except.elf except/test_except.dis \
 	      unaligned/test_unaligned.o unaligned/test_unaligned.elf unaligned/test_unaligned.dis
+
+atomic/test_ll_tight.elf: atomic/test_ll_tight.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c atomic/test_ll_tight.S -o atomic/test_ll_tight.o
+	$(LD) $(LDFLAGS) $(STARTUP) atomic/test_ll_tight.o -o $@
+
+atomic/test_ll_chain.elf: atomic/test_ll_chain.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c atomic/test_ll_chain.S -o atomic/test_ll_chain.o
+	$(LD) $(LDFLAGS) $(STARTUP) atomic/test_ll_chain.o -o $@

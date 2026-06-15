@@ -10,6 +10,14 @@
 
 `define FPGA 1
 
+// LL/SC reservation model -- KEEP IN SYNC with interpret.hh (LLSC_BREAK_ON_LOAD).
+//   default (undefined) = BERI/CHERI: a STORE to the linked cache line breaks the
+//     link; loads (and stores to other lines) do not.  Matches cheritest.
+//   LLSC_BREAK_ON_LOAD  = R10000 conservative (p.27): ANY intervening load OR
+//     store breaks the link.  R4400 (p.289) breaks only on external coherence +
+//     ERET.  Selecting this requires quarantining cheri scd_alias / lld_ld_scd.
+//`define LLSC_BREAK_ON_LOAD 1
+
 //`define RESPECT_MAPPED 1
 
 `define LG_M_WIDTH 6

@@ -1662,18 +1662,29 @@ void execMips(state_t *s) {
     return;
   }
 
-  /* LL/SC link (R10000 conservative model, p.27): any normal (non-LL/SC) load or
-   * store between LL and SC breaks the reservation.  The mem pipe is in-order so
-   * doing this at dispatch is in program order.  FP loads/stores included; 0x2f
-   * (CACHE) / SYNC / PREF are not loads/stores so left for a later pass. */
+  /* LL/SC link clearing on an intervening access (model in interpret.hh; the mem
+   * pipe is in-order so doing this at dispatch is in program order). */
   {
-    bool is_mem_ldst =
-      (opcode >= 0x20 && opcode <= 0x2e) ||   /* lb..lwu, sb..swr (not 0x2f CACHE) */
+    bool is_mem_store =
+      (opcode >= 0x28 && opcode <= 0x2e) ||   /* sb sh swl sw sdl sdr swr */
+      opcode == 0x3f ||                        /* sd   */
+      opcode == 0x39 || opcode == 0x3d;        /* swc1, sdc1 */
+#ifdef LLSC_BREAK_ON_LOAD
+    /* R10000 (p.27): ANY normal load or store breaks the link. */
+    bool is_mem_load =
+      (opcode >= 0x20 && opcode <= 0x27) ||   /* lb lh lwl lw lbu lhu lwr lwu */
       opcode == 0x1a || opcode == 0x1b ||     /* ldl, ldr */
-      opcode == 0x37 || opcode == 0x3f ||     /* ld, sd   */
-      opcode == 0x31 || opcode == 0x35 ||     /* lwc1, ldc1 */
-      opcode == 0x39 || opcode == 0x3d;       /* swc1, sdc1 */
-    if(is_mem_ldst) s->ll_link_valid = false;
+      opcode == 0x37 ||                        /* ld   */
+      opcode == 0x31 || opcode == 0x35;        /* lwc1, ldc1 */
+    if(is_mem_load || is_mem_store) s->ll_link_valid = false;
+#else
+    /* BERI/CHERI (default): only a STORE to the linked cache line breaks it. */
+    if(is_mem_store && s->ll_link_valid) {
+      int32_t simm = (int32_t)(int16_t)(inst & 0xffffu);
+      uint64_t sline = va2pa(s->gpr[rs] + simm) & ~UINT64_C(0xf);
+      if(sline == s->ll_link_addr) s->ll_link_valid = false;
+    }
+#endif
   }
 
   if(isRType) {

@@ -11,6 +11,11 @@
 #include "sparse_mem.hh"
 #include "mips_insns.hh"
 
+/* LL/SC reservation model -- MUST MATCH machine.vh's `define LLSC_BREAK_ON_LOAD.
+ * default (undefined) = BERI/CHERI (store to the linked line breaks the link);
+ * define = R10000 conservative (any intervening load/store breaks it). */
+//#define LLSC_BREAK_ON_LOAD 1
+
 #define IS_LITTLE_ENDIAN false
 
 enum class fpMode {

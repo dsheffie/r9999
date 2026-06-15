@@ -480,6 +480,22 @@ endfunction
 	  end
      end // always_ff@ (posedge clk)
 
+   wire w_req2_is_store = (r_req2.op == MEM_SB)  || (r_req2.op == MEM_SH)  ||
+                          (r_req2.op == MEM_SW)  || (r_req2.op == MEM_SWL) ||
+                          (r_req2.op == MEM_SWR) || (r_req2.op == MEM_SD)  ||
+                          (r_req2.op == MEM_SDL) || (r_req2.op == MEM_SDR);
+   /* What breaks the LL/SC link on the in-order first pass (LLSC model, machine.vh).
+    * NOT MEM_LL/LLD (set it), NOT MEM_SC/SCD (clear at response after w_match_link2). */
+`ifdef LLSC_BREAK_ON_LOAD
+   /* R10000 (p.27): ANY intervening normal load/store breaks the link. */
+   wire w_req2_breaks_link = (r_req2.op != MEM_LL)   && (r_req2.op != MEM_LLD) &&
+                             (r_req2.op != MEM_SC)    && (r_req2.op != MEM_SCD) &&
+                             (r_req2.op != MEM_TLBP)  && (r_req2.op != MEM_INVL) &&
+                             (r_req2.op != MEM_MOV);
+`else
+   /* BERI/CHERI (default): only a STORE to the linked line breaks the link. */
+   wire w_req2_breaks_link = w_req2_is_store && w_match_link2;
+`endif
    always_ff@(posedge clk)
      begin
 	if(reset || clr_link_reg)
@@ -487,22 +503,22 @@ endfunction
 	     r_link_reg_val <= 1'b0;
 	     r_link_reg <= 'd0;
 	  end
-	else if(n_core_mem_rsp_valid && r_got_req2 && (r_req2.op == MEM_LL || r_req2.op == MEM_LLD))
+	/* Track the link at the IN-ORDER first pass (port2 = core_mem_req ingress);
+	 * misses replay via port1, which is OOO and must NOT touch the link. */
+	else if(r_got_req2 && (r_req2.op == MEM_LL || r_req2.op == MEM_LLD))
 	  begin
-	     /* LL/LLD response from port2 (direct cache hit) */
 	     r_link_reg_val <= 1'b1;
 	     r_link_reg <= {r_req2.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
 	  end
 	else if(n_core_mem_rsp_valid && r_got_req2 && (r_req2.op == MEM_SC || r_req2.op == MEM_SCD))
 	  begin
-	     /* SC/SCD early ack at port2 always clears LLbit */
+	     /* SC/SCD: clear at its response, after the w_match_link2 check below */
 	     r_link_reg_val <= 1'b0;
 	  end
-	else if(n_core_mem_rsp_valid && (r_req.op == MEM_LL || r_req.op == MEM_LLD))
+	else if(r_got_req2 && w_req2_breaks_link)
 	  begin
-	     /* LL/LLD response from port1 (miss→reload path) */
-	     r_link_reg_val <= 1'b1;
-	     r_link_reg <= {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+	     /* in-order first pass breaks the link (model selected above) */
+	     r_link_reg_val <= 1'b0;
 	  end
      end
 
