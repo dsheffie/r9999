@@ -1426,14 +1426,18 @@ endfunction
 	    end
 	  MEM_SC:
 	    begin
-	       t_array_data = merge_cl32(t_data, bswap32(r_req.data[31:0]), r_req.addr[WORD_STOP-1:WORD_START]);
+	       /* A FAILED SC must not merge its store data into t_array_data: that data
+		* is forwarded to a same-line load via r_array_wr_data (store->load
+		* forwarding, see r_must_forward) even though the array write is gated
+		* off.  Keep the line unchanged so a failed SC is invisible to a later load. */
+	       t_array_data = r_sc_should_write ? merge_cl32(t_data, bswap32(r_req.data[31:0]), r_req.addr[WORD_STOP-1:WORD_START]) : t_data;
 	       t_rsp_data = 'd0;
 	       t_rsp_dst_valid = 1'b0;
 	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_sc_should_write;
 	    end
 	  MEM_SCD:
 	    begin
-	       t_array_data = merge_cl64(t_data, bswap64(r_req.data[63:0]), r_req.addr[DWORD_START]);
+	       t_array_data = r_sc_should_write ? merge_cl64(t_data, bswap64(r_req.data[63:0]), r_req.addr[DWORD_START]) : t_data;
 	       t_rsp_data = 'd0;
 	       t_rsp_dst_valid = 1'b0;
 	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_sc_should_write;

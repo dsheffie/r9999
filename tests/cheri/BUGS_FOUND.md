@@ -162,31 +162,32 @@ path is not consulted).
 - **`LLSC_BREAK_ON_LOAD`** = R10000 conservative: any intervening load/store breaks it.
 The interpreter (`interpret.cc`) mirrors both models so the co-sim agrees.
 
-**Known remaining (quarantined xfail, conftest.py): `lldscd_span::lld_sd_scd_value_1/2`.**
-`lld $t2,0; sb $t2,1; scd $t0,0; ld $a3,0` — the `sb` is to the linked line, so the SCD must
-fail and not store; the test asserts the loaded-back value is not the SCD's data.  On r9999
-it reads back the SCD's data anyway.
+## FIXED — a FAILED SC/SCD was visible to a later same-line load via store->load forwarding
 
-**Root cause (traced — and it is NOT the reservation logic).** The reservation works: the SCD
-sees the broken link (`w_match_link2=0`) and its **L1 array write is correctly gated off**
-(`t_wr_array = t_hit_cache && (r_is_retry||r_did_reload) && r_sc_should_write` = 0).  Verified
-by instrumenting the SCD's port1 write.  The data nonetheless lands in the line via a SECOND,
-**ungated** write path: `l1d.sv:865` `t_array_wr_en = w_cacheable_mem_rsp_valid || t_wr_array`
-— the cache array is also written on a **refill** (`w_cacheable_mem_rsp_valid`), and the write
-data `t_array_data` is the **SCD-merged** value (`merge_cl64(t_data, r_req.data, ...)`),
-computed for the SCD **regardless of `sc_should_write`**.  So a failed SCD's data is merged
-into the refill write.  The fix is to gate the *data merge* (or the refill-write of an SC
-line) on the reservation too — not just `t_wr_array`.
+Surfaced by `lldscd_span::lld_sd_scd_value_1/2` (`lld; sb; scd; ld` to the linked line: the
+`sb` breaks the link, the SCD must fail and not store, and the immediately-following `ld` must
+read the unchanged line).  r9999 read back the SCD's data instead.  Reproduced standalone in
+`tests/atomic/test_ll_fwd.S` (no cheri harness): a tight `ld` right after a failed `scd` got
+the SCD's store data.
 
-DEAD ENDS (do not retry — both proven ineffective by tracing):
-- #1 serialize atomics at ingress (`is_atomic ? (mem_q_empty && !w_sc_inflight)`): the
-  corrupting SCD is already in `mem_q`, and it is not an inter-SC race.
-- #2 per-in-flight-SC write-enable (carry `w_match_link2` in the `mem_req_t` entry, port1 uses
-  it): the per-SC gate is correct but changes nothing — `t_wr_array` was *already* 0 for the
-  failed SCD.  The shared-flop hypothesis was wrong; the bug is the ungated refill/merge path.
+**Root cause (traced).** The reservation logic was always correct — the failed SCD sees the
+broken link (`w_match_link2=0`) and its L1 array write is gated off (`t_wr_array && r_sc_should_write`
+= 0; instrumented the array write and confirmed the line stays unchanged in the cache).  The
+data leaked through **store->load forwarding**: a load to an in-flight store's line forwards
+`r_array_wr_data` (= the store's `t_array_data`) instead of the cache (`l1d.sv` `r_must_forward`,
+~1000/1151), and `t_array_data` for an SC/SCD was the **merge with the SC's store data computed
+regardless of `r_sc_should_write`**.  So the failed SCD's data sat in the forwarding path even
+though it never wrote the array.
 
-NOT fixed — torture-only (real code never does lld/sb/scd to the same line; 0/2781 kernel
-pairs have any intervening access).
+**Fix (l1d.sv MEM_SC/MEM_SCD):** gate the data merge on the reservation —
+`t_array_data = r_sc_should_write ? merge(...) : t_data`.  A failed SC now leaves `t_array_data`
+as the unchanged line, so neither the (already-gated) array write nor forwarding exposes its
+data.  `test_ll_fwd` P, `lld_sd_scd_value_1/2` pass, randgen 60/60, no regression.
+
+(This was NOT the shared `r_sc_should_write` flop, NOT a refill/merge write, and NOT an
+inter-SC race — those were earlier mis-diagnoses.  Two dead ends, do not retry: #1 serialize
+atomics at ingress; #2 per-in-flight-SC write-enable in `mem_req_t`.  The reservation gate was
+already correct; the only leak was the ungated *forwarding* data.)
 
 (Still genuinely missing in both models, for any future MP/DMA: external
 invalidation/eviction of the linked block.  No external coherence on the single-core FPGA.)
