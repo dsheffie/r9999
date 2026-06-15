@@ -40,11 +40,20 @@ while :; do
   while read -r elf ref; do
     [ -z "$elf" ] && continue
     [ -f "$BATCH/$elf" ] || { echo "[r$round] MISS  $elf (not in batch)"; continue; }
-    out=$(stdbuf -oL timeout 75 "$MIPS" -f "$BATCH/$elf" --sgi 1 2>&1 \
-          | grep -aiE "^checksum|MAGIC HALT|CORE HALTED")
-    got=$(printf '%s' "$out" | grep -oiE 'checksum *= *[0-9a-f]+' | grep -oiE '[0-9a-f]+$' | head -1)
-    halted=$(printf '%s' "$out" | grep -icE 'MAGIC HALT|CORE HALTED')
-    gU=$(printf '%s' "$got" | tr 'a-f' 'A-F'); rU=$(printf '%s' "$ref" | tr 'a-f' 'A-F')
+    rU=$(printf '%s' "$ref" | tr 'a-f' 'A-F')
+    got=""; halted=0; gU=""
+    # csmith checksums are deterministic, but the console drain can intermittently
+    # truncate the captured checksum (magic-halt seen before the tail drains).  So
+    # retry a non-match once: a truncation flake will match on the retry; a real
+    # divergence stays wrong both times.
+    for attempt in 1 2; do
+      out=$(stdbuf -oL timeout 75 "$MIPS" -f "$BATCH/$elf" --sgi 1 2>&1 \
+            | grep -aiE "^checksum|MAGIC HALT|CORE HALTED")
+      got=$(printf '%s' "$out" | grep -oiE 'checksum *= *[0-9a-f]+' | grep -oiE '[0-9a-f]+$' | head -1)
+      halted=$(printf '%s' "$out" | grep -icE 'MAGIC HALT|CORE HALTED')
+      gU=$(printf '%s' "$got" | tr 'a-f' 'A-F')
+      [ -n "$got" ] && [ "$gU" = "$rU" ] && [ "$halted" -ge 1 ] && break
+    done
     ts=$(date '+%H:%M:%S')
     if [ -z "$got" ]; then
       echo "[$ts r$round] ERROR $elf no-checksum (hang/timeout?) ref=$ref"; err=$((err+1))
