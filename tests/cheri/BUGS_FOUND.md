@@ -112,3 +112,30 @@ alu: test_raw_add, test_raw_addi, test_raw_addiu, test_raw_dadd, test_raw_daddi,
 operands, or whose sub result-vs-minuend sign distinguishes the formula).
 
 Reproducer source kept at: tests/cheri/bug_overflow_repro.s
+
+## BUG 3 — uncached (XKPHYS) SCD does not store on FPGA silicon (sim/silicon mismatch)
+
+Surfaced by `mem/test_raw_scd_uncached` running standalone on the FPGA
+(tests/cheri/fpga harness), comparing the on-silicon register dump to the
+ooo_core golden.
+
+The test forms an **XKPHYS uncached** address (`0x9000000000000000 | (pa & 0xffffffff)`,
+CCA = 2 = uncached), then:
+
+    lld  $k0, 0($gp)                 # establish the SC link
+    dli  $s4, 0xfedcba9876543210
+    scd  $s4, 0($gp)                 # store-conditional doubleword, uncached
+    ld   $s5, 0($gp)                 # read it back
+
+- ooo_core (sim): `$s5` (R21) = `0xfedcba9876543210` — the SCD stored, ld read it back.
+- FPGA silicon: `$s5` (R21) = `0x0` — **deterministic across reprograms** (3/3).
+
+The **cached** counterpart `mem/test_raw_scd` PASSES on silicon (FPGA == ooo_core),
+so the divergence is specific to the **uncached / XKPHYS path**: either the SC
+reservation is not honored for uncached addresses on the AXI/uncached datapath, or
+the uncached SCD store does not land (and the subsequent uncached `ld` reads 0).
+LL/SCD is newly added this cycle, so the uncached SC path is the prime suspect.
+
+NOT fixed here (needs RTL investigation of the uncached store / SC-reservation
+path; possibly XKPHYS CCA handling). Quarantined in tests/cheri/fpga/build_batch.sh
+so the FPGA sweep stays green, with this note as the tracking record.
