@@ -113,29 +113,44 @@ operands, or whose sub result-vs-minuend sign distinguishes the formula).
 
 Reproducer source kept at: tests/cheri/bug_overflow_repro.s
 
-## BUG 3 — uncached (XKPHYS) SCD does not store on FPGA silicon (sim/silicon mismatch)
+## (NOT A BUG) uncached (XKPHYS) SCD reads back 0 on silicon — architecturally undefined
 
 Surfaced by `mem/test_raw_scd_uncached` running standalone on the FPGA
-(tests/cheri/fpga harness), comparing the on-silicon register dump to the
-ooo_core golden.
+(tests/cheri/fpga harness). The test forms an **XKPHYS uncached** address
+(`0x9000000000000000 | (pa & 0xffffffff)`, CCA = 2 = uncached), does `lld; scd; ld`,
+and expects to read back the stored pattern. On silicon `$s5` (R21) reads back `0x0`
+(deterministic 3/3); ooo_core returns `0xfedcba9876543210`. The **cached** counterpart
+`mem/test_raw_scd` PASSES on silicon.
 
-The test forms an **XKPHYS uncached** address (`0x9000000000000000 | (pa & 0xffffffff)`,
-CCA = 2 = uncached), then:
+**Resolved as out-of-scope, NOT a core bug.** Both the R4400 and R10000 (T5) manuals
+define the LL/SC link entirely in terms of a **cache block + its coherence state**:
+- R10000 (§ "R10000-Specific CPU Instructions", p.27): SC fails on "external intervention
+  exclusive or invalidate to the **secondary cache block** containing the linked address."
+- R4400 (Ch.11): "the link is broken if any external request (invalidate/snoop/intervention)
+  changes the state of the **line** containing the lock variable … lock words stay in the
+  **cache** until some other processor takes ownership of that cache line."
 
-    lld  $k0, 0($gp)                 # establish the SC link
-    dli  $s4, 0xfedcba9876543210
-    scd  $s4, 0($gp)                 # store-conditional doubleword, uncached
-    ld   $s5, 0($gp)                 # read it back
+An uncached address has no cache block to link or snoop, so uncached LL/SC has no defined
+behavior on an R4000/R10000-class core. `mem_test_raw_scd_uncached` relies on a BERI-specific
+guarantee r9999 does not (and per the architecture need not) make. **Permanently quarantined**
+in tests/cheri/fpga/build_batch.sh; no RTL action.
 
-- ooo_core (sim): `$s5` (R21) = `0xfedcba9876543210` — the SCD stored, ld read it back.
-- FPGA silicon: `$s5` (R21) = `0x0` — **deterministic across reprograms** (3/3).
+## OPEN — LL/SC link register is cleared on too FEW conditions (conformance gap)
 
-The **cached** counterpart `mem/test_raw_scd` PASSES on silicon (FPGA == ooo_core),
-so the divergence is specific to the **uncached / XKPHYS path**: either the SC
-reservation is not honored for uncached addresses on the AXI/uncached datapath, or
-the uncached SCD store does not land (and the subsequent uncached `ld` reads 0).
-LL/SCD is newly added this cycle, so the uncached SC path is the prime suspect.
+While confirming the above, audited r9999's reservation (`l1d.sv` `r_link_reg`/`r_link_reg_val`,
+set on LL/LLD response, checked by SC via `w_match_link`). It is cleared ONLY by: reset,
+SC/SCD itself, and `clr_link_reg` — which `core.sv:677` pulses **only** on exception entry
+(`WRITE_EPC`) and ERET retirement.
 
-NOT fixed here (needs RTL investigation of the uncached store / SC-reservation
-path; possibly XKPHYS CCA handling). Quarantined in tests/cheri/fpga/build_batch.sh
-so the FPGA sweep stays green, with this note as the tracking record.
+The R10000 (p.27) breaks the link on a larger set; any of these between LL and SC must fail SC:
+exception ✓, ERET ✓, **intervening load ✗, intervening store ✗, SYNC ✗, CACHE op ✗, PREF ✗,
+external intervention/invalidate to the linked block ✗** (also implicitly: eviction of the
+linked line). r9999 honors only exception+ERET. The architecture's extra conditions are
+*conservative* (failing SC too eagerly is always safe — software retries the LL/SC loop;
+spuriously SUCCEEDING is the dangerous direction). r9999's leniency means SC can spuriously
+SUCCEED when, e.g., the linked line was CACHE-invalidated/evicted, or (for any future
+MP/DMA) externally written, between LL and SC. Benign for the current single-core FPGA test
+set (all LL/SC tests except the uncached one pass), but a real conformance gap. Cheapest
+correctness-preserving fix: also clear the link on invalidation/eviction of the linked
+block and on a CACHE op hitting it; optionally adopt the R10000 conservative model (clear on
+any intervening load/store/SYNC/PREF). NOT fixed here — tracking only.
