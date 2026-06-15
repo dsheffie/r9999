@@ -136,6 +136,7 @@ static inline state_t::reg_t sext32(uint32_t v) {
  * (EPC = branch pc = pc-4, BD=1); matches the RTL.  Call before the ExcCode write
  * (which preserves BD by masking only bits [6:2]). */
 static inline void set_exc_pc(state_t *s) {
+  s->ll_link_valid = false;   /* any exception breaks the LL/SC link (R10000 p.27) */
   if(s->in_delay_slot) {
     s->cpr0[CPR0_EPC]    = (uint32_t)(s->pc - 4);
     s->cpr0[CPR0_CAUSE] |=  (1u << 31);
@@ -241,6 +242,7 @@ static void raise_trap(state_t *s) {
 }
 
 void raise_int(state_t *s, uint32_t epc) {
+  s->ll_link_valid = false;   /* interrupt breaks the LL/SC link */
   s->cpr0[CPR0_EPC]   = epc;
   s->cpr0[CPR0_CAUSE] = (1u << 15);  /* IP[7]=1 (timer), ExcCode=0, BD=0 */
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
@@ -647,8 +649,11 @@ void _sc(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
-  s->mem.set<int32_t>(ea,  bswap<EL>(static_cast<int32_t>(s->gpr[rt])));
-  s->gpr[rt] = 1;
+  /* SC succeeds iff the reservation is still valid and on this cache line. */
+  bool ok = s->ll_link_valid && (s->ll_link_addr == (ea & ~UINT64_C(0xf)));
+  if(ok) s->mem.set<int32_t>(ea,  bswap<EL>(static_cast<int32_t>(s->gpr[rt])));
+  s->ll_link_valid = false;   /* SC always clears the link */
+  s->gpr[rt] = ok ? 1 : 0;
   s->pc += 4;
   s->insn_histo[mipsInsn::SC]++;
 }
@@ -673,9 +678,11 @@ void _scd(uint32_t inst, state_t *s) {
   int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
   uint32_t ea = va2pa(s->gpr[rs] + imm);
   if(ea & 7) { raise_ades(s); return; }
-  /* store-cond doubleword: 64-bit store, always succeeds (uncontended) -> rt=1 */
-  s->mem.set<int64_t>(ea, bswap<EL>(s->gpr[rt]));
-  s->gpr[rt] = 1;
+  /* SCD succeeds iff the reservation is still valid and on this cache line. */
+  bool ok = s->ll_link_valid && (s->ll_link_addr == (ea & ~UINT64_C(0xf)));
+  if(ok) s->mem.set<int64_t>(ea, bswap<EL>(s->gpr[rt]));
+  s->ll_link_valid = false;   /* SC always clears the link */
+  s->gpr[rt] = ok ? 1 : 0;
   s->pc += 4;
   s->insn_histo[mipsInsn::SCD]++;
 }
@@ -1654,7 +1661,21 @@ void execMips(state_t *s) {
     take_exception_ri(s);
     return;
   }
-    
+
+  /* LL/SC link (R10000 conservative model, p.27): any normal (non-LL/SC) load or
+   * store between LL and SC breaks the reservation.  The mem pipe is in-order so
+   * doing this at dispatch is in program order.  FP loads/stores included; 0x2f
+   * (CACHE) / SYNC / PREF are not loads/stores so left for a later pass. */
+  {
+    bool is_mem_ldst =
+      (opcode >= 0x20 && opcode <= 0x2e) ||   /* lb..lwu, sb..swr (not 0x2f CACHE) */
+      opcode == 0x1a || opcode == 0x1b ||     /* ldl, ldr */
+      opcode == 0x37 || opcode == 0x3f ||     /* ld, sd   */
+      opcode == 0x31 || opcode == 0x35 ||     /* lwc1, ldc1 */
+      opcode == 0x39 || opcode == 0x3d;       /* swc1, sdc1 */
+    if(is_mem_ldst) s->ll_link_valid = false;
+  }
+
   if(isRType) {
     uint32_t funct = inst & 63;
     uint32_t sa = (inst >> 6) & 31;
@@ -2121,6 +2142,7 @@ void execMips(state_t *s) {
 	  break;
 	}
 	case 24: { /* ERET -- exception return */
+	  s->ll_link_valid = false;   /* ERET breaks the LL/SC link (R10000 p.27, R4400 Ch.11) */
 	  if(s->cpr0[CPR0_SR] & SR_ERL) {
 	    /* Return from error: EPC = ErrorEPC, clear ERL */
 	    s->pc = (int32_t)s->cpr0[CPR0_ERROREPC] - 4;
@@ -2220,6 +2242,12 @@ void execMips(state_t *s) {
     printf("coproc2 unimplemented\n");  exit(-1);
   }
   else if(isLoadLinked) {
+    /* Set the reservation on the linked cache line before the load: if the load
+     * faults, the exception path (set_exc_pc) clears it again -> no stale link. */
+    int32_t llimm = (int32_t)(int16_t)(inst & 0xffffu);
+    uint64_t ll_ea = va2pa(s->gpr[rs] + llimm);
+    s->ll_link_valid = true;
+    s->ll_link_addr  = ll_ea & ~UINT64_C(0xf);   /* 16B line (LG_L1D_CL_LEN=4) */
     if(opcode == 0x34) _lld<EL>(inst, s);   /* lld = 64-bit */
     else               _lw<EL>(inst, s);    /* ll  = 32-bit */
   }

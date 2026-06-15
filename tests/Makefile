@@ -88,6 +88,10 @@ atomic/test_atomic.elf: atomic/test_atomic.S $(STARTUP) $(COMMON)/sim.h $(COMMON
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c atomic/test_atomic.S -o atomic/test_atomic.o
 	$(LD) $(LDFLAGS) $(STARTUP) atomic/test_atomic.o -o $@
 
+atomic/test_ll_intervening.elf: atomic/test_ll_intervening.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c atomic/test_ll_intervening.S -o atomic/test_ll_intervening.o
+	$(LD) $(LDFLAGS) $(STARTUP) atomic/test_ll_intervening.o -o $@
+
 except/test_traps.elf: except/test_traps.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_traps.S -o except/test_traps.o
 	$(LD) $(LDFLAGS) except/test_traps.o -o $@
@@ -234,6 +238,12 @@ run-atomic: atomic/test_atomic.elf
 	cd .. && $(SIM) --file tests/atomic/test_atomic.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
 	@echo "== same under co-sim (expect no 'does not match') =="
 	cd .. && $(SIM) --file tests/atomic/test_atomic.elf --checker true 2>&1 | grep -i 'does not match' || echo "  ok (no divergence)"
+
+run-atomic-intervening: atomic/test_ll_intervening.elf
+	@echo "== LL/SC intervening load/store breaks the link (expect P) =="
+	cd .. && $(SIM) --file tests/atomic/test_ll_intervening.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
+	@echo "== same under co-sim (expect no 'does not match') =="
+	cd .. && $(SIM) --file tests/atomic/test_ll_intervening.elf --checker true 2>&1 | grep -i 'does not match' || echo "  ok (no divergence)"
 
 run-unaligned: unaligned/test_unaligned.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1

@@ -138,6 +138,14 @@ public:
    */
   bool silent = false;
 
+  /* LL/SC reservation (link).  Matches the RTL (l1d.sv r_link_reg), cache-line
+   * granularity (LG_L1D_CL_LEN=4 -> 16B).  Set by LL/LLD; cleared by any
+   * intervening load/store, exception, or ERET (R10000 conservative model,
+   * p.27).  SC/SCD succeeds iff valid && the SC's line matches the linked line.
+   * The interp is 1:1 va2pa so the effective address is the physical line. */
+  bool ll_link_valid = false;
+  uint64_t ll_link_addr = 0;   /* cache-line-aligned address */
+
   /* True while executing a branch/jump delay-slot instruction.  An exception in
    * a delay slot sets EPC = the branch pc and Cause.BD = 1 (matches the RTL,
    * core.sv: n_epc = in_delay_slot ? pc-4 : pc; n_exc_in_delay = in_delay_slot). */
