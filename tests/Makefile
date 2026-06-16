@@ -41,7 +41,8 @@ TESTS := hello/hello.elf \
          cache/test_smc_hit.elf \
          cache/test_smc_index.elf \
          cache/test_inval_nowb.elf \
-         cache/test_cache_priv.elf
+         cache/test_cache_priv.elf \
+         devregs/test_devregs.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
@@ -58,6 +59,14 @@ $(COMMON)/crt0.o: $(COMMON)/crt0.S $(COMMON)/sim.h
 hello/hello.elf: hello/hello.c $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -c hello/hello.c -o hello/hello.o
 	$(LD) $(LDFLAGS) $(STARTUP) hello/hello.o -o $@
+
+# -----------------------------------------------------------------------
+# IRIX-boot device-register check (run via the Henry SoC harness for the
+# RTL device models: henry_tb --kernel devregs/test_devregs.elf)
+# -----------------------------------------------------------------------
+devregs/test_devregs.elf: devregs/test_devregs.c $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -c devregs/test_devregs.c -o devregs/test_devregs.o
+	$(LD) $(LDFLAGS) $(STARTUP) devregs/test_devregs.o -o $@
 
 # -----------------------------------------------------------------------
 # CP0 register access test
