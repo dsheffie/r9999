@@ -11,8 +11,9 @@
  * distinguished by the revision byte).  Keep in sync with machine.vh. */
 #define PRID_R4000  0x00000400   /* imp 0x04, rev 0x00 */
 #define PRID_R4400  0x00000440   /* imp 0x04, rev 0x40 */
+#define PRID_R4600  0x00002020   /* imp 0x20, rev 0x20 */
 #define PRID_R10000 0x00000900   /* imp 0x09, rev 0x00 */
-#define PRID_VALUE  PRID_R4000
+#define PRID_VALUE  PRID_R4600
 
 #ifdef __ASSEMBLER__
 

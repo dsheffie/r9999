@@ -110,8 +110,13 @@
  * the R4000 family shares imp=0x04 and is distinguished by the revision byte. */
 `define PRID_R4000  32'h00000400   /* imp 0x04, rev 0x00 */
 `define PRID_R4400  32'h00000440   /* imp 0x04, rev 0x40 */
+`define PRID_R4600  32'h00002020   /* imp 0x20, rev 0x20 */
 `define PRID_R10000 32'h00000900   /* imp 0x09, rev 0x00 */
-`define PRID_VALUE  `PRID_R4000
+/* IRIX /unix branches on PRId.IMP in `start`: imp 0x20 (R4600) takes the
+ * Indy per-CPU init path; imp 0x04 (R4000/R4400) falls through to a different
+ * cache/TLB-refill path that diverges before the KPTEBASE page-table backing
+ * (MAME_QUESTIONS.md Q5). Present R4600 so the kernel runs the right path. */
+`define PRID_VALUE  `PRID_R4600
 
 `define LG_BTB_SZ 7
 
