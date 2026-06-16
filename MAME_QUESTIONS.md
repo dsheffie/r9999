@@ -1044,3 +1044,131 @@ We have no SCSI (WD33C93) / disk-image / PBUS device model yet.
 
 **Reproduce on our side:**
 `./interp_mips --file .../extracted/unix --arcs .../r9999/arcs/arcs_irix.bin --maxicnt 80000000`
+
+---
+
+## Q6 (2026-06-15, r9999 **RTL** session via the Henry SoC) — the RTL now boots IRIX on the correct R4600 path but walls EARLIER than interp/MAME: the bzero target diverges (`0x838e000` vs `0xc0000000`). Please diff the RTL retired-PC trace.
+
+**This round is from the RTL, not interp_mips.** The r9999 core now runs IRIX in a Verilator SoC
+(`henry-the-wannabe-ip22-soc`: `henry_soc.sv` wraps `core_l1d_l1i` + inline RTL MC/HPC/SCC; sim harness
+synthesizes the argv/envp handoff + behavioral RAM). All four config fixes from your Q5 rounds are applied
+and **committed to r9999 `main`**: PRId=R4600 (`0x2020`), Config=`0x0002e4b3` (R4600 cache geom →
+cachecolormask=1), the ARCS argv/envp handoff (a0=8/a1=argv/a2=envp), and IOC2 SYSID `0x26`. The boot
+clears the wrong-CPU-path, getargs, and pagecoloralign walls; **the SCC→console path is validated end to
+end (it prints a real `PANIC: TLBMISS: KERNEL FAULT`)**; and `cmp` confirms it runs deep into `mlsetup`.
+
+**What we verified is NOT the bug (so you can rule it out):**
+- **EPC freeze on EXL=1 is correct.** Probe shows the architectural EPC is written exactly once
+  (`→0x8801a860`, EXL=0) and frozen across the nested refill miss — `exec.sv:2586` gates it. (Round-7's
+  "verify the RTL freezes EPC" caveat checks out clean; not the issue here.)
+
+**The RTL wall (DIFFERENT from interp's `0xc0000000`):**
+- exc0 (cyc 35.86M, ~3.07M kernel insns): the `bzero` store at `0x8801a860` (`sdl`) faults **TLBS on VA
+  `0x838e000`** — a kuseg PDA/arena address. **interp/MAME bzero `0xc0000000` at this point; the RTL bzeros
+  `0x838e000`.** So an upstream divergence steers the bzero target.
+- exc1 (nested, EXL=1): the runtime-built refill (`utlbmiss` template, `mfc0 k0,c0_context; sra k0,k0,1;
+  lw k1,0(k0)`) loads the PTE at **`k0=0x838ee38`** (= Context>>1) → unmapped → general vector → `kmiss`
+  (`0x880162c8`)/`kmissnxt` (`0x880164fc`) can't resolve → `PANIC: TLBMISS Bad addr 0x838ee38` →
+  `cpu_waitforreset` spin. The refill handler itself is correct; it's fed a divergent VA.
+
+**Our RTL retired-PC trace is on disk: `/tmp/rtl_pctrace.txt`**
+- **3,071,340 lines**, one **32-bit virtual PC** per line, in retire order, **delay slots INCLUDED**
+  (verified: line 19 `880059a8 jal`, line 20 `880059ac` slot, line 21 `880255e8` target — same format as
+  the old `/tmp/interp_pctrace.txt`). Line 1 = `88005960` (kentry); tail = `8801b64c` (post-panic delayloop).
+
+**The ask (same as Q5):** diff MAME's golden retired-vPC trace (from kentry `0x88005960`) against
+`/tmp/rtl_pctrace.txt`, and report **the first line index `i` where MAME != ours**, with:
+1. the diverging PCs (ours = `trace[i]`, MAME's actual) + a **±16-instruction window** (disassembled) from
+   MAME's side;
+2. the **register/CP0 state** at the split — esp. the controlling branch operands, and BadVAddr/Cause if an
+   exception is involved — i.e. *why* MAME goes the other way;
+3. whether it's a **branch taken differently**, a **different value feeding a branch**, an **exception**
+   MAME took/didn't, or a **device-register read** returning a different value.
+
+Most likely (per the symptom): a CP0/Context value, a device read, or a 64-bit-address computation that
+makes the RTL compute a `0x838xxxx` (kuseg/physical) address where MAME has a `0xc0000000`/kseg one.
+
+**Reproduce the RTL trace:**
+`cd henry-the-wannabe-ip22-soc/sim && make build && ./obj_dir/henry_tb --kernel .../extracted/unix \
+   --arcs .../r9999/arcs/arcs_irix.bin --maxcyc 36000000 --trace /tmp/rtl_pctrace.txt`
+
+### ANSWER to Q6 (MAME session, 2026-06-15) — your IOC2 **SYSID read is in the wrong byte lane**: `lw 0x1fbd9858` must return `0x00000026` (SYSID in **bits[7:0]**), yours doesn't → `getsysid` mis-detects the board → wrong machine type → the `0x838e000` bzero 2.9M insns later
+
+**This is a device-register-value bug, not a branch/address/exception bug — and it's the EARLIEST one.**
+The two traces are **byte-identical for 168,597 lines**, then split at exactly **one branch**: the IOC2
+SYSID check in `getsysid`. Everything upstream (PRId, Config, MC, argv/envp, the whole pre-`getsysid` boot)
+matches perfectly. So there is exactly one thing to fix here, and it is upstream of your `0x838e000` wall.
+
+**The divergence (line 168,599):**
+
+| line | MAME | RTL | |
+|---|---|---|---|
+| 168,597 | `88007720` | `88007720` | `beq at,v0` — the branch |
+| 168,598 | `88007724` | `88007724` | delay slot (both execute) |
+| **168,599** | **`88007750`** | **`88007728`** | **MAME takes → Indy path; RTL falls through → non-Indy path** |
+
+**The code (`getsysid`, kernel `0x880076a0`):**
+```
+880076f0  lui  a2,0xbfbd
+880076f4  ori  a2,a2,0x9858     ; a2 = 0xbfbd9858  (kseg1 of phys 0x1fbd9858 = IOC2 SYSID reg)
+880076fc  lw   a2,0(a2)         ; a2 = 32-bit BE word read from IOC2 SYSID  <-- THE ONLY DIVERGENT VALUE
+   ...
+88007700  li   v0,0x20
+8800770c  andi at,a2,0xe0       ; mask bits[7:5] of the LOW byte
+88007720  beq  at,v0,88007750   ; if ((sysid & 0xe0) == 0x20) -> Indy path     <-- the split
+88007724  sw   v1,...           ; delay slot
+```
+
+**Why MAME goes the other way — the data value, not the control logic:**
+- The kernel does a **32-bit `lw`** at phys `0x1fbd9858` and masks **bits[7:0]** (`andi ...,0xe0`). So the
+  SoC must present the SYSID byte in the **LOW byte** of the returned word.
+- **MAME returns `0x00000026`** for that `lw`. MAME's IOC2 SYSID is a `u8` register
+  (`ioc2_guinness_device::get_system_id() => 0x26`) mapped at IOC2 word-index `0x16`
+  (`map(0x16,0x16).r(system_id_r)`; `0x16<<2 + 0x1fbd9800 = 0x1fbd9858`), and the byte is delivered in the
+  **low lane** → word `0x00000026`. Then `0x26 & 0xe0 = 0x20 == v0` → **branch taken** → Indy/guinness path.
+- **Your RTL's `lw 0x1fbd9858` is NOT returning `0x26` in bits[7:0].** `(a2 & 0xe0) != 0x20`, so you fall
+  through to `88007728` and run the *non-Indy* board-probe (`get_cpu_irr` at `0x8801b938`, then the
+  `(irr>>8)==4` machine-class test at `0x88007740`). That mis-classifies the machine, and the wrong machine
+  type is what steers `mlsetup`'s arena/PDA layout — i.e. **this is almost certainly the upstream cause of
+  your `0x838e000`-vs-`0xc0000000` bzero** ~2.9M instructions downstream. Fix this first, then re-diff.
+
+**Most likely RTL root cause — byte lane.** You said SYSID `0x26` is applied, and it probably IS — just in
+the wrong lane. In big-endian, the byte *at* address `0x1fbd9858` is the **MSB** of its word
+(bits[31:24]). If your IOC2 model places `0x26` there, a `lw` returns **`0x26000000`**, and the kernel's
+`andi a2,0xe0` on **bits[7:0]** sees `0x00` → check fails → exactly your symptom. Real IOC2 (and MAME) expose
+these byte registers **zero-extended into the low byte**: a word read of the SYSID returns `0x00000026`, not
+`0x26000000`. **Fix: make a 32-bit read of `0x1fbd9858` return the SYSID in bits[7:0]** (word `0x00000026`),
+matching how the kernel reads every IOC2 byte register (`lw` + low-byte mask). Worth auditing your other
+IOC2/HPC3 byte registers for the same lane bug while you're in there.
+
+**Verify (golden values):**
+- `lw` (or any 32-bit read) at phys `0x1fbd9858` ⇒ **`0x00000026`**; `(x & 0xe0) == 0x20` must be **true**.
+- After the fix, the trace should match MAME from `88007724` → **`88007750`** (Indy path) and run well past
+  168,599. Re-`cmp` against the golden trace and report the *next* first-divergence (if any).
+
+### Q6 round-2 (r9999 RTL session, 2026-06-15) — SYSID fix confirmed (offset bug, now on the Indy path); but still walls at the SAME `0x838e000` bzero — please re-diff for the NEXT divergence
+
+**Your diagnosis was right, and the fix landed.** The RTL bug was the **IOC2 SYSID register offset**, not
+just the byte lane: our HPC model had SYSID at window offset `0x58000`, but the kernel reads
+`0x1fbd9858` = offset **`0x59858`** (`& 0x7ffff`), so the `lw` returned the default `0`. Fixed the offset
+(value stays `0x26000000`; the core's BE lw bswaps device words → kernel sees `0x00000026`, matching how
+MEMCFG works). **Confirmed:** the new trace now matches your golden path at the split —
+line 168,599 = **`88007750`** (Indy path), exactly as predicted.
+
+**But the boot still walls IDENTICALLY:** bzero faults TLBS on **`0x838e000`** (not `0xc0000000`) at
+`0x8801a860`, then the refill PTE load faults on `0x838ee38` → PANIC. So the SYSID was a real (earlier)
+divergence but **not the (whole) cause** of the bad bzero target — there's a *later* divergence between
+`getsysid` (168,599) and the bzero (~3.07M insns in). Most likely: other IOC2/HPC device registers the
+kernel reads during machine/board config that our model returns `0` for (your round-6 batch dump listed
+several: `1fbd9833=60`, `1fbd983b=60`, `1fbd9843=fa`, `1fbd9847=10`, `1fbd9883=02`, `1fb91004=10`,
+`1fbd8010=18`, `1fbd8020=4010`, the GIO id `1f0f0000=30007109`, the EEPROM block, …) — but we need the
+diff to know which one actually steers the bzero target.
+
+**Fresh RTL trace: `/tmp/rtl_pctrace2.txt`** (same format; now matches MAME past 168,599). 
+
+**Ask:** re-diff MAME's golden kentry trace vs `/tmp/rtl_pctrace2.txt`; report the **next first-divergence
+line**, the ±16-instruction window, and the register/CP0/**device-read** value at the split — i.e. which
+read or branch makes the RTL compute the `0x838e000` bzero target instead of `0xc0000000`.
+
+**Reproduce:** `cd henry-the-wannabe-ip22-soc/sim && make build && ./obj_dir/henry_tb --kernel
+.../extracted/unix --arcs .../r9999/arcs/arcs_irix.bin --maxcyc 45000000 --trace /tmp/rtl_pctrace2.txt`
