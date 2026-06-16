@@ -2558,9 +2558,13 @@ module exec(clk,
 	n_cause = r_cause;
 	if(core_wr_cause)
 	  begin
-	     n_cause = core_cause;
-	     n_exc_in_ds = exc_in_delay;
-	  end	
+	     n_cause = core_cause;                /* ExcCode always updates (handler needs it) */
+	     /* Cause.BD accompanies EPC: only update when not already in an exception
+	      * (EXL==0), so a nested exception preserves the original BD.  EPC itself
+	      * is gated the same way at the n_epc mux (r_sr_exl==0). */
+	     if(r_sr_exl == 1'b0)
+	       n_exc_in_ds = exc_in_delay;
+	  end
      end
 
    always_comb

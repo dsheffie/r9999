@@ -137,6 +137,11 @@ static inline state_t::reg_t sext32(uint32_t v) {
  * (which preserves BD by masking only bits [6:2]). */
 static inline void set_exc_pc(state_t *s) {
   s->ll_link_valid = false;   /* any exception breaks the LL/SC link (R10000 p.27) */
+  /* R4000: EPC and Cause.BD update ONLY when Status.EXL==0.  A nested exception
+   * (EXL already set, e.g. a TLB miss inside the refill handler) must leave EPC +
+   * BD holding the ORIGINAL access so its eret retries it.  Matches the RTL, where
+   * exec.sv gates the EPC write on r_sr_exl==0. */
+  if(s->cpr0[CPR0_SR] & SR_EXL) return;
   if(s->in_delay_slot) {
     s->cpr0[CPR0_EPC]    = (uint32_t)(s->pc - 4);
     s->cpr0[CPR0_CAUSE] |=  (1u << 31);

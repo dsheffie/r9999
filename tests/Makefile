@@ -284,3 +284,7 @@ atomic/test_ll_chain.elf: atomic/test_ll_chain.S $(STARTUP) $(COMMON)/sim.h $(CO
 atomic/test_ll_fwd.elf: atomic/test_ll_fwd.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c atomic/test_ll_fwd.S -o atomic/test_ll_fwd.o
 	$(LD) $(LDFLAGS) $(STARTUP) atomic/test_ll_fwd.o -o $@
+
+except/test_nested_epc.elf: except/test_nested_epc.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_nested_epc.S -o except/test_nested_epc.o
+	$(LD) $(LDFLAGS) except/test_nested_epc.o -o $@
