@@ -3013,10 +3013,12 @@ module exec(clk,
 	    end
 	  'd16:
 	    begin
-	       /* Config: set SC (bit 17) = no secondary cache -> kernel sees
-		* R4000PC and skips run_uncached(probe_scache). Our L2 is a
-		* transparent, coherent cache, not an SGI-probeable scache. */
-	       t_csr0_val = 'ha8200;
+	       /* Config = R4600 value (0x0002e4b3): 16 KB I$ + 16 KB D$, 32-byte
+		* lines, SC (bit 17) = no secondary cache.  IRIX's mlreset derives
+		* cachecolormask from these cache-size fields; the R4600 value gives
+		* cachecolormask=1 so pagecoloralign converges (MAME_QUESTIONS.md Q5
+		* round-2).  SC=1 still makes the kernel skip the scache probe. */
+	       t_csr0_val = 'h0002e4b3;
 	    end
 	  'd23:
 	    begin

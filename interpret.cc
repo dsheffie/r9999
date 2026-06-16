@@ -118,8 +118,9 @@ void initState(state_t *s) {
   /* PRId: read-only processor id (R4000 family for now) */
   s->cpr0[CPR0_PRID] = PRID_VALUE;
   s->cpr0_64[CPR0_PRID] = PRID_VALUE;
-  /* Config: return the same constant as the RTL (cache geometry) */
-  s->cpr0[CPR0_CONFIG] = 0x00088200;
+  /* Config: same constant as the RTL -- R4600 cache geometry (16K I$/D$, 32B
+   * lines, SC=1) so mlreset derives cachecolormask=1 (MAME_QUESTIONS.md Q5 r2) */
+  s->cpr0[CPR0_CONFIG] = 0x0002e4b3;
 }
 
 /* Raise MIPS Reserved Instruction exception (ExcCode=10).
