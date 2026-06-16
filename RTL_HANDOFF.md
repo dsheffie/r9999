@@ -6,6 +6,42 @@ check whether r9999 RTL has it.
 
 ---
 
+## 2026-06-15 (RTL session) — ANSWERED: the KPTEBASE/nested-EPC wall is NOT a r9999 RTL bug
+
+**Bottom line: r9999's RTL already does the right thing.** Two things made the original check below a dead
+lead:
+
+1. **The premise was superseded the same day.** interp_mips's own `IRIX_BOOT_NOTES.md` (later 2026-06-15
+   update) found the KPTEBASE wall was **not** `kvalloc`/`kptbl` — `kptbl[c0000000]` was a valid PTE all
+   along. The real bug was **CPU exception semantics**: `set_exc_pc` updated EPC + Cause.BD *unconditionally*
+   instead of **only when `Status.EXL==0`**. The self-mapped refill takes a *nested* TLB miss (EXL=1) inside
+   the `0x80000000` handler; that nested miss must NOT clobber EPC, so the `eret` retries the original
+   `0xc0000000` access. So don't check `kptbl[c0000000]==0x1` — check the EXL-gating of EPC.
+
+2. **r9999's RTL already gates EPC on `EXL==0`.** `exec.sv:2582` latches the architectural EPC from the core
+   only when `r_sr_exl==0`; a nested exception preserves EPC and `eret` retries correctly. The refill *vector*
+   is likewise gated (`core.sv:1582`, `n_tlb_refill = tlb_refill & ~w_sr_exl` → nested refill falls through to
+   the general `0x180` vector; this is why `test_xtlb_nested` passes). **So the nested-EPC wall that bit
+   interp_mips cannot occur in r9999's RTL.**
+
+**Landed anyway (conformance cleanups, commit `701db1e`):** the matching EXL-gate for **Cause.BD**
+(`exec.sv` `n_exc_in_ds`; EPC was already gated, BD wasn't), the same fix in **`interpret.cc` `set_exc_pc`**
+(it had the unconditional-EPC bug), and a directed regression **`tests/except/test_nested_epc.S`** (a syscall
+whose handler issues a second syscall while EXL=1; on the nested entry EPC must still equal the original —
+prints `P`, trace shows the `0x180` vector entered twice). Validated: `test_nested_epc` P (`-c0`), randgen
+40/40, `except`/`xtlb`(incl. nested)/`eret` suite co-sim-clean.
+
+**Co-sim caveat worth knowing:** `ooo_core -c1` compares **GPRs only** — not CP0 (`EPC`/`Cause`/`Status`) and
+not `k0`/`k1`. A revert-test confirmed the interp's EPC bug produced **zero** `-c1` divergence, so it was
+latent. To co-sim-validate CP0/exception behavior, fold the value into a non-`k0`/`k1` GPR and self-check.
+
+**The actual next IRIX blocker for the RTL is upstream of all this:** r9999's RTL sim has **no IRIX boot
+flow** — no `/unix` loader, no SoC/pseudo-BIOS wiring in `top.cc` (the SCC model + the `e451d50` wirepda fix
+*are* in `main`, but the kernel image is never loaded). IRIX-on-r9999-RTL needs that bring-up before any of
+the deeper `kvmsetup`/KPTEBASE questions can be exercised on silicon/Verilator.
+
+---
+
 ## 2026-06-15 — Check: does r9999 back the IRIX kernel page table at the first `0xc0000000` access? (the KPTEBASE wall)
 
 **Why you're being asked.** Booting real IRIX 6.5.22, `interp_mips` (the functional ISS) walls ~6.4M
