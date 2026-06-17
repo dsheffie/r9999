@@ -42,7 +42,8 @@ TESTS := hello/hello.elf \
          cache/test_smc_index.elf \
          cache/test_inval_nowb.elf \
          cache/test_cache_priv.elf \
-         devregs/test_devregs.elf
+         devregs/test_devregs.elf \
+         addr64/test_badvaddr.elf
 
 DISASMS := $(TESTS:.elf=.dis)
 
@@ -67,6 +68,16 @@ hello/hello.elf: hello/hello.c $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 devregs/test_devregs.elf: devregs/test_devregs.c $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -c devregs/test_devregs.c -o devregs/test_devregs.o
 	$(LD) $(LDFLAGS) $(STARTUP) devregs/test_devregs.o -o $@
+
+# -----------------------------------------------------------------------
+# BadVAddr-on-64-bit-store regression (self-contained, own vectors, no crt0).
+# Reproduces the IRIX-boot blocker: sdl/sd/sdr to a 64-bit kseg2 address must
+# report BadVAddr = the store EA.  Run on the RTL via henry_tb, or co-sim:
+#   ooo_core --file addr64/test_badvaddr.elf -c 1
+# -----------------------------------------------------------------------
+addr64/test_badvaddr.elf: addr64/test_badvaddr.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c addr64/test_badvaddr.S -o addr64/test_badvaddr.o
+	$(LD) $(LDFLAGS) addr64/test_badvaddr.o -o $@
 
 # -----------------------------------------------------------------------
 # CP0 register access test

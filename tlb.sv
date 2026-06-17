@@ -51,13 +51,25 @@ module tlb(clk,
 
 
    tlb_data_t r_tlb[47:0];
+   integer ri;
 
    wire [NN-1:0]	       w_addr_space_match;
    wire [NN-1:0]	       w_hit8k;
-   
+
+   /* Reset the per-entry valid bits so a power-up/soft-reset TLB holds no
+    * matchable entries (rv64core resets r_valid the same way).  Without this,
+    * un-reset entries can be selected by the 19-bit VPN match below. */
    always_ff@(posedge clk)
      begin
-	if(tlb_entry_in_valid)
+	if(reset)
+	  begin
+	     for(ri = 0; ri < N; ri = ri + 1)
+	       begin
+		  r_tlb[ri].v0 <= 1'b0;
+		  r_tlb[ri].v1 <= 1'b0;
+	       end
+	  end
+	else if(tlb_entry_in_valid)
 	  begin
 	     r_tlb[tlb_entry_in.entry] <= tlb_entry_in;
 	  end
@@ -85,7 +97,10 @@ module tlb(clk,
 	    * va[39:13]/R never matched a wired high-VA entry (the wirepda wall). The
 	    * low 19-bit VPN2 uniquely identifies a page in the 32-bit address space. */
 	   assign w_hit8k[i] = (r_tlb[i].vpn[18:0] == va[31:13]);
-	   assign w_hits[i] = w_addr_space_match[i] & w_hit8k[i];
+	   /* exclude a pair with BOTH pages invalid (v0=v1=0): reset / tlbinit-filler
+	    * entries must never be picked by find_first_set.  The selected page's own
+	    * v0/v1 still drives `valid` (the TLB-Invalid exception) for a matched pair. */
+	   assign w_hits[i] = w_addr_space_match[i] & w_hit8k[i] & (r_tlb[i].v0 | r_tlb[i].v1);
 	end
    endgenerate
    

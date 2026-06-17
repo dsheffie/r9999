@@ -10,7 +10,7 @@
 
 OUTPUT_FORMAT("elf32-tradbigmips")
 OUTPUT_ARCH(mips)
-ENTRY(arcs_spb)
+ENTRY(arcs_boot)
 
 SECTIONS
 {

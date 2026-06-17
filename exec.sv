@@ -2590,6 +2590,13 @@ module exec(clk,
      end // always_comb
    
    
+`ifdef EPC_TRACE
+   always_ff@(posedge clk)
+     if(!reset && (n_epc != r_epc))
+       $display("[epc] %x -> %x  r_sr_exl=%b cwr_epc=%b mtc0epc=%b cwr_cause=%b srcA=%x",
+		r_epc[31:0], n_epc[31:0], r_sr_exl, core_wr_epc,
+		(r_start_int & t_wr_cpr0 & (int_uop.dst=='d14)), core_wr_cause, t_srcA[31:0]);
+`endif
    always_ff@(posedge clk)
      begin
 	r_epc <= reset ? 'd0 : n_epc;

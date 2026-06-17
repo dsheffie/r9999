@@ -1172,3 +1172,162 @@ read or branch makes the RTL compute the `0x838e000` bzero target instead of `0x
 
 **Reproduce:** `cd henry-the-wannabe-ip22-soc/sim && make build && ./obj_dir/henry_tb --kernel
 .../extracted/unix --arcs .../r9999/arcs/arcs_irix.bin --maxcyc 45000000 --trace /tmp/rtl_pctrace2.txt`
+
+### ANSWER to Q6 round-2 (MAME session, 2026-06-15) — next divergence = `_cpuclkper100ticks`: your **8254 PIT timer (counter-2 @ `0x1fbd98b0`) isn't counting** — calibration loops **1×** vs MAME's **641×**. Also: PC-diffing has hit the PROM wall, so I switched methods (below).
+
+**First, the methodology — your raw trace now diverges at the first PROM romvec call (a red herring).**
+The naive `cmp` says line 169,525, but that's just `init_sysid` calling `arcs_getenv("eaddr")` →
+`GetEnvironmentVariable` (FirmwareVector entry **FW[30]**, romvec byte-offset **0x78**; `arcs_getenv` does
+`a4=*(0xa0001020); … ; lw a4,0x78(a4); jr a4`). MAME runs the **real PROM** (`0x9fc10944…`), you run a
+**RAM stub** (`0xa0001e68`). That's a *cosmetic* divergence — every romvec call will diverge in PC from here
+on regardless of whether the return matters (`eaddr` is just the MAC, stored for the net driver; it does not
+steer the bzero). **To see real kernel-path divergences I filtered both traces to kernel PCs only**
+(`grep '^88'`, which drops PROM `9fc…`, stubs `a000…`, and the `8000…` exception vectors) and re-diffed.
+Do this on your side too — it's the only way to diff past the first PROM call.
+
+**The real first kernel-path divergence: `_cpuclkper100ticks` (kernel `0x8801b50c`).** This is IRIX measuring
+CPU clock against the **IOC 8254-style PIT timer**. The split is the loop-exit branch at `0x8801b608`
+(`bnez a2,0x8801b5d4` — "loop while PIT counter-2 != 0"):
+- **MAME** keeps looping (PIT still counting down) → **641 iterations**.
+- **RTL** reads PIT counter-2 == 0 on the **first** pass → exits → **1 iteration** → CPU-clock calibration
+  comes out ~641× too small (garbage).
+
+**The device the kernel drives (phys, all byte accesses at PIT base `0x1fbd98b0`):**
+```
+0x8801b554  sb 0xb4 -> 0x1fbd98bf   ; PIT control word: select counter 2, mode 2, binary
+0x8801b584  sb 100  -> 0x1fbd98bb   ; counter-2 load value (LSB), then
+0x8801b5ac  sb 1    -> 0x1fbd98bb   ; (re)load counter 2
+LOOP (0x8801b5d4):
+0x8801b5d4  sb 0x80 -> 0x1fbd98bf   ; counter-latch command for counter 2
+0x8801b5f8  mfc0 c0_count           ; read CPU Count
+0x8801b5fc/b600  lbu 0x1fbd98bb     ; read latched counter-2 value (x2)
+0x8801b608  bnez a2 -> loop          ; <-- MAME: a2!=0 (counting); RTL: a2==0 (dead timer)
+```
+Selector note: `0x8801b510` reads `0x1fbe9858` and tests bits `0x20/0x01/0x1e` to pick PIT base `0x9030`
+vs `0x98b0`; both MAME and you took the `0x98b0` path, so **that** read already matches — the *only* gap is
+counter-2 not decrementing.
+
+**Fix:** model the IOC **8254 PIT counter 2** at `0x1fbd98b0`–`0x1fbd98bf` (control `+0xf`, count/latch
+`+0xb`) so it counts down at the real PIT rate (~1.0 MHz; MAME's gives a 641:1 CPU:PIT ratio at R4600
+100 MHz). It just needs to count down and read back nonzero for a while — the kernel polls it via the
+latch command. Until it does, every PIT-calibrated delay in the kernel is wrong.
+
+**Is this THE bzero cause? Probably not directly — but it's the first real gap, and there are likely more.**
+The bzero target itself is the tell: **`0x838e000` is the PDA's *physical* address** (round-6: the wired PDA
+is VA `0xffffa000` → PA `0x0838e000`). So at the wall the RTL is zeroing the PDA via its **physical/kuseg**
+address while MAME zeroes the **kseg2 virtual** alias `0xc0000000` — a *PDA-mapping-setup* divergence
+~2.9M insns downstream.
+
+---
+
+**CORRECTION / round-2 update (after dsheffie noted "neither the RTL nor interp_mips has a PIT"):**
+
+**(1) The PIT divergence above is BENIGN — ignore it.** interp_mips also has no PIT, yet boots to
+root-mount; the calibration loop just runs 1× and the kernel proceeds with a garbage cpuclk. Not the bug.
+So MAME (which *does* have a PIT) is a noisy oracle for you. I re-diffed your trace against
+**interp_mips** instead (`/tmp/interp_pctrace.txt`) — it shares your exact PIT-less / romvec-stub platform,
+so the two are **line-for-line identical** far past the MAME noise.
+
+**(2) interp-vs-RTL first divergence = line 191,626, in `szmem` (the memory-sizing routine) — and HERE THE
+RTL IS CORRECT; it's interp_mips that is wrong.** `szmem` (kernel `0x8800790c`) loops banks 0–2 calling a
+MC-config helper (`jal 0x8800782c`, `a0=bank`) that reads the MC registers `mconfig0` (`0xbfa000c4`) /
+`mconfig1` (`0xbfa000cc`) and returns each bank's size field (`(mconfig >> {16|0}) & 0xffff`); `beqz v0`
+at `0x88007844` = "bank empty?". Bank-by-bank outcome across all three:
+
+| bank (s0) | field read | MAME (real HW) | interp_mips | RTL |
+|---|---|---|---|---|
+| 0 | `mconfig0[31:16]` | present (`0x2320`) | present | present |
+| 1 | `mconfig0[15:0]`  | empty (`0`) | empty | empty |
+| 2 | **`mconfig1[31:16]`** | **empty (`mconfig1=0`)** | **PRESENT (phantom)** | **empty** |
+
+**MAME and the RTL agree** (banks 0 present, 1 & 2 empty — the real 16 MB single-bank Indy config, and the
+round-4 golden `mconfig0=0x23200000 / mconfig1=0`). **interp_mips is the outlier**: its `mconfig1` is
+nonzero, so it hallucinates a populated bank 2. **→ This is an interp_mips bug, not an RTL bug. Do NOT
+change the RTL's MC here — its `mconfig1=0` is right.** (Heads-up for the interp session: set interp's
+`mconfig1` to `0x00000000` so its `szmem` map matches real hardware.)
+
+**(3) So what's the actual `0x838e000` bzero cause?** It is **not** the memory map — the RTL's map already
+matches MAME's (a fully-booting oracle). It's a genuine RTL/Henry-vs-real-HW divergence *somewhere after*
+`szmem`, and **interp can't be the oracle for it** (interp's phantom bank 2 sends interp down a different —
+larger-memory — path from `szmem` onward, so RTL and interp stop being comparable here). The only faithful
+oracle past `szmem` is **MAME**, but a raw `cmp` is swamped by two benign alignment offsets: the PIT loop
+(MAME 641× vs RTL 1×) and PROM-stub execution (every romvec call). **Next step (say go): I'll produce a
+normalized MAME-vs-RTL diff** — collapse the PIT calibration loop, filter PROM/stub PCs, re-align after each
+benign offset — to find the first *real* RTL-vs-MAME kernel divergence that relocates the PDA. (Alternative:
+fix interp's `mconfig1→0`, re-run it, and it becomes a clean line-aligned oracle for you again.)
+
+---
+
+### Round-2 RESULT — normalized MAME-vs-RTL diff (MAME session, 2026-06-16)
+
+**Method.** Both traces filtered to kernel PCs (`grep '^88'`, drops PROM `9fc…`, stubs `a000…`, vectors
+`80…`), then the PIT loop (`0x8801b5d4`–`0x8801b60c`) collapsed. Then `diff` (LCS), not `cmp`, so benign
+re-converging blips don't mask the real split. **It works:** the only divergences before the panic are tiny
+1–2-line hunks in timing routines (`findcpufreq_raw` etc., bad-cpuclk micro-paths) that immediately
+re-converge — exactly the no-PIT noise, confirmed benign.
+
+**First PERMANENT divergence — line ~2.93M: the Newport graphics probe.** In `ng1_earlyinit` (`0x882b81fc`,
+`beqz v0,0x882b81dc` right after `jal newportProbe`):
+- **MAME**: `v0 != 0` → falls through → **Newport board FOUND** → `newportInit`, continues with graphics.
+- **RTL**: `v0 == 0` → branch taken → **no board** → headless path.
+- ⇒ **Henry's `newportProbe` (`0x882b8a44`) returns 0 — IRIX doesn't detect the Newport graphics.** Past
+  this point MAME runs graphics-init code the RTL never does, so **MAME is no longer a valid oracle** beyond
+  ~2.93M. (This is a real Henry gap if you intend graphics to be present — the docs model REX3/VC2/XMAP9 —
+  but it is probably *not* the panic's cause: real IRIX boots fine headless.)
+
+**The actual panic (~2.97M, the `0x838e000` fault) — looks like a 64-bit address bug in the core, NOT a
+device/SoC gap.** The faulting `bzero` (`0x8801a860`) is called from **`kmem_zone_alloc+0x7c` →
+`kmem_avail`** (the kernel allocator), `0x880e1e0c: jal bzero` with `a0 = v0` = the address returned by the
+alloc helper `0x880e1b64`. The target is **`0x0838e000` — a KUSEG address** (and it's inside szmem's 16 MB
+bank `0x08000000`). **A kernel allocator never returns kuseg**; this should be the **kseg0/xkphys** alias of
+phys `0x0838e000` — i.e. `0x8838e000` (32-bit kseg0) or the 64-bit `0xa8000000_0838e000` (xkphys cached).
+The address is missing its high bits → the store misses the TLB (kuseg needs a mapping) → the self-mapped
+refill nested-faults → `PANIC … Bad addr 0x838ee38` → `cpu_waitforreset` spin (`0x880097a4`, ~497K spins to
+maxcyc). **Missing-upper-32-bits on a kseg0/xkphys pointer = the classic r9999 64-bit hazard** (cf. the
+sv2v/`always_ff` note) — interp and MAME compute the 64-bit pointer correctly and boot; the RTL truncates it
+to kuseg and faults.
+
+**How to confirm on the RTL side (single-step / Verilator):** breakpoint the alloc return at **`0x880e1de8`**
+(just after `jal 0x880e1b64`) and the `bzero` call at **`0x880e1e0c`**, and dump the **full 64-bit** `v0`/`a0`.
+- **Expect** (correct): a kseg0/xkphys pointer — upper 32 bits `0xffffffff` (kseg0 sign-extend) or
+  `0xa8000000…` (xkphys), low = `…8838e000`/`…0838e000`.
+- **Bug**: upper 32 bits `0x00000000`, value `0x000000000838e000` → truncated → kuseg → fault. If so, hunt
+  the 64-bit address construction in/under `kmem_avail` `0x880e1b64` (the `dsll32/dsrl32/dsra32`/`or 0x8000…`
+  kseg0 idiom — same shape as `call_prom_cached` `0x88006574`) and check r9999's 64-bit `daddu`/`dsll32`/
+  sign-extension and 64-bit load/store address path. This is a **core bug**, not Henry/SoC.
+
+**Net for the RTL session:** two independent findings — (a) `newportProbe` returns 0 (Henry Newport not
+detected; real but likely not the blocker), and (b) **the boot blocker: `kmem_avail` hands `bzero` a
+truncated kuseg pointer `0x0838e000` instead of the kseg0/xkphys alias — a 64-bit address-path bug in the
+r9999 core.** Fix (b) to get past the panic; verify with the `0x880e1de8`/`0x880e1e0c` 64-bit-register dump
+above.
+
+### Q6 round-3 (r9999 RTL session, 2026-06-16) — CORRECTION: the bzero pointer is NOT truncated; the bug is BadVAddr reported wrong on the faulting 64-bit kseg2 STORE. Isolated + reproduced with a directed test.
+
+**Followed the round-2 lead and dumped the full 64-bit `a0` at the `bzero` call (exposed the retire
+register writeback in the Henry SoC). Result corrects finding (b):**
+
+- At `0x880e1e08` (`move a0,v0` → `jal bzero`), **`a0 = 0xffffffffc0000000`** — a *correct*, sign-extended
+  kseg2 pointer (= MAME's bzero target). `kmem_avail` is **not** returning a truncated kuseg pointer.
+- The faulting store is `bzero`'s first store, **`0x8801a860: sdl zero,0(a0)`**, EA should be `0xc0000000`.
+- But the fault reports **`BadVAddr = 0x0000000000838e000`**, not `0xc0000000`. So `kmiss`'s
+  `mfc0 a0,c0_badvaddr` (`0x880162a0`) reads the bogus address, walks/maps the wrong page, the
+  `0xc0000000` page is never backed, the `sdl` re-faults → PANIC. **The pointer is fine; the fault's
+  BadVAddr is wrong.**
+
+**Localized in the core:** `core.sv:1534` `n_badvaddr = r_addrs[rob_head]`; `core.sv:2356`
+`r_addrs[rob_ptr] <= core_mem_rsp.data` — i.e. BadVAddr comes from the **faulting address `l1d` reports**
+in the mem response, which is wrong for the unaligned 64-bit store. (randgen never exercised `sdl`/`sdr`
+to a 64-bit/kseg2 address, so this slipped through co-sim.)
+
+**Directed test added + REPRODUCES it: `tests/addr64/test_badvaddr.S`.** In 64-bit mode (KX=1), `sdl`/`sd`/
+`sdr` to `0xffffffffc0000000` TLBS-fault; the handler latches BadVAddr; the test checks it equals the store
+EA. **On the RTL it prints `F`** (BadVAddr ≠ store EA). **Co-sim (`ooo_core -c1`) confirms it's a CORE bug,
+not a test bug:** the traces match through `lui a0,0xc000`, then at the `sdl` fault the RTL diverges to the
+fail path while the interp (correct BadVAddr) continues — so the interp computes BadVAddr right and the RTL
+does not. (The exact wrong value is context-dependent — `0x838e000` in the boot, a different garbage in the
+unit test — but the class is the same: BadVAddr on a 64-bit unaligned/kseg2 store.)
+
+**So the fix target is `l1d.sv`'s faulting-effective-address path for `sdl`/`sdr` (and 64-bit stores
+generally)**, not the allocator and not a device. (Newport-probe-returns-0 from round-2 still stands as a
+separate, non-blocking Henry gap.)

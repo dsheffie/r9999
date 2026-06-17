@@ -29,7 +29,7 @@
 #define ARCS_RAM_BASE   0x08000000
 #endif
 #ifndef ARCS_RAM_SIZE
-#define ARCS_RAM_SIZE   0x08000000      /* 128 MiB */
+#define ARCS_RAM_SIZE   0x01000000      /* 16 MiB -- match the MC "bank0: 16M @ 08000000" */
 #endif
 #define ARCS_RAM_BASE_PG (ARCS_RAM_BASE >> 12)
 #define ARCS_RAM_PAGES   (ARCS_RAM_SIZE >> 12)
@@ -37,6 +37,22 @@
     .set    mips3
     .set    noreorder
     .set    noat
+
+/* SCC_MARK -- firmware-only FPGA progress tracer: print one char \ch to the
+ * Z8530 SCC (RR0 poll + DATA write).  Clobbers only $t7-$t9 (caller-saved) and
+ * preserves $a0-$a3 / $v0 / $ra / $s*, so it is safe to drop into a romvec stub
+ * before its body.  Lets us watch which PROM calls IRIX makes on silicon. */
+    .macro  SCC_MARK ch
+    lui     $t9, 0xbfbd
+    ori     $t8, $t9, 0x9830        /* RR0 (control) */
+    ori     $t9, $t9, 0x9837        /* DATA */
+8:  lbu     $t7, 0($t8)
+    andi    $t7, $t7, 0x04         /* Tx Buffer Empty */
+    beq     $t7, $zero, 8b
+    nop
+    li      $t7, \ch
+    sb      $t7, 0($t9)
+    .endm
 
     .section .arcs, "ax"
 
@@ -123,6 +139,7 @@ arcs_pvec:
 /* LONG Write(handle, void *buf, ULONG len, ULONG *cnt): write to CP0 putchar. */
     .globl  stub_write
 stub_write:
+    SCC_MARK 'W'
     move    $t0, $a2
     move    $t1, $a1
 1:  blez    $t0, 2f
@@ -146,6 +163,7 @@ stub_write:
  * first call (cur==NULL) returns our one free-RAM descriptor; then NULL. */
     .globl  stub_mdesc
 stub_mdesc:
+    SCC_MARK 'M'
     bne     $a0, $zero, 1f
     nop
     la      $v0, mdesc_ram
@@ -160,6 +178,7 @@ stub_mdesc:
  * MAC (08:00:69 = SGI OUI).  The kernel pulls little else from the romvec. */
     .globl  stub_getenv
 stub_getenv:
+    SCC_MARK 'E'
     la      $v0, eaddr_str
     jr      $ra
     nop
@@ -167,6 +186,7 @@ stub_getenv:
 /* COMPONENT *GetChild(COMPONENT *cur): root for NULL query, else NULL. */
     .globl  stub_child
 stub_child:
+    SCC_MARK 'C'
     bne     $a0, $zero, 1f
     nop
     la      $v0, root_component
@@ -178,18 +198,21 @@ stub_child:
 /* COMPONENT *GetPeer(COMPONENT *cur): no peers -> NULL. */
     .globl  stub_peer
 stub_peer:
+    SCC_MARK 'P'
     jr      $ra
     move    $v0, $zero
 
 /* Default: return 0 cleanly. */
     .globl  stub_default
 stub_default:
+    SCC_MARK 'D'
     jr      $ra
     move    $v0, $zero
 
 /* Halt/PowerDown/Restart/Reboot: stop the simulator (magic-halt register). */
     .globl  stub_halt
 stub_halt:
+    SCC_MARK 'H'
     li      $k0, 0xBFD00000
     li      $k1, 1
     sw      $k1, 0($k0)
@@ -226,3 +249,127 @@ arch_name:
     .align  2
 eaddr_str:
     .asciz  "08:00:69:12:34:56"     /* getenv("eaddr") -> SGI MAC (etoh parses this) */
+
+/* ====================================================================
+ * arcs_boot @ 0xA0003000 -- the ENTRY point (self-contained pseudo-PROM).
+ * Replaces the C++ harness handoff: (1) print a heartbeat out the Z8530 SCC
+ * (proof-of-life on silicon), (2) stage the sash argv/envp blob at kseg0
+ * 0x88fff000 (top of the 16 MiB bank, where the kernel reads it in early
+ * mlsetup -- mirrors interp_mips pseudo_bios.cc), (3) set a0=argc, a1=argv,
+ * a2=envp and jump to the IRIX /unix entry 0x88005960.  The driver starts the
+ * core here via --start-pc 0xa0003000.
+ * ==================================================================== */
+    .set    ARCS_BB,   0x88fff000       /* runtime base for the argv/envp blob */
+    .set    ARCS_ARGC, 8
+    .set    ARCS_KENTRY, 0x88005960     /* IRIX /unix start */
+
+    .org    0x2000
+    .globl  arcs_boot
+arcs_boot:
+    /* (1) SCC heartbeat: poll RR0.TxEmpty @0xbfbd9830, write DATA @0xbfbd9837 */
+    lui     $t4, 0xbfbd
+    ori     $t5, $t4, 0x9830
+    ori     $t6, $t4, 0x9837
+    la      $t1, arcs_hb_str
+1:  lbu     $t2, 0($t1)
+    beq     $t2, $zero, 2f
+    nop
+9:  lbu     $t3, 0($t5)             /* RR0 */
+    andi    $t3, $t3, 0x04         /* Tx Buffer Empty */
+    beq     $t3, $zero, 9b
+    nop
+    sb      $t2, 0($t6)
+    addiu   $t1, $t1, 1
+    b       1b
+    nop
+2:
+    /* (2) copy the argv/envp blob to kseg0 0x88fff000 */
+    la      $t0, arcs_argv_blob
+    la      $t2, arcs_argv_blob_end
+    li      $t1, ARCS_BB
+3:  lbu     $t3, 0($t0)
+    sb      $t3, 0($t1)
+    addiu   $t0, $t0, 1
+    addiu   $t1, $t1, 1
+    bne     $t0, $t2, 3b
+    nop
+    /* (3) entry regs + jump to /unix */
+    li      $a0, ARCS_ARGC
+    /* NB: `li $a1, ARCS_BB+(label-label)` mis-assembles to a single sign-extended
+     * addiu (0xfffffffffffff254) -- the label-diff defeats li's constant path.
+     * Load the base (li of a plain constant is fine) then addiu the folded offset. */
+    li      $a1, ARCS_BB
+    addiu   $a2, $a1, (arcs_envp_arr - arcs_argv_blob)   /* a2 = envp array */
+    addiu   $a1, $a1, (arcs_argv_arr - arcs_argv_blob)   /* a1 = argv array */
+    /* clean handoff: a real PROM enters /unix with only a0/a1/a2 meaningful;
+     * zero the scratch GPRs the stub dirtied so the kernel can't read stale
+     * values (jump via $k0 so no general reg is left holding the entry addr). */
+    move    $a3, $zero
+    move    $v0, $zero
+    move    $v1, $zero
+    move    $t0, $zero
+    move    $t1, $zero
+    move    $t2, $zero
+    move    $t3, $zero
+    move    $t4, $zero
+    move    $t5, $zero
+    move    $t6, $zero
+    move    $t7, $zero
+    move    $t8, $zero
+    move    $t9, $zero
+    li      $k0, ARCS_KENTRY
+    jr      $k0
+    nop
+
+    .align  2
+arcs_hb_str:
+    .asciz  "r9999 PROM: CPU alive, handing off to /unix\n"
+
+/* sash argv/envp blob (mirrors pseudo_bios.cc); pointers are assembler-computed
+ * for runtime base ARCS_BB = 0x88fff000.  Copied there by arcs_boot. */
+    .align  2
+arcs_argv_blob:
+s_a0:  .asciz "scsi(0)disk(1)rdisk(0)partition(0)/unix"
+s_a1:  .asciz "OSLoadOptions=auto"
+s_a2:  .asciz "ConsoleIn=serial(0)"
+s_a3:  .asciz "ConsoleOut=serial(0)"
+s_a4:  .asciz "SystemPartition=scsi(0)disk(1)rdisk(0)partition(8)"
+s_a5:  .asciz "OSLoader=sash"
+s_a6:  .asciz "OSLoadPartition=scsi(0)disk(1)rdisk(0)partition(0)"
+s_a7:  .asciz "OSLoadFilename=/unix"
+s_e0:  .asciz "AutoLoad=Yes"
+s_e1:  .asciz "TimeZone=PST8PDT"
+s_e2:  .asciz "console=d"
+s_e3:  .asciz "diskless=0"
+s_e4:  .asciz "dbaud=9600"
+s_e5:  .asciz "volume=80"
+s_e6:  .asciz "sgilogo=y"
+s_e7:  .asciz "autopower=y"
+s_e8:  .asciz "eaddr=08:01:02:03:04:05"
+s_e9:  .asciz "ConsoleOut=serial(0)"
+s_e10: .asciz "ConsoleIn=serial(0)"
+s_e11: .asciz "cpufreq=100"
+s_e12: .asciz "SystemPartition=scsi(0)disk(1)rdisk(0)partition(8)"
+s_e13: .asciz "OSLoadPartition=scsi(0)disk(1)rdisk(0)partition(0)"
+s_e14: .asciz "OSLoadFilename=/unix"
+s_e15: .asciz "OSLoader=sash"
+s_e16: .asciz "kernname=scsi(0)disk(1)rdisk(0)partition(0)/unix"
+    .align  2
+arcs_argv_arr:
+    .word   ARCS_BB+(s_a0-arcs_argv_blob), ARCS_BB+(s_a1-arcs_argv_blob)
+    .word   ARCS_BB+(s_a2-arcs_argv_blob), ARCS_BB+(s_a3-arcs_argv_blob)
+    .word   ARCS_BB+(s_a4-arcs_argv_blob), ARCS_BB+(s_a5-arcs_argv_blob)
+    .word   ARCS_BB+(s_a6-arcs_argv_blob), ARCS_BB+(s_a7-arcs_argv_blob)
+    .word   0
+arcs_envp_arr:
+    .word   ARCS_BB+(s_e0-arcs_argv_blob),  ARCS_BB+(s_e1-arcs_argv_blob)
+    .word   ARCS_BB+(s_e2-arcs_argv_blob),  ARCS_BB+(s_e3-arcs_argv_blob)
+    .word   ARCS_BB+(s_e4-arcs_argv_blob),  ARCS_BB+(s_e5-arcs_argv_blob)
+    .word   ARCS_BB+(s_e6-arcs_argv_blob),  ARCS_BB+(s_e7-arcs_argv_blob)
+    .word   ARCS_BB+(s_e8-arcs_argv_blob),  ARCS_BB+(s_e9-arcs_argv_blob)
+    .word   ARCS_BB+(s_e10-arcs_argv_blob), ARCS_BB+(s_e11-arcs_argv_blob)
+    .word   ARCS_BB+(s_e12-arcs_argv_blob), ARCS_BB+(s_e13-arcs_argv_blob)
+    .word   ARCS_BB+(s_e14-arcs_argv_blob), ARCS_BB+(s_e15-arcs_argv_blob)
+    .word   ARCS_BB+(s_e16-arcs_argv_blob)
+    .word   0
+arcs_argv_blob_end:

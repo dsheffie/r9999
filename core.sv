@@ -1411,6 +1411,11 @@ module core(clk,
 		 begin
 		    if(t_rob_head.is_cache)
 		      begin
+`ifdef IRIX_CACHE_TRACE
+			 $display("[cache] pc=%x is_d=%b inval=%b EA=%x",
+				  t_rob_head.pc[31:0], t_rob_head.cache_is_d,
+				  t_rob_head.cache_inval, t_rob_head.data[31:0] & 32'h1fffffff);
+`endif
 			 /* CACHE op: D-side does a surgical per-line writeback of the
 			  * addressed line to L2 (flush_cl at EA = rob.data); I-side
 			  * nukes the whole L1I (the arbiter chains an L2 flush). Fake

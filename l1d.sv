@@ -1714,7 +1714,12 @@ endfunction
 		      end
 		    else if(w_tlb_hit==1'b0)
 		       begin
-			  n_core_mem_rsp.data = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
+			  /* BadVAddr = the faulting VIRTUAL address (r_req2.addr), NOT the
+		   * translated PA: on a TLB miss w_mapped_addr is garbage, and
+		   * zero-extending it to PA_WIDTH drops the high 64-bit VA bits.  The
+		   * R4000 refill/kmiss reads BadVAddr (+Context) to find the PTE, so it
+		   * must be the full VA (e.g. kseg2 0xffffffffc0000000). */
+		  n_core_mem_rsp.data = r_req2.addr;
 			  n_core_mem_rsp.dst_valid = 1'b0;
 			  n_core_mem_rsp.bad_addr = 1'b0;
 			  n_core_mem_rsp.tlb_refill = 1'b1;
@@ -1723,7 +1728,12 @@ endfunction
 		    else if(w_tlb_valid == 1'b0)
 		       begin
 			  /* R4400: matching entry, V=0 -> TLB Invalid (TLBL/TLBS), common vector */
-			  n_core_mem_rsp.data = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
+			  /* BadVAddr = the faulting VIRTUAL address (r_req2.addr), NOT the
+		   * translated PA: on a TLB miss w_mapped_addr is garbage, and
+		   * zero-extending it to PA_WIDTH drops the high 64-bit VA bits.  The
+		   * R4000 refill/kmiss reads BadVAddr (+Context) to find the PTE, so it
+		   * must be the full VA (e.g. kseg2 0xffffffffc0000000). */
+		  n_core_mem_rsp.data = r_req2.addr;
 			  n_core_mem_rsp.dst_valid = 1'b0;
 			  n_core_mem_rsp.bad_addr = 1'b0;
 			  n_core_mem_rsp.tlb_invalid = 1'b1;
@@ -1734,7 +1744,12 @@ endfunction
 		    else if(r_req2.is_store && (w_tlb_dirty == 1'b0))
 		       begin
 			  /* R4400: store to valid-but-not-dirty page -> TLB Modified (Mod), common vector; no write */
-			  n_core_mem_rsp.data = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
+			  /* BadVAddr = the faulting VIRTUAL address (r_req2.addr), NOT the
+		   * translated PA: on a TLB miss w_mapped_addr is garbage, and
+		   * zero-extending it to PA_WIDTH drops the high 64-bit VA bits.  The
+		   * R4000 refill/kmiss reads BadVAddr (+Context) to find the PTE, so it
+		   * must be the full VA (e.g. kseg2 0xffffffffc0000000). */
+		  n_core_mem_rsp.data = r_req2.addr;
 			  n_core_mem_rsp.dst_valid = 1'b0;
 			  n_core_mem_rsp.bad_addr = 1'b0;
 			  n_core_mem_rsp.tlb_modified = 1'b1;
