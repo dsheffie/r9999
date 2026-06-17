@@ -139,7 +139,7 @@ module l2(clk,
 				     FLUSH_TRIAGE = 'd11,
 				     UNCACHE_STORE = 'd12,
 				     UNCACHE_LOAD = 'd13,
-				     GAMEOVER = 'd14,
+				     UNCACHE_WB_TURNAROUND = 'd14,   /* was GAMEOVER (dead): mem_req gap after WB drain */
 				     UNCACHE_WB_DRAIN = 'd15
 				     } state_t;
 
@@ -688,14 +688,24 @@ module l2(clk,
 		 n_mem_req = 1'b0;
 	       if(mem_rsp_valid)
 		 begin
-		    n_addr = r_saveaddr;
-		    n_mem_opcode = r_opcode;
-		    n_store_mask = r_uncache_mask;
-		    n_mem_req_store_data = r_store_data;
-		    n_mem_req = 1'b1;
+		    /* writeback done: drop mem_req for a turnaround cycle so the AXI
+		     * master's WAIT state can fall back to IDLE before we issue the
+		     * uncached store/load (it gates WAIT->IDLE on mem_req dropping).
+		     * Without the gap the back-to-back req deadlocks the AXI WAIT. */
+		    n_mem_req = 1'b0;
 		    n_got_mem_rsp_valid = 1'b0;
-		    n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+		    n_state = UNCACHE_WB_TURNAROUND;
 		 end
+	    end
+	  UNCACHE_WB_TURNAROUND:
+	    begin
+	       /* one-cycle mem_req gap is now satisfied; re-issue the uncached op */
+	       n_addr = r_saveaddr;
+	       n_mem_opcode = r_opcode;
+	       n_store_mask = r_uncache_mask;
+	       n_mem_req_store_data = r_store_data;
+	       n_mem_req = 1'b1;
+	       n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 	    end
 	  default:
 	    begin

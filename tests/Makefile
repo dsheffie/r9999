@@ -42,6 +42,10 @@ TESTS := hello/hello.elf \
          cache/test_smc_index.elf \
          cache/test_inval_nowb.elf \
          cache/test_cache_priv.elf \
+         cache/test_flush_full.elf \
+         cache/test_flush_l2_full.elf \
+         cache/test_l2_evict.elf \
+         cache/test_uc_wb_alias.elf \
          devregs/test_devregs.elf \
          addr64/test_badvaddr.elf
 
@@ -177,6 +181,22 @@ cache/test_inval_nowb.elf: cache/test_inval_nowb.S $(STARTUP) $(COMMON)/sim.h $(
 cache/test_cache_priv.elf: cache/test_cache_priv.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_cache_priv.S -o cache/test_cache_priv.o
 	$(LD) $(LDFLAGS) cache/test_cache_priv.o -o $@
+
+cache/test_flush_full.elf: cache/test_flush_full.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_flush_full.S -o cache/test_flush_full.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_flush_full.o -o $@
+
+cache/test_flush_l2_full.elf: cache/test_flush_l2_full.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_flush_l2_full.S -o cache/test_flush_l2_full.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_flush_l2_full.o -o $@
+
+cache/test_l2_evict.elf: cache/test_l2_evict.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l2_evict.S -o cache/test_l2_evict.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_l2_evict.o -o $@
+
+cache/test_uc_wb_alias.elf: cache/test_uc_wb_alias.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_uc_wb_alias.S -o cache/test_uc_wb_alias.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_uc_wb_alias.o -o $@
 
 # Code-coherence tests run under the co-sim checker (RTL must match the
 # coherent interpreter). inval_nowb is RTL-only (-c 0): the coherent interp
