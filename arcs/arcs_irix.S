@@ -38,22 +38,6 @@
     .set    noreorder
     .set    noat
 
-/* SCC_MARK -- firmware-only FPGA progress tracer: print one char \ch to the
- * Z8530 SCC (RR0 poll + DATA write).  Clobbers only $t7-$t9 (caller-saved) and
- * preserves $a0-$a3 / $v0 / $ra / $s*, so it is safe to drop into a romvec stub
- * before its body.  Lets us watch which PROM calls IRIX makes on silicon. */
-    .macro  SCC_MARK ch
-    lui     $t9, 0xbfbd
-    ori     $t8, $t9, 0x9830        /* RR0 (control) */
-    ori     $t9, $t9, 0x9837        /* DATA */
-8:  lbu     $t7, 0($t8)
-    andi    $t7, $t7, 0x04         /* Tx Buffer Empty */
-    beq     $t7, $zero, 8b
-    nop
-    li      $t7, \ch
-    sb      $t7, 0($t9)
-    .endm
-
     .section .arcs, "ax"
 
 /* ====================================================================
@@ -139,7 +123,6 @@ arcs_pvec:
 /* LONG Write(handle, void *buf, ULONG len, ULONG *cnt): write to CP0 putchar. */
     .globl  stub_write
 stub_write:
-    SCC_MARK 'W'
     move    $t0, $a2
     move    $t1, $a1
 1:  blez    $t0, 2f
@@ -163,7 +146,6 @@ stub_write:
  * first call (cur==NULL) returns our one free-RAM descriptor; then NULL. */
     .globl  stub_mdesc
 stub_mdesc:
-    SCC_MARK 'M'
     bne     $a0, $zero, 1f
     nop
     la      $v0, mdesc_ram
@@ -178,7 +160,6 @@ stub_mdesc:
  * MAC (08:00:69 = SGI OUI).  The kernel pulls little else from the romvec. */
     .globl  stub_getenv
 stub_getenv:
-    SCC_MARK 'E'
     la      $v0, eaddr_str
     jr      $ra
     nop
@@ -186,7 +167,6 @@ stub_getenv:
 /* COMPONENT *GetChild(COMPONENT *cur): root for NULL query, else NULL. */
     .globl  stub_child
 stub_child:
-    SCC_MARK 'C'
     bne     $a0, $zero, 1f
     nop
     la      $v0, root_component
@@ -198,21 +178,18 @@ stub_child:
 /* COMPONENT *GetPeer(COMPONENT *cur): no peers -> NULL. */
     .globl  stub_peer
 stub_peer:
-    SCC_MARK 'P'
     jr      $ra
     move    $v0, $zero
 
 /* Default: return 0 cleanly. */
     .globl  stub_default
 stub_default:
-    SCC_MARK 'D'
     jr      $ra
     move    $v0, $zero
 
 /* Halt/PowerDown/Restart/Reboot: stop the simulator (magic-halt register). */
     .globl  stub_halt
 stub_halt:
-    SCC_MARK 'H'
     li      $k0, 0xBFD00000
     li      $k1, 1
     sw      $k1, 0($k0)
