@@ -2778,16 +2778,16 @@ module exec(clk,
 	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd10)
 	  begin
 	     n_entryhi_asid = t_srcA[7:0];
-	     if(t_wr_cpr0_64)
-	       begin
-		  n_entryhi_r    = t_srcA[63:62];
-		  n_entryhi_vpn2 = t_srcA[39:13];
-	       end
-	     else
-	       begin
-		  n_entryhi_r    = 2'd0;
-		  n_entryhi_vpn2 = {8'd0, t_srcA[31:13]};
-	       end
+	     /* Take the full VPN2 (va[39:13]) + region R (va[63:62]) from the
+	      * sign-extended GPR for BOTH mtc0 and dmtc0.  The GPR already holds
+	      * the full sign-extended VA, so a 32-bit mtc0 of a high kseg2/ckseg
+	      * value (e.g. 0xffffffffffffa000) correctly yields R=11/VPN2[39:32]=ff
+	      * -- needed so the 64b-mode TLB match (tlb.sv) hits entries written
+	      * via mtc0 (IRIX tlbwired, etc.).  Zero-extending here was the companion
+	      * workaround to the old low-19 loose match. In 32-bit addressing the
+	      * TLB match ignores R/upper-VPN, so the extra stored bits are benign. */
+	     n_entryhi_r    = t_srcA[63:62];
+	     n_entryhi_vpn2 = t_srcA[39:13];
 	  end
      end
    

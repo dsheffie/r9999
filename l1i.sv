@@ -493,6 +493,7 @@ endfunction
 		       .asid(asid),
 		       .active(w_mapped),
 		       .req(1'b1),
+		       .in_64b_mode(in_64b_kernel_mode | in_64b_supervisor_mode | in_64b_user_mode),
 		       .va(w_la_pc),
 		       .pa(w_itlb_pa),
 		       .hit(w_itlb_hit),

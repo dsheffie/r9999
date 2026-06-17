@@ -7,6 +7,7 @@ module tlb(clk,
 
 	   active,
 	   req,
+	   in_64b_mode,
 	   va,
 	   pa,
 	   hit,
@@ -23,7 +24,10 @@ module tlb(clk,
 
    input logic active;
    input logic req;
-   
+   /* 64-bit addressing mode (Status KX/SX/UX for the current ring). Selects the
+    * TLB match width: full VPN2+R in 64b mode, low-19 VPN2 in 32b mode. */
+   input logic in_64b_mode;
+
    input logic [`M_WIDTH-1:0] va;
    output logic [`PA_WIDTH-1:0] pa;
    
@@ -90,13 +94,18 @@ module tlb(clk,
       for(genvar i = 0; i < N; i=i+1)
 	begin : hits
 	   assign w_addr_space_match[i] = (r_tlb[i].asid == asid) | (r_tlb[i].g0 & r_tlb[i].g1);
-	   /* 32-bit-addressing match: compare the 32-bit VPN2 (va[31:13]) only, and
-	    * IGNORE the region bits R (va[63:62]) and the upper VPN bits (va[39:32]).
-	    * A 32-bit kseg VA sign-extends (va[63:62]=11, va[39:32]=ff) but mtc0
-	    * writes EntryHi.VPN2 zero-extended (exec.sv ~2568), so comparing the full
-	    * va[39:13]/R never matched a wired high-VA entry (the wirepda wall). The
-	    * low 19-bit VPN2 uniquely identifies a page in the 32-bit address space. */
-	   assign w_hit8k[i] = (r_tlb[i].vpn[18:0] == va[31:13]);
+	   /* Mode-aware VPN2 match.  64-bit addressing: compare the FULL VPN2
+	    * (va[39:13]) AND the region R (va[63:62]); dmtc0 writes both into the
+	    * entry (exec.sv:2783-2784), so the kptbl/wired high kernel VAs match
+	    * uniquely.  32-bit addressing: compare va[31:13] only and IGNORE R +
+	    * upper VPN -- a 32-bit kseg VA sign-extends (va[63:62]=11, va[39:32]=ff)
+	    * but mtc0 writes EntryHi.VPN2 zero-extended with R=0 (exec.sv:2788-2789),
+	    * so the full compare would never match (the wirepda wall).  Using the
+	    * low-19 match in 64b mode is what aliased distinct high VAs -> the
+	    * "invalid kptbl entry" tlbmiss panic. */
+	   assign w_hit8k[i] = in_64b_mode ?
+				 ((r_tlb[i].vpn[26:0] == va[39:13]) & (r_tlb[i].r == va[63:62])) :
+				 (r_tlb[i].vpn[18:0] == va[31:13]);
 	   /* exclude a pair with BOTH pages invalid (v0=v1=0): reset / tlbinit-filler
 	    * entries must never be picked by find_first_set.  The selected page's own
 	    * v0/v1 still drives `valid` (the TLB-Invalid exception) for a matched pair. */
