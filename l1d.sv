@@ -21,9 +21,6 @@ module l1d(clk,
 	   in_kernel_mode,
 	   in_supervisor_mode,
 	   in_user_mode,
-	   in_64b_kernel_mode,
-	   in_64b_supervisor_mode,
-	   in_64b_user_mode,
 	   head_of_rob_ptr,
 	   head_of_rob_ptr_valid,
 	   head_of_rob_has_delay_slot,
@@ -81,9 +78,6 @@ module l1d(clk,
    input logic			in_kernel_mode;
    input logic			in_supervisor_mode;
    input logic			in_user_mode;
-   input logic			in_64b_kernel_mode;
-   input logic			in_64b_supervisor_mode;
-   input logic			in_64b_user_mode;
 
 
    input logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
@@ -1547,7 +1541,6 @@ endfunction
 	     .asid(asid),
 	     .active(core_mem_req.mapped),
 	     .req(t_got_req2),
-	     .in_64b_mode(in_64b_kernel_mode | in_64b_supervisor_mode | in_64b_user_mode),
 	     .va(n_tlb_addr),
 	     .pa(w_mapped_addr),
 	     .hit(w_tlb_hit),

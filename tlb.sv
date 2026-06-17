@@ -7,7 +7,6 @@ module tlb(clk,
 
 	   active,
 	   req,
-	   in_64b_mode,
 	   va,
 	   pa,
 	   hit,
@@ -24,9 +23,6 @@ module tlb(clk,
 
    input logic active;
    input logic req;
-   /* 64-bit addressing mode (Status KX/SX/UX for the current ring). Selects the
-    * TLB match width: full VPN2+R in 64b mode, low-19 VPN2 in 32b mode. */
-   input logic in_64b_mode;
 
    input logic [`M_WIDTH-1:0] va;
    output logic [`PA_WIDTH-1:0] pa;
@@ -94,18 +90,15 @@ module tlb(clk,
       for(genvar i = 0; i < N; i=i+1)
 	begin : hits
 	   assign w_addr_space_match[i] = (r_tlb[i].asid == asid) | (r_tlb[i].g0 & r_tlb[i].g1);
-	   /* Mode-aware VPN2 match.  64-bit addressing: compare the FULL VPN2
-	    * (va[39:13]) AND the region R (va[63:62]); dmtc0 writes both into the
-	    * entry (exec.sv:2783-2784), so the kptbl/wired high kernel VAs match
-	    * uniquely.  32-bit addressing: compare va[31:13] only and IGNORE R +
-	    * upper VPN -- a 32-bit kseg VA sign-extends (va[63:62]=11, va[39:32]=ff)
-	    * but mtc0 writes EntryHi.VPN2 zero-extended with R=0 (exec.sv:2788-2789),
-	    * so the full compare would never match (the wirepda wall).  Using the
-	    * low-19 match in 64b mode is what aliased distinct high VAs -> the
-	    * "invalid kptbl entry" tlbmiss panic. */
-	   assign w_hit8k[i] = in_64b_mode ?
-				 ((r_tlb[i].vpn[26:0] == va[39:13]) & (r_tlb[i].r == va[63:62])) :
-				 (r_tlb[i].vpn[18:0] == va[31:13]);
+	   /* Sail tlbEntryMatch / tlbSearch (sail-cheri-mips mips/mips_tlb.sail):
+	    * UNCONDITIONAL full match -- r = va[63:62], vpn2 = va[39:13], and the
+	    * entry hits iff (r == entryR) & (vpn2 == entryVPN).  No mode switch and R
+	    * is ALWAYS compared (the spec has no 32-bit low-19 shortcut).  exec.sv
+	    * writes EntryHi.R/VPN2 from the full GPR (also per Sail MTC0), so this is
+	    * self-consistent.  Validated: Sail-aligned interp_mips boots IRIX clean
+	    * with identical EntryHi storage.  (The old KX-gated low-19 arm aliased the
+	    * kptbl walk -- which runs at KX=0 -- causing the intermittent tlbmiss panic.) */
+	   assign w_hit8k[i] = (r_tlb[i].vpn[26:0] == va[39:13]) & (r_tlb[i].r == va[63:62]);
 	   /* exclude a pair with BOTH pages invalid (v0=v1=0): reset / tlbinit-filler
 	    * entries must never be picked by find_first_set.  The selected page's own
 	    * v0/v1 still drives `valid` (the TLB-Invalid exception) for a matched pair. */
