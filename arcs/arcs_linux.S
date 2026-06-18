@@ -59,6 +59,17 @@ arcs_spb:
     .word   0                   /* +0x2c AdapterCount = 0 */
 
 /* ====================================================================
+ * PATCH SLOT @ blob offset 0x40 (kseg1 0xA0001040).  The FPGA driver writes the
+ * loaded kernel's ELF e_entry here (big-endian) BEFORE starting the core, so
+ * ONE firmware boots any kernel.  arcs_boot reads this (uncached via kseg1)
+ * instead of a baked-in immediate.  Unpatched it defaults to ARCS_KENTRY.
+ * ==================================================================== */
+    .org    0x40
+    .globl  arcs_kentry_slot
+arcs_kentry_slot:
+    .word   ARCS_KENTRY
+
+/* ====================================================================
  * FirmwareVector (romvec) @ 0xA0001800  -- 35 entries, standard ARCS order.
  * Live: Halt/PowerDown/Restart/Reboot -> clean sim halt; GetMemoryDescriptor
  * (18); GetChild/GetPeer (9/10) -> component tree; Write (27) -> CP0 putchar
@@ -233,12 +244,16 @@ eaddr_str:
  * (proof-of-life on silicon), (2) stage the sash argv/envp blob at kseg0
  * 0x88fff000 (top of the 16 MiB bank, where the kernel reads it in early
  * mlsetup -- mirrors interp_mips pseudo_bios.cc), (3) set a0=argc, a1=argv,
- * a2=envp and jump to the IRIX /unix entry 0x88005960.  The driver starts the
+ * a2=envp and jump to the Linux kernel entry (ARCS_KENTRY). The driver starts the
  * core here via --start-pc 0xa0003000.
  * ==================================================================== */
     .set    ARCS_BB,   0x88fff000       /* runtime base for the argv/envp blob */
     .set    ARCS_ARGC, 8
-    .set    ARCS_KENTRY, 0x88005960     /* IRIX /unix start */
+    /* Linux kernel ELF entry (kernel_entry). BUILD-SPECIFIC: henry_tb prints it
+     * as "kernel entry 0x...."; update if vmlinux.32 is relinked. (Was the IRIX
+     * /unix entry 0x88005960; only the jump target differs for Linux -- the
+     * argv/envp handoff stub below is identical.) */
+    .set    ARCS_KENTRY, 0x8832c118     /* Linux vmlinux.32 entry */
 
     .org    0x2000
     .globl  arcs_boot
@@ -294,13 +309,16 @@ arcs_boot:
     move    $t7, $zero
     move    $t8, $zero
     move    $t9, $zero
-    li      $k0, ARCS_KENTRY
+    /* patchable kernel entry: load from the slot @ 0xA0001040 (kseg1, uncached
+     * so the driver's write is seen), not a baked-in immediate. */
+    la      $k0, arcs_kentry_slot
+    lw      $k0, 0($k0)
     jr      $k0
     nop
 
     .align  2
 arcs_hb_str:
-    .asciz  "r9999 PROM: CPU alive, handing off to /unix\n"
+    .asciz  "r9999 PROM: CPU alive, handing off to Linux\n"
 
 /* sash argv/envp blob (mirrors pseudo_bios.cc); pointers are assembler-computed
  * for runtime base ARCS_BB = 0x88fff000.  Copied there by arcs_boot. */
