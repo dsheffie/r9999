@@ -13,6 +13,7 @@ module tlb(clk,
 	   hit_index,
 	   dirty,
 	   valid,
+	   out_of_range,
 	   tlb_entry_in_valid,
 	   tlb_entry_in);
    
@@ -32,7 +33,11 @@ module tlb(clk,
    
    output logic	       dirty;
    output logic	       valid;
-        
+   /* Sail TLBTranslateC: PA > MAX_PA (36-bit) -> Address Error.  The matched
+    * entry's PFN (pa[39:12]=pfn[27:0]) overflows PA_WIDTH=36 iff pfn[27:24]!=0;
+    * w_pa4k currently truncates that silently, so flag it for an AdEL/AdES. */
+   output logic	       out_of_range;
+
    input logic	       tlb_entry_in_valid;
    input 	       tlb_data_t tlb_entry_in;
    
@@ -135,6 +140,8 @@ module tlb(clk,
 	dirty   <= reset ? 1'b0 : (active ? w_dirty : 1'b1);
 	valid <= reset ? 1'b0 : (active ? w_valid : 1'b1);
 	pa      <= active ? w_pa4k : va[`PA_WIDTH-1:0];
+	/* mapped + PFN beyond MAX_PA(36b); unmapped (active=0) PAs are in-range */
+	out_of_range <= reset ? 1'b0 : (active ? (|w_pfn[27:24]) : 1'b0);
      end
 
 

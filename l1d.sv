@@ -328,7 +328,8 @@ endfunction
    wire        w_tlb_dirty;
    wire        w_tlb_valid;
    wire	      w_tlb_hit;
-   
+   wire	      w_tlb_oor;   /* dtlb: matched entry's PFN exceeds MAX_PA(36b) -> Addr Error */
+
       
    mem_req_t n_req, r_req, t_req;
    mem_req_t n_req2, r_req2;
@@ -1547,6 +1548,7 @@ endfunction
 	     .hit_index(w_tlb_index),
 	     .dirty(w_tlb_dirty),
 	     .valid(w_tlb_valid),
+	     .out_of_range(w_tlb_oor),
 	     .tlb_entry_in_valid(tlb_entry_in_valid),
 	     .tlb_entry_in(tlb_entry_in)
 	     );
@@ -1755,6 +1757,15 @@ endfunction
 			  n_core_mem_rsp.tlb_modified = 1'b1;
 			  n_core_mem_rsp.tlb_hit = w_tlb_hit;
 			  n_core_mem_rsp.tlb_index = w_tlb_index;
+			  n_core_mem_rsp_valid = 1'b1;
+		       end
+		    else if(w_tlb_oor)
+		       begin
+			  /* Sail TLBTranslateC: valid+dirty entry whose PFN maps beyond
+			   * MAX_PA(36b) -> Address Error (AdEL/AdES); BadVAddr = the VA. */
+			  n_core_mem_rsp.data = r_req2.addr;
+			  n_core_mem_rsp.dst_valid = 1'b0;
+			  n_core_mem_rsp.bad_addr = 1'b1;
 			  n_core_mem_rsp_valid = 1'b1;
 		       end
 		    else if(r_req2.is_store)
