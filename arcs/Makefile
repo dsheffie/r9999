@@ -50,11 +50,11 @@ clean:
 	      arcs_irix.o arcs_irix.elf arcs_irix.bin arcs_irix.dis \
 	      arcs_linux.o arcs_linux.elf arcs_linux.bin arcs_linux.dis
 
-arcs_linux.o: arcs_linux.S arcs.ld ../tests/common/sim.h
+arcs_linux.o: arcs_linux.S arcs_linux.ld ../tests/common/sim.h
 	$(CC) $(ASFLAGS) $(ARCS_DEFS) -x assembler-with-cpp -c arcs_linux.S -o $@
 
-arcs_linux.elf: arcs_linux.o arcs.ld
-	$(LD) $(LDFLAGS) arcs_linux.o -o $@
+arcs_linux.elf: arcs_linux.o arcs_linux.ld
+	$(LD) -T arcs_linux.ld -nostdlib -G 0 -static arcs_linux.o -o $@
 
 arcs_linux.bin: arcs_linux.elf
 	$(OBJCOPY) -O binary $< $@
