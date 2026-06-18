@@ -19,7 +19,7 @@ LDFLAGS := -T arcs.ld -nostdlib -G 0 -static
 ARCS_DEFS ?=
 
 .PHONY: all clean
-all: arcs_fw.bin arcs_fw.dis arcs_irix.bin arcs_irix.dis
+all: arcs_fw.bin arcs_fw.dis arcs_irix.bin arcs_irix.dis arcs_linux.bin arcs_linux.dis
 
 arcs_fw.o: arcs_fw.S arcs.ld ../tests/common/sim.h
 	$(CC) $(ASFLAGS) $(ARCS_DEFS) -x assembler-with-cpp -c arcs_fw.S -o $@
@@ -47,4 +47,17 @@ arcs_irix.dis: arcs_irix.elf
 
 clean:
 	rm -f arcs_fw.o arcs_fw.elf arcs_fw.bin arcs_fw.dis \
-	      arcs_irix.o arcs_irix.elf arcs_irix.bin arcs_irix.dis
+	      arcs_irix.o arcs_irix.elf arcs_irix.bin arcs_irix.dis \
+	      arcs_linux.o arcs_linux.elf arcs_linux.bin arcs_linux.dis
+
+arcs_linux.o: arcs_linux.S arcs.ld ../tests/common/sim.h
+	$(CC) $(ASFLAGS) $(ARCS_DEFS) -x assembler-with-cpp -c arcs_linux.S -o $@
+
+arcs_linux.elf: arcs_linux.o arcs.ld
+	$(LD) $(LDFLAGS) arcs_linux.o -o $@
+
+arcs_linux.bin: arcs_linux.elf
+	$(OBJCOPY) -O binary $< $@
+
+arcs_linux.dis: arcs_linux.elf
+	$(OBJDUMP) -d $< > $@
