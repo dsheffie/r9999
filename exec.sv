@@ -2514,7 +2514,9 @@ module exec(clk,
    /* FP control/status register FCR31 (FCSR). No FP arithmetic is implemented,
     * so this is a plain holding register: ctc1 writes it, cfc1 reads it. */
    logic [31:0] r_fcsr, n_fcsr;
-
+   
+   logic	r_toggle, n_toggle;
+   
    /* CP0 register 9: Count (free-running, increments each cycle) */
    logic [31:0] r_count, n_count;
    /* CP0 register 11: Compare (timer fires when Count == Compare) */
@@ -2803,9 +2805,9 @@ module exec(clk,
 	n_sr_bev = r_sr_bev;
 	n_sr_ts = r_sr_ts;
 	n_sr_im = r_sr_im;
-
-	/* Count increments every cycle */
-	n_count = r_count + 32'd1;
+	n_toggle = !r_toggle;
+	/* Count increments every other cycle */
+	n_count = r_toggle ? (r_count + 32'd1) : r_count;
 	n_compare = r_compare;
 	n_watchlo = r_watchlo;
 	n_watchhi = r_watchhi;
@@ -2875,7 +2877,9 @@ module exec(clk,
 	r_sr_im <= reset ? 8'd0 : n_sr_im;
 	r_wired <= reset ? 'd0 :  n_wired;
 	r_random <= reset ? 'd47 : n_random;
-	r_count   <= reset ? 32'd0 : n_count;
+	r_count  <= reset ? 32'd0 : n_count;
+	r_toggle <= reset ? 1'b0 : n_toggle;
+	
 	r_compare <= reset ? 32'd0 : n_compare;
 	r_fcsr <= reset ? 32'd0 : n_fcsr;
 	r_watchlo <= reset ? 32'd0 : n_watchlo;
