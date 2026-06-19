@@ -2564,10 +2564,15 @@ module exec(clk,
 
    logic		r_exc_in_ds, n_exc_in_ds;
    logic [4:0]		r_cause, n_cause;
+   logic		r_ip1, r_ip0, n_ip1, n_ip0;
+   
    always_comb
      begin
 	n_exc_in_ds = r_exc_in_ds;
 	n_cause = r_cause;
+	n_ip0 = r_ip0;
+	n_ip1 = r_ip1;
+	
 	if(core_wr_cause)
 	  begin
 	     n_cause = core_cause;                /* ExcCode always updates (handler needs it) */
@@ -2575,7 +2580,14 @@ module exec(clk,
 	      * (EXL==0), so a nested exception preserves the original BD.  EPC itself
 	      * is gated the same way at the n_epc mux (r_sr_exl==0). */
 	     if(r_sr_exl == 1'b0)
-	       n_exc_in_ds = exc_in_delay;
+	       begin
+		  n_exc_in_ds = exc_in_delay;
+	       end
+	  end // if (core_wr_cause)
+	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd13)
+	  begin
+	     n_ip0 = t_srcA[8];
+	     n_ip1 = t_srcA[9];	     
 	  end
      end
 
@@ -2614,6 +2626,8 @@ module exec(clk,
 	r_epc <= reset ? 'd0 : n_epc;
 	r_badvaddr <= reset ? 'd0 : n_badvaddr;
 	r_cause <= reset ? 'd0 : n_cause;
+	r_ip0 <= reset ? 1'b0 : n_ip0;
+	r_ip1 <= reset ? 1'b0 : n_ip1;
 	r_exc_in_ds <= reset ? 1'b0 : n_exc_in_ds;
 	r_entryhi_asid <= reset ? 'd0 : n_entryhi_asid;
 	r_entryhi_r    <= reset ? 'd0 : n_entryhi_r;
@@ -2907,6 +2921,8 @@ module exec(clk,
 
    /* IP[7] = timer; others not yet wired */
    logic r_ip6, r_ip5, r_ip4, r_ip3, r_ip2;
+
+   
    always_ff@(posedge clk)
      begin
 	r_ip6 <= reset ? 1'b0 : ip6;
@@ -2916,7 +2932,7 @@ module exec(clk,
 	r_ip2 <= reset ? 1'b0 : ip2;	
      end
    
-   wire [7:0] w_ip = {r_timer_ip, r_ip6, r_ip5, r_ip4, r_ip3, r_ip2, 2'd0};
+   wire [7:0] w_ip = {r_timer_ip, r_ip6, r_ip5, r_ip4, r_ip3, r_ip2, r_ip1, r_ip0};
    /* interrupt is pending when IE=1, EXL=0, ERL=0, and any (IP & IM) bit set */
    assign irq_pending = r_sr_ie & ~r_sr_exl & ~r_sr_erl & |(w_ip & r_sr_im);
    assign cp0_count   = r_count;

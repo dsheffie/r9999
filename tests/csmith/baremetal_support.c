@@ -84,6 +84,16 @@ uint64_t exc_regfile[32];
 volatile uint32_t g_timer_interval    = 0;
 volatile uint32_t g_timer_next_compare = 0;
 volatile int      g_timer_irq_count   = 0;
+/* External device interrupts (IP2..IP6, the INT3/IOC2 levels). The TB injects
+ * ipN; the handler records the fired IP bits and masks IM[N] so the held line
+ * stops re-firing after ERET. */
+volatile int      g_ext_irq_count = 0;
+volatile uint32_t g_ext_irq_ip    = 0;   /* Cause.IP[6:2] bits seen */
+/* Software interrupts (IP0/IP1, the only software-WRITABLE Cause.IP bits).
+ * Triggered by mtc0 Cause; the handler accumulates which fired and clears the
+ * Cause.IP[1:0] bit(s) to ack (else the still-set bit re-fires after ERET). */
+volatile int      g_sw_irq_count  = 0;
+volatile uint32_t g_sw_irq_ip     = 0;   /* OR of Cause.IP[1:0] bits seen */
 
 /*
  * Called from the .boot.exc stub with a pointer to the saved GPR file.
@@ -100,6 +110,26 @@ int exc_handler(uint64_t *regs) {
     uint32_t exccode = (cause >> 2) & 0x1fu;
 
     if (exccode == 0u) {
+        /* Distinguish external device IRQ (IP2..IP6) from the CP0 timer (IP7). */
+        uint32_t ip = (cause >> 8) & 0xffu;          /* Cause.IP[7:0] */
+        if (ip & 0x7cu) {                            /* bits 6:2 = IP2..IP6 set */
+            g_ext_irq_ip = ip & 0x7cu;
+            ++g_ext_irq_count;
+            uint32_t sr;                             /* mask IM[N] for the fired levels */
+            __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
+            sr &= ~((uint32_t)(ip & 0x7cu) << 8);    /* IM bits are SR[15:8], same positions */
+            __asm__ volatile("mtc0 %0, $12" : : "r"(sr));
+            return 1;                                /* ERET */
+        }
+        if (ip & 0x03u) {                            /* bits 1:0 = software IP0/IP1 */
+            g_sw_irq_ip |= ip & 0x03u;
+            ++g_sw_irq_count;
+            uint32_t c;                              /* ack: clear Cause.IP[1:0] */
+            __asm__ volatile("mfc0 %0, $13" : "=r"(c));
+            c &= ~((uint32_t)(ip & 0x03u) << 8);
+            __asm__ volatile("mtc0 %0, $13" : : "r"(c));
+            return 1;                                /* ERET */
+        }
         /* Timer interrupt: rearm Compare and resume.
          * We advance g_timer_next_compare by the interval and write it to
          * Compare — no mfc0 $9 needed (reading Count would diverge between

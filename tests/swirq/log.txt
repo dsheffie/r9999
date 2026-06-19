@@ -1,0 +1,111 @@
+n_mispredicts = 70, cycles = 7717, insns = 2011, n_checks = 0
+0.260593 insn per cycle
+2011 insns retired
+avg insns in ROB = 2.55592, max inflight = 19
+l1d cache hits = 334
+l1d cache accesses = 448
+l1d hit rate = 74.5536
+l1i cache hits = 2248
+l1i cache accesses = 2850
+l1i hit rate = 78.8772
+l2 cache hits = 80
+l2 cache accesses = 307
+branch mispredict rate = 14.7992
+mispredicts per kiloinsn = 34.8086
+0 cycles spent flushing caches
+255 cache line loads
+28 cache line stores
+0 l1d misses
+0 insns access the l1d
+avg fetch = 0.0430353
+resteer bubble = 0
+front-end queues full = 1912
+1881 cycles where int exec queue is not empty
+1612 cycles where int exec queue dispatches
+669 cycles where mem exec queue is not empty
+448 cycles where mem exec queue dispatches
+83 cycles where mem exec queue is blocked by a store
+64 cycles with int queue full
+27 cycles with mem queue full
+68806 cycles with an empty decode queue
+1029 cycles with a  full uop queue
+2796 cycles where the machine is in active state
+46 cycles where the rob is full
+6 median flush cycles
+1052 cycles spent in pipeline flush
+73 times pipeline was flushed
+14.411 cycles to flush on avg
+4 min cycles to flush
+284 max cycles to flush
+4 median delay slot flush cycles
+497 cycles spent waiting for delay slot in flush
+7.1 cycles waiting on delay slot on avg
+3 min cycles for delay slot
+66 max cycles for delay slot
+0 faults inflight, 73002 times
+1 faults inflight, 305 times
+2 faults inflight, 10 times
+3 faults inflight, 55 times
+4 faults inflight, 182 times
+5 faults inflight, 6 times
+6 faults inflight, 3 times
+7 faults inflight, 7 times
+8 faults inflight, 5 times
+9 faults inflight, 2 times
+10 faults inflight, 2 times
+11 faults inflight, 2 times
+12 faults inflight, 2 times
+13 faults inflight, 2 times
+14 faults inflight, 2 times
+15 faults inflight, 2 times
+16 faults inflight, 2 times
+17 faults inflight, 2 times
+18 faults inflight, 2 times
+19 faults inflight, 2 times
+20 faults inflight, 2 times
+21 faults inflight, 6 times
+22 faults inflight, 2 times
+23 faults inflight, 1 times
+24 faults inflight, 5 times
+25 faults inflight, 1 times
+0 branches inflight, 72019 times
+1 branches inflight, 1148 times
+2 branches inflight, 414 times
+3 branches inflight, 33 times
+4 cycles before restart, 2 times
+5 cycles before restart, 21 times
+6 cycles before restart, 4 times
+7 cycles before restart, 6 times
+8 cycles before restart, 2 times
+9 cycles before restart, 14 times
+10 cycles before restart, 5 times
+11 cycles before restart, 2 times
+12 cycles before restart, 1 times
+15 cycles before restart, 2 times
+17 cycles before restart, 1 times
+19 cycles before restart, 1 times
+21 cycles before restart, 1 times
+23 cycles before restart, 1 times
+24 cycles before restart, 1 times
+25 cycles before restart, 2 times
+28 cycles before restart, 1 times
+39 cycles before restart, 1 times
+43 cycles before restart, 1 times
+71 cycles before restart, 1 times
+73 cycles before restart, 1 times
+132 cycles before restart, 1 times
+148 cycles before restart, 1 times
+4472 cycles of pushout
+avg int rdy insn = 0.0295732
+median int rdy insn = 0
+avg mem alloc to complete = 0
+median mem alloc to complete = 0
+avg non-mem alloc to complete = 8.11286
+median non-mem alloc to complete = 5
+l1d_reqs = 1473
+l1d_acks = 448
+l1d_stores = 203
+l1d tput = 0.304141
+30 got miss
+2 store to same set
+total_histo = 0
