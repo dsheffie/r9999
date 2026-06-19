@@ -540,7 +540,7 @@ int main(int argc, char **argv) {
     contextp->timeInc(1);  // 1 timeprecision period passes...
     tb->mem_rsp_valid = 0;
     tb->reset = 1;
-    tb->extern_irq = 0;
+    tb->ip6 = tb->ip5 = tb->ip4 = tb->ip3 = tb->ip2 = 0;
     tb->clk = 1;
     tb->eval();
     tb->clk = 0;
@@ -619,6 +619,21 @@ int main(int argc, char **argv) {
     }
     else if((globals::cycle & 3) == 0) {
       tb->step = (~tb->step) & 1;
+    }
+    /* manual external-IRQ exercise: R9999_ASSERT_IP=<2..6> drives ipN high
+     * (level-held) from cycle R9999_ASSERT_CYCLE onward, so we can inject an
+     * IP2..IP6 interrupt into the core from the TB. The handler must mask IM[N]
+     * (a held line would otherwise re-fire after ERET). Run with -c0: the cosim
+     * checker would diverge since the interpreter doesn't model the injected IRQ. */
+    { static int      aip  = getenv("R9999_ASSERT_IP")    ? atoi(getenv("R9999_ASSERT_IP")) : 0;
+      static uint64_t acyc = getenv("R9999_ASSERT_CYCLE") ? strtoull(getenv("R9999_ASSERT_CYCLE"),0,0) : 0;
+      if(aip && globals::cycle >= acyc) {
+        switch(aip) {
+          case 2: tb->ip2 = 1; break;  case 3: tb->ip3 = 1; break;
+          case 4: tb->ip4 = 1; break;  case 5: tb->ip5 = 1; break;
+          case 6: tb->ip6 = 1; break;
+        }
+      }
     }
     tb->eval();
 

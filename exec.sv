@@ -18,6 +18,11 @@ import "DPI-C" function void report_exec(input int int_valid,
 
 module exec(clk, 
 	    reset,
+	    ip6,
+	    ip5,
+	    ip4,
+	    ip3,
+	    ip2,
 	    retire,
 	    retire_two,
 	    core_epc,
@@ -87,6 +92,11 @@ module exec(clk,
 	    );
    input logic clk;
    input logic reset;
+   input logic ip6;
+   input logic ip5;
+   input logic ip4;
+   input logic ip3;
+   input logic ip2;
    input logic retire;
    input logic retire_two;
    input logic [`M_WIDTH-1:0] core_epc;
@@ -2896,7 +2906,17 @@ module exec(clk,
    assign in_64b_supervisor_mode = in_supervisor_mode & r_sr_sx;
 
    /* IP[7] = timer; others not yet wired */
-   wire [7:0] w_ip = {r_timer_ip, 7'd0};
+   logic r_ip6, r_ip5, r_ip4, r_ip3, r_ip2;
+   always_ff@(posedge clk)
+     begin
+	r_ip6 <= reset ? 1'b0 : ip6;
+	r_ip5 <= reset ? 1'b0 : ip5;
+	r_ip4 <= reset ? 1'b0 : ip4;
+	r_ip3 <= reset ? 1'b0 : ip3;
+	r_ip2 <= reset ? 1'b0 : ip2;	
+     end
+   
+   wire [7:0] w_ip = {r_timer_ip, r_ip6, r_ip5, r_ip4, r_ip3, r_ip2, 2'd0};
    /* interrupt is pending when IE=1, EXL=0, ERL=0, and any (IP & IM) bit set */
    assign irq_pending = r_sr_ie & ~r_sr_exl & ~r_sr_erl & |(w_ip & r_sr_im);
    assign cp0_count   = r_count;

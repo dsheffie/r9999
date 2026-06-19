@@ -38,6 +38,11 @@ module core(clk,
 	    single_step,
 	    step,
 	    reset,
+	    ip6,
+	    ip5,
+	    ip4,
+	    ip3,
+	    ip2,	   
 	    in_kernel_mode,
 	    in_supervisor_mode,
 	    in_user_mode,
@@ -49,7 +54,6 @@ module core(clk,
 	    putchar_fifo_pop,
 	    putchar_fifo_wptr,
 	    putchar_fifo_rptr,
-	    extern_irq,
 	    head_of_rob_ptr_valid,
 	    head_of_rob_ptr,
 	    head_of_rob_has_delay_slot,
@@ -146,6 +150,11 @@ module core(clk,
 
    input logic clk;
    input logic reset;
+   input logic ip6;
+   input logic ip5;
+   input logic ip4;
+   input logic ip3;
+   input logic ip2;   
    output logic	in_kernel_mode;
    output logic	in_supervisor_mode;
    output logic	in_user_mode;
@@ -159,7 +168,6 @@ module core(clk,
    output logic [3:0] putchar_fifo_wptr;
    output logic [3:0] putchar_fifo_rptr;
    
-   input logic extern_irq;
    output logic head_of_rob_ptr_valid;
    output logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
    output logic			      head_of_rob_has_delay_slot;
@@ -1036,28 +1044,7 @@ module core(clk,
      end // always_ff@ (negedge clk)
 `endif
    logic t_wr_epc, t_wr_cause, t_wr_badvaddr;
-   
    logic t_restart_complete;
-   logic t_clr_extern_irq;
-   logic r_extern_irq;
-   always_ff@(posedge clk)
-     begin
-	if(reset)
-	  begin
-	     r_extern_irq <= 1'b0;
-	  end
-	else
-	  begin
-	     if(t_clr_extern_irq)
-	       begin
-		  r_extern_irq <= 1'b0;
-	       end 
-	     else if(extern_irq)
-	       begin
-		  r_extern_irq <= 1'b1;
-	       end
-	  end // else: !if(reset)
-     end // always_ff@ (posedge clk)
    
    always_comb
      begin
@@ -1066,7 +1053,6 @@ module core(clk,
 	t_wr_badvaddr = 1'b0;
 	n_has_badvaddr = r_has_badvaddr;
 	
-	t_clr_extern_irq = 1'b0;
 	t_restart_complete = 1'b0;
 	
 	n_cause = r_cause;
@@ -2815,6 +2801,11 @@ module core(clk,
    exec e (
 	   .clk(clk), 
 	   .reset(reset),
+	   .ip6(ip6),
+	   .ip5(ip5),
+	   .ip4(ip4),
+	   .ip3(ip3),
+	   .ip2(ip2),
 	   .retire(t_retire),
 	   .retire_two(t_retire_two),
 	   .core_epc(r_epc),

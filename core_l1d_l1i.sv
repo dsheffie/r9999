@@ -4,13 +4,17 @@
 
 module core_l1d_l1i(clk, 
 		    reset,
+		    ip6,
+		    ip5,
+		    ip4,
+		    ip3,
+		    ip2,
 		    retire_allowed,
 		    putchar_fifo_out,
 		    putchar_fifo_empty,
 		    putchar_fifo_pop,
 		    putchar_fifo_wptr,
 		    putchar_fifo_rptr,
-		    extern_irq,
 		    single_step,
 		    step,
 		    in_flush_mode,
@@ -83,6 +87,11 @@ module core_l1d_l1i(clk,
    input logic clk;
    input logic reset;
    input logic retire_allowed;
+   input logic ip6;
+   input logic ip5;
+   input logic ip4;
+   input logic ip3;
+   input logic ip2;
    
    output logic [7:0] putchar_fifo_out;
    output logic       putchar_fifo_empty;
@@ -90,7 +99,6 @@ module core_l1d_l1i(clk,
    output logic [3:0] putchar_fifo_wptr;
    output logic [3:0] putchar_fifo_rptr;
    
-   input logic extern_irq;
    input logic single_step;
    input logic step;
    input logic resume;
@@ -638,6 +646,11 @@ module core_l1d_l1i(clk,
    core cpu (
 	     .clk(clk),
 	     .reset(reset),
+	     .ip6(ip6),
+	     .ip5(ip5),
+	     .ip4(ip4),
+	     .ip3(ip3),
+	     .ip2(ip2),
 	     .in_kernel_mode(w_in_kernel_mode),
 	     .in_supervisor_mode(w_in_supervisor_mode),
 	     .in_user_mode(w_in_user_mode),
@@ -649,7 +662,6 @@ module core_l1d_l1i(clk,
 	     .putchar_fifo_pop(putchar_fifo_pop),
 	     .putchar_fifo_wptr(putchar_fifo_wptr),
 	     .putchar_fifo_rptr(putchar_fifo_rptr),
-	     .extern_irq(extern_irq),
 	     .single_step(single_step),
 	     .step(step),
 	     .resume(resume),
