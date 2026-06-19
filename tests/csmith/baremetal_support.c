@@ -120,9 +120,10 @@ int exc_handler(uint64_t *regs) {
             g_ext_irq_ip = ip & 0x7cu;
             ++g_ext_irq_count;
             if (g_pit_mode && (ip & 0x30u)) {        /* IP4/IP5 = INT3 8254 timers */
-                /* ack the latched timer int via Timer Clear (b0=Timer0/IP4,
-                 * b1=Timer1/IP5); keep IM enabled so it re-fires next period. */
-                *(volatile uint8_t *)0xBFBD98A0u = (uint8_t)((ip >> 4) & 0x3u);
+                /* ack the latched timer int via Timer Clear @0xBFBD98A3 (slot+3
+                 * byte lane; b0=Timer0/IP4, b1=Timer1/IP5); keep IM enabled so it
+                 * re-fires next period. */
+                *(volatile uint8_t *)0xBFBD98A3u = (uint8_t)((ip >> 4) & 0x3u);
             } else {
                 uint32_t sr;                         /* mask IM[N] for the fired levels */
                 __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
