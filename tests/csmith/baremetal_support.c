@@ -89,6 +89,10 @@ volatile int      g_timer_irq_count   = 0;
  * stops re-firing after ERET. */
 volatile int      g_ext_irq_count = 0;
 volatile uint32_t g_ext_irq_ip    = 0;   /* Cause.IP[6:2] bits seen */
+/* When set (INT3 8254 timer tests on the henry SoC), ack IP4/IP5 by clearing the
+ * INT3 latch (Timer Clear @0xBFBD98A0) and leave IM enabled so the periodic timer
+ * re-fires -- vs the default extirq path, which masks IM[N] to stop a held line. */
+volatile int      g_pit_mode      = 0;
 /* Software interrupts (IP0/IP1, the only software-WRITABLE Cause.IP bits).
  * Triggered by mtc0 Cause; the handler accumulates which fired and clears the
  * Cause.IP[1:0] bit(s) to ack (else the still-set bit re-fires after ERET). */
@@ -115,10 +119,16 @@ int exc_handler(uint64_t *regs) {
         if (ip & 0x7cu) {                            /* bits 6:2 = IP2..IP6 set */
             g_ext_irq_ip = ip & 0x7cu;
             ++g_ext_irq_count;
-            uint32_t sr;                             /* mask IM[N] for the fired levels */
-            __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
-            sr &= ~((uint32_t)(ip & 0x7cu) << 8);    /* IM bits are SR[15:8], same positions */
-            __asm__ volatile("mtc0 %0, $12" : : "r"(sr));
+            if (g_pit_mode && (ip & 0x30u)) {        /* IP4/IP5 = INT3 8254 timers */
+                /* ack the latched timer int via Timer Clear (b0=Timer0/IP4,
+                 * b1=Timer1/IP5); keep IM enabled so it re-fires next period. */
+                *(volatile uint8_t *)0xBFBD98A0u = (uint8_t)((ip >> 4) & 0x3u);
+            } else {
+                uint32_t sr;                         /* mask IM[N] for the fired levels */
+                __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
+                sr &= ~((uint32_t)(ip & 0x7cu) << 8);/* IM bits are SR[15:8], same positions */
+                __asm__ volatile("mtc0 %0, $12" : : "r"(sr));
+            }
             return 1;                                /* ERET */
         }
         if (ip & 0x03u) {                            /* bits 1:0 = software IP0/IP1 */
