@@ -2093,6 +2093,7 @@ module exec(clk,
 		 .cache(w_cached),
 		 .mapped(w_mapped),
 		 .seg(w_seg),
+		 .bad_perms(w_bad_seg_perms),
 		 .in_kernel_mode(in_kernel_mode),
 		 .in_supervisor_mode(in_supervisor_mode),
 		 .in_user_mode(in_user_mode),
@@ -2100,7 +2101,7 @@ module exec(clk,
 		 .in_64b_supervisor_mode(in_64b_supervisor_mode),
 		 .in_64b_user_mode(in_64b_user_mode));
 
-   wire w_bad_seg_perms = (w_seg != 2'd3) & in_user_mode;
+   wire w_bad_seg_perms;
  
    always_ff@(negedge clk)
      begin

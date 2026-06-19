@@ -327,6 +327,7 @@ endfunction
    wire [5:0] w_tlb_index;
    wire        w_tlb_dirty;
    wire        w_tlb_valid;
+   wire [2:0]  w_tlb_c;     /* dtlb: matched page cacheability (EntryLo C/CCA) */
    wire	      w_tlb_hit;
    wire	      w_tlb_oor;   /* dtlb: matched entry's PFN exceeds MAX_PA(36b) -> Addr Error */
 
@@ -646,6 +647,13 @@ endfunction
      begin
 	t_remapped_req2 = r_req2;
 	t_remapped_req2.addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
+	/* For a TLB-MAPPED access, cacheability comes from the matched page's C
+	 * field (CCA==3 -> cached) rather than mipsseg's segment default; for an
+	 * unmapped (direct) access keep the segment decision in r_req2.cached.
+	 * w_tlb_c is registered in lockstep with w_mapped_addr, so it lines up
+	 * with r_req2 here. (This is the proper fix the L2 UNCACHE_WB_TURNAROUND
+	 * worked around: a cacheable mapped store was being routed uncached.) */
+	t_remapped_req2.cached = r_req2.mapped ? (w_tlb_c == 3'd3) : r_req2.cached;
 	/* the queued/replayed req now carries the TLB-translated PHYSICAL address;
 	 * mark it unmapped so the replay refills from / re-tags with the PA and
 	 * does NOT translate it a second time. */
@@ -1548,6 +1556,7 @@ endfunction
 	     .hit_index(w_tlb_index),
 	     .dirty(w_tlb_dirty),
 	     .valid(w_tlb_valid),
+	     .cache_attr(w_tlb_c),
 	     .out_of_range(w_tlb_oor),
 	     .tlb_entry_in_valid(tlb_entry_in_valid),
 	     .tlb_entry_in(tlb_entry_in)

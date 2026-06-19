@@ -13,6 +13,7 @@ module tlb(clk,
 	   hit_index,
 	   dirty,
 	   valid,
+	   cache_attr,
 	   out_of_range,
 	   tlb_entry_in_valid,
 	   tlb_entry_in);
@@ -33,6 +34,9 @@ module tlb(clk,
    
    output logic	       dirty;
    output logic	       valid;
+   /* matched page's cacheability (EntryLo C[5:3], MIPS CCA): the consumer treats
+    * CCA==3 (cacheable noncoherent) as cached, everything else as uncached. */
+   output logic [2:0]  cache_attr;
    /* Sail TLBTranslateC: PA > MAX_PA (36-bit) -> Address Error.  The matched
     * entry's PFN (pa[39:12]=pfn[27:0]) overflows PA_WIDTH=36 iff pfn[27:24]!=0;
     * w_pa4k currently truncates that silently, so flag it for an AdEL/AdES. */
@@ -129,6 +133,7 @@ module tlb(clk,
    wire [27:0]         w_pfn     = w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0;
    wire                w_dirty   = w_odd ? r_tlb[w_hit_idx].d1   : r_tlb[w_hit_idx].d0;
    wire                w_valid   = w_odd ? r_tlb[w_hit_idx].v1   : r_tlb[w_hit_idx].v0;
+   wire [2:0]          w_cache   = w_odd ? r_tlb[w_hit_idx].c1   : r_tlb[w_hit_idx].c0;
    /* 4KB page only (pagemask=0): PA[39:12]=pfn[27:0], PA[11:0]=va[11:0] */
    wire [27+12:0] w_pa4k_full = {w_pfn, va[11:0]};
    wire [`PA_WIDTH-1:0] w_pa4k = w_pa4k_full[`PA_WIDTH-1:0];
@@ -139,6 +144,9 @@ module tlb(clk,
 	hit_index <= reset ? 'd0 : w_hit_idx;
 	dirty   <= reset ? 1'b0 : (active ? w_dirty : 1'b1);
 	valid <= reset ? 1'b0 : (active ? w_valid : 1'b1);
+	/* unmapped (active=0) cacheability is decided by segment, not the TLB;
+	 * default to CCA==3 (cached) -- the l1d consumer ignores it when unmapped. */
+	cache_attr <= reset ? 3'd3 : (active ? w_cache : 3'd3);
 	pa      <= active ? w_pa4k : va[`PA_WIDTH-1:0];
 	/* mapped + PFN beyond MAX_PA(36b); unmapped (active=0) PAs are in-range */
 	out_of_range <= reset ? 1'b0 : (active ? (|w_pfn[27:24]) : 1'b0);

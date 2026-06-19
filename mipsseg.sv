@@ -1,6 +1,6 @@
 `include "machine.vh"
 
-module mipsseg(v_addr, l_addr, cache, mapped, seg,
+module mipsseg(v_addr, l_addr, cache, mapped, seg, bad_perms,
 	       in_kernel_mode,
 	       in_supervisor_mode,
 	       in_user_mode,
@@ -12,6 +12,9 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg,
    output logic		       cache;
    output logic	       mapped;
    output logic [1:0]  seg;
+   /* access-level violation -> AdEL/AdES: the current mode may not touch this
+    * segment.  kernel: all OK; user: useg only; supervisor: useg + sseg. */
+   output logic	       bad_perms;
    input logic			in_kernel_mode;
    input logic			in_supervisor_mode;
    input logic			in_user_mode;
@@ -36,6 +39,12 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg,
 	   assign w_in_64b_mode = 1'b0;
 	end
    endgenerate
+
+   /* supervisor segment (sseg): 32b/compat 0xC0000000-0xDFFFFFFF (cksseg),
+    * 64b xsseg VA[63:62]==01.  Used only for the supervisor access-level check. */
+   wire w_compat32 = (`M_WIDTH < 64) || !w_in_64b_mode || (v_addr[63:32] == 32'hFFFF_FFFF);
+   wire w_is_sseg  = w_compat32 ? (v_addr[31:29] == 3'b110)
+				: ((`M_WIDTH == 64) && (v_addr[63:62] == 2'b01));
 
    always_comb
      begin
@@ -97,6 +106,14 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg,
 	     l_addr = v_addr;
 	     seg    = 2'd2;
 	  end
+
+	/* access-level AdEL/AdES: seg==3 is the user segment (useg/xkuseg).
+	 * kernel may touch anything; user only useg; supervisor useg + sseg. */
+	bad_perms = 1'b0;
+	if(in_user_mode)
+	  bad_perms = (seg != 2'd3);
+	else if(in_supervisor_mode)
+	  bad_perms = ~((seg == 2'd3) | w_is_sseg);
      end // always_comb
 
 endmodule

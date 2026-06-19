@@ -474,6 +474,7 @@ endfunction
 		 .cache(w_cached),
 		 .mapped(w_mapped),
 		 .seg(w_seg),
+		 .bad_perms(),    /* i-side access-level AdEL: TODO (d-side first) */
 		 .in_kernel_mode(in_kernel_mode),
 		 .in_supervisor_mode(in_supervisor_mode),
 		 .in_user_mode(in_user_mode),
@@ -499,6 +500,7 @@ endfunction
 		       .hit_index(),
 		       .dirty(),
 		       .valid(w_itlb_valid),
+		       .cache_attr(),     /* i-side cacheability unused (i-fetch cached) */
 		       .out_of_range(),   /* i-side address-error: TODO (d-side first) */
 		       .tlb_entry_in_valid(tlb_entry_in_valid),
 		       .tlb_entry_in(tlb_entry_in)
