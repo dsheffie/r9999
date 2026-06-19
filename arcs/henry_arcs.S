@@ -1,5 +1,8 @@
 /*
- * arcs_linux.S  --  IP22-faithful synthetic ARCS firmware for booting IP22 Linux.
+ * henry_arcs.S  --  IP22-faithful synthetic ARCS/FSBL firmware for the Henry SoC.
+ * One blob boots BOTH IP22 Linux (-> /init) and IRIX 6.5 (-> banner): the FSBL is
+ * OS-neutral and the driver/TB patches the kentry slot per kernel. (Was arcs_linux.S;
+ * the old stub-style arcs_irix.S and the minimal arcs_fw.S are superseded/removed.)
  *
  * Structured like a real IP22: a first-stage boot loader (FSBL) lives in the
  * Boot PROM at kseg1 0xBFC00000 (phys 0x1fc00000, the CPU reset vector). At
@@ -38,7 +41,7 @@
 
     .set    ARCS_BB,   0x88fff000       /* runtime base for the argv/envp blob */
     .set    ARCS_ARGC, 8
-    .set    ARCS_KENTRY, 0x8832c118     /* default Linux entry (driver patches the slot) */
+    .set    ARCS_KENTRY, 0x88005960     /* default kernel entry; the driver/TB patches the slot @0xBFC00008 */
 
     .set    mips3
     .set    noreorder
@@ -99,6 +102,8 @@ fsbl:
     nop
 
     /* (3) entry regs + jump to the kernel */
+    /* a0=argc, a1=argv, a2=envp. Linux consumes these; IRIX ignores a1/a2 and
+     * reads everything from the SPB -- so this one convention boots both. */
     li      $a0, ARCS_ARGC
     li      $a1, ARCS_BB
     addiu   $a2, $a1, (arcs_envp_arr - arcs_argv_blob)   /* a2 = envp array */
@@ -123,7 +128,7 @@ fsbl:
 
     .align  2
 arcs_hb_str:
-    .asciz  "r9999 PROM: CPU alive, handing off to Linux\n"
+    .asciz  "r9999 PROM: CPU alive, handing off to the kernel\n"
 
 /* sash argv/envp blob (mirrors pseudo_bios.cc); pointers computed for runtime
  * base ARCS_BB = 0x88fff000.  Copied there by the FSBL above. */
