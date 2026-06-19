@@ -8,6 +8,10 @@ mipscore.v
 *.elf
 *.mips
 *.dis
+# sim run outputs (ooo_core / henry_tb)
+log.txt
+pushout.txt
+branch_info.txt
 # editor backups / autosave
 *~
 \#*#
