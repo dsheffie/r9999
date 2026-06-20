@@ -1106,6 +1106,7 @@ module core(clk,
 		      t_uop.op == J  |
 		      t_uop.op == IRQ |
 		      t_uop.op == FETCH_MISALIGNED |
+		      t_uop.op == FETCH_ADDR_ERROR |
 		      t_uop.op == FETCH_TLB_MISS |
 		      t_uop.op == FETCH_TLB_INVALID |
 		      t_uop.op == CPU |
@@ -1115,6 +1116,7 @@ module core(clk,
 		       t_uop2.op == J  |
 		       t_uop2.op == IRQ |
 		       t_uop2.op == FETCH_MISALIGNED |
+		       t_uop2.op == FETCH_ADDR_ERROR |
 		       t_uop2.op == FETCH_TLB_MISS |
 		       t_uop2.op == FETCH_TLB_INVALID |
 		       t_uop2.op == CPU |
@@ -1173,7 +1175,8 @@ module core(clk,
 			t_rob_head.trap | 
 			t_rob_head.is_irq |
 			(t_rob_head.opcode == FETCH_TLB_MISS) |
-			(t_rob_head.opcode == FETCH_MISALIGNED) |			
+			(t_rob_head.opcode == FETCH_MISALIGNED) |
+			(t_rob_head.opcode == FETCH_ADDR_ERROR) |
 			t_rob_head.tlb_refill |
 			t_rob_head.tlb_invalid |
 			t_rob_head.tlb_modified);
@@ -1540,7 +1543,8 @@ module core(clk,
 		 begin
 		    n_cause = 5'd11;  /* Coprocessor Unusable (CP0 access outside kernel; CE=0) */
 		 end
-	       else if(t_rob_head.opcode == FETCH_MISALIGNED)
+	       else if(t_rob_head.opcode == FETCH_MISALIGNED ||
+			       t_rob_head.opcode == FETCH_ADDR_ERROR)  /* both AdEL, BadVAddr=PC */
 		 begin
 		    n_pending_bad_addr = 1'b1;
 		    n_has_badvaddr = 1'b1;
@@ -2124,7 +2128,7 @@ module core(clk,
 		       t_rob_tail.faulted = 1'b1;
 		       t_rob_tail.tlb_invalid = 1'b1;
 		    end
-		  else if(t_uop.op == FETCH_MISALIGNED)
+		  else if(t_uop.op == FETCH_MISALIGNED || t_uop.op == FETCH_ADDR_ERROR)
 		    begin
 		       t_rob_tail.faulted = 1'b1;
 		    end		  
@@ -2197,7 +2201,7 @@ module core(clk,
 		       t_rob_next_tail.faulted = 1'b1;
 		       t_rob_next_tail.tlb_invalid = 1'b1;
 		    end
-		  else if(t_uop2.op == FETCH_MISALIGNED)
+		  else if(t_uop2.op == FETCH_MISALIGNED || t_uop2.op == FETCH_ADDR_ERROR)
 		    begin
 		       t_rob_next_tail.faulted = 1'b1;
 		    end
@@ -2340,11 +2344,16 @@ module core(clk,
 `endif
 		  end
 		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
-		  if(t_alloc && (t_uop.op == FETCH_TLB_MISS || t_uop.op == FETCH_TLB_INVALID || t_uop.op == FETCH_MISALIGNED))
-		    r_addrs[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.pc;
-		  if(t_alloc_two && (t_uop2.op == FETCH_TLB_MISS || t_uop2.op == FETCH_TLB_INVALID || t_uop2.op == FETCH_MISALIGNED))
-		    r_addrs[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.pc;
 	       end
+	     /* Fetch-fault BadVAddr: latch the faulting fetch PC into r_addrs at
+	      * ALLOC, UNCONDITIONALLY -- a fetch fault carries no mem op, so this
+	      * must NOT be gated on core_mem_rsp_valid (ARCH_FAULT reads BadVAddr
+	      * from here).  Previously nested in the mem-rsp block, which left
+	      * fetch-fault BadVAddr stale unless a load happened to respond that cycle. */
+	     if(t_alloc && (t_uop.op == FETCH_TLB_MISS || t_uop.op == FETCH_TLB_INVALID || t_uop.op == FETCH_MISALIGNED || t_uop.op == FETCH_ADDR_ERROR))
+	       r_addrs[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.pc;
+	     if(t_alloc_two && (t_uop2.op == FETCH_TLB_MISS || t_uop2.op == FETCH_TLB_INVALID || t_uop2.op == FETCH_MISALIGNED || t_uop2.op == FETCH_ADDR_ERROR))
+	       r_addrs[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.pc;
 	  end
      end // always_ff@ (posedge clk)
 
@@ -2732,7 +2741,8 @@ module core(clk,
 		     .tlb_miss(insn.tlb_miss),
 		     .tlb_invalid(insn.tlb_invalid),
 		     .misaligned(insn.misaligned),
-		     .insn(insn.data), 
+		     .bad_va(insn.bad_va),
+		     .insn(insn.data),
 		     .pc(insn.pc), 
 		     .insn_pred(insn.pred), 
 		     .pht_idx(insn.pht_idx),
@@ -2752,8 +2762,9 @@ module core(clk,
 		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .tlb_invalid(insn_two.tlb_invalid),
-		     .misaligned(insn_two.misaligned),		     
-		     .insn(insn_two.data), 
+		     .misaligned(insn_two.misaligned),
+		     .bad_va(insn_two.bad_va),
+		     .insn(insn_two.data),
 		     .pc(insn_two.pc), 
 		     .insn_pred(insn_two.pred), 
 		     .pht_idx(insn_two.pht_idx),

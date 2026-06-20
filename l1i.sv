@@ -265,7 +265,9 @@ endfunction
    
    
    wire	       w_cached, w_mapped;
+   wire	       w_bad_perms;   /* mipsseg i-side AdEL (access-level / VA out-of-range) */
    reg	       r_cached, r_mapped;
+   reg	       r_bad_va;      /* registered w_bad_perms, aligned with r_mapped/r_cache_pc */
    
    
    
@@ -474,7 +476,7 @@ endfunction
 		 .cache(w_cached),
 		 .mapped(w_mapped),
 		 .seg(w_seg),
-		 .bad_perms(),    /* i-side access-level AdEL: TODO (d-side first) */
+		 .bad_perms(w_bad_perms),    /* i-side AdEL: harvested below into r_bad_va */
 		 .in_kernel_mode(in_kernel_mode),
 		 .in_supervisor_mode(in_supervisor_mode),
 		 .in_user_mode(in_user_mode),
@@ -512,6 +514,7 @@ endfunction
 	r_la_pc <= reset ? 'd0 : w_la_pc;
 	r_cached <= reset ? 1'b0 : w_cached;
 	r_mapped <= reset ? 1'b0 : w_mapped;
+	r_bad_va <= reset ? 1'b0 : w_bad_perms;
      end
 
    /* For mapped (kuseg) addresses use TLB-translated PA; unmapped uses mipsseg output directly */
@@ -950,6 +953,7 @@ endfunction
 	t_insn.misaligned  = r_req & (r_cache_pc[1:0] != 2'b00);
 	t_insn.tlb_miss    = r_mapped & r_req & !w_itlb_hit & (r_cache_pc[1:0] == 2'b00);
 	t_insn.tlb_invalid = r_mapped & r_req &  w_itlb_hit & !w_itlb_valid;
+	t_insn.bad_va      = r_req & r_bad_va;   /* AdEL; decode prioritizes over tlb_miss */
 	t_insn.pc = r_cache_pc;
 	t_insn.pred_target = n_pc;
 	t_insn.pred = t_take_br;
@@ -962,6 +966,7 @@ endfunction
 	t_insn2.misaligned = 1'b0;
 	t_insn2.tlb_miss = 1'b0;
 	t_insn2.tlb_invalid = 1'b0;
+	t_insn2.bad_va = 1'b0;
 	t_insn2.pc = r_cache_pc + 'd4;
 	t_insn2.pred_target = 'd0;
 	t_insn2.pred = 1'b0;
@@ -974,6 +979,7 @@ endfunction
 	t_insn3.misaligned = 1'b0;
 	t_insn3.tlb_miss = 1'b0;
 	t_insn3.tlb_invalid = 1'b0;
+	t_insn3.bad_va = 1'b0;
 	t_insn3.pc = r_cache_pc + 'd8;
 	t_insn3.pred_target = 'd0;
 	t_insn3.pred = 1'b0;
@@ -986,6 +992,7 @@ endfunction
 	t_insn4.misaligned = 1'b0;
 	t_insn4.tlb_miss = 1'b0;
 	t_insn4.tlb_invalid = 1'b0;
+	t_insn4.bad_va = 1'b0;
 	t_insn4.pc = r_cache_pc + 'd12;
 	t_insn4.pred_target = 'd0;
 	t_insn4.pred = 1'b0;

@@ -30,6 +30,7 @@ TESTS := hello/hello.elf \
          except/test_except.elf \
          except/test_overflow.elf \
          except/test_traps.elf \
+         except/test_ifetch_adel.elf \
          atomic/test_atomic.elf \
          unaligned/test_unaligned.elf \
          xtlb/test_xtlb64.elf \
@@ -51,7 +52,7 @@ TESTS := hello/hello.elf \
 
 DISASMS := $(TESTS:.elf=.dis)
 
-.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow run-traps run-atomic run-fpu
+.PHONY: all clean run-hello run-cp0 run-tlb run-dside-tlb run-except run-unaligned run-xtlb run-cache run-overflow run-traps run-ifetch-adel run-atomic run-fpu
 
 all: $(STARTUP) $(TESTS) $(DISASMS)
 
@@ -119,6 +120,10 @@ atomic/test_ll_intervening.elf: atomic/test_ll_intervening.S $(STARTUP) $(COMMON
 except/test_traps.elf: except/test_traps.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_traps.S -o except/test_traps.o
 	$(LD) $(LDFLAGS) except/test_traps.o -o $@
+
+except/test_ifetch_adel.elf: except/test_ifetch_adel.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_ifetch_adel.S -o except/test_ifetch_adel.o
+	$(LD) $(LDFLAGS) except/test_ifetch_adel.o -o $@
 
 # -----------------------------------------------------------------------
 # Unaligned load test (lwl / lwr)
@@ -272,6 +277,10 @@ run-traps: except/test_traps.elf
 	cd .. && $(SIM) --file tests/except/test_traps.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
 	@echo "== same under co-sim (expect no 'does not match') =="
 	cd .. && $(SIM) --file tests/except/test_traps.elf --checker true 2>&1 | grep -i 'does not match' || echo "  ok (no divergence)"
+
+run-ifetch-adel: except/test_ifetch_adel.elf
+	@echo "== i-side fetch Address Error (OOR target), self-check (expect PASS) =="
+	$(SIM) --file $< -c 0 2>&1 | grep -aiE 'PASS|FAIL' | head -1
 
 run-atomic: atomic/test_atomic.elf
 	@echo "== LL/SC + LLD/SCD round-trip, self-check (expect P) =="

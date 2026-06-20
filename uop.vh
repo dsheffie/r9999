@@ -119,6 +119,7 @@ typedef enum logic [7:0]
    SCD,
    TNE,
    FETCH_MISALIGNED,
+   FETCH_ADDR_ERROR,   /* i-side AdEL: access-level / VA-range violation (BadVAddr=PC, ExcCode 4) */
    FETCH_TLB_MISS,
    FETCH_TLB_INVALID,
    II,

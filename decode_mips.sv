@@ -13,6 +13,7 @@ module decode_mips(
 		   tlb_miss,
 		   tlb_invalid,
 		   misaligned,
+		   bad_va,
 		   insn,
 		   pc,
 		   insn_pred,
@@ -32,6 +33,7 @@ module decode_mips(
    input logic			tlb_miss;
    input logic			tlb_invalid;
    input logic			misaligned;
+   input logic			bad_va;
    input logic [31:0]		insn;
    input logic [`M_WIDTH-1:0] pc;
    input logic 	      insn_pred;
@@ -136,6 +138,12 @@ module decode_mips(
 	else if(misaligned)
 	  begin
 	     uop.op = FETCH_MISALIGNED;
+	  end
+	else if(bad_va)
+	  begin
+	     /* AdEL: access-level / VA out-of-range -- must beat tlb_miss (an OOR
+	      * mapped VA also misses the ITLB; Address Error outranks TLB refill). */
+	     uop.op = FETCH_ADDR_ERROR;
 	  end
 	else if(tlb_miss)
 	  begin

@@ -73,6 +73,7 @@ typedef struct packed {
    logic 		  pred;
    logic [(`LG_PHT_SZ-1):0] pht_idx;
    logic		    misaligned;
+   logic		    bad_va;       /* i-side AdEL: mipsseg bad_perms (access-level / VA out-of-range) */
    logic		    tlb_miss;
    logic		    tlb_invalid;
    logic		    is_branch;
