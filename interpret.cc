@@ -152,18 +152,27 @@ static inline void set_exc_pc(state_t *s) {
   }
 }
 
+/* General exception vector (R4000): BEV=1 -> base 0xBFC00200, BEV=0 -> 0x80000000;
+ * general/common offset 0x180.  So 0xBFC00380 (BEV=1) or 0x80000180 (BEV=0).  All
+ * sites below are general exceptions (AdEL/AdES/RI/Ov/Tr/Int); TLB refill/XTLB use
+ * 0x000/0x080 and are not raised by this interpreter. */
+static inline uint32_t exc_vector_general(state_t *s) {
+  uint32_t base = (s->cpr0[CPR0_SR] & SR_BEV) ? 0xBFC00200u : 0x80000000u;
+  return base | 0x180u;
+}
+
 static void raise_adel(state_t *s) {
   set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (4u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
-  s->pc = sext32(0xBFC00180u);
+  s->pc = sext32(exc_vector_general(s));
 }
 
 static void raise_ades(state_t *s) {
   set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (5u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
-  s->pc = sext32(0xBFC00180u);
+  s->pc = sext32(exc_vector_general(s));
 }
 
 /* Reserved Instruction exception setup (ExcCode=10), no diagnostic message. */
@@ -171,7 +180,7 @@ static void take_exception_ri(state_t *s) {
   set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (10u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
-  s->pc = sext32(0xBFC00180u);
+  s->pc = sext32(exc_vector_general(s));
 }
 
 static void raise_ri(state_t *s, uint32_t inst) {
@@ -237,14 +246,14 @@ static void raise_overflow(state_t *s) {
   set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (12u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
-  s->pc = sext32(0xBFC00180u);
+  s->pc = sext32(exc_vector_general(s));
 }
 
 static void raise_trap(state_t *s) {
   set_exc_pc(s);
   s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (13u << 2);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
-  s->pc = sext32(0xBFC00180u);
+  s->pc = sext32(exc_vector_general(s));
 }
 
 void raise_int(state_t *s, uint32_t epc) {
@@ -252,7 +261,7 @@ void raise_int(state_t *s, uint32_t epc) {
   s->cpr0[CPR0_EPC]   = epc;
   s->cpr0[CPR0_CAUSE] = (1u << 15);  /* IP[7]=1 (timer), ExcCode=0, BD=0 */
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
-  s->pc = sext32(0xBFC00180u);
+  s->pc = sext32(exc_vector_general(s));
 }
 
 static uint32_t getConditionCode(state_t *s, uint32_t cc) {

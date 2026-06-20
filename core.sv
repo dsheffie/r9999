@@ -1605,7 +1605,7 @@ module core(clk,
 	       
 	       /* TLB refill -> 0x000 (32-bit) or 0x080 (64-bit XTLB);
 		* all other exceptions -> 0x180 general vector. */
-	       n_restart_pc = sign_extend32((w_sr_bev ? 32'hbfc00000 : 32'h80000000) |
+	       n_restart_pc = sign_extend32((w_sr_bev ? 32'hbfc00200 : 32'h80000000) |
 					    (r_tlb_refill ? (r_xtlb_refill ? 32'h80 : 32'h0) : 32'h180));
 	       n_restart_src_pc = 'd0;
 	       n_restart_src_is_indirect = 1'b0;
