@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# run_fpga_regression.sh -- build N fresh csmith tests, run each on the FPGA
-# (headless, --sgi 1, clean magic-halt detection) and compare the on-silicon
-# checksum to the QEMU reference.
+# run_fpga_regression.sh -- build N fresh csmith tests, run each on the FPGA via
+# the henry_arcs FSBL (kseg0 flow), clean magic-halt detection, and compare the
+# on-silicon checksum to the QEMU reference.
 #
 #   Usage: ./run_fpga_regression.sh [N]        (default N=5)
 #
-# Prereqs: the FPGA must already have a working bitstream programmed
-#          (e.g. ../../doit.sh deployed a timing-clean build).  The patched
-#          mips-axi driver stops cleanly on the magic-halt flag / cpu_stopped.
+# Prereqs: the FPGA must already have a working bitstream programmed (e.g.
+#          ../../doit.sh / a timing-clean Henry build), and ~/mips/henry_arcs.bin
+#          present on the board.  The test is booted like the kernel:
+#            mips-axi -f X.elf --sgi true --arcs henry_arcs.bin --start-pc 0xbfc00000
+#          (the old mapped layout + --sgi 1 hung at "state 1"; see
+#          project_henry_baremetal_runtime_broken).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 N=${1:-5}
 HOST=root@fpga.local
@@ -23,7 +26,8 @@ for i in $(seq 1 "$N"); do
   fi
   scp -q "$elf" "$HOST:~/mips/fpga_reg.elf" 2>/dev/null || { printf "[%2d] SKIP   scp failed\n" "$i"; continue; }
   out=$(timeout 100 ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST" \
-        'cd ~/mips && stdbuf -oL timeout 75 ~/bin/mips-axi -f fpga_reg.elf --sgi 1 2>&1 \
+        'cd ~/mips && stdbuf -oL timeout 75 ~/bin/mips-axi -f fpga_reg.elf \
+           --sgi true --arcs henry_arcs.bin --start-pc 0xbfc00000 2>&1 \
            | grep -aiE "^checksum|MAGIC HALT|CORE HALTED"' 2>/dev/null)
   got=$(printf '%s' "$out" | grep -oiE 'checksum *= *[0-9a-f]+' | grep -oiE '[0-9a-f]+$' | head -1)
   halted=$(printf '%s' "$out" | grep -icE 'MAGIC HALT|CORE HALTED')
