@@ -37,10 +37,25 @@ module rf4r2w(clk,
 
    always_ff@(posedge clk)
      begin
+`ifdef FPGA
+	/* FPGA/sim: the RF powers up to 0 (BRAM/bitstream INIT; Verilator zeroes
+	 * state) and phys reg 0 ($0) is provably never written (dst_valid=(rd!=0);
+	 * phys 0 reserved in the free list + never freed), so reading it returns 0
+	 * directly -- no rdptr==0 mux.  Dropping the conditional read removes a 2:1
+	 * mux per port AND lets the banks infer block RAM. */
+	rd0 <= rdptr0[LG_DEPTH-1] ? r_ram_mem[rdptr0[LG_DEPTH-2:0]] : r_ram_alu[rdptr0[LG_DEPTH-2:0]];
+	rd1 <= rdptr1[LG_DEPTH-1] ? r_ram_mem[rdptr1[LG_DEPTH-2:0]] : r_ram_alu[rdptr1[LG_DEPTH-2:0]];
+	rd2 <= rdptr2[LG_DEPTH-1] ? r_ram_mem[rdptr2[LG_DEPTH-2:0]] : r_ram_alu[rdptr2[LG_DEPTH-2:0]];
+	rd3 <= rdptr3[LG_DEPTH-1] ? r_ram_mem[rdptr3[LG_DEPTH-2:0]] : r_ram_alu[rdptr3[LG_DEPTH-2:0]];
+`else
+	/* No power-up-zero guarantee (e.g. ASIC SRAM): the rdptr==0 -> 0 mux IS the
+	 * mechanism that makes $0 read as 0.  Such a target must keep this (or add an
+	 * explicit RF zero/clear sequence at reset). */
 	rd0 <= rdptr0=='d0 ? 'd0 : (rdptr0[LG_DEPTH-1] ? r_ram_mem[rdptr0[LG_DEPTH-2:0]] : r_ram_alu[rdptr0[LG_DEPTH-2:0]]);
 	rd1 <= rdptr1=='d0 ? 'd0 : (rdptr1[LG_DEPTH-1] ? r_ram_mem[rdptr1[LG_DEPTH-2:0]] : r_ram_alu[rdptr1[LG_DEPTH-2:0]]);
 	rd2 <= rdptr2=='d0 ? 'd0 : (rdptr2[LG_DEPTH-1] ? r_ram_mem[rdptr2[LG_DEPTH-2:0]] : r_ram_alu[rdptr2[LG_DEPTH-2:0]]);
 	rd3 <= rdptr3=='d0 ? 'd0 : (rdptr3[LG_DEPTH-1] ? r_ram_mem[rdptr3[LG_DEPTH-2:0]] : r_ram_alu[rdptr3[LG_DEPTH-2:0]]);
+`endif
 	if(wen0)
 	  r_ram_alu[wrptr0[LG_DEPTH-2:0]] <= wr0;
 	if(wen1)
