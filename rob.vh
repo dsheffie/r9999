@@ -125,6 +125,31 @@ typedef struct packed {
 } mem_rsp_t;
 
 
+/* tlb_stored_t = what each TLB array slot actually holds.  It is tlb_data_t WITHOUT
+ * the `entry` (write-index) field: the array position IS the index, so storing it
+ * is pure duplication.  KEEP THESE TWO IN SYNC (same fields/order minus entry) --
+ * the write casts tlb_data_t -> tlb_stored_t, which drops the leading `entry`. */
+typedef struct packed {
+   logic [11:0] pagemask;
+   logic [7:0]  asid;
+   logic [1:0]  r;      /* region: va[63:62] */
+   logic [26:0] vpn;    /* va[39:13], 27 bits for 64-bit mode */
+
+   logic [`PFN_WIDTH-1:0] pfn0;   /* pa[PA_WIDTH-1:12] = PA_WIDTH-12 bits (24 for 36-bit PA) */
+   logic        d0;
+   logic        v0;
+   logic        g0;
+   logic [2:0]  c0;
+
+   logic [`PFN_WIDTH-1:0] pfn1;   /* pa[PA_WIDTH-1:12] = PA_WIDTH-12 bits (24 for 36-bit PA) */
+   logic        d1;
+   logic        v1;
+   logic        g1;
+   logic [2:0]  c1;
+} tlb_stored_t;
+
+/* tlb_data_t = the write-interface (plumbing) type: tlb_stored_t + the `entry`
+ * write-index as the leading (MSB) field, so tlb_stored_t'(x) truncates it off. */
 typedef struct packed {
 
    logic [5:0]  entry;

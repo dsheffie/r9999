@@ -1,3 +1,4 @@
+`include "machine.vh"
 module rf4r2w(clk,
 	      rdptr0,rdptr1,rdptr2,rdptr3,
 	      wrptr0,wrptr1,wen0,wen1,
@@ -31,8 +32,8 @@ module rf4r2w(clk,
     * write port 1 = MEM (load) results -> MEM bank, so each bank has a single
     * write port.  Reads pick the bank by the source pointer's MSB. */
    localparam HALF = 1 << (LG_DEPTH-1);
-   logic [WIDTH-1:0] 	    r_ram_alu[HALF-1:0];
-   logic [WIDTH-1:0] 	    r_ram_mem[HALF-1:0];
+   `RF_RAM_STYLE logic [WIDTH-1:0] 	    r_ram_alu[HALF-1:0];
+   `RF_RAM_STYLE logic [WIDTH-1:0] 	    r_ram_mem[HALF-1:0];
 
    always_ff@(posedge clk)
      begin

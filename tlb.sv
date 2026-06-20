@@ -59,7 +59,7 @@ module tlb(clk,
    wire [NN-1:0]	       w_hits;
 
 
-   tlb_data_t r_tlb[47:0];
+   tlb_stored_t r_tlb[47:0];   /* stored type: no `entry` (the array index IS the entry) */
    integer ri;
 
    wire [NN-1:0]	       w_addr_space_match;
@@ -80,7 +80,21 @@ module tlb(clk,
 	  end
 	else if(tlb_entry_in_valid)
 	  begin
-	     r_tlb[tlb_entry_in.entry] <= tlb_entry_in;
+	     /* copy the stored fields (everything except the entry write-index) */
+	     r_tlb[tlb_entry_in.entry].pagemask <= tlb_entry_in.pagemask;
+	     r_tlb[tlb_entry_in.entry].asid     <= tlb_entry_in.asid;
+	     r_tlb[tlb_entry_in.entry].r        <= tlb_entry_in.r;
+	     r_tlb[tlb_entry_in.entry].vpn      <= tlb_entry_in.vpn;
+	     r_tlb[tlb_entry_in.entry].pfn0     <= tlb_entry_in.pfn0;
+	     r_tlb[tlb_entry_in.entry].d0       <= tlb_entry_in.d0;
+	     r_tlb[tlb_entry_in.entry].v0       <= tlb_entry_in.v0;
+	     r_tlb[tlb_entry_in.entry].g0       <= tlb_entry_in.g0;
+	     r_tlb[tlb_entry_in.entry].c0       <= tlb_entry_in.c0;
+	     r_tlb[tlb_entry_in.entry].pfn1     <= tlb_entry_in.pfn1;
+	     r_tlb[tlb_entry_in.entry].d1       <= tlb_entry_in.d1;
+	     r_tlb[tlb_entry_in.entry].v1       <= tlb_entry_in.v1;
+	     r_tlb[tlb_entry_in.entry].g1       <= tlb_entry_in.g1;
+	     r_tlb[tlb_entry_in.entry].c1       <= tlb_entry_in.c1;
 	  end
      end
    

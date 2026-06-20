@@ -117,6 +117,15 @@
  * it -- no translate-time PA-range check needed). 36-bit PA -> 24-bit PFN. */
 `define PFN_WIDTH (`PA_WIDTH - 12)
 
+/* Per-structure block-RAM synthesis-attribute guards. Defined as the attribute =
+ * force that array into block RAM (frees the LUT/FF fabric, which is the bottleneck
+ * on Ultra96); define empty to let Vivado choose (FF/LUTRAM). These apply only to
+ * plain INDEXED RAMs -- the associative TLB CAMs (l1i/l1d r_tlb) must stay FFs.
+ *   TLB_SHADOW_RAM_STYLE -> exec's CP0 maintenance shadow TLB (r_shadow_tlb)
+ *   RF_RAM_STYLE         -> the rf4r2w register-file banks (int/FP/hilo PRFs) */
+`define TLB_SHADOW_RAM_STYLE (* ram_style = "block" *)
+`define RF_RAM_STYLE         (* ram_style = "block" *)
+
 /* CP0 PRId (processor identification) values. imp field is bits [15:8];
  * the R4000 family shares imp=0x04 and is distinguished by the revision byte. */
 `define PRID_R4000  32'h00000400   /* imp 0x04, rev 0x00 */

@@ -192,7 +192,12 @@ module exec(clk,
    output tlb_data_t	             tlb_entry_out;
    output logic			     tlb_entry_out_valid;
 
-   tlb_data_t r_shadow_tlb[47:0];
+   /* The shadow TLB is the CP0 maintenance mirror (TLBR/TLBWI/TLBWR): a plain
+    * indexed 48-entry RAM (registered read by r_index, write by r_tlb_index) --
+    * NOT a CAM (TLBP matches on the dtlb instead). Force it into block RAM so it
+    * costs ~1 BRAM instead of ~5904 FF/LUTRAM of fabric. 48-deep is too shallow
+    * for Vivado to pick BRAM unprompted. */
+   `TLB_SHADOW_RAM_STYLE tlb_stored_t r_shadow_tlb[47:0];
    
    
    localparam N_INT_SCHED_ENTRIES = 1<<`LG_INT_SCHED_ENTRIES;
@@ -2546,7 +2551,7 @@ module exec(clk,
    
    logic       r_index_probe_failed, n_index_probe_failed;
    logic [5:0] r_index, n_index;
-   tlb_data_t r_tlb_entry;
+   tlb_stored_t r_tlb_entry;   /* TLBR read-back: stored type (no entry field) */
    
    
    logic [`M_WIDTH-1:0]	n_epc, r_epc, n_badvaddr, r_badvaddr;
@@ -2669,7 +2674,21 @@ module exec(clk,
 	r_tlb_entry <= r_shadow_tlb[r_index];
 	if(r_tlb_entry_out_valid)
 	  begin
-	     r_shadow_tlb[r_tlb_index] <= tlb_entry_out;
+	     /* copy the stored fields (everything except the entry write-index) */
+	     r_shadow_tlb[r_tlb_index].pagemask <= tlb_entry_out.pagemask;
+	     r_shadow_tlb[r_tlb_index].asid     <= tlb_entry_out.asid;
+	     r_shadow_tlb[r_tlb_index].r        <= tlb_entry_out.r;
+	     r_shadow_tlb[r_tlb_index].vpn      <= tlb_entry_out.vpn;
+	     r_shadow_tlb[r_tlb_index].pfn0     <= tlb_entry_out.pfn0;
+	     r_shadow_tlb[r_tlb_index].d0       <= tlb_entry_out.d0;
+	     r_shadow_tlb[r_tlb_index].v0       <= tlb_entry_out.v0;
+	     r_shadow_tlb[r_tlb_index].g0       <= tlb_entry_out.g0;
+	     r_shadow_tlb[r_tlb_index].c0       <= tlb_entry_out.c0;
+	     r_shadow_tlb[r_tlb_index].pfn1     <= tlb_entry_out.pfn1;
+	     r_shadow_tlb[r_tlb_index].d1       <= tlb_entry_out.d1;
+	     r_shadow_tlb[r_tlb_index].v1       <= tlb_entry_out.v1;
+	     r_shadow_tlb[r_tlb_index].g1       <= tlb_entry_out.g1;
+	     r_shadow_tlb[r_tlb_index].c1       <= tlb_entry_out.c1;
 	  end
      end
 
