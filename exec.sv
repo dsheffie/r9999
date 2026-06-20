@@ -2102,14 +2102,6 @@ module exec(clk,
 		 .in_64b_user_mode(in_64b_user_mode));
 
    wire w_bad_seg_perms;
- 
-   always_ff@(negedge clk)
-     begin
-	if(w_bad_seg_perms)
-	  begin
-	     $display("trying to access segment %d in bad mode", w_seg);
-	  end
-     end
 
    always_comb
      begin

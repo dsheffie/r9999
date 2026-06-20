@@ -46,6 +46,13 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg, bad_perms,
    wire w_is_sseg  = w_compat32 ? (v_addr[31:29] == 3'b110)
 				: ((`M_WIDTH == 64) && (v_addr[63:62] == 2'b01));
 
+   /* VA out of range (Sail TLBTranslate MAX_VA): a MAPPED, non-compat 64b VA must
+    * fit in SEGBITS, i.e. VA[61:`SEGBITS]==0, else AdEL/AdES.  compat = the sign-
+    * extended 32b form (VA[61:31] all-1, e.g. ckseg/cksseg) is exempt; unmapped
+    * segs skip this (they get the PA>MAX_PA check in tlb.sv). */
+   wire w_va_oor = (`M_WIDTH == 64) && w_in_64b_mode &&
+		   ~(&v_addr[61:31]) && (|v_addr[61:`SEGBITS]);
+
    always_comb
      begin
 	cache  = 1'b0;
@@ -114,6 +121,8 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg, bad_perms,
 	  bad_perms = (seg != 2'd3);
 	else if(in_supervisor_mode)
 	  bad_perms = ~((seg == 2'd3) | w_is_sseg);
+	/* VA-range AdEL is mode-independent (even kernel) -- applies to mapped segs. */
+	bad_perms = bad_perms | (mapped & w_va_oor);
      end // always_comb
 
 endmodule

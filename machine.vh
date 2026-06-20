@@ -106,6 +106,12 @@
  * (kseg0 mask is 0x1fffffff = 29 bits). Shmoo {29,32,36} for the area/timing curve. */
 `define PA_WIDTH 36
 
+/* Supported virtual-address bits within a region (MIPS SEGBITS). A non-compat 64b
+ * VA must fit in SEGBITS, i.e. VA[61:SEGBITS]==0, else Address Error (Sail
+ * TLBTranslate MAX_VA). R4000 = 40; R10000 = 48. This also bounds the VPN width
+ * carried through the TLB/CAM, so shrinking it saves bits on the critical path. */
+`define SEGBITS 40
+
 /* CP0 PRId (processor identification) values. imp field is bits [15:8];
  * the R4000 family shares imp=0x04 and is distinguished by the revision byte. */
 `define PRID_R4000  32'h00000400   /* imp 0x04, rev 0x00 */
