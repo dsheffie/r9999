@@ -133,13 +133,13 @@ typedef struct packed {
    logic [1:0]  r;      /* region: va[63:62] */
    logic [26:0] vpn;    /* va[39:13], 27 bits for 64-bit mode */
 
-   logic [27:0] pfn0;   /* pa[39:12], 28 bits for 40-bit PA */
+   logic [`PFN_WIDTH-1:0] pfn0;   /* pa[PA_WIDTH-1:12] = PA_WIDTH-12 bits (24 for 36-bit PA) */
    logic        d0;
    logic        v0;
    logic        g0;
    logic [2:0]  c0;
 
-   logic [27:0] pfn1;   /* pa[39:12], 28 bits for 40-bit PA */
+   logic [`PFN_WIDTH-1:0] pfn1;   /* pa[PA_WIDTH-1:12] = PA_WIDTH-12 bits (24 for 36-bit PA) */
    logic        d1;
    logic        v1;
    logic        g1;

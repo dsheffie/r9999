@@ -37,9 +37,9 @@ module tlb(clk,
    /* matched page's cacheability (EntryLo C[5:3], MIPS CCA): the consumer treats
     * CCA==3 (cacheable noncoherent) as cached, everything else as uncached. */
    output logic [2:0]  cache_attr;
-   /* Sail TLBTranslateC: PA > MAX_PA (36-bit) -> Address Error.  The matched
-    * entry's PFN (pa[39:12]=pfn[27:0]) overflows PA_WIDTH=36 iff pfn[27:24]!=0;
-    * w_pa4k currently truncates that silently, so flag it for an AdEL/AdES. */
+   /* PA out-of-range is now enforced BY CONSTRUCTION: pfn is PFN_WIDTH = PA_WIDTH-12
+    * bits, so PA = {pfn, va[11:0]} is exactly PA_WIDTH and can never exceed MAX_PA.
+    * Kept (tied 0) for the consumer's port; the l1d bad_addr-from-oor path is dead. */
    output logic	       out_of_range;
 
    input logic	       tlb_entry_in_valid;
@@ -130,12 +130,12 @@ module tlb(clk,
    wire [LG_N-1:0]     w_hit_idx = w_idx[LG_N-1:0];
    /* VA[12]=0 → even page (pfn0/d0/v0), VA[12]=1 → odd page (pfn1/d1/v1) */
    wire                w_odd     = va[12];
-   wire [27:0]         w_pfn     = w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0;
+   wire [`PFN_WIDTH-1:0] w_pfn   = w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0;
    wire                w_dirty   = w_odd ? r_tlb[w_hit_idx].d1   : r_tlb[w_hit_idx].d0;
    wire                w_valid   = w_odd ? r_tlb[w_hit_idx].v1   : r_tlb[w_hit_idx].v0;
    wire [2:0]          w_cache   = w_odd ? r_tlb[w_hit_idx].c1   : r_tlb[w_hit_idx].c0;
    /* 4KB page only (pagemask=0): PA[39:12]=pfn[27:0], PA[11:0]=va[11:0] */
-   wire [27+12:0] w_pa4k_full = {w_pfn, va[11:0]};
+   wire [`PFN_WIDTH+11:0] w_pa4k_full = {w_pfn, va[11:0]};   /* = PA_WIDTH bits exactly */
    wire [`PA_WIDTH-1:0] w_pa4k = w_pa4k_full[`PA_WIDTH-1:0];
 
    always_ff@(posedge clk)
@@ -148,8 +148,8 @@ module tlb(clk,
 	 * default to CCA==3 (cached) -- the l1d consumer ignores it when unmapped. */
 	cache_attr <= reset ? 3'd3 : (active ? w_cache : 3'd3);
 	pa      <= active ? w_pa4k : va[`PA_WIDTH-1:0];
-	/* mapped + PFN beyond MAX_PA(36b); unmapped (active=0) PAs are in-range */
-	out_of_range <= reset ? 1'b0 : (active ? (|w_pfn[27:24]) : 1'b0);
+	/* PA can't exceed MAX_PA now (pfn is exactly PA_WIDTH-12 wide) -> always 0 */
+	out_of_range <= 1'b0;
      end
 
 

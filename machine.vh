@@ -112,6 +112,11 @@
  * carried through the TLB/CAM, so shrinking it saves bits on the critical path. */
 `define SEGBITS 40
 
+/* Page-frame-number width = PA_WIDTH - 12 (4KB page offset). The TLB stores
+ * PFN this wide (so PA = {pfn, va[11:0]} is exactly PA_WIDTH and can never exceed
+ * it -- no translate-time PA-range check needed). 36-bit PA -> 24-bit PFN. */
+`define PFN_WIDTH (`PA_WIDTH - 12)
+
 /* CP0 PRId (processor identification) values. imp field is bits [15:8];
  * the R4000 family shares imp=0x04 and is distinguished by the revision byte. */
 `define PRID_R4000  32'h00000400   /* imp 0x04, rev 0x00 */

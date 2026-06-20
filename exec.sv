@@ -2485,13 +2485,13 @@ module exec(clk,
    logic [7:0]  r_entryhi_asid, n_entryhi_asid;
    logic [1:0]  r_entryhi_r, n_entryhi_r;
    logic [26:0] n_entryhi_vpn2, r_entryhi_vpn2;
-   logic [27:0] n_entrylo0_pfn, r_entrylo0_pfn;
+   logic [`PFN_WIDTH-1:0] n_entrylo0_pfn, r_entrylo0_pfn;
    logic [2:0]  n_entrylo0_c, r_entrylo0_c;
    logic n_entrylo0_d, r_entrylo0_d;
    logic n_entrylo0_v, r_entrylo0_v;
    logic n_entrylo0_g, r_entrylo0_g;
    
-   logic [27:0] n_entrylo1_pfn, r_entrylo1_pfn;
+   logic [`PFN_WIDTH-1:0] n_entrylo1_pfn, r_entrylo1_pfn;
    logic [2:0]  n_entrylo1_c, r_entrylo1_c;
    logic n_entrylo1_d, r_entrylo1_d;
    logic n_entrylo1_v, r_entrylo1_v;
@@ -2716,7 +2716,9 @@ module exec(clk,
 	     n_entrylo0_v = t_srcA[1];
 	     n_entrylo0_d = t_srcA[2];
 	     n_entrylo0_c = t_srcA[5:3];
-	     n_entrylo0_pfn = t_wr_cpr0_64 ? t_srcA[33:6] : {4'd0, t_srcA[29:6]};
+	     /* PFN = PA[PA_WIDTH-1:12] = EntryLo[PFN_WIDTH+5:6]; PA bits beyond
+	      * PA_WIDTH (a 64b write past the 36-bit PA) are dropped (real 36-bit HW). */
+	     n_entrylo0_pfn = t_srcA[(`PFN_WIDTH+5):6];
 	  end
      end
 
@@ -2741,7 +2743,7 @@ module exec(clk,
 	     n_entrylo1_v = t_srcA[1];
 	     n_entrylo1_d = t_srcA[2];
 	     n_entrylo1_c = t_srcA[5:3];
-	     n_entrylo1_pfn = t_wr_cpr0_64 ? t_srcA[33:6] : {4'd0, t_srcA[29:6]};
+	     n_entrylo1_pfn = t_srcA[(`PFN_WIDTH+5):6];
 	  end
      end
 
@@ -3077,12 +3079,12 @@ module exec(clk,
 	case(int_uop.srcA[4:0])
 	  'd2:
 	    begin
-	       t_csr0_64_val = {30'd0, r_entrylo0_pfn, r_entrylo0_c,
+	       t_csr0_64_val = {{(64-`PFN_WIDTH-6){1'b0}}, r_entrylo0_pfn, r_entrylo0_c,
 				 r_entrylo0_d, r_entrylo0_v, r_entrylo0_g};
 	    end
 	  'd3:
 	    begin
-	       t_csr0_64_val = {30'd0, r_entrylo1_pfn, r_entrylo1_c,
+	       t_csr0_64_val = {{(64-`PFN_WIDTH-6){1'b0}}, r_entrylo1_pfn, r_entrylo1_c,
 				 r_entrylo1_d, r_entrylo1_v, r_entrylo1_g};
 	    end
 	  'd10:
