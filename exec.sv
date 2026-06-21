@@ -2542,6 +2542,13 @@ module exec(clk,
    logic       r_sr_sx, n_sr_sx;
    /* 64b kernel */
    logic       r_sr_kx, n_sr_kx;
+   /* coprocessor-0 usable (Status[28]). NOT enforced (no CpU exception modeled),
+    * but stored+reported because the kernel uses CU0 as its from-user/from-kernel
+    * indicator in the exception entry (handle_int "sll k0,3; bltz" extracts CU0:
+    * kernel runs CU0=1, userspace CU0=0). Hardcoding it to 1 made every userspace
+    * interrupt look "from kernel" -> handle_int skipped the kernel-stack switch and
+    * used the user gp(=0) -> ld 32(gp) faulted on 0x20 -> TLB-refill livelock. */
+   logic       r_sr_cu0, n_sr_cu0;
    /* exception vector */
    logic       r_sr_bev, n_sr_bev;
    /* tlb shutdown */
@@ -2840,6 +2847,7 @@ module exec(clk,
 	n_sr_ux = r_sr_ux;
 	n_sr_sx = r_sr_sx;
 	n_sr_kx = r_sr_kx;
+	n_sr_cu0 = r_sr_cu0;
 	n_sr_bev = r_sr_bev;
 	n_sr_ts = r_sr_ts;
 	n_sr_im = r_sr_im;
@@ -2865,6 +2873,7 @@ module exec(clk,
 	     n_sr_ux = t_srcA[5];
 	     n_sr_sx = t_srcA[6];
 	     n_sr_kx = t_srcA[7];
+	     n_sr_cu0 = t_srcA[28];
 	     n_sr_bev = t_srcA[22];
 	     n_sr_ts = t_srcA[21];
 	     n_sr_im = t_srcA[15:8];
@@ -2910,6 +2919,7 @@ module exec(clk,
 	r_sr_ux <= reset ? 'd0 : n_sr_ux;
 	r_sr_sx <= reset ? 'd0 : n_sr_sx;
 	r_sr_kx <= reset ? 'd0 : n_sr_kx;
+	r_sr_cu0 <= reset ? 1'b1 : n_sr_cu0;
 	r_sr_bev <= reset ? 1'b1 : n_sr_bev;
 	r_sr_ts <= reset ? 1'b0 : n_sr_ts;
 	r_sr_im <= reset ? 8'd0 : n_sr_im;
@@ -2958,7 +2968,7 @@ module exec(clk,
 			     1'b0, /* XX */
 			     1'b1, /* cu2 */
 			     1'b1, /* cu1 */
-			     1'b1, /* cu0 */
+			     r_sr_cu0, /* cu0 (stored; kernel's from-user/kernel indicator) */
 			     1'b0, /* reduced power */
 			     1'b0, /* floating-point registers */
 			     1'b0, /* reverse endian */
