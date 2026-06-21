@@ -60,6 +60,13 @@ module tlb(clk,
 
 
    tlb_stored_t r_tlb[47:0];   /* stored type: no `entry` (the array index IS the entry) */
+   /* per-slot "written by TLBWR/TLBWI" bit: a slot is matchable once software has
+    * written it, NOT when (v0|v1).  Using v0|v1 in the match wrongly excluded a
+    * refill-installed both-pages-invalid entry (page-not-present), so the retry
+    * re-refilled forever instead of taking TLB-Invalid -> do_page_fault (the
+    * userspace demand-paging livelock).  reset clears it so unwritten slots never
+    * match; the selected page's v0/v1 still drives `valid` (the Invalid exception). */
+   logic [N-1:0] r_tlb_written;
    integer ri;
 
    wire [NN-1:0]	       w_addr_space_match;
@@ -72,6 +79,7 @@ module tlb(clk,
      begin
 	if(reset)
 	  begin
+	     r_tlb_written <= '0;
 	     for(ri = 0; ri < N; ri = ri + 1)
 	       begin
 		  r_tlb[ri].v0 <= 1'b0;
@@ -80,6 +88,7 @@ module tlb(clk,
 	  end
 	else if(tlb_entry_in_valid)
 	  begin
+	     r_tlb_written[tlb_entry_in.entry] <= 1'b1;
 	     /* copy the stored fields (everything except the entry write-index) */
 	     r_tlb[tlb_entry_in.entry].pagemask <= tlb_entry_in.pagemask;
 	     r_tlb[tlb_entry_in.entry].asid     <= tlb_entry_in.asid;
@@ -122,10 +131,13 @@ module tlb(clk,
 	    * with identical EntryHi storage.  (The old KX-gated low-19 arm aliased the
 	    * kptbl walk -- which runs at KX=0 -- causing the intermittent tlbmiss panic.) */
 	   assign w_hit8k[i] = (r_tlb[i].vpn[26:0] == va[39:13]) & (r_tlb[i].r == va[63:62]);
-	   /* exclude a pair with BOTH pages invalid (v0=v1=0): reset / tlbinit-filler
-	    * entries must never be picked by find_first_set.  The selected page's own
-	    * v0/v1 still drives `valid` (the TLB-Invalid exception) for a matched pair. */
-	   assign w_hits[i] = w_addr_space_match[i] & w_hit8k[i] & (r_tlb[i].v0 | r_tlb[i].v1);
+	   /* Match a slot once it has been WRITTEN by software (TLBWR/TLBWI), not when
+	    * (v0|v1).  An entry whose pages are both invalid (a refill for a not-yet-
+	    * present page) must still match so the access takes TLB-Invalid ->
+	    * do_page_fault; the old (v0|v1) guard excluded it and the refill looped
+	    * forever.  Reset clears r_tlb_written so unwritten slots never match.  The
+	    * selected page's own v0/v1 still drives `valid` (the Invalid exception). */
+	   assign w_hits[i] = w_addr_space_match[i] & w_hit8k[i] & r_tlb_written[i];
 	end
    endgenerate
    
