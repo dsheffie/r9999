@@ -1042,6 +1042,14 @@ module decode_mips(
 			 uop.has_delay_slot = 1'b0;
 			 uop.is_int = 1'b1;
 		      end
+		    else if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd32))
+		      begin
+			 /* WAIT: r9999 has no low-power halt -- treat as NOP so the kernel
+			  * idle loop (r4k_wait) spins with interrupts enabled instead of
+			  * RI-faulting (same approach as CACHE->NOP). */
+			 uop.op = NOP;
+			 uop.is_int = 1'b1;
+		      end
 		    end // if(in_kernel_mode)
 		    else
 		      begin
