@@ -465,7 +465,7 @@ void branch(uint32_t inst, state_t *s) {
   if(isLikely) {
     if(takeBranch) {
       if(saveReturn)
-	s->gpr[31] = sext32((uint32_t)(npc + 4));
+	s->gpr[31] = npc + 4;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
       if(!run_delay_slot<EL>(s))
 	s->pc = (imm+npc);
     }
@@ -477,7 +477,7 @@ void branch(uint32_t inst, state_t *s) {
     bool ds_faulted = run_delay_slot<EL>(s);
     if(takeBranch){
       if(saveReturn) {
-	s->gpr[31] = sext32((uint32_t)(npc + 4));
+	s->gpr[31] = npc + 4;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
       }
       if(!ds_faulted)
 	s->pc = (imm+npc);
@@ -1755,7 +1755,7 @@ void execMips(state_t *s) {
       }
       case 0x09: { /* jalr */
 	state_t::reg_t jaddr = s->gpr[rs];
-	s->gpr[31] = sext32((uint32_t)(s->pc + 8));
+	s->gpr[31] = s->pc + 8;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
 	s->pc += 4;
 	if(!run_delay_slot<EL>(s))
 	  s->pc = jaddr;
@@ -2082,7 +2082,7 @@ void execMips(state_t *s) {
       s->insn_histo[mipsInsn::J]++;
     }
     else if(opcode==0x3) { /* jal */
-      s->gpr[31] = sext32((uint32_t)(s->pc + 8));
+      s->gpr[31] = s->pc + 8;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
       s->pc += 4;
       s->insn_histo[mipsInsn::JAL]++;
     }
