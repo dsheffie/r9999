@@ -1063,7 +1063,7 @@ module core(clk,
 	t_alloc = 1'b0;
 	t_alloc_two = 1'b0;
 	t_possible_to_alloc = 1'b0;
-	n_save_to_tlb_regs = r_save_to_tlb_regs;
+	n_save_to_tlb_regs = 1'b0;
 	n_oldest_first_pending = r_oldest_first_pending;
 	
 	n_in_delay_slot = r_in_delay_slot;

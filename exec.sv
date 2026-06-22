@@ -2837,7 +2837,18 @@ module exec(clk,
 	     n_entryhi_vpn2 = t_srcA[39:13];
 	  end
      end
-   
+
+`ifdef VERILATOR
+   always_comb
+     begin
+	if(save_to_tlb_regs & (r_start_int & t_wr_cpr0 & int_uop.dst == 'd10))
+	  begin
+	     $display("attempting save to tlb regs through a fault and write tlb regs in the same cycle, uop pc %x", int_uop.pc);
+	     $stop();
+	  end
+     end
+`endif
+
    always_comb
      begin
 	n_sr_ie = r_sr_ie;
