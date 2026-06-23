@@ -18,6 +18,7 @@ typedef struct packed {
    logic       valid_dst;
    logic       valid_hilo_dst;
    logic       valid_fp_dst;   /* dst is an FP physical reg (free into the FP free list at retire) */
+   logic       valid_fcr_dst;  /* dst is an FCR (FP cond-code) physical reg; pdst/old_pdst hold the FCR ptr */
    logic       has_delay_slot;
    logic       has_nullifying_delay_slot;
    logic       in_delay_slot;

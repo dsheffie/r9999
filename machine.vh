@@ -71,6 +71,15 @@
 
 `define MUL_LAT 3
 
+/* FP unit: fixed-latency pipelined add/sub/mul/compare (mirrors mipscore fpu.sv).
+ * FP completes on its own ROB port (complete_bundle_2), so no shared wb-bitvec. */
+`define FPU_LAT 4
+`define FP_MAX_LAT `FPU_LAT
+/* renamed FP condition-code (FCR) register file */
+`define LG_FCR_PRF_ENTRIES 2
+/* FP issue queue (in-order, mirrors the int UQ) */
+`define LG_FP_UQ_ENTRIES 3
+
 `define DIV32_LAT (`M_WIDTH+1)
 
 `define MAX_LAT (`DIV32_LAT)

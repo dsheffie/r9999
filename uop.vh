@@ -143,7 +143,27 @@ typedef enum logic [7:0]
    CFC1,  /* move from FP control reg (FCR0=FIR / FCR31=FCSR) -> GPR */
    CTC1,  /* move GPR -> FP control reg (FCR31=FCSR) */
    DMTC1, /* 64-bit GPR -> FPR move (full reg, no sign-ext) */
-   DMFC1  /* 64-bit FPR -> GPR move (full reg) */
+   DMFC1, /* 64-bit FPR -> GPR move (full reg) */
+   /* FP arithmetic (COP1) -- routed to the FP issue queue / fpu unit.
+    * Names match mipscore's fpu.sv (which fpu.sv references). */
+   SP_ADD,
+   DP_ADD,
+   SP_SUB,
+   DP_SUB,
+   SP_MUL,
+   DP_MUL,
+   /* FP compares: write the FCR condition-code bit */
+   SP_CMP_LT,
+   DP_CMP_LT,
+   SP_CMP_EQ,
+   DP_CMP_EQ,
+   SP_CMP_LE,
+   DP_CMP_LE,
+   /* FP branches (read the FCR condition-code bit; run in the int pipe) */
+   BC1T,
+   BC1F,
+   BC1TL,
+   BC1FL
    } opcode_t;
 
 function logic is_mult(opcode_t op);

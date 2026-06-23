@@ -71,7 +71,9 @@ module exec(clk,
 	    uq_push_two,
 	    complete_bundle_1,
 	    complete_valid_1,
-	    mem_req, 
+	    complete_bundle_2,
+	    complete_valid_2,
+	    mem_req,
 	    mem_req_valid, 
 	    mem_req_ack,
 	    core_store_data_valid,
@@ -162,6 +164,8 @@ module exec(clk,
    
    output 	complete_t complete_bundle_1;
    output logic complete_valid_1;
+   output 	complete_t complete_bundle_2;
+   output logic complete_valid_2;
 
 
    output 	mem_req_t mem_req;
@@ -385,8 +389,8 @@ module exec(clk,
 
    always_comb
      begin
-	uq_full = t_uq_full || t_mem_uq_full || t_mem_dq_full;
-	uq_next_full = t_uq_next_full || t_mem_uq_next_full || t_mem_dq_next_full;
+	uq_full = t_uq_full || t_mem_uq_full || t_mem_dq_full || t_fp_uq_full;
+	uq_next_full = t_uq_next_full || t_mem_uq_next_full || t_mem_dq_next_full || t_fp_uq_next_full;
      end
    
    always_ff@(posedge clk)
@@ -769,19 +773,22 @@ module exec(clk,
    logic [`LG_INT_SCHED_ENTRIES:0]  t_alu_sched_select_ptr;
    
 	
-   logic [N_INT_SCHED_ENTRIES-1:0] r_alu_srcA_rdy, 
-				   r_alu_srcB_rdy, 
-				   r_alu_hilo_rdy;
-   
-   logic [N_INT_SCHED_ENTRIES-1:0] t_alu_srcA_match, 
-				   t_alu_srcB_match, 
-				   t_alu_hilo_match;
-   
+   logic [N_INT_SCHED_ENTRIES-1:0] r_alu_srcA_rdy,
+				   r_alu_srcB_rdy,
+				   r_alu_hilo_rdy,
+				   r_alu_fcr_rdy;
+
+   logic [N_INT_SCHED_ENTRIES-1:0] t_alu_srcA_match,
+				   t_alu_srcB_match,
+				   t_alu_hilo_match,
+				   t_alu_fcr_match;
 
 
-   logic t_alu_alloc_srcA_match, 
-	 t_alu_alloc_srcB_match, 
-	 t_alu_alloc_hilo_match;
+
+   logic t_alu_alloc_srcA_match,
+	 t_alu_alloc_srcB_match,
+	 t_alu_alloc_hilo_match,
+	 t_alu_alloc_fcr_match;
    
    wire [N_INT_SCHED_ENTRIES-1:0] w_alu_sched_oldest_ready;
    
@@ -844,7 +851,10 @@ module exec(clk,
 						       (t_div_complete && (t_div_hilo_prf_ptr_out == uq.hilo_src)) ||
 						       (r_start_int && t_wr_hilo && (int_uop.hilo_dst == uq.hilo_src))
 						       );
-	
+	/* FCR source (BC1x): wakes on the fpu compare writing the same FCR phys reg */
+	t_alu_alloc_fcr_match = uq.fcr_src_valid &&
+				(w_fpu_fcr_valid & (w_fpu_fcr_ptr == uq.hilo_src));
+
      end // always_comb
   
 
@@ -905,7 +915,9 @@ module exec(clk,
 									     (t_div_complete && (t_div_hilo_prf_ptr_out == r_alu_sched_uops[i].hilo_src)) ||
 									     (r_start_int && t_wr_hilo && (int_uop.hilo_dst == r_alu_sched_uops[i].hilo_src))
 									     );
-		
+		t_alu_fcr_match[i] = r_alu_sched_uops[i].fcr_src_valid &&
+				     (w_fpu_fcr_valid & (w_fpu_fcr_ptr == r_alu_sched_uops[i].hilo_src));
+	
 
 		//is_mult(r_alu_sched_uops[i].op);
 		
@@ -915,6 +927,7 @@ module exec(clk,
 					(t_alu_srcA_match[i] |r_alu_srcA_rdy[i]) &
 					(t_alu_srcB_match[i] |r_alu_srcB_rdy[i]) &
 					(t_alu_hilo_match[i] |r_alu_hilo_rdy[i]) &
+					(t_alu_fcr_match[i] |r_alu_fcr_rdy[i]) &
 					(!r_alu_sched_uops[i].oldest_first ||
 					 (head_of_rob_ptr_valid &&
 					  (r_alu_sched_uops[i].rob_ptr == head_of_rob_ptr))) ) : 1'b0;
@@ -927,6 +940,7 @@ module exec(clk,
 		     r_alu_srcA_rdy[i] <= 1'b0;
 		     r_alu_srcB_rdy[i] <= 1'b0;
 		     r_alu_hilo_rdy[i] <= 1'b0;
+		     r_alu_fcr_rdy[i] <= 1'b0;
 		  end
 		else
 		  begin
@@ -935,18 +949,21 @@ module exec(clk,
 			  r_alu_srcA_rdy[i] <= uq.srcA_valid ? (!r_prf_inflight[uq.srcA] | t_alu_alloc_srcA_match) : 1'b1;
 			  r_alu_srcB_rdy[i] <= uq.srcB_valid ? (!r_prf_inflight[uq.srcB] | t_alu_alloc_srcB_match) : 1'b1;
 			  r_alu_hilo_rdy[i] <= uq.hilo_src_valid ? (!r_hilo_inflight[uq.hilo_src] | t_alu_alloc_hilo_match) : 1'b1;
+			  r_alu_fcr_rdy[i] <= uq.fcr_src_valid ? (!r_fcr_prf_inflight[uq.hilo_src] | t_alu_alloc_fcr_match) : 1'b1;
 		       end
 		     else if(t_alu_select_entry[i])
 		       begin
 			  r_alu_srcA_rdy[i] <= 1'b0;
 			  r_alu_srcB_rdy[i] <= 1'b0;
 			  r_alu_hilo_rdy[i] <= 1'b0;
+			  r_alu_fcr_rdy[i] <= 1'b0;
 		       end
 		     else if(r_alu_sched_valid[i])
 		       begin
 			  r_alu_srcA_rdy[i] <= r_alu_srcA_rdy[i] | t_alu_srcA_match[i];
 			  r_alu_srcB_rdy[i] <= r_alu_srcB_rdy[i] | t_alu_srcB_match[i];
 			  r_alu_hilo_rdy[i] <= r_alu_hilo_rdy[i] | t_alu_hilo_match[i];
+			  r_alu_fcr_rdy[i] <= r_alu_fcr_rdy[i] | t_alu_fcr_match[i];
 		       end // else: !if(t_pop_uq&&(t_alu_sched_alloc_ptr == i))
 		     
 		  end // else: !if(reset)
@@ -1175,6 +1192,9 @@ module exec(clk,
 	r_fp_rd_dq   <= r_fp_prf[t_mem_dq.src_ptr];
 	if(mem_rsp_dst_valid & mem_rsp_fp_dst)
 	  r_fp_prf[mem_rsp_dst_ptr] <= mem_rsp_load_data;
+	/* FP arithmetic result (fpu) -- distinct phys reg from the mem-pipe write above */
+	if(w_fpu_result_valid)
+	  r_fp_prf[w_fpu_dst_ptr] <= w_fpu_result;
      end
 
    
@@ -1205,12 +1225,192 @@ module exec(clk,
 	     else
 	       n_prf_inflight[mem_rsp_dst_ptr] = 1'b0;
 	  end
+	/* FP arithmetic result clears the FP-dst inflight bit */
+	if(w_fpu_result_valid)
+	  n_fp_prf_inflight[w_fpu_dst_ptr] = 1'b0;
 	if(r_start_int && t_wr_int_prf)
 	  begin
 	     n_prf_inflight[int_uop.dst] = 1'b0;
 	  end
      end // always_comb
-   
+
+   // =================================================================
+   // FP execution pipe (mirrors mipscore: in-order FP UQ -> fpu -> port 2)
+   // =================================================================
+   localparam N_FP_UQ_ENTRIES   = (1<<`LG_FP_UQ_ENTRIES);
+   localparam N_FCR_PRF_ENTRIES = (1<<`LG_FCR_PRF_ENTRIES);
+
+   /* FP issue queue: a normal circular queue, issued strictly in-order (no
+    * scheduler) -- exactly like mipscore.  Sources wake on r_fp_prf_inflight /
+    * r_fcr_prf_inflight; the fpu is fixed-latency so FP completes 1/cycle on its
+    * own ROB port (complete_bundle_2) with no shared writeback-bitvec. */
+   uop_t r_fp_uq[N_FP_UQ_ENTRIES];
+   uop_t fp_uq;
+   logic t_fp_uq_empty, t_fp_uq_full, t_fp_uq_next_full;
+   logic [`LG_FP_UQ_ENTRIES:0] r_fp_uq_head_ptr, n_fp_uq_head_ptr;
+   logic [`LG_FP_UQ_ENTRIES:0] r_fp_uq_tail_ptr, n_fp_uq_tail_ptr;
+   logic [`LG_FP_UQ_ENTRIES:0] r_fp_uq_next_tail_ptr, n_fp_uq_next_tail_ptr;
+   logic t_push_one_fp, t_push_two_fp, t_pop_fp_uq;
+
+   /* renamed FCR (FP condition-code byte) physical register file */
+   logic [7:0] r_fcr_prf[N_FCR_PRF_ENTRIES-1:0];
+   logic [N_FCR_PRF_ENTRIES-1:0] r_fcr_prf_inflight, n_fcr_prf_inflight;
+
+   /* fpu outputs */
+   wire [63:0] w_fpu_result;
+   wire        w_fpu_result_valid, w_fpu_fcr_valid;
+   wire [`LG_PRF_ENTRIES-1:0]     w_fpu_dst_ptr;
+   wire [`LG_FCR_PRF_ENTRIES-1:0] w_fpu_fcr_ptr;
+   wire [`LG_ROB_ENTRIES-1:0]     w_fpu_rob_ptr;
+
+   logic t_fpu_srcA_rdy, t_fpu_srcB_rdy, t_fpu_fcr_rdy, t_fpu_srcs_rdy, t_start_fpu;
+   wire [`M_WIDTH-1:0] w_fp_srcA = r_fp_prf[fp_uq.srcA];
+   wire [`M_WIDTH-1:0] w_fp_srcB = r_fp_prf[fp_uq.srcB];
+   wire [`M_WIDTH-1:0] w_fp_srcC = r_fp_prf[fp_uq.srcC];
+
+   // ---- FP UQ pointers / full-empty / push-pop bookkeeping ----
+   always_comb
+     begin
+	n_fp_uq_head_ptr = r_fp_uq_head_ptr;
+	n_fp_uq_tail_ptr = r_fp_uq_tail_ptr;
+	n_fp_uq_next_tail_ptr = r_fp_uq_next_tail_ptr;
+	t_fp_uq_empty = (r_fp_uq_head_ptr == r_fp_uq_tail_ptr);
+	t_fp_uq_full = (r_fp_uq_head_ptr != r_fp_uq_tail_ptr) &&
+		       (r_fp_uq_head_ptr[`LG_FP_UQ_ENTRIES-1:0] == r_fp_uq_tail_ptr[`LG_FP_UQ_ENTRIES-1:0]);
+	t_fp_uq_next_full = (r_fp_uq_head_ptr != r_fp_uq_next_tail_ptr) &&
+			    (r_fp_uq_head_ptr[`LG_FP_UQ_ENTRIES-1:0] == r_fp_uq_next_tail_ptr[`LG_FP_UQ_ENTRIES-1:0]);
+	fp_uq = r_fp_uq[r_fp_uq_head_ptr[`LG_FP_UQ_ENTRIES-1:0]];
+
+	t_push_two_fp = uq_push && uq_push_two && uq_uop.is_fp && uq_uop_two.is_fp;
+	t_push_one_fp = ((uq_push && uq_uop.is_fp) || (uq_push_two && uq_uop_two.is_fp)) && !t_push_two_fp;
+
+	if(t_push_two_fp)
+	  begin
+	     n_fp_uq_tail_ptr = r_fp_uq_tail_ptr + 'd2;
+	     n_fp_uq_next_tail_ptr = r_fp_uq_next_tail_ptr + 'd2;
+	  end
+	else if((uq_push_two && uq_uop_two.is_fp) || (uq_push && uq_uop.is_fp))
+	  begin
+	     n_fp_uq_tail_ptr = r_fp_uq_tail_ptr + 'd1;
+	     n_fp_uq_next_tail_ptr = r_fp_uq_next_tail_ptr + 'd1;
+	  end
+	if(t_pop_fp_uq)
+	  n_fp_uq_head_ptr = r_fp_uq_head_ptr + 'd1;
+     end
+
+   always_ff@(posedge clk)
+     begin
+	if(reset || t_flash_clear)
+	  begin
+	     r_fp_uq_head_ptr <= 'd0;
+	     r_fp_uq_tail_ptr <= 'd0;
+	     r_fp_uq_next_tail_ptr <= 'd1;
+	  end
+	else
+	  begin
+	     r_fp_uq_head_ptr <= n_fp_uq_head_ptr;
+	     r_fp_uq_tail_ptr <= n_fp_uq_tail_ptr;
+	     r_fp_uq_next_tail_ptr <= n_fp_uq_next_tail_ptr;
+	  end
+     end
+   always_ff@(posedge clk)
+     begin
+	if(t_push_two_fp)
+	  begin
+	     r_fp_uq[r_fp_uq_tail_ptr[`LG_FP_UQ_ENTRIES-1:0]] <= uq_uop;
+	     r_fp_uq[r_fp_uq_next_tail_ptr[`LG_FP_UQ_ENTRIES-1:0]] <= uq_uop_two;
+	  end
+	else if(t_push_one_fp)
+	  r_fp_uq[r_fp_uq_tail_ptr[`LG_FP_UQ_ENTRIES-1:0]] <= uq_uop.is_fp ? uq_uop : uq_uop_two;
+     end
+
+   // ---- in-order issue: wake on source inflight bits, pop when ready ----
+   always_comb
+     begin
+	t_fpu_srcA_rdy = fp_uq.fp_srcA_valid ? !r_fp_prf_inflight[fp_uq.srcA] : 1'b1;
+	t_fpu_srcB_rdy = fp_uq.fp_srcB_valid ? !r_fp_prf_inflight[fp_uq.srcB] : 1'b1;
+	t_fpu_fcr_rdy  = fp_uq.fcr_src_valid ? !r_fcr_prf_inflight[fp_uq.hilo_src] : 1'b1;
+	t_fpu_srcs_rdy = t_fpu_srcA_rdy && t_fpu_srcB_rdy && t_fpu_fcr_rdy;
+	t_pop_fp_uq = !t_fp_uq_empty && !t_flash_clear && t_fpu_srcs_rdy;
+	t_start_fpu = t_pop_fp_uq;
+     end
+
+   fpu #(.LG_PRF_WIDTH(`LG_PRF_ENTRIES),
+	 .LG_ROB_WIDTH(`LG_ROB_ENTRIES),
+	 .LG_FCR_WIDTH(`LG_FCR_PRF_ENTRIES),
+	 .FPU_LAT(`FPU_LAT))
+   fpu0(
+	.clk(clk),
+	.reset(reset),
+	.pc(fp_uq.pc),
+	.opcode(fp_uq.op),
+	.start(t_start_fpu),
+	.src_a(w_fp_srcA),
+	.src_b(w_fp_srcB),
+	.src_c(w_fp_srcC),
+	.src_fcr(r_fcr_prf[fp_uq.hilo_src]),
+	.rob_ptr_in(fp_uq.rob_ptr),
+	.dst_ptr_in(fp_uq.dst),
+	.fcr_ptr_in(fp_uq.hilo_dst),
+	.fcr_sel(fp_uq.imm[2:0]),
+	.val(w_fpu_result_valid),
+	.cmp_val(w_fpu_fcr_valid),
+	.y(w_fpu_result),
+	.rob_ptr_out(w_fpu_rob_ptr),
+	.dst_ptr_out(w_fpu_dst_ptr),
+	.fcr_ptr_out(w_fpu_fcr_ptr)
+	);
+
+   // ---- FCR PRF: inflight tracking + write ----
+   always_comb
+     begin
+	n_fcr_prf_inflight = r_fcr_prf_inflight;
+	if(uq_push && uq_uop.fcr_dst_valid)
+	  n_fcr_prf_inflight[uq_uop.hilo_dst] = 1'b1;
+	if(uq_push_two && uq_uop_two.fcr_dst_valid)
+	  n_fcr_prf_inflight[uq_uop_two.hilo_dst] = 1'b1;
+	if(w_fpu_fcr_valid)
+	  n_fcr_prf_inflight[w_fpu_fcr_ptr] = 1'b0;
+     end
+   always_ff@(posedge clk)
+     begin
+	if(reset || t_flash_clear)
+	  r_fcr_prf_inflight <= 'd0;
+	else
+	  r_fcr_prf_inflight <= ds_done ? 'd0 : n_fcr_prf_inflight;
+     end
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     for(integer i = 0; i < N_FCR_PRF_ENTRIES; i = i + 1)
+	       r_fcr_prf[i] <= 8'd0;
+	  end
+	else if(w_fpu_fcr_valid)
+	  r_fcr_prf[w_fpu_fcr_ptr] <= w_fpu_result[7:0];
+     end
+
+   // ---- FP completion -> ROB port 2 ----
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  complete_valid_2 <= 1'b0;
+	else
+	  complete_valid_2 <= (w_fpu_result_valid || w_fpu_fcr_valid) & !ds_done;
+     end
+   always_ff@(posedge clk)
+     begin
+	complete_bundle_2.rob_ptr <= w_fpu_rob_ptr;
+	complete_bundle_2.complete <= 1'b1;
+	complete_bundle_2.faulted <= 1'b0;
+	complete_bundle_2.restart_pc <= 'd0;
+	complete_bundle_2.is_ii <= 1'b0;
+	complete_bundle_2.take_br <= 1'b0;
+	complete_bundle_2.overflow <= 1'b0;
+	complete_bundle_2.trap <= 1'b0;
+	complete_bundle_2.data <= w_fpu_result;
+     end
+
    always_comb
      begin
 	n_hilo_inflight = r_hilo_inflight;
@@ -1669,6 +1869,34 @@ module exec(clk,
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
 	       t_alu_valid = 1'b1;
 	    end // case: BNE
+	  BC1T:
+	    begin
+	       t_take_br = r_fcr_prf[int_uop.hilo_src][int_uop.srcC[2:0]];
+	       t_mispred_br = int_uop.br_pred != t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_alu_valid = 1'b1;
+	    end
+	  BC1F:
+	    begin
+	       t_take_br = ~r_fcr_prf[int_uop.hilo_src][int_uop.srcC[2:0]];
+	       t_mispred_br = int_uop.br_pred != t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_alu_valid = 1'b1;
+	    end
+	  BC1TL:
+	    begin
+	       t_take_br = r_fcr_prf[int_uop.hilo_src][int_uop.srcC[2:0]];
+	       t_mispred_br = int_uop.br_pred != t_take_br || !t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_alu_valid = 1'b1;
+	    end
+	  BC1FL:
+	    begin
+	       t_take_br = ~r_fcr_prf[int_uop.hilo_src][int_uop.srcC[2:0]];
+	       t_mispred_br = int_uop.br_pred != t_take_br || !t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_alu_valid = 1'b1;
+	    end
 	  BGEZ:
 	    begin
 	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);

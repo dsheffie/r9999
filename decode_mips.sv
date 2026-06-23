@@ -1118,6 +1118,66 @@ module decode_mips(
 			      uop.is_mem = 1'b1;
 			   end
 		      end
+		    else if(insn[25:21]==5'd8)
+		      begin /* BC1x: branch on FP condition code (read FCR) */
+			 uop.fcr_src_valid = 1'b1;
+			 uop.has_delay_slot = 1'b1;
+			 uop.imm = insn[15:0];
+			 uop.br_pred = insn_pred;
+			 uop.is_br = 1'b1;
+			 uop.is_int = 1'b1;
+			 /* cc index (which condition-code bit) rides srcC, NOT renamed */
+			 uop.srcC = {{(`LG_PRF_ENTRIES-3){1'b0}}, insn[20:18]};
+			 case(insn[17:16])
+			   2'b00: uop.op = BC1F;
+			   2'b01: uop.op = BC1T;
+			   2'b10:
+			     begin
+				uop.op = BC1FL;
+				uop.has_nullifying_delay_slot = 1'b1;
+			     end
+			   2'b11:
+			     begin
+				uop.op = BC1TL;
+				uop.has_nullifying_delay_slot = 1'b1;
+			     end
+			 endcase
+		      end
+		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
+			    (insn[5:0]==6'd0 || insn[5:0]==6'd1 || insn[5:0]==6'd2))
+		      begin /* ADD/SUB/MUL.[sd]: fmt 16=single,17=double; func 0=add,1=sub,2=mul */
+			 uop.srcA = fs;
+			 uop.fp_srcA_valid = 1'b1;
+			 uop.srcB = ft;
+			 uop.fp_srcB_valid = 1'b1;
+			 uop.dst = fd;
+			 uop.fp_dst_valid = 1'b1;
+			 uop.is_fp = 1'b1;
+			 if(insn[25:21]==5'd16) /* single */
+			   uop.op = (insn[5:0]==6'd0) ? SP_ADD :
+				    (insn[5:0]==6'd1) ? SP_SUB : SP_MUL;
+			 else /* double */
+			   uop.op = (insn[5:0]==6'd0) ? DP_ADD :
+				    (insn[5:0]==6'd1) ? DP_SUB : DP_MUL;
+		      end
+		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
+			    (insn[5:0]==6'd50 || insn[5:0]==6'd60 || insn[5:0]==6'd62))
+		      begin /* C.EQ/C.LT/C.LE.[sd]: write the FCR cond-code bit insn[10:8] */
+			 uop.srcA = fs;
+			 uop.fp_srcA_valid = 1'b1;
+			 uop.srcB = ft;
+			 uop.fp_srcB_valid = 1'b1;
+			 uop.fcr_dst_valid = 1'b1; /* alloc a new FCR phys reg */
+			 uop.fcr_src_valid = 1'b1; /* read old FCR to keep other CC bits */
+			 uop.is_fp = 1'b1;
+			 uop.imm = {13'd0, insn[10:8]}; /* cc index -> fcr_sel */
+			 if(insn[25:21]==5'd16) /* single */
+			   uop.op = (insn[5:0]==6'd50) ? SP_CMP_EQ :
+				    (insn[5:0]==6'd60) ? SP_CMP_LT : SP_CMP_LE;
+			 else /* double */
+			   uop.op = (insn[5:0]==6'd50) ? DP_CMP_EQ :
+				    (insn[5:0]==6'd60) ? DP_CMP_LT : DP_CMP_LE;
+		      end
 		 end // case: 6'd17
 	       6'd20: /* BEQL */
 		 begin
