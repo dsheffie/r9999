@@ -9,6 +9,16 @@
     .set mips3
     .set noreorder
     .set noat
+
+    /* magic-halt: -c 0 (no-checker) runs stop on a write to kseg1 0xBFD00000 */
+    .macro  HALT
+    li      $k0, 0xBFD00000
+    li      $k1, 1
+    sw      $k1, 0($k0)
+1:  b       1b
+    nop
+    .endm
+
     .text
     .globl main
     .type main,@function
@@ -69,9 +79,9 @@ cc_ok:
 pass:
     ori   $25, $0, 0x50       /* 'P' */
     mtc0  $25, $7
-    break
+    HALT
 fail:
     ori   $25, $0, 0x46       /* 'F' */
     mtc0  $25, $7
-    break
+    HALT
     .size main,.-main

@@ -1,3 +1,4 @@
+`include "uop.vh"
 `include "fp_compare.vh"
 
 module fpu(clk,
@@ -9,6 +10,7 @@ module fpu(clk,
 	   src_b,
 	   src_c,
 	   src_fcr,
+	   rm,
 	   rob_ptr_in,
 	   dst_ptr_in,
 	   fcr_ptr_in,
@@ -36,7 +38,8 @@ module fpu(clk,
    input logic [63:0] src_b;
    input logic [63:0] src_c;
    input logic [7:0]  src_fcr;
-   
+   input logic [1:0]  rm;          // FCSR.RM (0=RN 1=RZ 2=RP 3=RM)
+
    input logic [LG_ROB_WIDTH-1:0] rob_ptr_in;
    input logic [LG_PRF_WIDTH-1:0] dst_ptr_in;
    input logic [LG_FCR_WIDTH-1:0] fcr_ptr_in;
@@ -138,43 +141,45 @@ module fpu(clk,
 	  .y(w_dp_cmp));
 
    
-   function logic [63:0] handle_fcr(logic b, logic [2:0] sel, logic [7:0] fcr_reg);
-      logic [63:0] 		   y;
+   /* fcr_in / t_hf are deliberately NOT named fcr_reg / y: a function-local that
+    * shadows a module-level signal trips sv2v's Scoper (henry SoC sv2v flow). */
+   function logic [63:0] handle_fcr(logic b, logic [2:0] sel, logic [7:0] fcr_in);
+      logic [63:0] 		   t_hf;
       case(sel)
 	3'd0:
 	  begin
-	     y = {56'd0, fcr_reg[7:1], b};
+	     t_hf = {56'd0, fcr_in[7:1], b};
 	  end
 	3'd1:
 	  begin
-	     y = {56'd0, fcr_reg[7:2], b, fcr_reg[0]};
+	     t_hf = {56'd0, fcr_in[7:2], b, fcr_in[0]};
 	  end
 	3'd2:
 	  begin
-	     y = {56'd0, fcr_reg[7:3], b, fcr_reg[1:0]};
+	     t_hf = {56'd0, fcr_in[7:3], b, fcr_in[1:0]};
 	  end
 	3'd3:
 	  begin
-	     y = {56'd0, fcr_reg[7:4], b, fcr_reg[2:0]};
+	     t_hf = {56'd0, fcr_in[7:4], b, fcr_in[2:0]};
 	  end
 	3'd4:
 	  begin
-	     y = {56'd0, fcr_reg[7:5], b, fcr_reg[3:0]};		      
+	     t_hf = {56'd0, fcr_in[7:5], b, fcr_in[3:0]};
 	  end
 	3'd5:
 	  begin
-	     y = {56'd0, fcr_reg[7:6], b, fcr_reg[4:0]};		     
+	     t_hf = {56'd0, fcr_in[7:6], b, fcr_in[4:0]};
 	  end
 	3'd6:
 	  begin
-	     y = {56'd0, fcr_reg[7], b, fcr_reg[5:0]};		      
+	     t_hf = {56'd0, fcr_in[7], b, fcr_in[5:0]};
 	  end
 	3'd7:
 	  begin
-	     y = {56'd0, b, fcr_reg[6:0]};		      
+	     t_hf = {56'd0, b, fcr_in[6:0]};
 	  end
       endcase // case (sel)
-      return y;
+      return t_hf;
    endfunction // handle_fcr
    
    always_comb
@@ -288,7 +293,7 @@ module fpu(clk,
    /* one unified single/double adder: fmt selects format, sub selects subtract.
     * Single operands ride the low 32 bits of src_a/src_b (MIPS layout); the unit
     * extracts/packs per fmt and rounds once at the target precision.
-    * TODO: FCSR.RM is not yet plumbed to the fpu -- round-to-nearest (rm=0). */
+    * Rounding mode comes from FCSR.RM (the rm port). */
    wire w_add_is_double = (opcode == DP_ADD) || (opcode == DP_SUB);
    wire w_add_is_sub    = (opcode == SP_SUB) || (opcode == DP_SUB);
    wire w_add_en        = (opcode == SP_ADD) || (opcode == SP_SUB) ||
@@ -299,7 +304,7 @@ module fpu(clk,
 	 .a(src_a),
 	 .b(src_b),
 	 .en(w_add_en),
-	 .rm(2'b00),
+	 .rm(rm),
 	 .fmt(w_add_is_double),
 	 .y(t_adder_result),
 	 .denorm(),
@@ -307,7 +312,7 @@ module fpu(clk,
 	 );
    
    /* one unified single/double multiplier: fmt selects format.
-    * TODO: FCSR.RM not yet plumbed to the fpu -- round-to-nearest (rm=0). */
+    * Rounding mode comes from FCSR.RM (the rm port). */
    wire w_mul_is_double = (opcode == DP_MUL);
    wire w_mul_en        = (opcode == SP_MUL) || (opcode == DP_MUL);
    fpu_mul #(.MUL_LAT(FPU_LAT))
@@ -315,7 +320,7 @@ module fpu(clk,
 	 .a(src_a),
 	 .b(src_b),
 	 .en(w_mul_en),
-	 .rm(2'b00),
+	 .rm(rm),
 	 .fmt(w_mul_is_double),
 	 .y(t_mult_result),
 	 .denorm(),

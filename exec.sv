@@ -1349,6 +1349,7 @@ module exec(clk,
 	.src_b(w_fp_srcB),
 	.src_c(w_fp_srcC),
 	.src_fcr(r_fcr_prf[fp_uq.hilo_src]),
+	.rm(r_fcsr[1:0]),   /* FCSR.RM; CTC1 serializes so this is stable per FP op */
 	.rob_ptr_in(fp_uq.rob_ptr),
 	.dst_ptr_in(fp_uq.dst),
 	.fcr_ptr_in(fp_uq.hilo_dst),

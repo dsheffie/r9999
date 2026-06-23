@@ -235,6 +235,11 @@ run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp
 	      | grep -iE "does not match|FAIL" ) || echo "  ok (no divergence)"; \
 	done
 
+# FCSR.RM directed-rounding test: self-check only (the checker ignores FCSR.RM).
+run-fpu-rm: fpu/fp_round.elf
+	@echo "== fpu/fp_round (FCSR.RM self-check; expect 'P') =="
+	cd .. && $(SIM) --file tests/fpu/fp_round.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
+
 # -----------------------------------------------------------------------
 # Generic disassembly rule
 # -----------------------------------------------------------------------
