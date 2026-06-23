@@ -20,6 +20,7 @@ main:
 
     add.d $f4, $f0, $f2       /* 3.0 */
     sub.d $f6, $f2, $f0       /* 1.0 */
+    mul.d $f8, $f2, $f2       /* 4.0 */
     nop
     nop
     nop
@@ -27,6 +28,7 @@ main:
 
     sdc1  $f4, 16($14)        /* store 3.0 */
     sdc1  $f6, 24($14)        /* store 1.0 */
+    sdc1  $f8, 32($14)        /* store 4.0 */
     nop
     nop
 
@@ -34,6 +36,8 @@ main:
     lw    $9,  20($14)        /* lo(3.0) = 0x00000000 */
     lw    $10, 24($14)        /* hi(1.0) = 0x3ff00000 */
     lw    $11, 28($14)        /* lo(1.0) = 0x00000000 */
+    lw    $18, 32($14)        /* hi(4.0) = 0x40100000 */
+    lw    $19, 36($14)        /* lo(4.0) = 0x00000000 */
     nop
 
     lui   $13, 0x4008
@@ -45,6 +49,11 @@ main:
     bne   $10, $13, fail
     nop
     bne   $11, $0, fail
+    nop
+    lui   $13, 0x4010
+    bne   $18, $13, fail
+    nop
+    bne   $19, $0, fail
     nop
 
     /* C.LE.D: 1.0 <= 2.0 -> cc0=1 -> BC1T taken */

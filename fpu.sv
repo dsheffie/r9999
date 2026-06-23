@@ -50,11 +50,11 @@ module fpu(clk,
    output logic [LG_PRF_WIDTH-1:0] dst_ptr_out;
    output logic [LG_FCR_WIDTH-1:0] fcr_ptr_out;
    
-   /* one unified single/double adder (fpu_add): y is already format-correct
-    * (single result zero-extended into the low 32 bits), so no SP/DP split. */
+   /* one unified single/double adder + multiplier (fpu_add / fpu_mul): y is
+    * already format-correct (single result zero-extended into the low 32 bits),
+    * so no SP/DP split. */
    logic [63:0] 		   t_adder_result;
-   logic [31:0] 		   t_sp_mult_result;
-   logic [63:0] 		   t_dp_mult_result;
+   logic [63:0] 		   t_mult_result;
       
    logic [FPU_LAT-1:0] 		   r_val;
    logic [LG_PRF_WIDTH-1:0] 	   r_ptr [FPU_LAT-1:0];
@@ -205,13 +205,13 @@ module fpu(clk,
 	    end
 	  SP_MUL:
 	    begin
-	       y = {32'd0, t_sp_mult_result};
+	       y = t_mult_result;
 	       val = r_val[0];
 	    end
 	  DP_MUL:
 	    begin
-	       y = t_dp_mult_result;
-	       val = r_val[0];	       
+	       y = t_mult_result;
+	       val = r_val[0];
 	    end
 	  SP_CMP_LT:
 	    begin
@@ -306,21 +306,21 @@ module fpu(clk,
 	 .fflags()
 	 );
    
-   fp_mul #(.W(32), .MUL_LAT(FPU_LAT)) 
-   sm (.clk(clk),
-       .a(src_a[31:0]),
-       .b(src_b[31:0]),
-       .en(opcode == SP_MUL),
-       .y(t_sp_mult_result)
-       );
-   
-   fp_mul #(.W(64), .MUL_LAT(FPU_LAT)) 
-   dm (.clk(clk),
-       .a(src_a[63:0]),
-       .b(src_b[63:0]),
-       .en(opcode == DP_MUL),
-       .y(t_dp_mult_result)
-       );
+   /* one unified single/double multiplier: fmt selects format.
+    * TODO: FCSR.RM not yet plumbed to the fpu -- round-to-nearest (rm=0). */
+   wire w_mul_is_double = (opcode == DP_MUL);
+   wire w_mul_en        = (opcode == SP_MUL) || (opcode == DP_MUL);
+   fpu_mul #(.MUL_LAT(FPU_LAT))
+   smul (.clk(clk),
+	 .a(src_a),
+	 .b(src_b),
+	 .en(w_mul_en),
+	 .rm(2'b00),
+	 .fmt(w_mul_is_double),
+	 .y(t_mult_result),
+	 .denorm(),
+	 .fflags()
+	 );
 
    
 endmodule // fpu
