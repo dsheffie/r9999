@@ -1657,9 +1657,19 @@ endfunction
 	t_mh_block = r_got_req && r_last_wr && 
 		     (r_cache_idx == t_mem_head.addr[IDX_STOP-1:IDX_START] );
 	
-	t_cm_block = r_got_req && r_last_wr && 
-		     (r_cache_idx == core_mem_req.addr[IDX_STOP-1:IDX_START]) &&
-		     (r_cache_tag == core_mem_req.addr[`PA_WIDTH-1:IDX_STOP]);
+	/* store->load forward match is INDEX-ONLY (matches rv64core nu_l1d). The
+	 * incoming load's PHYSICAL tag is not available here: the dtlb pa output is
+	 * registered (tlb.sv), so w_mapped_addr/w_tlb_tag2 still hold the PREVIOUS
+	 * request's translation this cycle -- any tag compare here is wrong. The old
+	 * code compared core_mem_req.addr's high bits (the untranslated VA tag), which
+	 * for a MAPPED access (VA != PA) wrongly fails -> no forward -> the load reads
+	 * stale array data -> every mapped store->load round-trip silently corrupted
+	 * (unmapped kseg0 has w_mapped_addr==va so it happened to match -> kernel boots).
+	 * The index is within the page offset (VA index == PA index); the physical tag
+	 * is enforced one cycle later by the hit-test (r_tag_out2 == w_tlb_tag2), which
+	 * gates whether the forwarded data is actually used. */
+	t_cm_block = r_got_req && r_last_wr &&
+		     (r_cache_idx == core_mem_req.addr[IDX_STOP-1:IDX_START]);
 
 
 	t_cm_block_stall = t_cm_block && !(r_did_reload||r_is_retry);//1'b0;
