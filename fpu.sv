@@ -50,8 +50,9 @@ module fpu(clk,
    output logic [LG_PRF_WIDTH-1:0] dst_ptr_out;
    output logic [LG_FCR_WIDTH-1:0] fcr_ptr_out;
    
-   logic [31:0] 		   t_sp_adder_result;
-   logic [63:0] 		   t_dp_adder_result;
+   /* one unified single/double adder (fpu_add): y is already format-correct
+    * (single result zero-extended into the low 32 bits), so no SP/DP split. */
+   logic [63:0] 		   t_adder_result;
    logic [31:0] 		   t_sp_mult_result;
    logic [63:0] 		   t_dp_mult_result;
       
@@ -184,22 +185,22 @@ module fpu(clk,
 	case(r_opcode[0])
 	  SP_ADD:
 	    begin
-	       y = {32'd0, t_sp_adder_result};
+	       y = t_adder_result;
 	       val = r_val[0];
 	    end
 	  SP_SUB:
 	    begin
-	       y = {32'd0, t_sp_adder_result};
+	       y = t_adder_result;
 	       val = r_val[0];
 	    end
 	  DP_ADD:
 	    begin
-	       y = t_dp_adder_result;
+	       y = t_adder_result;
 	       val = r_val[0];
 	    end
 	  DP_SUB:
 	    begin
-	       y = t_dp_adder_result;
+	       y = t_adder_result;
 	       val = r_val[0];
 	    end
 	  SP_MUL:
@@ -284,23 +285,26 @@ module fpu(clk,
 	  end
      end // always_ff@ (posedge clk)
 
-   fp_add #(.W(32), .ADD_LAT(FPU_LAT)) 
-   sa (.clk(clk),
-       .sub(opcode == SP_SUB),
-       .a(src_a[31:0]),
-       .b(src_b[31:0]),
-       .en(opcode == SP_ADD || opcode == SP_SUB),
-       .y(t_sp_adder_result)
-       );
-   
-   fp_add #(.W(64), .ADD_LAT(FPU_LAT)) 
-   sd (.clk(clk),
-       .sub(opcode == DP_SUB),
-       .a(src_a),
-       .b(src_b),
-       .en(opcode == DP_ADD || opcode == DP_SUB),
-       .y(t_dp_adder_result)
-       );
+   /* one unified single/double adder: fmt selects format, sub selects subtract.
+    * Single operands ride the low 32 bits of src_a/src_b (MIPS layout); the unit
+    * extracts/packs per fmt and rounds once at the target precision.
+    * TODO: FCSR.RM is not yet plumbed to the fpu -- round-to-nearest (rm=0). */
+   wire w_add_is_double = (opcode == DP_ADD) || (opcode == DP_SUB);
+   wire w_add_is_sub    = (opcode == SP_SUB) || (opcode == DP_SUB);
+   wire w_add_en        = (opcode == SP_ADD) || (opcode == SP_SUB) ||
+			  (opcode == DP_ADD) || (opcode == DP_SUB);
+   fpu_add #(.ADD_LAT(FPU_LAT))
+   sadd (.clk(clk),
+	 .sub(w_add_is_sub),
+	 .a(src_a),
+	 .b(src_b),
+	 .en(w_add_en),
+	 .rm(2'b00),
+	 .fmt(w_add_is_double),
+	 .y(t_adder_result),
+	 .denorm(),
+	 .fflags()
+	 );
    
    fp_mul #(.W(32), .MUL_LAT(FPU_LAT)) 
    sm (.clk(clk),
