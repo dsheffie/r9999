@@ -1338,32 +1338,17 @@ static void fpCmp(uint32_t inst, state_t *s) {
   T Tft = *((T*)(s->cpr1+ft));
   uint32_t v = 0;
 
-  switch(cond)
-    {
-    case COND_UN:
-      v = (Tfs == Tft);
-      s->fcr1[CP1_CR25] = setBit(s->fcr1[CP1_CR25],v,cc);
-      break;
-    case COND_EQ:
-      v = (Tfs == Tft);
-      s->insn_histo[select_fp_insn<T>(mipsInsn::DP_CMP_EQ, mipsInsn::SP_CMP_EQ)]++;            
-      s->fcr1[CP1_CR25] = setBit(s->fcr1[CP1_CR25],v,cc);
-      break;
-    case COND_LT:
-      v = (Tfs < Tft);
-      s->insn_histo[select_fp_insn<T>(mipsInsn::DP_CMP_LT, mipsInsn::SP_CMP_LT)]++;      
-      s->fcr1[CP1_CR25] = setBit(s->fcr1[CP1_CR25],v,cc);
-      break;
-    case COND_LE:
-      v = (Tfs <= Tft);
-      s->insn_histo[select_fp_insn<T>(mipsInsn::DP_CMP_LE, mipsInsn::SP_CMP_LE)]++;            
-      s->fcr1[CP1_CR25] = setBit(s->fcr1[CP1_CR25],v,cc);
-      break;
-    default:
-      printf("unimplemented %s = %s\n", __func__, getCondName(cond).c_str());
-      exit(-1);
-      break;
-    }
+  /* All 16 C.cond predicates: result = less&cond[2] | equal&cond[1] |
+   * unordered&cond[0].  (C++ NaN comparisons are false, so lt/eq are 0 when
+   * unordered.)  cond[3]=signaling only affects the Invalid flag, which this
+   * checker does not model. */
+  {
+    bool un = std::isnan(Tfs) || std::isnan(Tft);
+    bool lt = (Tfs <  Tft);
+    bool eq = (Tfs == Tft);
+    v = (((cond & 4) && lt) || ((cond & 2) && eq) || ((cond & 1) && un)) ? 1u : 0u;
+    s->fcr1[CP1_CR25] = setBit(s->fcr1[CP1_CR25],v,cc);
+  }
   if(globals::trace_retirement) {
     std::cout << std::hex
 	      << s->pc

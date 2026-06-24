@@ -159,13 +159,17 @@ typedef enum logic [7:0]
    DP_DIV,
    SP_SQRT,
    DP_SQRT,
-   /* FP compares: write the FCR condition-code bit */
-   SP_CMP_LT,
-   DP_CMP_LT,
-   SP_CMP_EQ,
-   DP_CMP_EQ,
-   SP_CMP_LE,
-   DP_CMP_LE,
+   /* FP compares: all 16 C.cond predicates, cond[3:0] carried in uop.imm[6:3]
+    * (cc index in imm[2:0]); writes the FCR condition-code bit */
+   SP_CMP,
+   DP_CMP,
+   /* FP sign ops (single-cycle, bit-twiddle): abs / neg / mov */
+   SP_ABS,
+   DP_ABS,
+   SP_NEG,
+   DP_NEG,
+   SP_MOV,
+   DP_MOV,
    /* FP branches (read the FCR condition-code bit; run in the int pipe) */
    BC1T,
    BC1F,

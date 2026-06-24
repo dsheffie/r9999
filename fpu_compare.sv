@@ -8,14 +8,16 @@
 // compare of the low W-1 bits.  Extract {sign, magnitude} per fmt and the rest
 // is format-independent.  D-deep pipeline (matches fp_compare).
 
-module fpu_compare(clk, a, b, start, cmp_type, fmt, y, fflags);
+module fpu_compare(clk, a, b, start, cond, fmt, y, fflags);
    parameter D = 4;
 
    input logic 	      clk;
    input logic [63:0] a;
    input logic [63:0] b;
    input logic 	      start;          // unused (interface parity)
-   input 	      fp_cmp_t cmp_type;
+   /* MIPS C.cond.fmt predicate (insn[3:0]): bit2=less, bit1=equal, bit0=unordered
+    * makes-true, bit3=signaling (invalid on any NaN vs. sNaN only). */
+   input logic [3:0]  cond;
    input logic 	      fmt;            // 0 = single, 1 = double
    output logic       y;
    output logic [4:0] fflags;          // {V,Z,O,U,I}; a compare only raises V
@@ -58,29 +60,14 @@ module fpu_compare(clk, a, b, start, cmp_type, fmt, y, fflags);
    wire 	w_eq = (mag_a == mag_b) & (s_a == s_b);  // +0 == -0 falls out (s forced 0)
    wire 	w_le = w_lt | w_eq;
 
-   // ---------------- result + invalid flag ----------------
-   logic 	t_y, t_invalid;
-   always_comb
-     begin
-	t_y = 1'b0;
-	if(!w_unordered)               // NaN -> unordered -> false
-	  case(cmp_type)
-	    CMP_LT:  t_y = w_lt;
-	    CMP_LE:  t_y = w_le;
-	    CMP_EQ:  t_y = w_eq;
-	    default: t_y = 1'b0;
-	  endcase
-     end
-   always_comb
-     begin
-	// LT/LE signaling -> invalid on any NaN; EQ quiet -> invalid on sNaN only
-	t_invalid = 1'b0;
-	case(cmp_type)
-	  CMP_LT, CMP_LE: t_invalid = w_unordered;
-	  CMP_EQ:         t_invalid = w_any_snan;
-	  default:        t_invalid = 1'b0;
-	endcase
-     end
+   // ---------------- result + invalid flag (all 16 predicates) ----------------
+   // result = less&cond[2] | equal&cond[1] | unordered&cond[0].  less/equal must
+   // be FALSE when unordered (NaN) -- mask them with ~w_unordered (the raw mag/sign
+   // compares ignore NaN).  invalid: signaling (cond[3]) -> any NaN; quiet -> sNaN.
+   wire 	w_ord_lt  = w_lt & ~w_unordered;
+   wire 	w_ord_eq  = w_eq & ~w_unordered;
+   wire 	t_y       = (w_ord_lt & cond[2]) | (w_ord_eq & cond[1]) | (w_unordered & cond[0]);
+   wire 	t_invalid = cond[3] ? w_unordered : w_any_snan;
 
    // ---------------- D-deep output pipeline ----------------
    logic [D-1:0]      r_d, r_v;

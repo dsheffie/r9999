@@ -15,6 +15,7 @@ module fpu(clk,
 	   dst_ptr_in,
 	   fcr_ptr_in,
 	   fcr_sel,
+	   cmp_cond,
 	   val,
 	   cmp_val,
 	   y,
@@ -46,7 +47,8 @@ module fpu(clk,
    input logic [LG_PRF_WIDTH-1:0] dst_ptr_in;
    input logic [LG_FCR_WIDTH-1:0] fcr_ptr_in;
    input logic [2:0] 		  fcr_sel;
-   
+   input logic [3:0] 		  cmp_cond;   // C.cond predicate (insn[3:0])
+
    output logic 		  val;
    output logic 		  cmp_val;
    
@@ -81,31 +83,18 @@ module fpu(clk,
    assign fcr_ptr_out = r_fcr[0];
    assign fcr_reg = r_fcr_reg[0];
 
-   /* one unified single/double comparator (fmt selects format), replacing the
-    * separate W=32 / W=64 fp_compare instances.  cmp_type folds SP_/DP_ opcodes
-    * to LT/EQ/LE; fmt picks the operand width. */
+   /* one unified single/double comparator (fmt selects format).  All 16 C.cond
+    * predicates handled in-unit via cmp_cond; fmt picks the operand width. */
    wire 			   w_cmp;
-   fp_cmp_t t_cmp_type;
-   wire 			   w_cmp_fmt = (opcode == DP_CMP_LT) ||
-					       (opcode == DP_CMP_EQ) ||
-					       (opcode == DP_CMP_LE);
-   always_comb
-     begin
-	t_cmp_type = CMP_NONE;
-	case(opcode)
-	  SP_CMP_LT, DP_CMP_LT: t_cmp_type = CMP_LT;
-	  SP_CMP_EQ, DP_CMP_EQ: t_cmp_type = CMP_EQ;
-	  SP_CMP_LE, DP_CMP_LE: t_cmp_type = CMP_LE;
-	  default: t_cmp_type = CMP_NONE;
-	endcase
-     end // always_comb
+   wire 			   w_is_cmp = (opcode == SP_CMP) || (opcode == DP_CMP);
+   wire 			   w_cmp_fmt = (opcode == DP_CMP);
 
    fpu_compare #(.D(FPU_LAT))
    scmp(.clk(clk),
 	.a(src_a),
 	.b(src_b),
-	.start(start && (t_cmp_type != CMP_NONE)),
-	.cmp_type(t_cmp_type),
+	.start(start && w_is_cmp),
+	.cond(cmp_cond),
 	.fmt(w_cmp_fmt),
 	.y(w_cmp),
 	.fflags(w_cmp_fflags));
@@ -196,37 +185,12 @@ module fpu(clk,
 	       y = 'd0;
 	       val = r_val[0];
 	    end
-	  SP_CMP_LT:
+	  SP_CMP, DP_CMP:
 	    begin
 	       cmp_val = r_val[0];
 	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
-	  SP_CMP_LE:
-	    begin
-	       cmp_val = r_val[0];
-	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
-	    end
-	  SP_CMP_EQ:
-	    begin
-	       cmp_val = r_val[0];
-	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
-	    end
-	  DP_CMP_LT:
-	    begin
-	       cmp_val = r_val[0];
-	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
-	    end
-	  DP_CMP_LE:
-	    begin
-	       cmp_val = r_val[0];
-	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
-	    end
-	  DP_CMP_EQ:
-	    begin
-	       cmp_val = r_val[0];
-	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
-	    end
-	  
+
 	  default:
 	    begin
 	    end
@@ -244,7 +208,7 @@ module fpu(clk,
 	    begin fflags = w_add_fflags; denorm = w_add_denorm; end
 	  SP_MUL, DP_MUL:
 	    begin fflags = w_mul_fflags; denorm = w_mul_denorm; end
-	  SP_CMP_LT, DP_CMP_LT, SP_CMP_EQ, DP_CMP_EQ, SP_CMP_LE, DP_CMP_LE:
+	  SP_CMP, DP_CMP:
 	    fflags = w_cmp_fflags;
 	  /* DIV / SQRT punt to soft-float: raise E (denorm) -> FPE at retirement */
 	  SP_DIV, DP_DIV, SP_SQRT, DP_SQRT:

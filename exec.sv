@@ -1310,6 +1310,26 @@ module exec(clk,
    wire w_iss_is_f2i  = (r_fp_iss_uop.op == TRUNC_W_S) || (r_fp_iss_uop.op == TRUNC_W_D);
    wire w_iss_is_i2f  = (r_fp_iss_uop.op == CVT_S_W)   || (r_fp_iss_uop.op == CVT_D_W);
    wire w_iss_is_cvt  = w_iss_is_f2i | w_iss_is_i2f;
+   /* abs/neg/mov: single-cycle bit-twiddle, ride the same single-cycle path as
+    * converts (bank0 writeback, complete at pop+2 via r_fp_wb_bitvec). */
+   wire w_head_is_signop = (fp_uq.op == SP_ABS) || (fp_uq.op == DP_ABS) ||
+			   (fp_uq.op == SP_NEG) || (fp_uq.op == DP_NEG) ||
+			   (fp_uq.op == SP_MOV) || (fp_uq.op == DP_MOV);
+   wire w_iss_is_signop  = (r_fp_iss_uop.op == SP_ABS) || (r_fp_iss_uop.op == DP_ABS) ||
+			   (r_fp_iss_uop.op == SP_NEG) || (r_fp_iss_uop.op == DP_NEG) ||
+			   (r_fp_iss_uop.op == SP_MOV) || (r_fp_iss_uop.op == DP_MOV);
+   /* both convert and signop are single-cycle (bitvec dist 2, fpu bypassed) */
+   wire w_head_is_sc = w_head_is_cvt | w_head_is_signop;
+   wire w_iss_is_sc  = w_iss_is_cvt  | w_iss_is_signop;
+   /* abs.* clears the sign, neg.* flips it, mov.* copies; single zero-extends low 32 */
+   wire w_signop_dbl = (r_fp_iss_uop.op == DP_ABS) || (r_fp_iss_uop.op == DP_NEG) || (r_fp_iss_uop.op == DP_MOV);
+   wire w_signop_abs = (r_fp_iss_uop.op == SP_ABS) || (r_fp_iss_uop.op == DP_ABS);
+   wire w_signop_neg = (r_fp_iss_uop.op == SP_NEG) || (r_fp_iss_uop.op == DP_NEG);
+   wire [63:0] w_signop_out = w_signop_dbl ?
+       (w_signop_abs ? {1'b0,           w_fp_srcA[62:0]} :
+        w_signop_neg ? {~w_fp_srcA[63], w_fp_srcA[62:0]} : w_fp_srcA) :
+       {32'd0, (w_signop_abs ? {1'b0,           w_fp_srcA[30:0]} :
+                w_signop_neg ? {~w_fp_srcA[31], w_fp_srcA[30:0]} : w_fp_srcA[31:0])};
 
    logic t_fpu_srcA_rdy, t_fpu_srcB_rdy, t_fpu_fcr_rdy, t_fpu_srcs_rdy;
    /* registered FP read/issue stage: the cycle after a head pops, the fp_regfile
@@ -1386,7 +1406,7 @@ module exec(clk,
 	/* writeback slot for the head op (convert=2, fpu arith/compare=FPU_LAT+1 from pop)
 	 * must be free, else stall a cycle (mixed-latency shared FP writeback port). */
 	t_pop_fp_uq = !t_fp_uq_empty && !t_flash_clear && t_fpu_srcs_rdy &&
-		      !r_fp_wb_bitvec[w_head_is_cvt ? 2 : (`FPU_LAT+1)];
+		      !r_fp_wb_bitvec[w_head_is_sc ? 2 : (`FPU_LAT+1)];
      end
 
    /* FP writeback reservation: shift down each cycle; on pop, reserve dist-1 (next-cycle
@@ -1398,7 +1418,7 @@ module exec(clk,
 	  n_fp_wb_bitvec[i] = r_fp_wb_bitvec[i+1];
 	n_fp_wb_bitvec[FP_WB_BITS-1] = 1'b0;
 	if(t_pop_fp_uq)
-	  n_fp_wb_bitvec[(w_head_is_cvt ? 2 : (`FPU_LAT+1)) - 1] = 1'b1;
+	  n_fp_wb_bitvec[(w_head_is_sc ? 2 : (`FPU_LAT+1)) - 1] = 1'b1;
      end
    always_ff@(posedge clk)
      begin
@@ -1431,7 +1451,7 @@ module exec(clk,
 	.reset(reset),
 	.pc(r_fp_iss_uop.pc),
 	.opcode(r_fp_iss_uop.op),
-	.start(r_fp_iss_valid & ~w_iss_is_cvt),   /* converts bypass the fpu (single-cycle path below) */
+	.start(r_fp_iss_valid & ~w_iss_is_sc),   /* converts + sign-ops bypass the fpu (single-cycle path) */
 	.src_a(w_fp_srcA),
 	.src_b(w_fp_srcB),
 	.src_c({`M_WIDTH{1'b0}}),   /* no MADD: src_c unused */
@@ -1441,6 +1461,7 @@ module exec(clk,
 	.dst_ptr_in(r_fp_iss_uop.dst),
 	.fcr_ptr_in(r_fp_iss_uop.hilo_dst),
 	.fcr_sel(r_fp_iss_uop.imm[2:0]),
+	.cmp_cond(r_fp_iss_uop.imm[6:3]),   /* C.cond predicate */
 	.val(w_fpu_result_valid),
 	.cmp_val(w_fpu_fcr_valid),
 	.y(w_fpu_result),
@@ -1469,12 +1490,12 @@ module exec(clk,
 	if(reset || t_flash_clear)
 	  r_cvt_valid <= 1'b0;
 	else
-	  r_cvt_valid <= r_fp_iss_valid & w_iss_is_cvt;
+	  r_cvt_valid <= r_fp_iss_valid & w_iss_is_sc;
      end
    always_ff@(posedge clk)
      begin
-	r_cvt_result <= w_iss_is_f2i ? w_f2i_out : w_i2f_out;
-	r_cvt_fflags <= w_iss_is_f2i ? w_f2i_fflags : w_i2f_fflags;
+	r_cvt_result <= w_iss_is_signop ? w_signop_out : (w_iss_is_f2i ? w_f2i_out : w_i2f_out);
+	r_cvt_fflags <= w_iss_is_signop ? 5'd0         : (w_iss_is_f2i ? w_f2i_fflags : w_i2f_fflags);
 	r_cvt_dst    <= r_fp_iss_uop.dst;
 	r_cvt_rob    <= r_fp_iss_uop.rob_ptr;
      end

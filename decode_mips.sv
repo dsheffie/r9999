@@ -1181,8 +1181,22 @@ module decode_mips(
 			 uop.op = (insn[25:21]==5'd16) ? SP_SQRT : DP_SQRT;
 		      end
 		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
-			    (insn[5:0]==6'd50 || insn[5:0]==6'd60 || insn[5:0]==6'd62))
-		      begin /* C.EQ/C.LT/C.LE.[sd]: write the FCR cond-code bit insn[10:8] */
+			    (insn[5:0]==6'd5 || insn[5:0]==6'd6 || insn[5:0]==6'd7))
+		      begin /* ABS(5)/MOV(6)/NEG(7).[sd]: single FP source, no flags */
+			 uop.srcA = fs;
+			 uop.fp_srcA_valid = 1'b1;
+			 uop.dst = fd;
+			 uop.fp_dst_valid = 1'b1;
+			 uop.is_fp = 1'b1;
+			 if(insn[25:21]==5'd16) /* single */
+			   uop.op = (insn[5:0]==6'd5) ? SP_ABS :
+				    (insn[5:0]==6'd6) ? SP_MOV : SP_NEG;
+			 else /* double */
+			   uop.op = (insn[5:0]==6'd5) ? DP_ABS :
+				    (insn[5:0]==6'd6) ? DP_MOV : DP_NEG;
+		      end
+		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) && (insn[5:4]==2'b11))
+		      begin /* C.cond.fmt: all 16 predicates (func 48..63); cc = insn[10:8] */
 			 uop.srcA = fs;
 			 uop.fp_srcA_valid = 1'b1;
 			 uop.srcB = ft;
@@ -1190,13 +1204,8 @@ module decode_mips(
 			 uop.fcr_dst_valid = 1'b1; /* alloc a new FCR phys reg */
 			 uop.fcr_src_valid = 1'b1; /* read old FCR to keep other CC bits */
 			 uop.is_fp = 1'b1;
-			 uop.imm = {13'd0, insn[10:8]}; /* cc index -> fcr_sel */
-			 if(insn[25:21]==5'd16) /* single */
-			   uop.op = (insn[5:0]==6'd50) ? SP_CMP_EQ :
-				    (insn[5:0]==6'd60) ? SP_CMP_LT : SP_CMP_LE;
-			 else /* double */
-			   uop.op = (insn[5:0]==6'd50) ? DP_CMP_EQ :
-				    (insn[5:0]==6'd60) ? DP_CMP_LT : DP_CMP_LE;
+			 uop.imm = {9'd0, insn[3:0], insn[10:8]}; /* cond->imm[6:3], cc->imm[2:0] */
+			 uop.op = (insn[25:21]==5'd16) ? SP_CMP : DP_CMP;
 		      end
 		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) && (insn[5:0]==6'd13))
 		      begin /* TRUNC.W.[sd]: FP->int32, round toward zero (f2i) */
