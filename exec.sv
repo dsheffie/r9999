@@ -1323,10 +1323,16 @@ module exec(clk,
    /* head-op (fp_uq) and issue-op (r_fp_iss_uop) convert classification */
    wire w_head_is_cvt = (fp_uq.op == TRUNC_W_S) || (fp_uq.op == TRUNC_W_D) ||
 			(fp_uq.op == CVT_S_W)   || (fp_uq.op == CVT_D_W)   ||
-			(fp_uq.op == CVT_S_D)   || (fp_uq.op == CVT_D_S);
+			(fp_uq.op == CVT_S_D)   || (fp_uq.op == CVT_D_S)   ||
+			(fp_uq.op == CVT_W_S)   || (fp_uq.op == CVT_W_D)   ||
+			(fp_uq.op == CVT_L_S)   || (fp_uq.op == CVT_L_D)   ||
+			(fp_uq.op == CVT_S_L)   || (fp_uq.op == CVT_D_L);
    wire w_iss_is_f2f  = (r_fp_iss_uop.op == CVT_S_D)   || (r_fp_iss_uop.op == CVT_D_S);
-   wire w_iss_is_f2i  = (r_fp_iss_uop.op == TRUNC_W_S) || (r_fp_iss_uop.op == TRUNC_W_D);
-   wire w_iss_is_i2f  = (r_fp_iss_uop.op == CVT_S_W)   || (r_fp_iss_uop.op == CVT_D_W);
+   wire w_iss_is_f2i  = (r_fp_iss_uop.op == TRUNC_W_S) || (r_fp_iss_uop.op == TRUNC_W_D) ||
+			(r_fp_iss_uop.op == CVT_W_S)   || (r_fp_iss_uop.op == CVT_W_D)   ||
+			(r_fp_iss_uop.op == CVT_L_S)   || (r_fp_iss_uop.op == CVT_L_D);
+   wire w_iss_is_i2f  = (r_fp_iss_uop.op == CVT_S_W)   || (r_fp_iss_uop.op == CVT_D_W)   ||
+			(r_fp_iss_uop.op == CVT_S_L)   || (r_fp_iss_uop.op == CVT_D_L);
    wire w_iss_is_cvt  = w_iss_is_f2i | w_iss_is_i2f | w_iss_is_f2f;
    /* abs/neg/mov: single-cycle bit-twiddle, ride the same single-cycle path as
     * converts (bank0 writeback, complete at pop+2 via r_fp_wb_bitvec). */
@@ -1493,14 +1499,22 @@ module exec(clk,
    /* single-cycle FP convert: combinational on the issue-stage operand (w_fp_srcA),
     * result registered one cycle -> writes bank0 / completes at pop+2.  TRUNC.W = RZ;
     * CVT.S.W/CVT.D.W use FCSR.RM.  fmt: source-double for f2i, dest-double for i2f. */
+   /* TRUNC.W -> RZ; ROUND/CEIL/FLOOR.W -> fixed rm in imm[1:0]; CVT.W -> FCSR.RM
+    * (imm[2]).  fmt = source-double (TRUNC_W_D / CVT_W_D). */
+   wire w_f2i_src_d = (r_fp_iss_uop.op == TRUNC_W_D) || (r_fp_iss_uop.op == CVT_W_D) ||
+		      (r_fp_iss_uop.op == CVT_L_D);
+   wire w_f2i_dst_l = (r_fp_iss_uop.op == CVT_L_S) || (r_fp_iss_uop.op == CVT_L_D);
+   wire [1:0] w_f2i_rm = ((r_fp_iss_uop.op == TRUNC_W_S) || (r_fp_iss_uop.op == TRUNC_W_D)) ? 2'b01
+			 : r_fp_iss_uop.imm[2] ? r_fcsr[1:0]
+			 : r_fp_iss_uop.imm[1:0];
    fpu_f2i f2i0(.in(w_fp_srcA),
-		.fmt(r_fp_iss_uop.op == TRUNC_W_D),
-		.dst_long(1'b0),
-		.rm(2'b01),              /* TRUNC -> round toward zero */
+		.fmt(w_f2i_src_d),
+		.dst_long(w_f2i_dst_l),
+		.rm(w_f2i_rm),
 		.out(w_f2i_out), .fflags(w_f2i_fflags));
    fpu_i2f i2f0(.in(w_fp_srcA),
-		.src_long(1'b0),
-		.fmt(r_fp_iss_uop.op == CVT_D_W),
+		.src_long((r_fp_iss_uop.op == CVT_S_L) || (r_fp_iss_uop.op == CVT_D_L)),
+		.fmt((r_fp_iss_uop.op == CVT_D_W) || (r_fp_iss_uop.op == CVT_D_L)),
 		.rm(r_fcsr[1:0]),
 		.out(w_i2f_out), .fflags(w_i2f_fflags));
    /* FP<->FP convert: CVT.D.S widens (to_double=1, exact); CVT.S.D narrows (rounds

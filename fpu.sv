@@ -180,7 +180,7 @@ module fpu(clk,
 	  /* DIV / SQRT: no datapath -- complete with a dummy result (y=0) and raise
 	   * the Unimplemented-Op (E) bit (see the denorm mux) so they fault to the
 	   * OS soft-float emulator. */
-	  SP_DIV, DP_DIV, SP_SQRT, DP_SQRT:
+	  SP_DIV, DP_DIV, SP_SQRT, DP_SQRT, FP_UNIMPL:
 	    begin
 	       y = 'd0;
 	       val = r_val[0];
@@ -210,8 +210,9 @@ module fpu(clk,
 	    begin fflags = w_mul_fflags; denorm = w_mul_denorm; end
 	  SP_CMP, DP_CMP:
 	    fflags = w_cmp_fflags;
-	  /* DIV / SQRT punt to soft-float: raise E (denorm) -> FPE at retirement */
-	  SP_DIV, DP_DIV, SP_SQRT, DP_SQRT:
+	  /* DIV/SQRT + any unimplemented COP1: raise E (denorm) -> FPE at retirement,
+	   * OS soft-float emulates */
+	  SP_DIV, DP_DIV, SP_SQRT, DP_SQRT, FP_UNIMPL:
 	    denorm = 1'b1;
 	  default: ;
 	endcase

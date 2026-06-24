@@ -237,6 +237,10 @@ fpu/fp_cu1.elf: fpu/fp_cu1.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_cu1.S -o fpu/fp_cu1.o
 	$(LD) $(LDFLAGS) fpu/fp_cu1.o -o $@
 
+fpu/fp_unimpl.elf: fpu/fp_unimpl.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_unimpl.S -o fpu/fp_unimpl.o
+	$(LD) $(LDFLAGS) fpu/fp_unimpl.o -o $@
+
 fpu/fp_fr0.elf: fpu/fp_fr0.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_fr0.S -o fpu/fp_fr0.o
 	$(LD) $(LDFLAGS) fpu/fp_fr0.o -o $@
@@ -245,8 +249,8 @@ fpu/%.elf: fpu/%.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/$*.S -o fpu/$*.o
 	$(LD) $(LDFLAGS) $(STARTUP) fpu/$*.o -o $@
 
-run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf fpu/fp_arith.elf fpu/fp_arith_d.elf fpu/fp_cvt.elf fpu/fp_signop.elf fpu/fp_cmp.elf fpu/fp_cvtf.elf
-	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst fp_arith fp_arith_d fp_cvt fp_signop fp_cmp fp_cvtf; do \
+run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf fpu/fp_arith.elf fpu/fp_arith_d.elf fpu/fp_cvt.elf fpu/fp_signop.elf fpu/fp_cmp.elf fpu/fp_cvtf.elf fpu/fp_cvtw.elf fpu/fp_cvtl.elf
+	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst fp_arith fp_arith_d fp_cvt fp_signop fp_cmp fp_cvtf fp_cvtw fp_cvtl; do \
 	  echo "== fpu/$$t (co-sim; expect 'P' and no 'does not match') =="; \
 	  ( cd .. && ./ooo_core --file tests/fpu/$$t.elf --checker true 2>&1 \
 	      | grep -iE "does not match|FAIL" ) || echo "  ok (no divergence)"; \
@@ -274,6 +278,10 @@ run-fpu-cu1: fpu/fp_cu1.elf
 	$(SIM) --file fpu/fp_cu1.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1
 
 # FR=0 odd-register FP-compute -> Reserved Instruction. -c0 only.
+run-fpu-unimpl: fpu/fp_unimpl.elf
+	@echo "== fpu/fp_unimpl (unimpl COP1 -> FPE.E self-check; expect 'P') =="
+	$(SIM) --file fpu/fp_unimpl.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1
+
 run-fpu-fr0: fpu/fp_fr0.elf
 	@echo "== fpu/fp_fr0 (FR=0 odd-reg arith -> RI self-check; expect 'P') =="
 	$(SIM) --file fpu/fp_fr0.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1

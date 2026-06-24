@@ -184,6 +184,17 @@ static void take_exception_ri(state_t *s) {
   s->pc = sext32(exc_vector_general(s));
 }
 
+/* FP exception (ExcCode 15) with the Unimplemented-Op (E) bit set in FCSR.Cause
+ * (bit 17) -- the catch-all for any COP1 op not implemented in hardware (matches
+ * the RTL FP_UNIMPL path; the OS soft-float emulator handles it). */
+static void take_exception_fpe(state_t *s) {
+  set_exc_pc(s);
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (15u << 2);
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->fcr1[CP1_CR31]  |= (1u << 17);
+  s->pc = sext32(exc_vector_general(s));
+}
+
 static void raise_ri(state_t *s, uint32_t inst) {
   fprintf(stderr, "unimplemented: opcode=0x%02x funct=0x%02x @ pc=0x%08x\n",
           inst >> 26, inst & 0x3fu, (uint32_t)s->pc);
@@ -1168,6 +1179,42 @@ static void _truncw(uint32_t inst, state_t *s) {
   s->pc += 4;
 }
 
+/* float -> int32 with selectable rounding: ROUND.W(RN)/CEIL.W(RP)/FLOOR.W(RM)/
+ * CVT.W(FCSR.RM).  rm: 0=RN(half-even) 1=RZ 2=RP 3=RM.  Result -> FPR[fd][31:0]. */
+static void _cvtw_rm(uint32_t inst, state_t *s, int rm) {
+  uint32_t fmt = (inst >> 21) & 31;
+  uint32_t fd = (inst>>6) & 31, fs = (inst>>11) & 31;
+  double d = (fmt == FMT_S) ? (double)(*((float*)(s->cpr1 + fs)))
+                            : (*((double*)(s->cpr1 + fs)));
+  double r;
+  switch(rm) {
+    case 0:  r = std::nearbyint(d); break;   /* RN (host fenv default = round-half-even) */
+    case 1:  r = std::trunc(d);     break;   /* RZ */
+    case 2:  r = std::ceil(d);      break;   /* RP */
+    default: r = std::floor(d);     break;   /* RM */
+  }
+  *((int32_t*)(s->cpr1 + fd)) = (int32_t)r;
+  s->pc += 4;
+}
+
+/* float -> int64 with selectable rounding (ROUND/TRUNC/CEIL/FLOOR.L / CVT.L).
+ * rm: 0=RN 1=RZ 2=RP 3=RM.  Result -> full 64-bit FPR[fd]. */
+static void _cvtl_rm(uint32_t inst, state_t *s, int rm) {
+  uint32_t fmt = (inst >> 21) & 31;
+  uint32_t fd = (inst>>6) & 31, fs = (inst>>11) & 31;
+  double d = (fmt == FMT_S) ? (double)(*((float*)(s->cpr1 + fs)))
+                            : (*((double*)(s->cpr1 + fs)));
+  double r;
+  switch(rm) {
+    case 0:  r = std::nearbyint(d); break;
+    case 1:  r = std::trunc(d);     break;
+    case 2:  r = std::ceil(d);      break;
+    default: r = std::floor(d);     break;
+  }
+  *((int64_t*)(s->cpr1 + fd)) = (int64_t)r;
+  s->pc += 4;
+}
+
 static void _movnd(uint32_t inst, state_t *s) {
   uint32_t fd = (inst>>6) & 31;
   uint32_t fs = (inst>>11) & 31;
@@ -1273,6 +1320,9 @@ static void _cvts(uint32_t inst, state_t *s) {
     case FMT_W:
       *((float*)(s->cpr1 + fd)) = (float)(*((int32_t*)(s->cpr1 + fs)));
       break;
+    case FMT_L:
+      *((float*)(s->cpr1 + fd)) = (float)(*((int64_t*)(s->cpr1 + fs)));
+      break;
     default:
       printf("%s @ %d\n", __func__, __LINE__);
       exit(-1);
@@ -1293,6 +1343,9 @@ static void _cvtd(uint32_t inst, state_t *s) {
       break;
     case FMT_W:
      *((double*)(s->cpr1 + fd)) = (double)(*((int32_t*)(s->cpr1 + fs)));
+      break;
+    case FMT_L:
+      *((double*)(s->cpr1 + fd)) = (double)(*((int64_t*)(s->cpr1 + fs)));
       break;
     default:
       printf("%s @ %d\n", __func__, __LINE__);
@@ -1599,8 +1652,32 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	  case 0x7:
 	    do_fp_op<fpOperation::neg>(inst, s);
 	    break;
+	  case 0x8:
+	    _cvtl_rm(inst, s, 0);   /* ROUND.L -> RN */
+	    break;
+	  case 0xa:
+	    _cvtl_rm(inst, s, 2);   /* CEIL.L -> RP */
+	    break;
+	  case 0xb:
+	    _cvtl_rm(inst, s, 3);   /* FLOOR.L -> RM */
+	    break;
+	  case 0x25:
+	    _cvtl_rm(inst, s, (int)(s->fcr1[CP1_CR31] & 3));   /* CVT.L -> FCSR.RM */
+	    break;
 	  case 0x9:
-	    _truncl(inst, s);
+	    _cvtl_rm(inst, s, 1);   /* TRUNC.L -> RZ */
+	    break;
+	  case 0xc:
+	    _cvtw_rm(inst, s, 0);   /* ROUND.W -> RN */
+	    break;
+	  case 0xe:
+	    _cvtw_rm(inst, s, 2);   /* CEIL.W -> RP */
+	    break;
+	  case 0xf:
+	    _cvtw_rm(inst, s, 3);   /* FLOOR.W -> RM */
+	    break;
+	  case 0x24:
+	    _cvtw_rm(inst, s, (int)(s->fcr1[CP1_CR31] & 3));   /* CVT.W -> FCSR.RM */
 	    break;
 	  case 0xd:
 	    _truncw(inst, s);
@@ -1628,10 +1705,10 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	    _cvtd(inst, s);
 	    break;
 	  default:
-	    printf("unhandled coproc1 instruction (%x) @ %08x\n",
-		   inst, s->pc);
-	    exit(-1);
-	    break;
+	    /* any COP1 op not implemented -> Unimplemented (E) FPE, matching the RTL
+	     * FP_UNIMPL catch-all (OS soft-float emulates). */
+	    take_exception_fpe(s);
+	    return;
 	  }
       }
     }

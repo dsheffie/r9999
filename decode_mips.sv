@@ -1236,6 +1236,47 @@ module decode_mips(
 			 uop.is_fp = 1'b1;
 			 uop.op = (insn[25:21]==5'd16) ? TRUNC_W_S : TRUNC_W_D;
 		      end
+			    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
+				    (insn[5:0]==6'd12 || insn[5:0]==6'd14 ||
+				     insn[5:0]==6'd15 || insn[5:0]==6'd36))
+			      begin /* ROUND.W(12,RN)/CEIL.W(14,RP)/FLOOR.W(15,RM)/CVT.W(36,FCSR.RM) */
+				 uop.srcA = fs;
+				 uop.fp_srcA_valid = 1'b1;
+				 uop.dst = fd;
+				 uop.fp_dst_valid = 1'b1;
+				 uop.is_fp = 1'b1;
+				 uop.op = (insn[25:21]==5'd16) ? CVT_W_S : CVT_W_D;
+				 /* rm carrier: imm[2]=1 -> FCSR.RM (cvt.w); else imm[1:0] fixed */
+				 uop.imm = (insn[5:0]==6'd36) ? 16'd4 :   /* CVT.W -> FCSR.RM */
+					   (insn[5:0]==6'd12) ? 16'd0 :   /* ROUND -> RN */
+					   (insn[5:0]==6'd14) ? 16'd2 :   /* CEIL  -> RP */
+							16'd3;    /* FLOOR -> RM */
+			      end
+			    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
+				    (insn[5:0]==6'd8 || insn[5:0]==6'd9 ||
+				     insn[5:0]==6'd10 || insn[5:0]==6'd11 || insn[5:0]==6'd37))
+			      begin /* f2i->L: ROUND.L(8,RN)/TRUNC.L(9,RZ)/CEIL.L(10,RP)/FLOOR.L(11,RM)/CVT.L(37,FCSR.RM) */
+				 uop.srcA = fs;
+				 uop.fp_srcA_valid = 1'b1;
+				 uop.dst = fd;
+				 uop.fp_dst_valid = 1'b1;
+				 uop.is_fp = 1'b1;
+				 uop.op = (insn[25:21]==5'd16) ? CVT_L_S : CVT_L_D;
+				 uop.imm = (insn[5:0]==6'd37) ? 16'd4 :   /* CVT.L -> FCSR.RM */
+					   (insn[5:0]==6'd8)  ? 16'd0 :   /* ROUND -> RN */
+					   (insn[5:0]==6'd9)  ? 16'd1 :   /* TRUNC -> RZ */
+					   (insn[5:0]==6'd10) ? 16'd2 :   /* CEIL  -> RP */
+							16'd3;    /* FLOOR -> RM */
+			      end
+			    else if((insn[25:21]==5'd21) && (insn[5:0]==6'd32 || insn[5:0]==6'd33))
+			      begin /* CVT.S.L / CVT.D.L: int64 -> FP (i2f, src_long), FCSR.RM */
+				 uop.srcA = fs;
+				 uop.fp_srcA_valid = 1'b1;
+				 uop.dst = fd;
+				 uop.fp_dst_valid = 1'b1;
+				 uop.is_fp = 1'b1;
+				 uop.op = (insn[5:0]==6'd32) ? CVT_S_L : CVT_D_L;
+			      end
 		    else if((insn[25:21]==5'd20) && (insn[5:0]==6'd32 || insn[5:0]==6'd33))
 		      begin /* CVT.S.W / CVT.D.W: int32->FP (i2f), FCSR.RM */
 			 uop.srcA = fs;
@@ -1254,6 +1295,15 @@ module decode_mips(
 				 uop.fp_dst_valid = 1'b1;
 				 uop.is_fp = 1'b1;
 				 uop.op = (insn[5:0]==6'd32) ? CVT_S_D : CVT_D_S;
+			      end
+			    else
+			      begin /* any other COP1 op: Unimplemented (E) -> OS soft-float emulator */
+				 uop.srcA = fs;
+				 uop.fp_srcA_valid = 1'b1;
+				 uop.dst = fd;
+				 uop.fp_dst_valid = 1'b1;
+				 uop.is_fp = 1'b1;
+				 uop.op = FP_UNIMPL;
 			      end
 		 end // case: 6'd17
 	       6'd20: /* BEQL */

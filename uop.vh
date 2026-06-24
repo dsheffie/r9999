@@ -182,7 +182,21 @@ typedef enum logic [7:0]
    CVT_S_W,    /* i2f, W src, single dst, FCSR.RM */
    CVT_D_W,    /* i2f, W src, double dst, FCSR.RM */
    CVT_S_D,    /* f2f, double src -> single dst (narrow, FCSR.RM, E-trap on underflow/denorm) */
-   CVT_D_S     /* f2f, single src -> double dst (widen, exact) */
+   CVT_D_S,    /* f2f, single src -> double dst (widen, exact) */
+   /* f2i->W with selectable rounding (ROUND/CEIL/FLOOR/CVT.W); rm carried in imm:
+    * imm[2]=1 -> FCSR.RM (CVT.W); else imm[1:0] = fixed rm (RN/RP/RM). src fmt by op. */
+   CVT_W_S,
+   CVT_W_D,
+   /* f2i->L (64-bit): ROUND/TRUNC/CEIL/FLOOR.L + CVT.L; same imm rm carrier
+    * (imm[1:0]=RZ for TRUNC.L).  dst_long=1.  src fmt by op. */
+   CVT_L_S,
+   CVT_L_D,
+   /* i2f from L (64-bit int -> float/double); src_long=1.  dst fmt by op. */
+   CVT_S_L,
+   CVT_D_L,
+   /* catch-all: any COP1 op not implemented in HW -> raise Unimplemented (E) like
+    * div/sqrt, so the OS soft-float emulator handles it instead of SIGILL. */
+   FP_UNIMPL
    } opcode_t;
 
 function logic is_mult(opcode_t op);
