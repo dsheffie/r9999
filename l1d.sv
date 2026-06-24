@@ -1621,6 +1621,9 @@ endfunction
 	n_core_mem_rsp.dst_ptr = r_req.dst_ptr;
 	n_core_mem_rsp.dst_valid = 1'b0;
 	n_core_mem_rsp.fp_dst = r_req.fp_dst;
+	n_core_mem_rsp.fp_merge = r_req.fp_merge;   /* FR=0 lwc1 merge (carried to writeback) */
+	n_core_mem_rsp.fp_hi = r_req.fp_hi;
+	n_core_mem_rsp.fp_pres = r_req.fp_pres;
 	n_core_mem_rsp.bad_addr = 1'b0;
 	
 	n_core_mem_rsp.tlb_refill = 1'b0;
@@ -1705,6 +1708,9 @@ endfunction
 		    /* port2 response routes to FP-vs-int by THIS port's req (the
 		     * default at the top uses r_req = port1, wrong for a port2 rsp) */
 		    n_core_mem_rsp.fp_dst = r_req2.fp_dst;
+		    n_core_mem_rsp.fp_merge = r_req2.fp_merge;
+		    n_core_mem_rsp.fp_hi = r_req2.fp_hi;
+		    n_core_mem_rsp.fp_pres = r_req2.fp_pres;
 		    if(drain_ds_complete)
 		      begin
 			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
@@ -1716,6 +1722,9 @@ endfunction
 			 /* GPR<->FPR move: no memory access; echo the
 			  * carried data (r_req2.addr) to the dst PRF */
 			 n_core_mem_rsp.fp_dst = r_req2.fp_dst;
+			 n_core_mem_rsp.fp_merge = r_req2.fp_merge;   /* =0 for moves (override port1 default) */
+			 n_core_mem_rsp.fp_hi = r_req2.fp_hi;
+			 n_core_mem_rsp.fp_pres = r_req2.fp_pres;
 			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
 			 n_core_mem_rsp_valid = 1'b1;
 		      end
@@ -1836,6 +1845,9 @@ endfunction
 			 n_core_mem_rsp.data = t_rsp_data2[`M_WIDTH-1:0];
                          n_core_mem_rsp.dst_valid = t_rsp_dst_valid2;
 			 n_core_mem_rsp.fp_dst = r_req2.fp_dst;   /* port2: route FP loads to the FP PRF */
+			 n_core_mem_rsp.fp_merge = r_req2.fp_merge;   /* FR=0 lwc1 merge */
+			 n_core_mem_rsp.fp_hi = r_req2.fp_hi;
+			 n_core_mem_rsp.fp_pres = r_req2.fp_pres;
                          n_cache_hits = r_cache_hits + 'd1;
                          n_core_mem_rsp_valid = 1'b1;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;

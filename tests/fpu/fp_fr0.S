@@ -126,6 +126,140 @@ _start:
     bne     $2, $3, fail
     nop
 
+    /* ---- T2d: FR=0 mfc1 extract -- even reg = low half, odd reg = high half ----
+     * dbl[0] = 0x400921fb54442d18 -> low=0x54442d18, high=0x400921fb */
+    ldc1    $f0, 0($14)
+    nop
+    nop
+    sw      $0, 0($19)
+    mfc1    $9, $f0             /* even -> low half */
+    nop
+    nop
+    nop
+    .word   0x440a0800          /* mfc1 $10, $f1 -> high half */
+    nop
+    nop
+    nop
+    lw      $2, 0($19)
+    bne     $2, $0, fail        /* must NOT fault */
+    nop
+    lui     $3, 0x5444
+    ori     $3, $3, 0x2d18      /* 0x54442d18 (low) */
+    bne     $9, $3, fail
+    nop
+    lui     $3, 0x4009
+    ori     $3, $3, 0x21fb      /* 0x400921fb (high) */
+    bne     $10, $3, fail
+    nop
+
+    /* ---- T2e: FR=0 mtc1 merge -- overwrite one half, preserve the other ----
+     * ldc1 $f0=0x400921fb54442d18; mtc1 $f0 low<-0x11112222; mtc1 $f1 high<-0x33334444 */
+    ldc1    $f0, 0($14)
+    nop
+    nop
+    sw      $0, 0($19)
+    lui     $8, 0x1111
+    ori     $8, $8, 0x2222
+    mtc1    $8, $f0             /* even -> overwrite LOW half */
+    nop
+    nop
+    nop
+    nop
+    mfc1    $9, $f0             /* low = 0x11112222 */
+    bne     $9, $8, fail
+    nop
+    .word   0x440a0800          /* mfc1 $10,$f1 -> high (unchanged) = 0x400921fb */
+    nop
+    nop
+    nop
+    lui     $3, 0x4009
+    ori     $3, $3, 0x21fb
+    bne     $10, $3, fail       /* high half preserved by the low-half merge */
+    nop
+    lui     $8, 0x3333
+    ori     $8, $8, 0x4444
+    .word   0x44880800          /* mtc1 $8,$f1 -> overwrite HIGH half */
+    nop
+    nop
+    nop
+    nop
+    .word   0x440a0800          /* mfc1 $10,$f1 -> high = 0x33334444 */
+    nop
+    nop
+    nop
+    bne     $10, $8, fail
+    nop
+    mfc1    $9, $f0             /* low still = 0x11112222 (preserved) */
+    lui     $3, 0x1111
+    ori     $3, $3, 0x2222
+    bne     $9, $3, fail
+    nop
+    lw      $2, 0($19)
+    bne     $2, $0, fail        /* none of the above faulted */
+    nop
+
+    /* ---- T2f: FR=0 swc1 extract -- even stores low half, odd stores high half ---- */
+    sw      $0, 0($19)
+    swc1    $f0, 24($14)        /* even -> store low half (0x11112222) */
+    nop
+    nop
+    .word   0xe5c1001c          /* swc1 $f1, 28($14) -> store high half (0x33334444) */
+    nop
+    nop
+    lw      $2, 0($19)
+    bne     $2, $0, fail        /* must NOT fault */
+    nop
+    lw      $9, 24($14)
+    lui     $3, 0x1111
+    ori     $3, $3, 0x2222
+    bne     $9, $3, fail        /* low half stored */
+    nop
+    lw      $9, 28($14)
+    lui     $3, 0x3333
+    ori     $3, $3, 0x4444
+    bne     $9, $3, fail        /* high half stored */
+    nop
+
+    /* ---- T2g: FR=0 lwc1 merge -- odd writes HIGH half (preserve low), even writes
+     * LOW half (preserve high).  ldc1 $f0=0x400921fb54442d18; lwc1 $f1<-0xDEADBEEF
+     * (high); lwc1 $f0<-0xCAFEBABE (low); sdc1 -> 0xDEADBEEFCAFEBABE ---- */
+    lui     $8, 0xDEAD
+    ori     $8, $8, 0xBEEF
+    sw      $8, 16($14)         /* mem word for the odd lwc1 */
+    lui     $8, 0xCAFE
+    ori     $8, $8, 0xBABE
+    sw      $8, 20($14)         /* mem word for the even lwc1 */
+    ldc1    $f0, 0($14)         /* $f0 = 0x400921fb54442d18 */
+    nop
+    nop
+    sw      $0, 0($19)
+    .word   0xc5c10010          /* lwc1 $f1, 16($14) -> HIGH half (preserve low) */
+    nop
+    nop
+    nop
+    nop
+    lwc1    $f0, 20($14)        /* even -> LOW half (preserve high) */
+    nop
+    nop
+    nop
+    nop
+    lw      $2, 0($19)
+    bne     $2, $0, fail        /* must NOT fault */
+    nop
+    sdc1    $f0, 24($14)        /* store the merged double */
+    nop
+    nop
+    lw      $9, 24($14)         /* hi = 0xDEADBEEF (from the odd lwc1) */
+    lui     $3, 0xDEAD
+    ori     $3, $3, 0xBEEF
+    bne     $9, $3, fail
+    nop
+    lw      $9, 28($14)         /* lo = 0xCAFEBABE (from the even lwc1) */
+    lui     $3, 0xCAFE
+    ori     $3, $3, 0xBABE
+    bne     $9, $3, fail
+    nop
+
     /* ---- T3: FR=1 odd-reg add.s -> runs, no fault ---- */
     li      $t0, 0x24000000     /* Status: CU1=1, FR=1 (bit26 set) */
     mtc0    $t0, $12
@@ -152,7 +286,9 @@ fail:
 
     .data
     .align  3
-dbl:        .dword 0x400921fb54442d18  /* pi-ish double for the ldc1/sdc1 roundtrip */
-            .dword 0                    /* roundtrip dest */
+dbl:        .dword 0x400921fb54442d18  /* [0]  pi-ish double for ldc1/sdc1/mfc1 */
+            .dword 0                    /* [8]  ldc1/sdc1 roundtrip dest */
+            .dword 0                    /* [16] scratch */
+            .dword 0                    /* [24] swc1 low/high store dest (24,28) */
 fpe_flag:   .word 0
 fpe_code:   .word 0

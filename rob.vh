@@ -99,6 +99,11 @@ typedef struct packed {
    logic [`LG_PRF_ENTRIES-1:0] dst_ptr;
    logic 		       dst_valid;
    logic 		       fp_dst;   /* result writes the FP PRF (vs int) — for moves/FP loads */
+   /* FR=0 lwc1 merge: write only the fp_hi-selected 32b half of the load result,
+    * preserving the other half (fp_pres = the old 32b half read at issue). */
+   logic 		       fp_merge;
+   logic 		       fp_hi;
+   logic [31:0]		       fp_pres;
    logic [(`M_WIDTH-1):0]      data;
 `ifdef VERILATOR
    logic [(`M_WIDTH-1):0]      pc;
@@ -108,7 +113,8 @@ typedef struct packed {
 typedef struct packed {
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic [`LG_PRF_ENTRIES-1:0] src_ptr;
-   logic 		       fp;   /* store data comes from the FP PRF (swc1/sdc1) */
+   logic 		       fp;     /* store data comes from the FP PRF (swc1/sdc1) */
+   logic 		       fp_hi;  /* FR=0 swc1: store the HIGH 32b half (odd reg) */
 } dq_t;
 
 typedef struct packed {
@@ -122,6 +128,9 @@ typedef struct packed {
    logic [`LG_PRF_ENTRIES-1:0] dst_ptr;
    logic 		       dst_valid;
    logic 		       fp_dst;   /* result writes the FP PRF (vs int) */
+   logic 		       fp_merge; /* FR=0 lwc1: merge into the fp_hi half, preserve fp_pres */
+   logic 		       fp_hi;
+   logic [31:0]		       fp_pres;
    logic 		       bad_addr;
    logic		       tlb_refill;
    logic		       tlb_invalid;

@@ -734,8 +734,17 @@ static void _sb(uint32_t inst, state_t *s) {
 static void _mtc1(uint32_t inst, state_t *s) {
   uint32_t fs = (inst>>11) & 31;
   uint32_t rt = (inst>>16) & 31;
-  /* mips3/4 FR=1: FPR[fs] = sign_extend32(GPR[rt][31:0]) */
-  s->cpr1[fs] = (uint64_t)(int64_t)(int32_t)(uint32_t)s->gpr[rt];
+  uint32_t w = (uint32_t)s->gpr[rt];
+  if((s->cpr0[CPR0_SR] & SR_FR) == 0) {
+    /* FR=0: merge the new word into the fs[0]-selected half of the even reg, preserving
+     * the other half (R10000 UM p.307). */
+    uint64_t old = s->cpr1[fs & ~1u];
+    s->cpr1[fs & ~1u] = (fs & 1) ? ((old & 0xffffffffull) | ((uint64_t)w << 32))
+                                 : ((old & 0xffffffff00000000ull) | w);
+  } else {
+    /* FR=1: FPR[fs] = sign_extend32(GPR[rt][31:0]) */
+    s->cpr1[fs] = (uint64_t)(int64_t)(int32_t)w;
+  }
   s->pc += 4;
   s->insn_histo[mipsInsn::MTC1]++;
 }
@@ -743,8 +752,12 @@ static void _mtc1(uint32_t inst, state_t *s) {
 static void _mfc1(uint32_t inst, state_t *s) {
   uint32_t fs = (inst>>11) & 31;
   uint32_t rt = (inst>>16) & 31;
-  /* mips3/4 FR=1: GPR[rt] = sign_extend32(FPR[fs][31:0]) */
-  s->gpr[rt] = (int64_t)(int32_t)(uint32_t)s->cpr1[fs];
+  /* FR=1: GPR[rt] = sign_extend32(FPR[fs][31:0]).  FR=0: the even reg of the pair
+   * holds the 64-bit double; fs[0] selects the half (even=low, odd=high). */
+  uint64_t v = s->cpr1[fs & ~1u];
+  uint32_t w = ((s->cpr0[CPR0_SR] & SR_FR) == 0) ? (uint32_t)((fs & 1) ? (v >> 32) : v)
+                                                 : (uint32_t)s->cpr1[fs];
+  s->gpr[rt] = (int64_t)(int32_t)w;
   s->pc +=4;
   s->insn_histo[mipsInsn::MFC1]++;
 }
@@ -1091,8 +1104,16 @@ void _lwc1(uint32_t inst, state_t *s) {
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
   uint32_t v = bswap<EL>(s->mem.get<uint32_t>(ea));
-  /* FR=1: load the word into bits[31:0]; RTL's MEM_LW sign-extends to 64b */
-  s->cpr1[ft] = (uint64_t)(int64_t)(int32_t)v;
+  if((s->cpr0[CPR0_SR] & SR_FR) == 0) {
+    /* FR=0: merge the loaded word into the ft[0]-selected half of the even reg,
+     * preserving the other half (R10000 UM p.305). */
+    uint64_t old = s->cpr1[ft & ~1u];
+    s->cpr1[ft & ~1u] = (ft & 1) ? ((old & 0xffffffffull) | ((uint64_t)v << 32))
+                                 : ((old & 0xffffffff00000000ull) | v);
+  } else {
+    /* FR=1: load the word into bits[31:0]; RTL's MEM_LW sign-extends to 64b */
+    s->cpr1[ft] = (uint64_t)(int64_t)(int32_t)v;
+  }
   s->pc += 4;
   s->insn_histo[mipsInsn::LWC1]++;
 }
@@ -1104,7 +1125,10 @@ void _swc1(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
-  uint32_t v = (uint32_t)s->cpr1[ft];   /* bits[31:0] */
+  /* FR=1 / FR=0-even: low 32; FR=0-odd: high 32 of the even reg. */
+  uint64_t rv = s->cpr1[((s->cpr0[CPR0_SR] & SR_FR) == 0) ? (ft & ~1u) : ft];
+  uint32_t v = (((s->cpr0[CPR0_SR] & SR_FR) == 0) && (ft & 1)) ? (uint32_t)(rv >> 32)
+                                                               : (uint32_t)rv;
   s->mem.set<uint32_t>(ea, bswap<EL>(v));
   s->pc += 4;
   s->insn_histo[mipsInsn::SWC1]++;

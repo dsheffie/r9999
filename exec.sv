@@ -91,6 +91,9 @@ module exec(clk,
 	    mem_rsp_dst_ptr,
 	    mem_rsp_dst_valid,
 	    mem_rsp_fp_dst,
+	    mem_rsp_fp_merge,
+	    mem_rsp_fp_hi,
+	    mem_rsp_fp_pres,
 	    mem_rsp_rob_ptr,
 	    mem_rsp_load_data,
 	    tlb_entry_out,
@@ -197,6 +200,9 @@ module exec(clk,
    input logic [`LG_PRF_ENTRIES-1:0] mem_rsp_dst_ptr;
    input logic 			     mem_rsp_dst_valid;
    input logic 			     mem_rsp_fp_dst;
+   input logic 			     mem_rsp_fp_merge;   /* FR=0 lwc1 merge */
+   input logic 			     mem_rsp_fp_hi;
+   input logic [31:0]		     mem_rsp_fp_pres;
    input logic [`M_WIDTH-1:0]	     mem_rsp_load_data;
    input logic [`LG_ROB_ENTRIES-1:0] mem_rsp_rob_ptr;
 
@@ -616,9 +622,11 @@ module exec(clk,
 	t_dq0.rob_ptr = uq_uop.rob_ptr;
 	t_dq0.src_ptr = uq_uop.srcB;
 	t_dq0.fp = uq_uop.fp_srcB_valid;
+	t_dq0.fp_hi = uq_uop.jmp_imm[0];   /* FR=0 swc1: high-half store */
 	t_dq1.rob_ptr = uq_uop_two.rob_ptr;
 	t_dq1.src_ptr = uq_uop_two.srcB;
 	t_dq1.fp = uq_uop_two.fp_srcB_valid;
+	t_dq1.fp_hi = uq_uop_two.jmp_imm[0];
      end
 
        
@@ -1215,7 +1223,11 @@ module exec(clk,
 	  .wen0(w_fpu_result_valid | r_cvt_valid),
 	  .wen1(mem_rsp_dst_valid & mem_rsp_fp_dst),
 	  .wr0(w_fpu_result_valid ? w_fpu_result : r_cvt_result),
-	  .wr1(mem_rsp_load_data),
+	  /* FR=0 lwc1 merge: splice the loaded 32 into the fp_hi half, keep fp_pres. */
+	  .wr1(mem_rsp_fp_merge
+	       ? (mem_rsp_fp_hi ? {mem_rsp_load_data[31:0], mem_rsp_fp_pres}
+				: {mem_rsp_fp_pres, mem_rsp_load_data[31:0]})
+	       : mem_rsp_load_data),
 	  .rd0(w_fp_srcA),
 	  .rd1(w_fp_srcB),
 	  .rd2(r_fp_rd_srcB),
@@ -2419,7 +2431,9 @@ module exec(clk,
    always_comb
      begin
 	t_core_store_data.rob_ptr = mem_dq.rob_ptr;
-	t_core_store_data.data = mem_dq.fp ? r_fp_rd_dq : t_mem_srcB;
+	/* FR=0 swc1 odd reg (fp_hi): store the HIGH 32b half (placed low for MEM_SW). */
+	t_core_store_data.data = mem_dq.fp ? (mem_dq.fp_hi ? {32'd0, r_fp_rd_dq[63:32]} : r_fp_rd_dq)
+					   : t_mem_srcB;
 	core_store_data_ptr = mem_dq.rob_ptr;
 	core_store_data_ptr_valid = r_dq_ready;
      end
@@ -2497,6 +2511,9 @@ module exec(clk,
 	t_mem_tail.rob_ptr = mem_uq.rob_ptr;
 	t_mem_tail.dst_valid = 1'b0;
 	t_mem_tail.fp_dst = 1'b0;
+	t_mem_tail.fp_merge = 1'b0;
+	t_mem_tail.fp_hi = 1'b0;
+	t_mem_tail.fp_pres = 32'd0;
 	t_mem_tail.dst_ptr = mem_uq.dst;
 	t_mem_tail.is_store = 1'b0;
 	t_mem_tail.is_atomic = 1'b0;
@@ -2674,9 +2691,14 @@ module exec(clk,
 	    end
 	  MTC1:
 	    begin
-	       /* GPR->FPR move (mips3/4): FPR[fs] = sign_extend32(GPR[rt][31:0]) */
+	       /* GPR->FPR move.  FR=1 (no fp_srcB read): FPR = sign_extend32(GPR[31:0]).
+		* FR=0 (fp_srcB = old even-reg): splice GPR[31:0] into the jmp_imm[0]-selected
+		* half, preserve the other half (read-old merge, R10000 UM p.307). */
 	       t_mem_tail.op = MEM_MOV;
-	       t_mem_tail.addr = {{32{t_mem_srcA[31]}}, t_mem_srcA[31:0]};
+	       t_mem_tail.addr = mem_uq.fp_srcB_valid ?
+		   (mem_uq.jmp_imm[0] ? {t_mem_srcA[31:0],   r_fp_rd_srcB[31:0]}
+				      : {r_fp_rd_srcB[63:32], t_mem_srcA[31:0]})
+		   : {{32{t_mem_srcA[31]}}, t_mem_srcA[31:0]};
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.fp_dst = 1'b1;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
@@ -2685,9 +2707,11 @@ module exec(clk,
 	    end
 	  MFC1:
 	    begin
-	       /* FPR->GPR move (mips3/4): GPR[rt] = sign_extend32(FPR[fs][31:0]) */
+	       /* FPR->GPR move: GPR[rt] = sign_extend32(selected 32b half).  jmp_imm[0]
+		* picks the half: FR=1 / FR=0-even -> low 32; FR=0-odd -> high 32. */
 	       t_mem_tail.op = MEM_MOV;
-	       t_mem_tail.addr = {{32{r_fp_rd_srcB[31]}}, r_fp_rd_srcB[31:0]};
+	       t_mem_tail.addr = mem_uq.jmp_imm[0] ? {{32{r_fp_rd_srcB[63]}}, r_fp_rd_srcB[63:32]}
+						   : {{32{r_fp_rd_srcB[31]}}, r_fp_rd_srcB[31:0]};
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.fp_dst = 1'b0;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
@@ -2718,10 +2742,16 @@ module exec(clk,
 	    end
 	  LWC1:
 	    begin
-	       /* FP load (word): normal L1D load, result writes the FP PRF */
+	       /* FP load (word): normal L1D load, result writes the FP PRF.  FR=0
+		* (fp_srcB_valid): merge the loaded 32 into the jmp_imm[0] half, preserving
+		* the OTHER half (fp_pres = old even-reg half read at issue), spliced at
+		* writeback. */
 	       t_mem_tail.op = MEM_LW;
 	       t_mem_tail.dst_valid = 1'b1;
 	       t_mem_tail.fp_dst = 1'b1;
+	       t_mem_tail.fp_merge = mem_uq.fp_srcB_valid;
+	       t_mem_tail.fp_hi = mem_uq.jmp_imm[0];
+	       t_mem_tail.fp_pres = mem_uq.jmp_imm[0] ? r_fp_rd_srcB[31:0] : r_fp_rd_srcB[63:32];
 	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
 	    end
 	  LDC1:

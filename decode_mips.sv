@@ -1070,20 +1070,38 @@ module decode_mips(
 		      end
 		    else
 		    if((insn[25:21]==5'd0) && (insn[10:0] == 11'd0))
-		      begin /* mfc1: GPR[rt] <- FPR[fs] (FR=1 flat) */
+		      begin /* mfc1: GPR[rt] <- FPR[fs] */
 			 uop.dst = rt;
 			 uop.dst_valid = 1'b1;
 			 uop.op = MFC1;
-			 uop.srcB = fs;
+			 /* FR=0: read the EVEN reg of the pair; jmp_imm[0]=fs[0] picks the
+			  * 32b half to extract (low=even, high=odd).  FR=1: whole reg, low32. */
+			 if(!fr)
+			   begin
+			      uop.srcB = {fs[`LG_PRF_ENTRIES-1:1], 1'b0};
+			      uop.jmp_imm[0] = fs[0];
+			   end
+			 else
+			   uop.srcB = fs;
 			 uop.fp_srcB_valid = 1'b1;
 			 uop.is_mem = 1'b1;
 		      end
 		    else if((insn[25:21]==5'd4) && (insn[10:0] == 11'd0))
-		      begin /* mtc1: FPR[fs] <- GPR[rt] (FR=1 flat) */
+		      begin /* mtc1: FPR[fs] <- GPR[rt] */
 			 uop.srcA = rt;
 			 uop.srcA_valid = 1'b1;
 			 uop.op = MTC1;
-			 uop.dst = fs;
+			 /* FR=0: write the EVEN reg; read it too (srcB) as the merge old-value;
+			  * jmp_imm[0]=fs[0] picks the half to overwrite.  FR=1: whole reg. */
+			 if(!fr)
+			   begin
+			      uop.dst = {fs[`LG_PRF_ENTRIES-1:1], 1'b0};
+			      uop.srcB = {fs[`LG_PRF_ENTRIES-1:1], 1'b0};
+			      uop.fp_srcB_valid = 1'b1;
+			      uop.jmp_imm[0] = fs[0];
+			   end
+			 else
+			   uop.dst = fs;
 			 uop.fp_dst_valid = 1'b1;
 			 uop.is_mem = 1'b1;
 		      end // if ((insn[25:21]==5'd4) && (insn[10:0] == 11'd0))
@@ -1604,10 +1622,21 @@ module decode_mips(
 		    uop.op = LWC1;
 		    uop.srcA = rs;
 		    uop.srcA_valid = 1'b1;
-		    uop.dst = ft;
 		    uop.fp_dst_valid = 1'b1;
 		    uop.imm = insn[15:0];
 		    uop.is_mem = 1'b1;
+		    /* FR=0: write the EVEN reg's jmp_imm[0]-selected 32b half, preserving
+		     * the other half.  Read the even reg (srcB) at issue for the merge old
+		     * value (spliced at writeback).  FR=1: whole reg ft, plain load. */
+		    if(!fr)
+		      begin
+			 uop.dst = {ft[`LG_PRF_ENTRIES-1:1], 1'b0};
+			 uop.srcB = {ft[`LG_PRF_ENTRIES-1:1], 1'b0};
+			 uop.fp_srcB_valid = 1'b1;
+			 uop.jmp_imm[0] = ft[0];
+		      end
+		    else
+		      uop.dst = ft;
 		    end
 		 end
 	       6'd53: /* LDC1: FPR[ft] <- mem[rs+off] (64b) */
@@ -1639,7 +1668,15 @@ module decode_mips(
 		    uop.op = SWC1;
 		    uop.srcA = rs;
 		    uop.srcA_valid = 1'b1;
-		    uop.srcB = ft;
+		    /* FR=0: store the half (even=low, odd=high) of the EVEN reg; jmp_imm[0]
+		     * = ft[0] picks it.  FR=1: low 32 of the whole reg. */
+		    if(!fr)
+		      begin
+			 uop.srcB = {ft[`LG_PRF_ENTRIES-1:1], 1'b0};
+			 uop.jmp_imm[0] = ft[0];
+		      end
+		    else
+		      uop.srcB = ft;
 		    uop.fp_srcB_valid = 1'b1;
 		    uop.imm = insn[15:0];
 		    uop.is_mem = 1'b1;
