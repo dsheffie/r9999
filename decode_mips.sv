@@ -9,6 +9,7 @@ module decode_mips(
 		   in_64b_kernel_mode,
 		   in_64b_supervisor_mode,
 		   in_64b_user_mode,
+		   cu1,
 		   irq,
 		   tlb_miss,
 		   tlb_invalid,
@@ -29,6 +30,7 @@ module decode_mips(
    input logic			in_64b_kernel_mode;
    input logic			in_64b_supervisor_mode;
    input logic			in_64b_user_mode;
+   input logic			cu1;   /* Status.CU1 (coprocessor-1 / FPU enable) */
    input logic			irq;
    input logic			tlb_miss;
    input logic			tlb_invalid;
@@ -107,6 +109,7 @@ module decode_mips(
 	uop.fp_dst_valid = 1'b0;
 	uop.fcr_dst_valid = 1'b0;
 	uop.is_fp = 1'b0;
+	uop.cpu_ce1 = 1'b0;
 	
 	uop.has_delay_slot = 1'b0;
 	uop.has_nullifying_delay_slot = 1'b0;
@@ -1058,6 +1061,12 @@ module decode_mips(
 		 end // case: 6'd16
 	       6'd17: /* coproc1 */
 		 begin
+		    if(!cu1)
+		      begin /* CP1 with FPU disabled -> Coprocessor Unusable, CE=1 */
+			 uop.op = CPU;
+			 uop.cpu_ce1 = 1'b1;
+		      end
+		    else
 		    if((insn[25:21]==5'd0) && (insn[10:0] == 11'd0))
 		      begin /* mfc1: GPR[rt] <- FPR[fs] (FR=1 flat) */
 			 uop.dst = rt;
@@ -1144,8 +1153,8 @@ module decode_mips(
 			 endcase
 		      end
 		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
-			    (insn[5:0]==6'd0 || insn[5:0]==6'd1 || insn[5:0]==6'd2))
-		      begin /* ADD/SUB/MUL.[sd]: fmt 16=single,17=double; func 0=add,1=sub,2=mul */
+			    (insn[5:0]==6'd0 || insn[5:0]==6'd1 || insn[5:0]==6'd2 || insn[5:0]==6'd3))
+		      begin /* ADD/SUB/MUL/DIV.[sd]: fmt 16=single,17=double; func 0=add,1=sub,2=mul,3=div */
 			 uop.srcA = fs;
 			 uop.fp_srcA_valid = 1'b1;
 			 uop.srcB = ft;
@@ -1155,10 +1164,21 @@ module decode_mips(
 			 uop.is_fp = 1'b1;
 			 if(insn[25:21]==5'd16) /* single */
 			   uop.op = (insn[5:0]==6'd0) ? SP_ADD :
-				    (insn[5:0]==6'd1) ? SP_SUB : SP_MUL;
+				    (insn[5:0]==6'd1) ? SP_SUB :
+				    (insn[5:0]==6'd2) ? SP_MUL : SP_DIV;
 			 else /* double */
 			   uop.op = (insn[5:0]==6'd0) ? DP_ADD :
-				    (insn[5:0]==6'd1) ? DP_SUB : DP_MUL;
+				    (insn[5:0]==6'd1) ? DP_SUB :
+				    (insn[5:0]==6'd2) ? DP_MUL : DP_DIV;
+		      end
+		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) && (insn[5:0]==6'd4))
+		      begin /* SQRT.[sd]: single source (fs), func 4 */
+			 uop.srcA = fs;
+			 uop.fp_srcA_valid = 1'b1;
+			 uop.dst = fd;
+			 uop.fp_dst_valid = 1'b1;
+			 uop.is_fp = 1'b1;
+			 uop.op = (insn[25:21]==5'd16) ? SP_SQRT : DP_SQRT;
 		      end
 		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
 			    (insn[5:0]==6'd50 || insn[5:0]==6'd60 || insn[5:0]==6'd62))
@@ -1177,6 +1197,24 @@ module decode_mips(
 			 else /* double */
 			   uop.op = (insn[5:0]==6'd50) ? DP_CMP_EQ :
 				    (insn[5:0]==6'd60) ? DP_CMP_LT : DP_CMP_LE;
+		      end
+		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) && (insn[5:0]==6'd13))
+		      begin /* TRUNC.W.[sd]: FP->int32, round toward zero (f2i) */
+			 uop.srcA = fs;
+			 uop.fp_srcA_valid = 1'b1;
+			 uop.dst = fd;
+			 uop.fp_dst_valid = 1'b1;
+			 uop.is_fp = 1'b1;
+			 uop.op = (insn[25:21]==5'd16) ? TRUNC_W_S : TRUNC_W_D;
+		      end
+		    else if((insn[25:21]==5'd20) && (insn[5:0]==6'd32 || insn[5:0]==6'd33))
+		      begin /* CVT.S.W / CVT.D.W: int32->FP (i2f), FCSR.RM */
+			 uop.srcA = fs;
+			 uop.fp_srcA_valid = 1'b1;
+			 uop.dst = fd;
+			 uop.fp_dst_valid = 1'b1;
+			 uop.is_fp = 1'b1;
+			 uop.op = (insn[5:0]==6'd32) ? CVT_S_W : CVT_D_W;
 		      end
 		 end // case: 6'd17
 	       6'd20: /* BEQL */
@@ -1548,6 +1586,10 @@ module decode_mips(
 		 end
 	       6'd49: /* LWC1: FPR[ft] <- mem[rs+off] (low 32b) */
 		 begin
+		    if(!cu1)
+		      begin uop.op = CPU; uop.cpu_ce1 = 1'b1; end
+		    else
+		    begin
 		    uop.op = LWC1;
 		    uop.srcA = rs;
 		    uop.srcA_valid = 1'b1;
@@ -1555,9 +1597,14 @@ module decode_mips(
 		    uop.fp_dst_valid = 1'b1;
 		    uop.imm = insn[15:0];
 		    uop.is_mem = 1'b1;
+		    end
 		 end
 	       6'd53: /* LDC1: FPR[ft] <- mem[rs+off] (64b) */
 		 begin
+		    if(!cu1)
+		      begin uop.op = CPU; uop.cpu_ce1 = 1'b1; end
+		    else
+		    begin
 			 uop.op = LDC1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
@@ -1565,6 +1612,7 @@ module decode_mips(
 			 uop.fp_dst_valid = 1'b1;
 			 uop.imm = insn[15:0];
 			 uop.is_mem = 1'b1;
+		    end
 		 end
 	       6'd51: /* PREF */
 		 begin
@@ -1573,6 +1621,10 @@ module decode_mips(
 		 end
 	       6'd57: /* SWC1: mem[rs+off] <- FPR[ft] (low 32b) */
 		 begin
+		    if(!cu1)
+		      begin uop.op = CPU; uop.cpu_ce1 = 1'b1; end
+		    else
+		    begin
 		    uop.op = SWC1;
 		    uop.srcA = rs;
 		    uop.srcA_valid = 1'b1;
@@ -1581,9 +1633,14 @@ module decode_mips(
 		    uop.imm = insn[15:0];
 		    uop.is_mem = 1'b1;
 		    uop.is_store = 1'b1;
+		    end
 		 end
 	       6'd61: /* SDC1: mem[rs+off] <- FPR[ft] (64b) */
 		 begin
+		    if(!cu1)
+		      begin uop.op = CPU; uop.cpu_ce1 = 1'b1; end
+		    else
+		    begin
 			 uop.op = SDC1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
@@ -1592,6 +1649,7 @@ module decode_mips(
 			 uop.imm = insn[15:0];
 			 uop.is_mem = 1'b1;
 			 uop.is_store = 1'b1;
+		    end
 		 end
 	       6'd55: /* LD */
 		 begin

@@ -55,6 +55,17 @@ _start:
     b       .Lbss_loop
 .Lbss_done:
 
+    /* Enable the FPU (Status.CU1 = bit 29) so bare-metal FP tests can use COP1.
+     * CU1 is now a real R/W bit (lazy-FPU); without this every COP1 op CpU-faults.
+     * Use $k0/$k1 (NOT co-sim-compared) so the Status readback (whose CU1/FR bits
+     * differ between the RTL and the GPR-only checker) never lands in a checked GPR. */
+    mfc0    $k0, $12
+    lui     $k1, 0x2000         /* 0x20000000 = ST0_CU1 */
+    or      $k0, $k0, $k1
+    mtc0    $k0, $12
+    move    $k0, $zero          /* don't leave a Status readback in a GPR: the */
+    move    $k1, $zero          /* GPR-only checker models FR/CU1 differently   */
+
     /* Call main(0, NULL, NULL) */
     move    $a0, $zero
     move    $a1, $zero

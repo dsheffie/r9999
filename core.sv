@@ -310,6 +310,7 @@ module core(clk,
    wire					  w_in_64b_kernel_mode;
    wire					  w_in_64b_supervisor_mode;
    wire					  w_in_64b_user_mode;
+   wire					  w_cu1;   /* Status.CU1 (FPU enable) from exec -> decode CP1 CpU gate */
    wire					  w_irq_pending;
    wire [31:0]				  w_cp0_count;
    
@@ -357,7 +358,11 @@ module core(clk,
    rob_entry_t r_rob_even[(N_ROB_ENTRIES/2)-1:0];
    rob_entry_t r_rob_odd[(N_ROB_ENTRIES/2)-1:0];
    logic [`M_WIDTH-1:0 ] r_addrs[N_ROB_ENTRIES-1:0];
-   
+   /* FP IEEE flags side-band (1W at FP completion / 2R at retire), mirroring
+    * r_addrs: {denorm(E), V,Z,O,U,I} of each completed FP op, indexed by ROB ptr.
+    * Read at retire to update FCSR.Cause/Flags (gated by the fp_set_flags bit). */
+   logic [5:0] 		 r_fp_flags[N_ROB_ENTRIES-1:0];
+
    
    logic [N_ROB_ENTRIES-1:0] 		  r_rob_complete;
    logic [N_ROB_ENTRIES-1:0] 		  r_rob_sd_complete;
@@ -415,8 +420,10 @@ module core(clk,
    logic [`LG_PRF_ENTRIES-1:0]      r_fp_retire_rat[31:0];
    logic [`LG_PRF_ENTRIES-1:0]      n_fp_retire_rat[31:0];
    logic [`LG_PRF_ENTRIES-1:0]      n_fp_prf_entry;
-   logic [`LG_PRF_ENTRIES:0]        t_fp_ffs;
-   logic 			   t_fp_ffs_full;
+   logic [`LG_PRF_ENTRIES:0]        t_fp_ffs0, t_fp_ffs1;   // bank0 (fpu) / bank1 (mem) free ptr
+   logic 			   t_fp_b0_full, t_fp_b1_full;
+   logic 			   w_fp_dst_is_mem;
+   wire [N_PRF_ENTRIES-1:0] 	   w_fp_free_b0, w_fp_free_b1;
    logic 			   t_enough_fprfs, t_enough_next_fprfs;
    logic 			   t_free_fp_reg, t_free_fp_reg_two;
    logic [`LG_PRF_ENTRIES-1:0]      t_free_fp_reg_ptr, t_free_fp_reg_two_ptr;
@@ -434,6 +441,11 @@ module core(clk,
    logic 			   t_enough_fcrprfs, t_enough_next_fcrprfs;
    logic 			   t_free_fcr;
    logic [`LG_FCR_PRF_ENTRIES-1:0]  t_free_fcr_ptr;
+
+   /* FCSR (FCR31) Cause/Flags update -> exec (internal), driven at retire/fault */
+   logic			   core_fcsr_we;
+   logic [5:0]			   core_fcsr_cause6;
+   logic [4:0]			   core_fcsr_flags5;
 
    logic [N_ROB_ENTRIES-1:0] 	    uq_wait, mq_wait;
    
@@ -490,6 +502,7 @@ module core(clk,
    logic [31:0] 	     r_arch_a0;
 
    logic [4:0] 		     n_cause, r_cause;
+   logic [1:0] 		     n_ce, r_ce;   /* Cause.CE for a CpU (1=CP1/FPU, else 0) */
    logic		     r_tlb_refill, n_tlb_refill;
    logic		     r_xtlb_refill, n_xtlb_refill;
    logic		     n_save_to_tlb_regs, r_save_to_tlb_regs;
@@ -850,6 +863,7 @@ module core(clk,
 	     r_machine_clr <= 1'b0;
 	     r_got_restart_ack <= 1'b0;
 	     r_cause <= 5'd0;
+	     r_ce <= 2'd0;
 	     r_tlb_refill <= 1'b0;
 	     r_xtlb_refill <= 1'b0;
 	     r_save_to_tlb_regs <= 1'b0;
@@ -866,6 +880,7 @@ module core(clk,
 	     r_machine_clr <= n_machine_clr;
 	     r_got_restart_ack <= n_got_restart_ack;
 	     r_cause <= n_cause;
+	     r_ce <= n_ce;
 	     r_tlb_refill <= n_tlb_refill;
 	     r_xtlb_refill <= n_xtlb_refill;
 	     r_save_to_tlb_regs <= n_save_to_tlb_regs;
@@ -1076,6 +1091,7 @@ module core(clk,
 	t_restart_complete = 1'b0;
 	
 	n_cause = r_cause;
+	n_ce = r_ce;
 	n_tlb_refill = r_tlb_refill;
 	n_xtlb_refill = r_xtlb_refill;
 
@@ -1089,6 +1105,9 @@ module core(clk,
 	n_in_delay_slot = r_in_delay_slot;
 	t_retire = 1'b0;
 	t_retire_two = 1'b0;
+	core_fcsr_we = 1'b0;
+	core_fcsr_cause6 = 6'd0;
+	core_fcsr_flags5 = 5'd0;
 	t_rat_copy = 1'b0;
 	t_clr_rob = 1'b0;
 	t_clr_dq = 1'b0;
@@ -1111,14 +1130,14 @@ module core(clk,
 	
 	t_enough_iprfs = !((t_uop.dst_valid) && t_gpr_ffs_full);
 	t_enough_hlprfs = !((t_uop.hilo_dst_valid) && (r_hilo_prf_free == 'd0));
-	t_enough_fprfs = !((t_uop.fp_dst_valid) && t_fp_ffs_full);
+	t_enough_fprfs = !((t_uop.fp_dst_valid) && (t_uop.is_mem ? t_fp_b1_full : t_fp_b0_full));
 	t_enough_fcrprfs = !((t_uop.fcr_dst_valid) && (r_fcr_prf_free == 'd0));
 
 
 	t_enough_next_iprfs = !((t_uop2.dst_valid) && t_gpr_ffs2_full);
 	t_enough_next_hlprfs = !((t_uop2.hilo_dst_valid) /*&& (r_hilo_prf_free == 'd0)*/);
 	/* one FP dst alloc per cycle: slot 1 FP-dst needs a free FP reg AND slot 0 not also FP-dst */
-	t_enough_next_fprfs = !((t_uop2.fp_dst_valid) && (t_fp_ffs_full || t_uop.fp_dst_valid));
+	t_enough_next_fprfs = !((t_uop2.fp_dst_valid) && ((t_uop2.is_mem ? t_fp_b1_full : t_fp_b0_full) || t_uop.fp_dst_valid));
 	/* one FCR dst alloc per cycle: slot 1 FCR-dst serialized to slot 0 next cycle */
 	t_enough_next_fcrprfs = !(t_uop2.fcr_dst_valid);
 
@@ -1197,7 +1216,8 @@ module core(clk,
 			t_rob_head.is_syscall | 
 			t_rob_head.is_ii |
 			t_rob_head.is_cpu |
-			t_rob_head.is_bad_addr | 
+			t_rob_head.is_fpe |
+			t_rob_head.is_bad_addr |
 			t_rob_head.overflow | 
 			t_rob_head.trap | 
 			t_rob_head.is_irq |
@@ -1302,6 +1322,21 @@ module core(clk,
 				   & !t_rob_next_head.is_call
 		    		   & !t_rob_next_head.valid_hilo_dst
 				   & !t_rob_next_head.valid_fcr_dst & ~single_step;
+		    /* non-trapping FP ops retiring this cycle: accumulate IEEE flags
+		     * into FCSR.Flags and set Cause to the youngest's exceptions. */
+		    if(t_retire & t_rob_head.fp_set_flags)
+		      begin
+			 core_fcsr_we = 1'b1;
+			 core_fcsr_cause6 = r_fp_flags[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
+			 core_fcsr_flags5 = r_fp_flags[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]][4:0];
+		      end
+		    if(t_retire_two & t_rob_next_head.fp_set_flags)
+		      begin
+			 core_fcsr_we = 1'b1;
+			 core_fcsr_cause6 = r_fp_flags[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]];
+			 core_fcsr_flags5 = core_fcsr_flags5 |
+					    r_fp_flags[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]][4:0];
+		      end
 		 end // if (t_can_retire_rob_head)
 	       else if(!t_dq_empty)
 		 begin
@@ -1573,7 +1608,16 @@ module core(clk,
 		 end
 	       else if(t_rob_head.is_cpu)
 		 begin
-		    n_cause = 5'd11;  /* Coprocessor Unusable (CP0 access outside kernel; CE=0) */
+		    n_cause = 5'd11;  /* Coprocessor Unusable */
+		    n_ce = t_rob_head.cpu_ce1 ? 2'd1 : 2'd0;  /* CP1 (FPU) -> CE=1, else CP0 -> CE=0 */
+		 end
+	       else if(t_rob_head.is_fpe)
+		 begin
+		    n_cause = 5'd15;  /* Floating-Point Exception (denorm/Unimplemented + enabled IEEE) */
+		    /* set FCSR.Cause so the handler can read why it trapped; the trapped
+		     * op does NOT accumulate into the sticky Flags field. */
+		    core_fcsr_we = 1'b1;
+		    core_fcsr_cause6 = r_fp_flags[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
 		 end
 	       else if(t_rob_head.opcode == FETCH_MISALIGNED ||
 			       t_rob_head.opcode == FETCH_ADDR_ERROR)  /* both AdEL, BadVAddr=PC */
@@ -2074,6 +2118,9 @@ module core(clk,
 	
 	t_rob_tail.is_ii = 1'b0;
 	t_rob_tail.is_cpu = 1'b0;
+	t_rob_tail.cpu_ce1 = 1'b0;
+	t_rob_tail.is_fpe = 1'b0;
+	t_rob_tail.fp_set_flags = 1'b0;
 	t_rob_tail.overflow = 1'b0;
 	t_rob_tail.trap = 1'b0;
 	t_rob_tail.tlb_refill = 1'b0;
@@ -2116,6 +2163,8 @@ module core(clk,
 	t_rob_next_tail.cache_inval = t_alloc_uop2.cache_inval;
 	t_rob_next_tail.is_tlbp = (t_alloc_uop2.op == TLBP);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
+	t_rob_next_tail.is_fpe = 1'b0;
+	t_rob_next_tail.fp_set_flags = 1'b0;
 	t_rob_next_tail.overflow = 1'b0;
 	t_rob_next_tail.trap = 1'b0;
 	t_rob_next_tail.tlb_refill = 1'b0;
@@ -2126,6 +2175,7 @@ module core(clk,
 	
 	t_rob_next_tail.is_ii = 1'b0;
 	t_rob_next_tail.is_cpu = 1'b0;
+	t_rob_next_tail.cpu_ce1 = 1'b0;
 	t_rob_next_tail.is_bad_addr = 1'b0;
 	t_rob_next_tail.take_br = 1'b0;
 	t_rob_next_tail.is_br = t_alloc_uop2.is_br;	
@@ -2200,6 +2250,7 @@ module core(clk,
 		    begin
 		       t_rob_tail.faulted = 1'b1;
 		       t_rob_tail.is_cpu = 1'b1;
+		       t_rob_tail.cpu_ce1 = t_uop.cpu_ce1;
 		    end
 		  else if(t_uop.op == FETCH_TLB_MISS)
 		    begin
@@ -2273,6 +2324,7 @@ module core(clk,
 		    begin
 		       t_rob_next_tail.faulted = 1'b1;
 		       t_rob_next_tail.is_cpu = 1'b1;
+		       t_rob_next_tail.cpu_ce1 = t_uop2.cpu_ce1;
 		    end
 		  else if(t_uop2.op == FETCH_TLB_MISS)
 		    begin
@@ -2406,6 +2458,8 @@ module core(clk,
 	       begin
 		  if(t_complete_bundle_2.rob_ptr[0]) begin
 		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= t_complete_bundle_2.faulted;
+		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_fpe <= t_complete_bundle_2.faulted;
+		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].fp_set_flags <= 1'b1;
 		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].target_pc <= t_complete_bundle_2.restart_pc;
 		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_ii <= t_complete_bundle_2.is_ii;
 		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].take_br <= t_complete_bundle_2.take_br;
@@ -2418,6 +2472,8 @@ module core(clk,
 		  end
 		  else begin
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= t_complete_bundle_2.faulted;
+		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_fpe <= t_complete_bundle_2.faulted;
+		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].fp_set_flags <= 1'b1;
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].target_pc <= t_complete_bundle_2.restart_pc;
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_ii <= t_complete_bundle_2.is_ii;
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].take_br <= t_complete_bundle_2.take_br;
@@ -2428,6 +2484,8 @@ module core(clk,
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
 `endif
 		  end
+		  /* FP IEEE flags side-band (1W), read at retire (see core_fcsr_*) */
+		  r_fp_flags[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:0]] <= t_complete_bundle_2.fp_flags;
 	       end
 	     if(core_mem_rsp_valid)
 	       begin
@@ -2718,12 +2776,29 @@ module core(clk,
 	  end
      end // always_comb
 
-   find_first_set#(`LG_PRF_ENTRIES) ffs_fp(.in(r_fp_prf_free), .y(t_fp_ffs));
+   /* FP free-list banked to match fp_regfile: bank0 = low half (ptr MSB=0) = fpu-arith
+    * results; bank1 = high half (MSB=1) = mem-pipe FP results (loads + mtc1).  Allocate
+    * the (single, per the gating) fp dst from the bank matching its producing write port
+    * -- is_mem (load/mtc1) -> bank1, else (fpu arith) -> bank0 -- so the ptr MSB the
+    * regfile reads by is meaningful.  Free/retire stay on the flat r_fp_prf_free vector. */
+   generate
+      for(genvar fpgi = 0; fpgi < N_PRF_ENTRIES; fpgi = fpgi + 1)
+	begin : fp_free_bank_split
+	   assign w_fp_free_b0[fpgi] = (fpgi <  N_PRF_ENTRIES/2) ? r_fp_prf_free[fpgi] : 1'b0;
+	   assign w_fp_free_b1[fpgi] = (fpgi >= N_PRF_ENTRIES/2) ? r_fp_prf_free[fpgi] : 1'b0;
+	end
+   endgenerate
+   find_first_set#(`LG_PRF_ENTRIES) ffs_fp0(.in(w_fp_free_b0), .y(t_fp_ffs0));
+   find_first_set#(`LG_PRF_ENTRIES) ffs_fp1(.in(w_fp_free_b1), .y(t_fp_ffs1));
    always_comb
      begin
 	n_fp_prf_free = r_fp_prf_free;
-	n_fp_prf_entry = t_fp_ffs[`LG_PRF_ENTRIES-1:0];
-	t_fp_ffs_full = t_fp_ffs[`LG_PRF_ENTRIES];
+	t_fp_b0_full = t_fp_ffs0[`LG_PRF_ENTRIES];
+	t_fp_b1_full = t_fp_ffs1[`LG_PRF_ENTRIES];
+	w_fp_dst_is_mem = (t_alloc & t_uop.fp_dst_valid) ? t_uop.is_mem :
+			  (t_alloc_two & t_uop2.fp_dst_valid) ? t_uop2.is_mem : 1'b0;
+	n_fp_prf_entry = w_fp_dst_is_mem ? t_fp_ffs1[`LG_PRF_ENTRIES-1:0]
+					 : t_fp_ffs0[`LG_PRF_ENTRIES-1:0];
 	if(t_alloc & t_uop.fp_dst_valid)
 	  n_fp_prf_free[n_fp_prf_entry] = 1'b0;
 	if(t_alloc_two & t_uop2.fp_dst_valid)
@@ -2893,6 +2968,7 @@ module core(clk,
 		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
+		     .cu1(w_cu1),
 		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn.tlb_miss),
 		     .tlb_invalid(insn.tlb_invalid),
@@ -2915,6 +2991,7 @@ module core(clk,
 		     .in_64b_kernel_mode(w_in_64b_kernel_mode),
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
+		     .cu1(w_cu1),
 		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .tlb_invalid(insn_two.tlb_invalid),
@@ -2978,6 +3055,7 @@ module core(clk,
 	   .core_epc(r_epc),
 	   .core_wr_epc(t_wr_epc),
 	   .core_cause(r_cause),
+	   .core_ce(r_ce),
 	   .exec_epc(w_exec_epc),
 	   .core_wr_tlbp(t_wr_tlbp),
 	   .core_tlbp_hit(t_tlbp_hit),
@@ -2990,6 +3068,9 @@ module core(clk,
 	   .core_wr_cause(t_wr_cause),
 	   .core_wr_badvaddr(t_wr_badvaddr),
 	   .core_badvaddr(r_badvaddr),
+	   .core_fcsr_we(core_fcsr_we),
+	   .core_fcsr_cause6(core_fcsr_cause6),
+	   .core_fcsr_flags5(core_fcsr_flags5),
 	   .save_to_tlb_regs(r_save_to_tlb_regs),
 	   .exc_in_delay(r_exc_in_delay),
 	   .in_kernel_mode(in_kernel_mode),
@@ -2998,7 +3079,8 @@ module core(clk,
 	   .in_64b_kernel_mode(w_in_64b_kernel_mode),
 	   .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 	   .in_64b_user_mode(w_in_64b_user_mode),
-	   
+	   .cu1(w_cu1),
+
 	   .putchar_fifo_out(putchar_fifo_out),
 	   .putchar_fifo_empty(putchar_fifo_empty),
 	   .putchar_fifo_pop(putchar_fifo_pop),

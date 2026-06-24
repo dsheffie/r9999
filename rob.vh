@@ -7,6 +7,9 @@ typedef struct packed {
    logic       faulted;
    logic       is_ii;
    logic       is_cpu;   /* coprocessor unusable (CpU, cause 11) */
+   logic       cpu_ce1;  /* the CpU is for CP1 (FPU, CU1=0) -> Cause.CE=1 (else CP0 CpU = CE=0) */
+   logic       is_fpe;   /* FP exception (FPE, cause 15): denorm/enabled IEEE flag */
+   logic       fp_set_flags; /* completed on FP port 2 (arith/cmp/cvt): update FCSR Cause/Flags at retire */
    logic       overflow;
    logic       trap;
    logic       is_bad_addr;
@@ -64,6 +67,7 @@ typedef struct packed {
    logic 		       is_ii;
    logic		       overflow;
    logic		       trap;
+   logic [5:0]		       fp_flags;  /* {denorm(E), V,Z,O,U,I} of a completing FP op (port 2) */
    logic [(`M_WIDTH-1):0]      data;
 } complete_t;
 

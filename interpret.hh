@@ -326,6 +326,7 @@ bool is_store_insn(state_t *s);
 #define SR_SX    (1u <<  6)  /* supervisor extended */
 #define SR_KX    (1u <<  7)  /* kernel extended (64-bit kernel mode) */
 #define SR_BEV   (1u << 22)  /* bootstrap exception vectors */
+#define SR_FR    (1u << 26)  /* FP register mode (flat FR=1 datapath; hardwired 1 in RTL) */
 #define SR_CU0   (1u << 28)  /* coprocessor 0 usable */
 #define SR_CU1   (1u << 29)  /* coprocessor 1 usable (FPU) */
 #define SR_CU2   (1u << 30)  /* coprocessor 2 usable */

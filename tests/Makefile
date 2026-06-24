@@ -224,12 +224,25 @@ run-cache: cache/test_smc_hit.elf cache/test_smc_index.elf cache/test_inval_nowb
 # the interpreter).  Each prints 'P' on the functional self-check; a co-sim
 # divergence prints 'does not match'.
 # -----------------------------------------------------------------------
+# FP-exception tests are self-contained (own vectors, no crt0); specific rules win.
+fpu/fp_fpe.elf: fpu/fp_fpe.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_fpe.S -o fpu/fp_fpe.o
+	$(LD) $(LDFLAGS) fpu/fp_fpe.o -o $@
+
+fpu/fp_divsqrt.elf: fpu/fp_divsqrt.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_divsqrt.S -o fpu/fp_divsqrt.o
+	$(LD) $(LDFLAGS) fpu/fp_divsqrt.o -o $@
+
+fpu/fp_cu1.elf: fpu/fp_cu1.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_cu1.S -o fpu/fp_cu1.o
+	$(LD) $(LDFLAGS) fpu/fp_cu1.o -o $@
+
 fpu/%.elf: fpu/%.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/$*.S -o fpu/$*.o
 	$(LD) $(LDFLAGS) $(STARTUP) fpu/$*.o -o $@
 
-run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf fpu/fp_arith.elf fpu/fp_arith_d.elf
-	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst fp_arith fp_arith_d; do \
+run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf fpu/fp_arith.elf fpu/fp_arith_d.elf fpu/fp_cvt.elf
+	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst fp_arith fp_arith_d fp_cvt; do \
 	  echo "== fpu/$$t (co-sim; expect 'P' and no 'does not match') =="; \
 	  ( cd .. && ./ooo_core --file tests/fpu/$$t.elf --checker true 2>&1 \
 	      | grep -iE "does not match|FAIL" ) || echo "  ok (no divergence)"; \
@@ -239,6 +252,22 @@ run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp
 run-fpu-rm: fpu/fp_round.elf
 	@echo "== fpu/fp_round (FCSR.RM self-check; expect 'P') =="
 	cd .. && $(SIM) --file tests/fpu/fp_round.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
+
+# FP-exception (ExcCode 15) directed test: self-check only (the checker models
+# neither FPE nor FCSR enables).
+run-fpu-fpe: fpu/fp_fpe.elf
+	@echo "== fpu/fp_fpe (FPE/ExcCode-15 self-check; expect 'P') =="
+	$(SIM) --file fpu/fp_fpe.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1
+
+# DIV/SQRT punt-to-soft-float: each must fault E (ExcCode 15, Cause.E). -c0 only.
+run-fpu-divsqrt: fpu/fp_divsqrt.elf
+	@echo "== fpu/fp_divsqrt (div/sqrt -> FPE.E self-check; expect 'P') =="
+	$(SIM) --file fpu/fp_divsqrt.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1
+
+# lazy-FPU CpU path: CP1 with CU1=0 -> ExcCode 11, Cause.CE=1. -c0 only.
+run-fpu-cu1: fpu/fp_cu1.elf
+	@echo "== fpu/fp_cu1 (CU1=0 -> CpU CE=1 self-check; expect 'P') =="
+	$(SIM) --file fpu/fp_cu1.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1
 
 # -----------------------------------------------------------------------
 # Generic disassembly rule

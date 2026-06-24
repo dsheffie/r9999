@@ -28,9 +28,13 @@ module exec(clk,
 	    core_epc,
 	    core_wr_epc,
 	    core_cause,
+	    core_ce,
 	    core_wr_cause,
 	    core_wr_badvaddr,
 	    core_badvaddr,
+	    core_fcsr_we,
+	    core_fcsr_cause6,
+	    core_fcsr_flags5,
 	    exec_epc,
 	    core_wr_tlbp,
 	    core_tlbp_hit,
@@ -45,6 +49,7 @@ module exec(clk,
 	    in_user_mode,
 	    in_64b_user_mode,
 	    in_64b_supervisor_mode,
+	    cu1,
 	    in_64b_kernel_mode,
 	    putchar_fifo_out,
 	    putchar_fifo_empty,
@@ -105,10 +110,16 @@ module exec(clk,
        
    input logic		      core_wr_epc;
    input logic [4:0]	      core_cause;
+   input logic [1:0]	      core_ce;     /* Cause.CE (coprocessor #) for a CpU exception */
    input logic		      core_wr_cause;
    input logic		      core_wr_badvaddr;
    input logic [`M_WIDTH-1:0] core_badvaddr;
-   
+   /* FCSR (FCR31) update from retire/fault: set the Cause field (bits 17:12) and
+    * OR sticky exceptions into the Flags field (bits 6:2). */
+   input logic		      core_fcsr_we;
+   input logic [5:0]	      core_fcsr_cause6;  /* {E,V,Z,O,U,I} this op raised */
+   input logic [4:0]	      core_fcsr_flags5;  /* {V,Z,O,U,I} to OR into Flags (0 on a trap) */
+
    output logic [`M_WIDTH-1:0] exec_epc;
    input logic		       save_to_tlb_regs;
    input logic		       core_wr_tlbp;
@@ -128,6 +139,7 @@ module exec(clk,
    output logic			in_64b_kernel_mode;
    output logic			in_64b_supervisor_mode;
    output logic			in_64b_user_mode;
+   output logic			cu1;   /* Status.CU1 (FPU enable) -> decode CP1 CpU gate */
    output logic			irq_pending;
    output logic [31:0]		cp0_count;
 
@@ -219,14 +231,12 @@ module exec(clk,
    logic [N_INT_PRF_ENTRIES-1:0]  r_prf_inflight, n_prf_inflight;
    logic [N_HILO_PRF_ENTRIES-1:0] r_hilo_inflight, n_hilo_inflight;
 
-   /* FP register file (shared by the mem-pipe mover now, the FPU later).
-    * 64-bit regs; FR=1/N32 model. */
-   logic [`M_WIDTH-1:0] 	  r_fp_prf[N_INT_PRF_ENTRIES-1:0];
-   /* registered FP read ports (rf4r2w-style synchronous read): address presented
-    * from the combinational head, output aligned with mem_uq / mem_dq.  Matches the
-    * int PRF's registered-read pattern so synth maps cleanly (no async-read on a
-    * combinational BRAM read). srcB = mfc1 source; dq = FP store data. */
-   logic [`M_WIDTH-1:0] 	  r_fp_rd_srcB, r_fp_rd_dq;
+   /* FP register file: clustered/banked rf4r2w-style (fp_regfile, instanced below).
+    * All four read ports are SYNCHRONOUS (registered inside the module): rd0/rd1 =
+    * fpu operand reads (consumed one cycle later in the FP read stage); rd2 = mfc1
+    * source (srcB); rd3 = FP store data (dq).  No flat r_fp_prf flop array anymore. */
+   logic [`M_WIDTH-1:0] 	  w_fp_srcA, w_fp_srcB;     // fpu reads  (rd0/rd1)
+   logic [`M_WIDTH-1:0] 	  r_fp_rd_srcB, r_fp_rd_dq; // mem reads (rd2/rd3)
    logic [N_INT_PRF_ENTRIES-1:0]  r_fp_prf_inflight, n_fp_prf_inflight;
 
    logic 			  t_wr_int_prf, t_wr_cpr0, t_wr_cpr0_64;
@@ -1180,22 +1190,35 @@ module exec(clk,
 	  end
      end // always_ff@ (posedge clk)
 
-   /* FP PRF: one write port (mem-pipe move / FP-load response; shared with the future
-    * FPU) + two registered read ports (mfc1 source, FP store data).  Read address is
-    * the combinational head (t_mem_uq.srcB / t_mem_dq.src_ptr) so the registered output
-    * lands aligned with mem_uq / mem_dq -- exactly like the int PRF (rf4r2w).  The NBA
-    * read evaluates the pre-write array => read-old on a same-cycle RW collision (which
-    * the inflight pop-gating already prevents). */
-   always_ff@(posedge clk)
-     begin
-	r_fp_rd_srcB <= r_fp_prf[t_mem_uq.srcB];
-	r_fp_rd_dq   <= r_fp_prf[t_mem_dq.src_ptr];
-	if(mem_rsp_dst_valid & mem_rsp_fp_dst)
-	  r_fp_prf[mem_rsp_dst_ptr] <= mem_rsp_load_data;
-	/* FP arithmetic result (fpu) -- distinct phys reg from the mem-pipe write above */
-	if(w_fpu_result_valid)
-	  r_fp_prf[w_fpu_dst_ptr] <= w_fpu_result;
-     end
+   /* FP register file -- clustered/banked (Henry Wong scheme), like the int PRF.
+    * Bank by physical-ptr MSB: bank 0 (fpu-arith results, write port 0) / bank 1
+    * (mem-pipe FP results = loads + mtc1, write port 1).  The free-list allocates
+    * fp dsts into the bank matching their producing write port (core.sv), so the
+    * MSB is meaningful.  4 synchronous read ports: rd0/rd1 = fpu operands (address
+    * = combinational FP-UQ head; consumed a cycle later in the FP read stage),
+    * rd2/rd3 = mem-pipe reads (mfc1 source / FP store data), aligned with mem_uq /
+    * mem_dq exactly as before.  read-before-write on a same-cycle collision is a
+    * non-issue: inflight pop-gating never lets a source be read the cycle it is
+    * written. */
+   fp_regfile #(.WIDTH(`M_WIDTH), .LG_DEPTH(`LG_PRF_ENTRIES))
+   fpprf (.clk(clk),
+	  .rdptr0(fp_uq.srcA),
+	  .rdptr1(fp_uq.srcB),
+	  .rdptr2(t_mem_uq.srcB),
+	  .rdptr3(t_mem_dq.src_ptr),
+	  /* bank0 write port shared by fpu-arith result and single-cycle convert
+	   * (mutually exclusive by r_fp_wb_bitvec) */
+	  .wrptr0(w_fpu_result_valid ? w_fpu_dst_ptr : r_cvt_dst),
+	  .wrptr1(mem_rsp_dst_ptr),
+	  .wen0(w_fpu_result_valid | r_cvt_valid),
+	  .wen1(mem_rsp_dst_valid & mem_rsp_fp_dst),
+	  .wr0(w_fpu_result_valid ? w_fpu_result : r_cvt_result),
+	  .wr1(mem_rsp_load_data),
+	  .rd0(w_fp_srcA),
+	  .rd1(w_fp_srcB),
+	  .rd2(r_fp_rd_srcB),
+	  .rd3(r_fp_rd_dq)
+	  );
 
    
    always_comb
@@ -1228,6 +1251,9 @@ module exec(clk,
 	/* FP arithmetic result clears the FP-dst inflight bit */
 	if(w_fpu_result_valid)
 	  n_fp_prf_inflight[w_fpu_dst_ptr] = 1'b0;
+	/* single-cycle convert result clears its FP-dst inflight bit */
+	if(r_cvt_valid)
+	  n_fp_prf_inflight[r_cvt_dst] = 1'b0;
 	if(r_start_int && t_wr_int_prf)
 	  begin
 	     n_prf_inflight[int_uop.dst] = 1'b0;
@@ -1258,15 +1284,41 @@ module exec(clk,
 
    /* fpu outputs */
    wire [63:0] w_fpu_result;
+   wire [4:0]  w_fpu_fflags;
+   wire        w_fpu_denorm;
    wire        w_fpu_result_valid, w_fpu_fcr_valid;
    wire [`LG_PRF_ENTRIES-1:0]     w_fpu_dst_ptr;
    wire [`LG_FCR_PRF_ENTRIES-1:0] w_fpu_fcr_ptr;
    wire [`LG_ROB_ENTRIES-1:0]     w_fpu_rob_ptr;
 
-   logic t_fpu_srcA_rdy, t_fpu_srcB_rdy, t_fpu_fcr_rdy, t_fpu_srcs_rdy, t_start_fpu;
-   wire [`M_WIDTH-1:0] w_fp_srcA = r_fp_prf[fp_uq.srcA];
-   wire [`M_WIDTH-1:0] w_fp_srcB = r_fp_prf[fp_uq.srcB];
-   wire [`M_WIDTH-1:0] w_fp_srcC = r_fp_prf[fp_uq.srcC];
+   /* single-cycle FP convert (fpu_f2i / fpu_i2f) -- shares the bank0 write port +
+    * complete_bundle_2 with the multi-cycle fpu, arbitrated by r_fp_wb_bitvec.
+    * Latency from pop: convert = 2 (read stage + 1), fpu = FPU_LAT+1; reserve each
+    * op's writeback slot at pop, gate the head on the matching slot. */
+   localparam FP_WB_BITS = `FPU_LAT + 2;
+   logic [FP_WB_BITS-1:0] r_fp_wb_bitvec, n_fp_wb_bitvec;
+   wire [63:0] w_f2i_out, w_i2f_out;
+   wire [4:0]  w_f2i_fflags, w_i2f_fflags;
+   logic        r_cvt_valid;
+   logic [`LG_PRF_ENTRIES-1:0] r_cvt_dst;
+   logic [`LG_ROB_ENTRIES-1:0] r_cvt_rob;
+   logic [63:0] r_cvt_result;
+   logic [4:0]  r_cvt_fflags;
+   /* head-op (fp_uq) and issue-op (r_fp_iss_uop) convert classification */
+   wire w_head_is_cvt = (fp_uq.op == TRUNC_W_S) || (fp_uq.op == TRUNC_W_D) ||
+			(fp_uq.op == CVT_S_W)   || (fp_uq.op == CVT_D_W);
+   wire w_iss_is_f2i  = (r_fp_iss_uop.op == TRUNC_W_S) || (r_fp_iss_uop.op == TRUNC_W_D);
+   wire w_iss_is_i2f  = (r_fp_iss_uop.op == CVT_S_W)   || (r_fp_iss_uop.op == CVT_D_W);
+   wire w_iss_is_cvt  = w_iss_is_f2i | w_iss_is_i2f;
+
+   logic t_fpu_srcA_rdy, t_fpu_srcB_rdy, t_fpu_fcr_rdy, t_fpu_srcs_rdy;
+   /* registered FP read/issue stage: the cycle after a head pops, the fp_regfile
+    * presents its operands (w_fp_srcA/B) and these carry the issued uop's metadata,
+    * so the fpu sees registered operands + metadata together (synchronous RF read
+    * costs +1 FP issue latency; inflight gating keeps it correct, no bypass). */
+   uop_t       r_fp_iss_uop;
+   logic       r_fp_iss_valid;
+   logic [7:0] r_fp_iss_fcr;
 
    // ---- FP UQ pointers / full-empty / push-pop bookkeeping ----
    always_comb
@@ -1331,8 +1383,43 @@ module exec(clk,
 	t_fpu_srcB_rdy = fp_uq.fp_srcB_valid ? !r_fp_prf_inflight[fp_uq.srcB] : 1'b1;
 	t_fpu_fcr_rdy  = fp_uq.fcr_src_valid ? !r_fcr_prf_inflight[fp_uq.hilo_src] : 1'b1;
 	t_fpu_srcs_rdy = t_fpu_srcA_rdy && t_fpu_srcB_rdy && t_fpu_fcr_rdy;
-	t_pop_fp_uq = !t_fp_uq_empty && !t_flash_clear && t_fpu_srcs_rdy;
-	t_start_fpu = t_pop_fp_uq;
+	/* writeback slot for the head op (convert=2, fpu arith/compare=FPU_LAT+1 from pop)
+	 * must be free, else stall a cycle (mixed-latency shared FP writeback port). */
+	t_pop_fp_uq = !t_fp_uq_empty && !t_flash_clear && t_fpu_srcs_rdy &&
+		      !r_fp_wb_bitvec[w_head_is_cvt ? 2 : (`FPU_LAT+1)];
+     end
+
+   /* FP writeback reservation: shift down each cycle; on pop, reserve dist-1 (next-cycle
+    * frame). gate above reads [dist]. arith/compare fpu dist=FPU_LAT+1, convert dist=2. */
+   always_comb
+     begin
+	integer i;
+	for(i = 0; i < FP_WB_BITS-1; i = i + 1)
+	  n_fp_wb_bitvec[i] = r_fp_wb_bitvec[i+1];
+	n_fp_wb_bitvec[FP_WB_BITS-1] = 1'b0;
+	if(t_pop_fp_uq)
+	  n_fp_wb_bitvec[(w_head_is_cvt ? 2 : (`FPU_LAT+1)) - 1] = 1'b1;
+     end
+   always_ff@(posedge clk)
+     begin
+	if(reset || t_flash_clear)
+	  r_fp_wb_bitvec <= 'd0;
+	else
+	  r_fp_wb_bitvec <= n_fp_wb_bitvec;
+     end
+
+   /* FP read/issue stage register: aligns with the fp_regfile rd0/rd1 latency */
+   always_ff@(posedge clk)
+     begin
+	if(reset || t_flash_clear)
+	  r_fp_iss_valid <= 1'b0;
+	else
+	  r_fp_iss_valid <= t_pop_fp_uq;
+     end
+   always_ff@(posedge clk)
+     begin
+	r_fp_iss_uop <= fp_uq;
+	r_fp_iss_fcr <= r_fcr_prf[fp_uq.hilo_src];
      end
 
    fpu #(.LG_PRF_WIDTH(`LG_PRF_ENTRIES),
@@ -1342,25 +1429,64 @@ module exec(clk,
    fpu0(
 	.clk(clk),
 	.reset(reset),
-	.pc(fp_uq.pc),
-	.opcode(fp_uq.op),
-	.start(t_start_fpu),
+	.pc(r_fp_iss_uop.pc),
+	.opcode(r_fp_iss_uop.op),
+	.start(r_fp_iss_valid & ~w_iss_is_cvt),   /* converts bypass the fpu (single-cycle path below) */
 	.src_a(w_fp_srcA),
 	.src_b(w_fp_srcB),
-	.src_c(w_fp_srcC),
-	.src_fcr(r_fcr_prf[fp_uq.hilo_src]),
+	.src_c({`M_WIDTH{1'b0}}),   /* no MADD: src_c unused */
+	.src_fcr(r_fp_iss_fcr),
 	.rm(r_fcsr[1:0]),   /* FCSR.RM; CTC1 serializes so this is stable per FP op */
-	.rob_ptr_in(fp_uq.rob_ptr),
-	.dst_ptr_in(fp_uq.dst),
-	.fcr_ptr_in(fp_uq.hilo_dst),
-	.fcr_sel(fp_uq.imm[2:0]),
+	.rob_ptr_in(r_fp_iss_uop.rob_ptr),
+	.dst_ptr_in(r_fp_iss_uop.dst),
+	.fcr_ptr_in(r_fp_iss_uop.hilo_dst),
+	.fcr_sel(r_fp_iss_uop.imm[2:0]),
 	.val(w_fpu_result_valid),
 	.cmp_val(w_fpu_fcr_valid),
 	.y(w_fpu_result),
+	.fflags(w_fpu_fflags),
+	.denorm(w_fpu_denorm),
 	.rob_ptr_out(w_fpu_rob_ptr),
 	.dst_ptr_out(w_fpu_dst_ptr),
 	.fcr_ptr_out(w_fpu_fcr_ptr)
 	);
+
+   /* single-cycle FP convert: combinational on the issue-stage operand (w_fp_srcA),
+    * result registered one cycle -> writes bank0 / completes at pop+2.  TRUNC.W = RZ;
+    * CVT.S.W/CVT.D.W use FCSR.RM.  fmt: source-double for f2i, dest-double for i2f. */
+   fpu_f2i f2i0(.in(w_fp_srcA),
+		.fmt(r_fp_iss_uop.op == TRUNC_W_D),
+		.dst_long(1'b0),
+		.rm(2'b01),              /* TRUNC -> round toward zero */
+		.out(w_f2i_out), .fflags(w_f2i_fflags));
+   fpu_i2f i2f0(.in(w_fp_srcA),
+		.src_long(1'b0),
+		.fmt(r_fp_iss_uop.op == CVT_D_W),
+		.rm(r_fcsr[1:0]),
+		.out(w_i2f_out), .fflags(w_i2f_fflags));
+   always_ff@(posedge clk)
+     begin
+	if(reset || t_flash_clear)
+	  r_cvt_valid <= 1'b0;
+	else
+	  r_cvt_valid <= r_fp_iss_valid & w_iss_is_cvt;
+     end
+   always_ff@(posedge clk)
+     begin
+	r_cvt_result <= w_iss_is_f2i ? w_f2i_out : w_i2f_out;
+	r_cvt_fflags <= w_iss_is_f2i ? w_f2i_fflags : w_i2f_fflags;
+	r_cvt_dst    <= r_fp_iss_uop.dst;
+	r_cvt_rob    <= r_fp_iss_uop.rob_ptr;
+     end
+
+   /* FP exception: the single FP completion this cycle (fpu OR convert -- bitvec
+    * mutually-exclusive) carries {denorm, fflags}.  An op FAULTS (R4000 FPE,
+    * ExcCode 15) iff denorm (Unimplemented E, always) OR an enabled IEEE flag
+    * (fflags & FCSR.Enable[11:7]).  Routed via complete_bundle_2.faulted -> the
+    * ROB is_fpe bit -> ARCH_FAULT.  (convert raises no denorm.) */
+   wire [4:0] w_fp_cmpl_fflags = (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_fflags : r_cvt_fflags;
+   wire       w_fp_cmpl_denorm = (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_denorm : 1'b0;
+   wire       w_fp_fault = w_fp_cmpl_denorm | (|(w_fp_cmpl_fflags & r_fcsr[11:7]));
 
    // ---- FCR PRF: inflight tracking + write ----
    always_comb
@@ -1397,19 +1523,22 @@ module exec(clk,
 	if(reset)
 	  complete_valid_2 <= 1'b0;
 	else
-	  complete_valid_2 <= (w_fpu_result_valid || w_fpu_fcr_valid) & !ds_done;
+	  complete_valid_2 <= (w_fpu_result_valid || w_fpu_fcr_valid || r_cvt_valid) & !ds_done;
      end
    always_ff@(posedge clk)
      begin
-	complete_bundle_2.rob_ptr <= w_fpu_rob_ptr;
+	/* port-2 source mux: fpu arith/compare, else the single-cycle convert.
+	 * r_fp_wb_bitvec guarantees these never assert in the same cycle. */
+	complete_bundle_2.rob_ptr <= (w_fpu_result_valid || w_fpu_fcr_valid) ? w_fpu_rob_ptr : r_cvt_rob;
 	complete_bundle_2.complete <= 1'b1;
-	complete_bundle_2.faulted <= 1'b0;
+	complete_bundle_2.faulted <= w_fp_fault;   /* FP exception (denorm/enabled IEEE) -> is_fpe -> ExcCode 15 */
 	complete_bundle_2.restart_pc <= 'd0;
 	complete_bundle_2.is_ii <= 1'b0;
 	complete_bundle_2.take_br <= 1'b0;
 	complete_bundle_2.overflow <= 1'b0;
 	complete_bundle_2.trap <= 1'b0;
-	complete_bundle_2.data <= w_fpu_result;
+	complete_bundle_2.fp_flags <= {w_fp_cmpl_denorm, w_fp_cmpl_fflags};
+	complete_bundle_2.data <= (w_fpu_result_valid || w_fpu_fcr_valid) ? w_fpu_result : r_cvt_result;
      end
 
    always_comb
@@ -2778,6 +2907,9 @@ module exec(clk,
     * interrupt look "from kernel" -> handle_int skipped the kernel-stack switch and
     * used the user gp(=0) -> ld 32(gp) faulted on 0x20 -> TLB-refill livelock. */
    logic       r_sr_cu0, n_sr_cu0;
+   /* coprocessor-1 usable (Status[29] = ST0_CU1). R/W: the kernel toggles it for
+    * lazy-FPU context switching; a CP1 op with CU1=0 raises CpU (CE=1, in decode). */
+   logic       r_sr_cu1, n_sr_cu1;
    /* exception vector */
    logic       r_sr_bev, n_sr_bev;
    /* tlb shutdown */
@@ -2798,18 +2930,21 @@ module exec(clk,
 
    logic		r_exc_in_ds, n_exc_in_ds;
    logic [4:0]		r_cause, n_cause;
+   logic [1:0]		r_ce, n_ce;   /* Cause.CE (coprocessor # for a CpU) */
    logic		r_ip1, r_ip0, n_ip1, n_ip0;
-   
+
    always_comb
      begin
 	n_exc_in_ds = r_exc_in_ds;
 	n_cause = r_cause;
+	n_ce = r_ce;
 	n_ip0 = r_ip0;
 	n_ip1 = r_ip1;
-	
+
 	if(core_wr_cause)
 	  begin
 	     n_cause = core_cause;                /* ExcCode always updates (handler needs it) */
+	     n_ce = core_ce;                      /* CE = coprocessor # (1 for CP1 CpU, else 0) */
 	     /* Cause.BD accompanies EPC: only update when not already in an exception
 	      * (EXL==0), so a nested exception preserves the original BD.  EPC itself
 	      * is gated the same way at the n_epc mux (r_sr_exl==0). */
@@ -2860,6 +2995,7 @@ module exec(clk,
 	r_epc <= reset ? 'd0 : n_epc;
 	r_badvaddr <= reset ? 'd0 : n_badvaddr;
 	r_cause <= reset ? 'd0 : n_cause;
+	r_ce <= reset ? 2'd0 : n_ce;
 	r_ip0 <= reset ? 1'b0 : n_ip0;
 	r_ip1 <= reset ? 1'b0 : n_ip1;
 	r_exc_in_ds <= reset ? 1'b0 : n_exc_in_ds;
@@ -3088,6 +3224,7 @@ module exec(clk,
 	n_sr_sx = r_sr_sx;
 	n_sr_kx = r_sr_kx;
 	n_sr_cu0 = r_sr_cu0;
+	n_sr_cu1 = r_sr_cu1;
 	n_sr_bev = r_sr_bev;
 	n_sr_ts = r_sr_ts;
 	n_sr_im = r_sr_im;
@@ -3097,10 +3234,16 @@ module exec(clk,
 	n_compare = r_compare;
 	n_watchlo = r_watchlo;
 	n_watchhi = r_watchhi;
-	/* CTC1: write FCSR (FCR31) */
+	/* CTC1: write FCSR (FCR31).  CTC1 serializes, so it never coincides with
+	 * a retiring FP op's Cause/Flags update (core_fcsr_we). */
 	n_fcsr = r_fcsr;
 	if(r_start_int & t_wr_fcsr)
 	  n_fcsr = t_srcA[31:0];
+	else if(core_fcsr_we)
+	  begin
+	     n_fcsr[17:12] = core_fcsr_cause6;          /* Cause = this op's exceptions */
+	     n_fcsr[6:2]   = r_fcsr[6:2] | core_fcsr_flags5; /* Flags accumulate (0 on trap) */
+	  end
 	/* Timer IP: set when Count wraps to Compare, cleared by MTC0 Compare */
 	n_timer_ip = r_timer_ip | (n_count == r_compare);
 
@@ -3114,6 +3257,7 @@ module exec(clk,
 	     n_sr_sx = t_srcA[6];
 	     n_sr_kx = t_srcA[7];
 	     n_sr_cu0 = t_srcA[28];
+	     n_sr_cu1 = t_srcA[29];
 	     n_sr_bev = t_srcA[22];
 	     n_sr_ts = t_srcA[21];
 	     n_sr_im = t_srcA[15:8];
@@ -3160,6 +3304,7 @@ module exec(clk,
 	r_sr_sx <= reset ? 'd0 : n_sr_sx;
 	r_sr_kx <= reset ? 'd0 : n_sr_kx;
 	r_sr_cu0 <= reset ? 1'b1 : n_sr_cu0;
+	r_sr_cu1 <= reset ? 1'b0 : n_sr_cu1;
 	r_sr_bev <= reset ? 1'b1 : n_sr_bev;
 	r_sr_ts <= reset ? 1'b0 : n_sr_ts;
 	r_sr_im <= reset ? 8'd0 : n_sr_im;
@@ -3175,6 +3320,7 @@ module exec(clk,
 	r_timer_ip <= reset ? 1'b0 : n_timer_ip;
      end
 
+   assign cu1 = r_sr_cu1;
    assign in_kernel_mode = (r_sr_ksu=='d0) | r_sr_exl | r_sr_erl;
    assign in_supervisor_mode = (r_sr_ksu=='d1) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
    assign in_user_mode = (r_sr_ksu=='d2) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
@@ -3207,10 +3353,10 @@ module exec(clk,
 	cpr0_status_reg = {
 			     1'b0, /* XX */
 			     1'b1, /* cu2 */
-			     1'b1, /* cu1 */
+			     r_sr_cu1, /* cu1 (R/W; lazy-FPU enable) */
 			     r_sr_cu0, /* cu0 (stored; kernel's from-user/kernel indicator) */
 			     1'b0, /* reduced power */
-			     1'b0, /* floating-point registers */
+			     1'b1, /* FR: flat FR=1 datapath (32x64b FP regs) */
 			     1'b0, /* reverse endian */
 			     1'b0,  /* bit24 - must be zero */
 			     1'b0,  /* bit23 - must be zero */
@@ -3299,7 +3445,7 @@ module exec(clk,
 	    begin
 	       t_csr0_val = sign_extend32({r_exc_in_ds,
 					   1'b0, /* must be zero */
-					   2'd0, /* coproc field */
+					   r_ce, /* coproc field (Cause.CE) */
 					   12'd0, /* must be zero */
 					   w_ip, /* interrupt pending bits */
 					   1'b0, /* must be zero */

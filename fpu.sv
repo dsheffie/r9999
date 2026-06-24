@@ -18,6 +18,8 @@ module fpu(clk,
 	   val,
 	   cmp_val,
 	   y,
+	   fflags,
+	   denorm,
 	   rob_ptr_out,
 	   dst_ptr_out,
 	   fcr_ptr_out
@@ -49,6 +51,8 @@ module fpu(clk,
    output logic 		  cmp_val;
    
    output logic [63:0] 		  y;
+   output logic [4:0] 		  fflags;   /* {V,Z,O,U,I} of the emerging result */
+   output logic 		  denorm;   /* denormal operand/result -> Unimplemented (E) */
    output logic [LG_ROB_WIDTH-1:0] rob_ptr_out;
    output logic [LG_PRF_WIDTH-1:0] dst_ptr_out;
    output logic [LG_FCR_WIDTH-1:0] fcr_ptr_out;
@@ -58,6 +62,9 @@ module fpu(clk,
     * so no SP/DP split. */
    logic [63:0] 		   t_adder_result;
    logic [63:0] 		   t_mult_result;
+   /* per-unit IEEE flags + denorm (aligned with each unit's result) */
+   wire [4:0] 		   w_add_fflags, w_mul_fflags, w_cmp_fflags;
+   wire 			   w_add_denorm, w_mul_denorm;
       
    logic [FPU_LAT-1:0] 		   r_val;
    logic [LG_PRF_WIDTH-1:0] 	   r_ptr [FPU_LAT-1:0];
@@ -74,71 +81,34 @@ module fpu(clk,
    assign fcr_ptr_out = r_fcr[0];
    assign fcr_reg = r_fcr_reg[0];
 
-   wire 			   w_sp_cmp, w_dp_cmp;
-   fp_cmp_t t_sp_cmp_type, t_dp_cmp_type;
-
+   /* one unified single/double comparator (fmt selects format), replacing the
+    * separate W=32 / W=64 fp_compare instances.  cmp_type folds SP_/DP_ opcodes
+    * to LT/EQ/LE; fmt picks the operand width. */
+   wire 			   w_cmp;
+   fp_cmp_t t_cmp_type;
+   wire 			   w_cmp_fmt = (opcode == DP_CMP_LT) ||
+					       (opcode == DP_CMP_EQ) ||
+					       (opcode == DP_CMP_LE);
    always_comb
      begin
-	t_sp_cmp_type = CMP_NONE;
+	t_cmp_type = CMP_NONE;
 	case(opcode)
-	  SP_CMP_LT:
-	    begin
-	       t_sp_cmp_type = CMP_LT;
-	    end
-	  SP_CMP_EQ:
-	    begin
-	       t_sp_cmp_type = CMP_EQ;
-	    end
-	  SP_CMP_LE:	    
-	    begin
-	       t_sp_cmp_type = CMP_LE;	       
-	    end
-	  default:
-	    begin
-	    end
+	  SP_CMP_LT, DP_CMP_LT: t_cmp_type = CMP_LT;
+	  SP_CMP_EQ, DP_CMP_EQ: t_cmp_type = CMP_EQ;
+	  SP_CMP_LE, DP_CMP_LE: t_cmp_type = CMP_LE;
+	  default: t_cmp_type = CMP_NONE;
 	endcase
      end // always_comb
 
-   always_comb
-     begin
-	t_dp_cmp_type = CMP_NONE;
-	case(opcode)
-	  DP_CMP_LT:
-	    begin
-	       t_dp_cmp_type = CMP_LT;
-	    end
-	  DP_CMP_EQ:
-	    begin
-	       t_dp_cmp_type = CMP_EQ;
-	    end
-	  DP_CMP_LE:	    
-	    begin
-	       t_dp_cmp_type = CMP_LE;	       
-	    end
-	  default:
-	    begin
-	    end
-	endcase
-     end // always_comb
-   
-   
-   fp_compare #(.W(32), .D(FPU_LAT)) 
-   sp_cmp(.clk(clk),
-	  .pc(pc),
-	  .a(src_a[31:0]),
-	  .b(src_b[31:0]),
-	  .start(start && (t_sp_cmp_type != CMP_NONE)),
-	  .cmp_type(t_sp_cmp_type), 
-	  .y(w_sp_cmp));
-
-   fp_compare #(.W(64), .D(FPU_LAT)) 
-   dp_cmp(.clk(clk),
-	  .pc(pc),
-	  .a(src_a), 
-	  .b(src_b),
-	  .start(start && (t_dp_cmp_type != CMP_NONE)),
-	  .cmp_type(t_dp_cmp_type), 
-	  .y(w_dp_cmp));
+   fpu_compare #(.D(FPU_LAT))
+   scmp(.clk(clk),
+	.a(src_a),
+	.b(src_b),
+	.start(start && (t_cmp_type != CMP_NONE)),
+	.cmp_type(t_cmp_type),
+	.fmt(w_cmp_fmt),
+	.y(w_cmp),
+	.fflags(w_cmp_fflags));
 
    
    /* fcr_in / t_hf are deliberately NOT named fcr_reg / y: a function-local that
@@ -218,35 +188,43 @@ module fpu(clk,
 	       y = t_mult_result;
 	       val = r_val[0];
 	    end
+	  /* DIV / SQRT: no datapath -- complete with a dummy result (y=0) and raise
+	   * the Unimplemented-Op (E) bit (see the denorm mux) so they fault to the
+	   * OS soft-float emulator. */
+	  SP_DIV, DP_DIV, SP_SQRT, DP_SQRT:
+	    begin
+	       y = 'd0;
+	       val = r_val[0];
+	    end
 	  SP_CMP_LT:
 	    begin
 	       cmp_val = r_val[0];
-	       y = handle_fcr(w_sp_cmp, r_fcr_sel[0], fcr_reg);
+	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
 	  SP_CMP_LE:
 	    begin
 	       cmp_val = r_val[0];
-	       y = handle_fcr(w_sp_cmp, r_fcr_sel[0], fcr_reg);
+	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
 	  SP_CMP_EQ:
 	    begin
 	       cmp_val = r_val[0];
-	       y = handle_fcr(w_sp_cmp, r_fcr_sel[0], fcr_reg);
+	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
 	  DP_CMP_LT:
 	    begin
 	       cmp_val = r_val[0];
-	       y = handle_fcr(w_dp_cmp, r_fcr_sel[0], fcr_reg);
+	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
 	  DP_CMP_LE:
 	    begin
 	       cmp_val = r_val[0];
-	       y = handle_fcr(w_dp_cmp, r_fcr_sel[0], fcr_reg);
+	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
 	  DP_CMP_EQ:
 	    begin
 	       cmp_val = r_val[0];
-	       y = handle_fcr(w_dp_cmp, r_fcr_sel[0], fcr_reg);
+	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
 	  
 	  default:
@@ -254,6 +232,26 @@ module fpu(clk,
 	    end
 	endcase // case (r_opcode[0])
      end // always_comb
+
+   /* IEEE flags + denorm of the emerging result, muxed by the same r_opcode[0].
+    * Compares only raise V (no denorm). Consumed by exec only when val/cmp_val. */
+   always_comb
+     begin
+	fflags = 5'd0;
+	denorm = 1'b0;
+	case(r_opcode[0])
+	  SP_ADD, SP_SUB, DP_ADD, DP_SUB:
+	    begin fflags = w_add_fflags; denorm = w_add_denorm; end
+	  SP_MUL, DP_MUL:
+	    begin fflags = w_mul_fflags; denorm = w_mul_denorm; end
+	  SP_CMP_LT, DP_CMP_LT, SP_CMP_EQ, DP_CMP_EQ, SP_CMP_LE, DP_CMP_LE:
+	    fflags = w_cmp_fflags;
+	  /* DIV / SQRT punt to soft-float: raise E (denorm) -> FPE at retirement */
+	  SP_DIV, DP_DIV, SP_SQRT, DP_SQRT:
+	    denorm = 1'b1;
+	  default: ;
+	endcase
+     end
 
    always_ff@(posedge clk)
      begin
@@ -307,8 +305,8 @@ module fpu(clk,
 	 .rm(rm),
 	 .fmt(w_add_is_double),
 	 .y(t_adder_result),
-	 .denorm(),
-	 .fflags()
+	 .denorm(w_add_denorm),
+	 .fflags(w_add_fflags)
 	 );
    
    /* one unified single/double multiplier: fmt selects format.
@@ -323,8 +321,8 @@ module fpu(clk,
 	 .rm(rm),
 	 .fmt(w_mul_is_double),
 	 .y(t_mult_result),
-	 .denorm(),
-	 .fflags()
+	 .denorm(w_mul_denorm),
+	 .fflags(w_mul_fflags)
 	 );
 
    

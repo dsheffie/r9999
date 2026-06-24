@@ -111,8 +111,9 @@ static void _movzd(uint32_t inst, state_t *s);
 static void _movzs(uint32_t inst, state_t *s);
 
 void initState(state_t *s) {
-  /* Matches the RTL's cpr0_status_reg reset in exec.sv. */
-  s->cpr0[CPR0_SR] |= SR_ERL | SR_BEV | SR_CU0 | SR_CU1 | SR_CU2;
+  /* Matches the RTL's cpr0_status_reg reset in exec.sv: CU2 hardwired 1, CU0
+   * resets 1, CU1 resets 0 (R/W; lazy-FPU), FR hardwired 1 (flat FR=1 datapath). */
+  s->cpr0[CPR0_SR] |= SR_ERL | SR_BEV | SR_CU0 | SR_CU2 | SR_FR;
   /* Random starts at max TLB index; it cycles downward to Wired */
   s->cpr0[CPR0_RANDOM] = state_t::NUM_TLB_ENTRIES - 1;
   /* PRId: read-only processor id (R4000 family for now) */

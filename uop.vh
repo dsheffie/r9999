@@ -152,6 +152,13 @@ typedef enum logic [7:0]
    DP_SUB,
    SP_MUL,
    DP_MUL,
+   /* FP divide / sqrt: NOT implemented in hardware -- the fpu just raises the
+    * Unimplemented-Op (E) bit so they fault (FPE, ExcCode 15, FCSR.Cause.E) and
+    * the OS soft-float emulator handles them. */
+   SP_DIV,
+   DP_DIV,
+   SP_SQRT,
+   DP_SQRT,
    /* FP compares: write the FCR condition-code bit */
    SP_CMP_LT,
    DP_CMP_LT,
@@ -163,7 +170,13 @@ typedef enum logic [7:0]
    BC1T,
    BC1F,
    BC1TL,
-   BC1FL
+   BC1FL,
+   /* FP converts -- single-cycle (fpu_f2i / fpu_i2f), share the FP writeback
+    * port with the multi-cycle fpu via r_fp_wb_bitvec.  f2i = FP->int, i2f = int->FP. */
+   TRUNC_W_S,  /* f2i, single src, W dst, RZ */
+   TRUNC_W_D,  /* f2i, double src, W dst, RZ */
+   CVT_S_W,    /* i2f, W src, single dst, FCSR.RM */
+   CVT_D_W     /* i2f, W src, double dst, FCSR.RM */
    } opcode_t;
 
 function logic is_mult(opcode_t op);
@@ -274,6 +287,7 @@ typedef struct packed {
    logic 		       cache_is_d; /* CACHE targets D-cache (per-line WB) vs I-cache (whole nuke) */
    logic 		       cache_inval; /* CACHE Hit-Invalidate: drop the line WITHOUT writeback (DMA-in) */
    logic 		       is_fp;   /* compute FP op (routes to the FP issue queue) */
+   logic 		       cpu_ce1; /* CpU is for CP1 (Status.CU1=0) -> Cause.CE=1 (vs CP0 CpU = CE=0) */
    logic [`LG_PHT_SZ-1:0]      pht_idx;
    logic		       mode_when_fetched;
 `ifdef VERILATOR
