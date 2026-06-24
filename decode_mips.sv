@@ -1245,6 +1245,16 @@ module decode_mips(
 			 uop.is_fp = 1'b1;
 			 uop.op = (insn[5:0]==6'd32) ? CVT_S_W : CVT_D_W;
 		      end
+			    else if((insn[25:21]==5'd17 && insn[5:0]==6'd32) ||  /* CVT.S.D: D->S narrow */
+				    (insn[25:21]==5'd16 && insn[5:0]==6'd33))    /* CVT.D.S: S->D widen */
+			      begin /* FP<->FP convert (f2f): narrow rounds per RM, widen is exact */
+				 uop.srcA = fs;
+				 uop.fp_srcA_valid = 1'b1;
+				 uop.dst = fd;
+				 uop.fp_dst_valid = 1'b1;
+				 uop.is_fp = 1'b1;
+				 uop.op = (insn[5:0]==6'd32) ? CVT_S_D : CVT_D_S;
+			      end
 		 end // case: 6'd17
 	       6'd20: /* BEQL */
 		 begin

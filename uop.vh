@@ -180,7 +180,9 @@ typedef enum logic [7:0]
    TRUNC_W_S,  /* f2i, single src, W dst, RZ */
    TRUNC_W_D,  /* f2i, double src, W dst, RZ */
    CVT_S_W,    /* i2f, W src, single dst, FCSR.RM */
-   CVT_D_W     /* i2f, W src, double dst, FCSR.RM */
+   CVT_D_W,    /* i2f, W src, double dst, FCSR.RM */
+   CVT_S_D,    /* f2f, double src -> single dst (narrow, FCSR.RM, E-trap on underflow/denorm) */
+   CVT_D_S     /* f2f, single src -> double dst (widen, exact) */
    } opcode_t;
 
 function logic is_mult(opcode_t op);

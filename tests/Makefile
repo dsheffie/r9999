@@ -245,8 +245,8 @@ fpu/%.elf: fpu/%.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/$*.S -o fpu/$*.o
 	$(LD) $(LDFLAGS) $(STARTUP) fpu/$*.o -o $@
 
-run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf fpu/fp_arith.elf fpu/fp_arith_d.elf fpu/fp_cvt.elf fpu/fp_signop.elf fpu/fp_cmp.elf
-	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst fp_arith fp_arith_d fp_cvt fp_signop fp_cmp; do \
+run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf fpu/fp_arith.elf fpu/fp_arith_d.elf fpu/fp_cvt.elf fpu/fp_signop.elf fpu/fp_cmp.elf fpu/fp_cvtf.elf
+	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst fp_arith fp_arith_d fp_cvt fp_signop fp_cmp fp_cvtf; do \
 	  echo "== fpu/$$t (co-sim; expect 'P' and no 'does not match') =="; \
 	  ( cd .. && ./ooo_core --file tests/fpu/$$t.elf --checker true 2>&1 \
 	      | grep -iE "does not match|FAIL" ) || echo "  ok (no divergence)"; \

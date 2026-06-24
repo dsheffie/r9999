@@ -1311,19 +1311,23 @@ module exec(clk,
     * op's writeback slot at pop, gate the head on the matching slot. */
    localparam FP_WB_BITS = `FPU_LAT + 2;
    logic [FP_WB_BITS-1:0] r_fp_wb_bitvec, n_fp_wb_bitvec;
-   wire [63:0] w_f2i_out, w_i2f_out;
-   wire [4:0]  w_f2i_fflags, w_i2f_fflags;
+   wire [63:0] w_f2i_out, w_i2f_out, w_f2f_out;
+   wire [4:0]  w_f2i_fflags, w_i2f_fflags, w_f2f_fflags;
+   wire        w_f2f_denorm;
    logic        r_cvt_valid;
    logic [`LG_PRF_ENTRIES-1:0] r_cvt_dst;
    logic [`LG_ROB_ENTRIES-1:0] r_cvt_rob;
    logic [63:0] r_cvt_result;
    logic [4:0]  r_cvt_fflags;
+   logic        r_cvt_denorm;   /* CVT.S.D narrow underflow / denorm operand -> E-trap */
    /* head-op (fp_uq) and issue-op (r_fp_iss_uop) convert classification */
    wire w_head_is_cvt = (fp_uq.op == TRUNC_W_S) || (fp_uq.op == TRUNC_W_D) ||
-			(fp_uq.op == CVT_S_W)   || (fp_uq.op == CVT_D_W);
+			(fp_uq.op == CVT_S_W)   || (fp_uq.op == CVT_D_W)   ||
+			(fp_uq.op == CVT_S_D)   || (fp_uq.op == CVT_D_S);
+   wire w_iss_is_f2f  = (r_fp_iss_uop.op == CVT_S_D)   || (r_fp_iss_uop.op == CVT_D_S);
    wire w_iss_is_f2i  = (r_fp_iss_uop.op == TRUNC_W_S) || (r_fp_iss_uop.op == TRUNC_W_D);
    wire w_iss_is_i2f  = (r_fp_iss_uop.op == CVT_S_W)   || (r_fp_iss_uop.op == CVT_D_W);
-   wire w_iss_is_cvt  = w_iss_is_f2i | w_iss_is_i2f;
+   wire w_iss_is_cvt  = w_iss_is_f2i | w_iss_is_i2f | w_iss_is_f2f;
    /* abs/neg/mov: single-cycle bit-twiddle, ride the same single-cycle path as
     * converts (bank0 writeback, complete at pop+2 via r_fp_wb_bitvec). */
    wire w_head_is_signop = (fp_uq.op == SP_ABS) || (fp_uq.op == DP_ABS) ||
@@ -1499,6 +1503,12 @@ module exec(clk,
 		.fmt(r_fp_iss_uop.op == CVT_D_W),
 		.rm(r_fcsr[1:0]),
 		.out(w_i2f_out), .fflags(w_i2f_fflags));
+   /* FP<->FP convert: CVT.D.S widens (to_double=1, exact); CVT.S.D narrows (rounds
+    * per FCSR.RM, E-trap via denorm on underflow / denorm operand). */
+   fpu_f2f f2f0(.in(w_fp_srcA),
+		.to_double(r_fp_iss_uop.op == CVT_D_S),
+		.rm(r_fcsr[1:0]),
+		.out(w_f2f_out), .denorm(w_f2f_denorm), .fflags(w_f2f_fflags));
    always_ff@(posedge clk)
      begin
 	if(reset || t_flash_clear)
@@ -1508,8 +1518,13 @@ module exec(clk,
      end
    always_ff@(posedge clk)
      begin
-	r_cvt_result <= w_iss_is_signop ? w_signop_out : (w_iss_is_f2i ? w_f2i_out : w_i2f_out);
-	r_cvt_fflags <= w_iss_is_signop ? 5'd0         : (w_iss_is_f2i ? w_f2i_fflags : w_i2f_fflags);
+	r_cvt_result <= w_iss_is_signop ? w_signop_out :
+			w_iss_is_f2f    ? w_f2f_out :
+			w_iss_is_f2i    ? w_f2i_out : w_i2f_out;
+	r_cvt_fflags <= w_iss_is_signop ? 5'd0 :
+			w_iss_is_f2f    ? w_f2f_fflags :
+			w_iss_is_f2i    ? w_f2i_fflags : w_i2f_fflags;
+	r_cvt_denorm <= w_iss_is_f2f ? w_f2f_denorm : 1'b0;
 	r_cvt_dst    <= r_fp_iss_uop.dst;
 	r_cvt_rob    <= r_fp_iss_uop.rob_ptr;
      end
@@ -1520,7 +1535,7 @@ module exec(clk,
     * (fflags & FCSR.Enable[11:7]).  Routed via complete_bundle_2.faulted -> the
     * ROB is_fpe bit -> ARCH_FAULT.  (convert raises no denorm.) */
    wire [4:0] w_fp_cmpl_fflags = (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_fflags : r_cvt_fflags;
-   wire       w_fp_cmpl_denorm = (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_denorm : 1'b0;
+   wire       w_fp_cmpl_denorm = (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_denorm : r_cvt_denorm;
    wire       w_fp_fault = w_fp_cmpl_denorm | (|(w_fp_cmpl_fflags & r_fcsr[11:7]));
 
    // ---- FCR PRF: inflight tracking + write ----
