@@ -1529,6 +1529,17 @@ static void execCoproc1(uint32_t inst, state_t *s) {
     }
   else
     {
+      /* FR=0 odd-register FP-compute -> Reserved Instruction, matching the RTL
+       * decode gate (decode_mips.sv).  MIPS is underspecified here (UNPREDICTABLE,
+       * no mandated exception; Sail doesn't model FR) -- we choose loud RI over the
+       * R10000's silent force-to-even.  Covers arith/cvt/abs/neg/mov + compare;
+       * moves/cfc1/ctc1 are handled above and are FR-half ops, not faulted. */
+      if(((s->cpr0[CPR0_SR] & SR_FR) == 0) &&
+	 ((((inst >> 11) | (inst >> 16) | (inst >> 6)) & 1u) != 0u))
+	{
+	  take_exception_ri(s);
+	  return;
+	}
       if((lowop >> 4) == 3)
 	{
 	  _c(inst, s);

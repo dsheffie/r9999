@@ -10,6 +10,7 @@ module decode_mips(
 		   in_64b_supervisor_mode,
 		   in_64b_user_mode,
 		   cu1,
+		   fr,
 		   irq,
 		   tlb_miss,
 		   tlb_invalid,
@@ -31,6 +32,7 @@ module decode_mips(
    input logic			in_64b_supervisor_mode;
    input logic			in_64b_user_mode;
    input logic			cu1;   /* Status.CU1 (coprocessor-1 / FPU enable) */
+   input logic			fr;    /* Status.FR (FP register mode: 1=32x64b, 0=16 even/odd pairs) */
    input logic			irq;
    input logic			tlb_miss;
    input logic			tlb_invalid;
@@ -1692,6 +1694,39 @@ module decode_mips(
 		 begin
 		 end
 	     endcase // case (insn[5:0])
+
+	     /* ---- FR=0 odd-register FP-compute gate (DESIGN NOTE) ----------------
+	      * In FR=0 (o32 / MIPS I-II FP model) the 32 FPRs are 16 even/odd 32-bit
+	      * pairs, and ARITHMETIC is defined only on even-numbered registers
+	      * (R10000 UM p.307, "32- and 64-Bit Operations"; Fig 15-5).  An odd
+	      * register on a compute op is architecturally UNPREDICTABLE -- MIPS is
+	      * wildly underspecified here: it mandates NO specific exception, and the
+	      * Sail spec (sail-cheri-mips) doesn't even model FR (mips_prelude.sail:
+	      * "RP/FR/RE/MX/PX not implemented") so it gives no ruling.  The R10000
+	      * silently forces the low bit to 0 (treats odd as even) -- a SILENT
+	      * fault we refuse.  WE CHOOSE Reserved Instruction (ResI / ExcCode 10):
+	      * loud, uses the standard RI code, and is correct as PERMANENT behavior
+	      * even once FR=0 is fully supported (odd-reg compute stays malformed; the
+	      * FR=0 merge work only makes the VALID cases -- even-reg arith + odd/even
+	      * load halves -- work).  This per-op silent-half merge in FR=0 is exactly
+	      * why mipscore sprayed MERGE variants through every FP op; we instead gate
+	      * compute here and (later) do the R10000 rename-alias + load/move merge.
+	      * `is_fp` is set ONLY by FP compute (add/sub/mul/div/sqrt/cmp/cvt/abs/
+	      * neg/mov) -- never by moves/loads/stores -- so it selects exactly the
+	      * even-only ops.  Unused reg fields are 0 in valid encodings (compares:
+	      * insn[6]=0; single-src: ft=0), so the uniform fs|ft|fd low-bit test is
+	      * safe and, on a malformed encoding, conservatively faults. */
+	     if((fr == 1'b0) && uop.is_fp && (insn[11] | insn[16] | insn[6]))
+	       begin
+		  uop.op            = II;   /* -> is_ii -> ARCH_FAULT -> cause 10 (ResI) */
+		  uop.is_fp         = 1'b0;
+		  uop.fp_srcA_valid = 1'b0;
+		  uop.fp_srcB_valid = 1'b0;
+		  uop.fp_dst_valid  = 1'b0;
+		  uop.fcr_src_valid = 1'b0;
+		  uop.fcr_dst_valid = 1'b0;
+		  uop.dst_valid     = 1'b0;
+	       end
 	  end // always_comb
      end   
 

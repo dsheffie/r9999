@@ -311,6 +311,7 @@ module core(clk,
    wire					  w_in_64b_supervisor_mode;
    wire					  w_in_64b_user_mode;
    wire					  w_cu1;   /* Status.CU1 (FPU enable) from exec -> decode CP1 CpU gate */
+   wire					  w_fr;    /* Status.FR (FP reg mode) from exec -> decode FR=0 odd-reg gate */
    wire					  w_irq_pending;
    wire [31:0]				  w_cp0_count;
    
@@ -2969,6 +2970,7 @@ module core(clk,
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
 		     .cu1(w_cu1),
+		     .fr(w_fr),
 		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn.tlb_miss),
 		     .tlb_invalid(insn.tlb_invalid),
@@ -2992,6 +2994,7 @@ module core(clk,
 		     .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 		     .in_64b_user_mode(w_in_64b_user_mode),
 		     .cu1(w_cu1),
+		     .fr(w_fr),
 		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .tlb_invalid(insn_two.tlb_invalid),
@@ -3080,6 +3083,7 @@ module core(clk,
 	   .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 	   .in_64b_user_mode(w_in_64b_user_mode),
 	   .cu1(w_cu1),
+	   .fr(w_fr),
 
 	   .putchar_fifo_out(putchar_fifo_out),
 	   .putchar_fifo_empty(putchar_fifo_empty),

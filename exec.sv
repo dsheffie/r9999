@@ -50,6 +50,7 @@ module exec(clk,
 	    in_64b_user_mode,
 	    in_64b_supervisor_mode,
 	    cu1,
+	    fr,
 	    in_64b_kernel_mode,
 	    putchar_fifo_out,
 	    putchar_fifo_empty,
@@ -140,6 +141,7 @@ module exec(clk,
    output logic			in_64b_supervisor_mode;
    output logic			in_64b_user_mode;
    output logic			cu1;   /* Status.CU1 (FPU enable) -> decode CP1 CpU gate */
+   output logic			fr;    /* Status.FR (FP reg mode) -> decode FR=0 odd-reg gate */
    output logic			irq_pending;
    output logic [31:0]		cp0_count;
 
@@ -2931,6 +2933,9 @@ module exec(clk,
    /* coprocessor-1 usable (Status[29] = ST0_CU1). R/W: the kernel toggles it for
     * lazy-FPU context switching; a CP1 op with CU1=0 raises CpU (CE=1, in decode). */
    logic       r_sr_cu1, n_sr_cu1;
+   /* FP register mode (Status[26] = FR). R/W: FR=1 = 32x64b regs (n32/n64);
+    * FR=0 = 16 even/odd 32b pairs (o32). FR=0 arith on an odd reg -> RI (decode). */
+   logic       r_sr_fr, n_sr_fr;
    /* exception vector */
    logic       r_sr_bev, n_sr_bev;
    /* tlb shutdown */
@@ -3246,6 +3251,7 @@ module exec(clk,
 	n_sr_kx = r_sr_kx;
 	n_sr_cu0 = r_sr_cu0;
 	n_sr_cu1 = r_sr_cu1;
+	n_sr_fr = r_sr_fr;
 	n_sr_bev = r_sr_bev;
 	n_sr_ts = r_sr_ts;
 	n_sr_im = r_sr_im;
@@ -3279,6 +3285,7 @@ module exec(clk,
 	     n_sr_kx = t_srcA[7];
 	     n_sr_cu0 = t_srcA[28];
 	     n_sr_cu1 = t_srcA[29];
+	     n_sr_fr  = t_srcA[26];
 	     n_sr_bev = t_srcA[22];
 	     n_sr_ts = t_srcA[21];
 	     n_sr_im = t_srcA[15:8];
@@ -3326,6 +3333,8 @@ module exec(clk,
 	r_sr_kx <= reset ? 'd0 : n_sr_kx;
 	r_sr_cu0 <= reset ? 1'b1 : n_sr_cu0;
 	r_sr_cu1 <= reset ? 1'b0 : n_sr_cu1;
+	/* FR resets to 1 (n32/n64 default; the kernel sets FR=0 per o32 process). */
+	r_sr_fr  <= reset ? 1'b1 : n_sr_fr;
 	r_sr_bev <= reset ? 1'b1 : n_sr_bev;
 	r_sr_ts <= reset ? 1'b0 : n_sr_ts;
 	r_sr_im <= reset ? 8'd0 : n_sr_im;
@@ -3342,6 +3351,7 @@ module exec(clk,
      end
 
    assign cu1 = r_sr_cu1;
+   assign fr  = r_sr_fr;
    assign in_kernel_mode = (r_sr_ksu=='d0) | r_sr_exl | r_sr_erl;
    assign in_supervisor_mode = (r_sr_ksu=='d1) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
    assign in_user_mode = (r_sr_ksu=='d2) & (r_sr_exl==1'b0) & (r_sr_erl==1'b0);
@@ -3377,7 +3387,7 @@ module exec(clk,
 			     r_sr_cu1, /* cu1 (R/W; lazy-FPU enable) */
 			     r_sr_cu0, /* cu0 (stored; kernel's from-user/kernel indicator) */
 			     1'b0, /* reduced power */
-			     1'b1, /* FR: flat FR=1 datapath (32x64b FP regs) */
+			     r_sr_fr, /* FR (R/W): see the decision note at the decode FR=0 gate */
 			     1'b0, /* reverse endian */
 			     1'b0,  /* bit24 - must be zero */
 			     1'b0,  /* bit23 - must be zero */

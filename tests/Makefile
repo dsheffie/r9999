@@ -237,6 +237,10 @@ fpu/fp_cu1.elf: fpu/fp_cu1.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_cu1.S -o fpu/fp_cu1.o
 	$(LD) $(LDFLAGS) fpu/fp_cu1.o -o $@
 
+fpu/fp_fr0.elf: fpu/fp_fr0.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_fr0.S -o fpu/fp_fr0.o
+	$(LD) $(LDFLAGS) fpu/fp_fr0.o -o $@
+
 fpu/%.elf: fpu/%.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/$*.S -o fpu/$*.o
 	$(LD) $(LDFLAGS) $(STARTUP) fpu/$*.o -o $@
@@ -268,6 +272,11 @@ run-fpu-divsqrt: fpu/fp_divsqrt.elf
 run-fpu-cu1: fpu/fp_cu1.elf
 	@echo "== fpu/fp_cu1 (CU1=0 -> CpU CE=1 self-check; expect 'P') =="
 	$(SIM) --file fpu/fp_cu1.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1
+
+# FR=0 odd-register FP-compute -> Reserved Instruction. -c0 only.
+run-fpu-fr0: fpu/fp_fr0.elf
+	@echo "== fpu/fp_fr0 (FR=0 odd-reg arith -> RI self-check; expect 'P') =="
+	$(SIM) --file fpu/fp_fr0.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1
 
 # -----------------------------------------------------------------------
 # Generic disassembly rule
