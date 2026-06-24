@@ -1058,6 +1058,8 @@ template <bool EL>
 void _ldc1(uint32_t inst, state_t *s) {
   uint32_t ft = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
+  /* FR=0: a doubleword load to an odd register is invalid -> RI (matches RTL). */
+  if(((s->cpr0[CPR0_SR] & SR_FR) == 0) && (ft & 1)) { take_exception_ri(s); return; }
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);
@@ -1071,6 +1073,8 @@ template <bool EL>
 void _sdc1(uint32_t inst, state_t *s) {
   uint32_t ft = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
+  /* FR=0: a doubleword store from an odd register is invalid -> RI (matches RTL). */
+  if(((s->cpr0[CPR0_SR] & SR_FR) == 0) && (ft & 1)) { take_exception_ri(s); return; }
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   uint32_t ea = va2pa(s->gpr[rs] + imm);

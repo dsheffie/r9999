@@ -93,6 +93,39 @@ _start:
     bne     $2, $3, fail
     nop
 
+    /* ---- T2b: FR=0 even-reg ldc1/sdc1 -> valid full-64 (no fault, roundtrip) ---- */
+    la      $14, dbl
+    sw      $0, 0($19)
+    ldc1    $f0, 0($14)         /* even reg: legal in FR=0, full 64 */
+    nop
+    nop
+    sdc1    $f0, 8($14)
+    nop
+    nop
+    lw      $2, 0($19)
+    bne     $2, $0, fail        /* must NOT fault */
+    nop
+    lw      $9, 8($14)          /* hi(roundtripped) */
+    lw      $3, 0($14)
+    bne     $9, $3, fail        /* roundtrip hi word matches */
+    nop
+
+    /* ---- T2c: FR=0 odd-reg ldc1 -> invalid -> RI (.word: ldc1 $f1,0($14)) ---- */
+    sw      $0, 0($19)
+    .word   0xd5c10000          /* ldc1 $f1, 0($14)  (ft=$f1 odd) */
+    nop
+    nop
+    nop
+    nop
+    lw      $2, 0($19)
+    beq     $2, $0, fail        /* must fault */
+    nop
+    la      $4, fpe_code
+    lw      $2, 0($4)
+    li      $3, 10
+    bne     $2, $3, fail
+    nop
+
     /* ---- T3: FR=1 odd-reg add.s -> runs, no fault ---- */
     li      $t0, 0x24000000     /* Status: CU1=1, FR=1 (bit26 set) */
     mtc0    $t0, $12
@@ -119,5 +152,7 @@ fail:
 
     .data
     .align  3
+dbl:        .dword 0x400921fb54442d18  /* pi-ish double for the ldc1/sdc1 roundtrip */
+            .dword 0                    /* roundtrip dest */
 fpe_flag:   .word 0
 fpe_code:   .word 0

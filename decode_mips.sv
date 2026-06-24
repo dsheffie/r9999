@@ -1716,15 +1716,25 @@ module decode_mips(
 	      * even-only ops.  Unused reg fields are 0 in valid encodings (compares:
 	      * insn[6]=0; single-src: ft=0), so the uniform fs|ft|fd low-bit test is
 	      * safe and, on a malformed encoding, conservatively faults. */
-	     if((fr == 1'b0) && uop.is_fp && (insn[11] | insn[16] | insn[6]))
+	     /* (compute) is_fp ops: any odd fs/ft/fd.  (doubleword) LDC1/SDC1: odd ft
+	      * (insn[20:16]) -- a 64-bit double can't be named by an odd reg in FR=0
+	      * (R10000 UM p.305, "if the register selected is odd, the load/store is
+	      * invalid").  Singleword lwc1/swc1/mtc1/mfc1 are NOT faulted here -- odd
+	      * selects the high half (Part 2b merge/extract). */
+	     if((fr == 1'b0) &&
+		((uop.is_fp && (insn[11] | insn[16] | insn[6])) ||
+		 ((uop.op == LDC1 || uop.op == SDC1) && insn[16])))
 	       begin
 		  uop.op            = II;   /* -> is_ii -> ARCH_FAULT -> cause 10 (ResI) */
 		  uop.is_fp         = 1'b0;
+		  uop.is_mem        = 1'b0;
+		  uop.is_store      = 1'b0;
 		  uop.fp_srcA_valid = 1'b0;
 		  uop.fp_srcB_valid = 1'b0;
 		  uop.fp_dst_valid  = 1'b0;
 		  uop.fcr_src_valid = 1'b0;
 		  uop.fcr_dst_valid = 1'b0;
+		  uop.srcA_valid    = 1'b0;
 		  uop.dst_valid     = 1'b0;
 	       end
 	  end // always_comb
