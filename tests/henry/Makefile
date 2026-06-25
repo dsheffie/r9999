@@ -19,7 +19,7 @@ LDFLAGS := -T henry.ld -nostdlib -G 0 -static
 
 CRT0    := henry_crt0.o
 
-TESTS   := hello.elf
+TESTS   := hello.elf contest.elf
 
 all: $(TESTS)
 
@@ -28,6 +28,14 @@ henry_crt0.o: henry_crt0.S
 
 %.o: %.c henry_io.h
 	$(CC) $(CFLAGS) -c $< -o $@
+
+irqvec.o: irqvec.S
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c $< -o $@
+
+# contest links the IP2 handler at 0x80000180 via henry_irq.ld
+contest.elf: contest.o irqvec.o $(CRT0) henry_irq.ld
+	$(LD) -T henry_irq.ld -nostdlib -G 0 -static $(CRT0) contest.o irqvec.o -o $@
+	$(CROSS)objdump -d $@ > contest.dis
 
 %.elf: %.o $(CRT0) henry.ld
 	$(LD) $(LDFLAGS) $(CRT0) $< -o $@
