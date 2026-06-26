@@ -1981,6 +1981,11 @@ module core(clk,
 	t_rob_tail.pdst  = 'd0;
 	t_rob_tail.old_pdst  = 'd0;
 	t_rob_tail.pc = t_alloc_uop.pc;
+	/* carry the decode-time 64b-mode flag into the ROB (the P-mode-hazard guard at
+	 * ARCH_FAULT reads t_rob_head.mode_when_fetched).  Was dropped here -> the guard
+	 * compared a stale ROB-slot value, giving spurious P-mode mismatches (and could
+	 * mask a real one). */
+	t_rob_tail.mode_when_fetched = t_alloc_uop.mode_when_fetched;
 	/* default to sequential next-PC so a serializing op restarts at pc+4;
 	 * branches overwrite this with the resolved target at completion (~1963). */
 	t_rob_tail.target_pc = (t_alloc_uop.op == J) ? t_alloc_uop.pred_target : (t_alloc_uop.pc + 'd4);
@@ -2026,6 +2031,7 @@ module core(clk,
 	t_rob_next_tail.pdst  = 'd0;
 	t_rob_next_tail.old_pdst  = 'd0;
 	t_rob_next_tail.pc = t_alloc_uop2.pc;
+	t_rob_next_tail.mode_when_fetched = t_alloc_uop2.mode_when_fetched;   /* see slot0 note above */
 	t_rob_next_tail.target_pc = (t_alloc_uop2.op == J) ? t_alloc_uop2.pred_target : (t_alloc_uop2.pc + 'd4);
 	t_rob_next_tail.opcode = t_alloc_uop2.op;
 	t_rob_next_tail.is_call = t_alloc_uop2.op == JAL || t_alloc_uop2.op == JALR || t_alloc_uop2.op == BAL;
