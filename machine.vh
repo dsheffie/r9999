@@ -20,6 +20,15 @@
 
 //`define RESPECT_MAPPED 1
 
+/* L1D request skid buffer: bypass the r_mem_q FIFO when it is empty and the L1D
+ * can accept, driving the freshly-AGU'd request straight to the L1D the same
+ * cycle (saves 1 cycle of load-to-use); falls back to enqueue ("skid") when the
+ * L1D is busy.  Validated: load-to-use 3->2 cyc / +44% IPC on the dependent-load
+ * microbench (tests/memlat), randgen 400/400 + FP co-sim 15/15 clean, henry synth
+ * WNS +0.204 (worst path unchanged = ITLB CAM, not the bypass).  Comment out to
+ * fall back to the plain enqueue-then-dequeue path. */
+`define ENABLE_L1D_SKID 1
+
 `define LG_M_WIDTH 6
 
 `define BIG_ENDIAN 1

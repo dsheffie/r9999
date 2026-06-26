@@ -1067,6 +1067,19 @@ module exec(clk,
 	n_mq_tail_ptr = r_mq_tail_ptr;
 	n_mq_next_tail_ptr = r_mq_next_tail_ptr;
 	
+`ifdef ENABLE_L1D_SKID
+	/* skid: enqueue a fresh request only if it was NOT bypassed-and-accepted this
+	 * cycle; advance head only for requests that actually came from the FIFO. */
+	if(r_mem_ready & !(w_skid_bypass & mem_req_ack))
+	  begin
+	     n_mq_tail_ptr = r_mq_tail_ptr + 'd1;
+	     n_mq_next_tail_ptr = r_mq_next_tail_ptr + 'd1;
+	  end
+	if(mem_req_ack & !w_skid_bypass)
+	  begin
+	     n_mq_head_ptr = r_mq_head_ptr + 'd1;
+	  end
+`else
 	if(r_mem_ready)
 	  begin
 	     n_mq_tail_ptr = r_mq_tail_ptr + 'd1;
@@ -1076,6 +1089,7 @@ module exec(clk,
 	  begin
 	     n_mq_head_ptr = r_mq_head_ptr + 'd1;
 	  end
+`endif
 	
 	t_mem_head = r_mem_q[r_mq_head_ptr[`LG_MQ_ENTRIES-1:0]];
 	
@@ -1091,10 +1105,17 @@ module exec(clk,
    
    always_ff@(posedge clk)
      begin
+`ifdef ENABLE_L1D_SKID
+	if(r_mem_ready & !(w_skid_bypass & mem_req_ack))
+	  begin
+	     r_mem_q[r_mq_tail_ptr[`LG_MQ_ENTRIES-1:0]] <= t_mem_tail;
+	  end
+`else
 	if(r_mem_ready)
 	  begin
 	     r_mem_q[r_mq_tail_ptr[`LG_MQ_ENTRIES-1:0]] <= t_mem_tail;
 	  end
+`endif
      end
 
 
@@ -1129,8 +1150,17 @@ module exec(clk,
    
 
    
+`ifdef ENABLE_L1D_SKID
+   /* bypass the FIFO when it is empty and a fresh AGU'd request is ready this
+    * cycle: drive t_mem_tail straight to the L1D (which accepts combinationally
+    * and registers into r_req2), saving the enqueue->dequeue cycle. */
+   wire w_skid_bypass = (r_mq_head_ptr == r_mq_tail_ptr) & r_mem_ready;
+   assign mem_req       = w_skid_bypass ? t_mem_tail : t_mem_head;
+   assign mem_req_valid = !mem_q_empty | r_mem_ready;
+`else
    assign mem_req = t_mem_head;
    assign mem_req_valid = !mem_q_empty;
+`endif
    assign uq_wait = r_uq_wait;
    assign mq_wait = r_mq_wait;
    assign core_store_data_valid = !mem_mdq_empty;
