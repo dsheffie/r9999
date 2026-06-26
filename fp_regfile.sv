@@ -14,7 +14,13 @@
 // only after its producer has written it (so an un-written entry is never
 // architecturally consumed).  The free-list allocates fp dsts into the bank
 // matching their producing write port, so the ptr MSB is meaningful.
-module fp_regfile(clk,
+`ifdef VERILATOR
+/* checkpoint resume: seed the FP PRF from the ISS state at reset (Verilator
+ * only -- stripped from synth). */
+import "DPI-C" function longint loadfpr(input int regid);
+`endif
+
+module fp_regfile(clk, reset,
 		  rdptr0, rdptr1, rdptr2, rdptr3,
 		  wrptr0, wrptr1, wen0, wen1,
 		  wr0, wr1,
@@ -23,6 +29,7 @@ module fp_regfile(clk,
    parameter WIDTH = 64;
    parameter LG_DEPTH = 7;
    input logic 		      clk;
+   input logic 		      reset;   /* only consumed by the VERILATOR seed below */
    input logic [LG_DEPTH-1:0] rdptr0;
    input logic [LG_DEPTH-1:0] rdptr1;
    input logic [LG_DEPTH-1:0] rdptr2;
@@ -46,6 +53,19 @@ module fp_regfile(clk,
 
    always_ff@(posedge clk)
      begin
+`ifdef VERILATOR
+	if(reset)
+	  begin
+	     /* seed phys fpr i = arch fpr i (initial RAT identity); both banks. */
+	     for(integer i = 0; i < 32; i=i+1)
+	       begin
+		  r_ram_fpu[i] <= loadfpr(i);
+		  r_ram_mem[i] <= loadfpr(i);
+	       end
+	  end
+	else
+	  begin
+`endif //  `ifdef VERILATOR
 	rd0 <= rdptr0[LG_DEPTH-1] ? r_ram_mem[rdptr0[LG_DEPTH-2:0]] : r_ram_fpu[rdptr0[LG_DEPTH-2:0]];
 	rd1 <= rdptr1[LG_DEPTH-1] ? r_ram_mem[rdptr1[LG_DEPTH-2:0]] : r_ram_fpu[rdptr1[LG_DEPTH-2:0]];
 	rd2 <= rdptr2[LG_DEPTH-1] ? r_ram_mem[rdptr2[LG_DEPTH-2:0]] : r_ram_fpu[rdptr2[LG_DEPTH-2:0]];
@@ -54,6 +74,9 @@ module fp_regfile(clk,
 	  r_ram_fpu[wrptr0[LG_DEPTH-2:0]] <= wr0;
 	if(wen1)
 	  r_ram_mem[wrptr1[LG_DEPTH-2:0]] <= wr1;
+`ifdef VERILATOR
+	  end // else: !if(reset)
+`endif
      end
 
 endmodule

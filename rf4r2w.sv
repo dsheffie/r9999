@@ -1,5 +1,12 @@
 `include "machine.vh"
-module rf4r2w(clk,
+
+`ifdef VERILATOR
+/* checkpoint resume: seed the integer PRF from the ISS state at reset (Verilator
+ * only -- stripped from synth). Mirrors rv64core rf6r3w. */
+import "DPI-C" function longint loadgpr(input int regid);
+`endif
+
+module rf4r2w(clk, reset,
 	      rdptr0,rdptr1,rdptr2,rdptr3,
 	      wrptr0,wrptr1,wen0,wen1,
 	      wr0, wr1,
@@ -8,6 +15,7 @@ module rf4r2w(clk,
    parameter WIDTH = 1;
    parameter LG_DEPTH = 1;
    input logic clk;
+   input logic reset;   /* only consumed by the VERILATOR checkpoint seed below */
    input logic [LG_DEPTH-1:0] rdptr0;
    input logic [LG_DEPTH-1:0] rdptr1;
    input logic [LG_DEPTH-1:0] rdptr2;
@@ -37,6 +45,20 @@ module rf4r2w(clk,
 
    always_ff@(posedge clk)
      begin
+`ifdef VERILATOR
+	if(reset)
+	  begin
+	     /* seed phys reg i = arch reg i (initial RAT is identity); both banks
+	      * so whichever the RAT points at carries the value. i=0 stays 0. */
+	     for(integer i = 1; i < 32; i=i+1)
+	       begin
+		  r_ram_alu[i] <= loadgpr(i);
+		  r_ram_mem[i] <= loadgpr(i);
+	       end
+	  end
+	else
+	  begin
+`endif //  `ifdef VERILATOR
 `ifdef FPGA
 	/* FPGA/sim: the RF powers up to 0 (BRAM/bitstream INIT; Verilator zeroes
 	 * state) and phys reg 0 ($0) is provably never written (dst_valid=(rd!=0);
@@ -60,6 +82,9 @@ module rf4r2w(clk,
 	  r_ram_alu[wrptr0[LG_DEPTH-2:0]] <= wr0;
 	if(wen1)
 	  r_ram_mem[wrptr1[LG_DEPTH-2:0]] <= wr1;
+`ifdef VERILATOR
+	  end // else: !if(reset)
+`endif
      end
 
 endmodule

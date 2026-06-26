@@ -14,6 +14,12 @@ import "DPI-C" function void report_exec(input int int_valid,
 					 input int blocked_by_store,
 					 input int int_ready
 					 );
+/* checkpoint resume seeds (Verilator only): full control-register + HILO state */
+import "DPI-C" function int     have_checkpoint();
+import "DPI-C" function int     loadcp0(input int regid);
+import "DPI-C" function longint loadcp0_64(input int regid);
+import "DPI-C" function longint loadhilo(input int half);
+import "DPI-C" function int     loadfcsr();
 `endif
 
 module exec(clk, 
@@ -69,6 +75,7 @@ module exec(clk,
 	    cpr0_status_reg,
 	    uq_wait,
 	    mq_wait,
+	    fp_uq_wait,
 	    uq_full,
 	    uq_next_full,
 	    uq_uop,
@@ -167,8 +174,9 @@ module exec(clk,
    output logic [31:0]     cpr0_status_reg;
       
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);   
-   output logic [N_ROB_ENTRIES-1:0]  uq_wait;   
+   output logic [N_ROB_ENTRIES-1:0]  uq_wait;
    output logic [N_ROB_ENTRIES-1:0]  mq_wait;
+   output logic [N_ROB_ENTRIES-1:0]  fp_uq_wait;
    
    output logic 			     uq_full;
    output logic 			     uq_next_full;
@@ -354,7 +362,7 @@ module exec(clk,
    logic [`LG_HILO_PRF_ENTRIES-1:0] t_div_hilo_prf_ptr_out;
    logic 			    t_div_complete;
 
-   logic [N_ROB_ENTRIES-1:0] 	    r_uq_wait, r_mq_wait;
+   logic [N_ROB_ENTRIES-1:0] 	    r_uq_wait, r_mq_wait, r_fp_uq_wait;
    /* non mem uop queue */
    uop_t r_uq[N_UQ_ENTRIES];
    uop_t uq, int_uop;
@@ -558,11 +566,13 @@ module exec(clk,
 	  begin
 	     r_mq_wait <= 'd0;
 	     r_uq_wait <= 'd0;
+	     r_fp_uq_wait <= 'd0;
 	  end
 	else if(restart_complete)
 	  begin
 	     r_mq_wait <= 'd0;
 	     r_uq_wait <= 'd0;
+	     r_fp_uq_wait <= 'd0;
 	  end
 	else
 	  begin
@@ -595,6 +605,22 @@ module exec(clk,
 	     if(r_start_int)
 	       begin
 		  r_uq_wait[int_uop.rob_ptr] <= 1'b0;
+	       end
+
+	     //fp port (mirrors mipscore r_fq_wait: track ops sitting in fp_uq so a
+	     // fault-drain can flash-clear their r_rob_inflight via t_clr_mask).
+	     if(t_push_two_fp)
+	       begin
+		  r_fp_uq_wait[uq_uop.rob_ptr] <= 1'b1;
+		  r_fp_uq_wait[uq_uop_two.rob_ptr] <= 1'b1;
+	       end
+	     else if(t_push_one_fp)
+	       begin
+		  r_fp_uq_wait[uq_uop.is_fp ? uq_uop.rob_ptr : uq_uop_two.rob_ptr] <= 1'b1;
+	       end
+	     if(t_pop_fp_uq)
+	       begin
+		  r_fp_uq_wait[fp_uq.rob_ptr] <= 1'b0;
 	       end
 
 	  end // else: !if(reset)
@@ -1170,6 +1196,7 @@ module exec(clk,
    assign mem_req_valid = !mem_q_empty;
    assign uq_wait = r_uq_wait;
    assign mq_wait = r_mq_wait;
+   assign fp_uq_wait = r_fp_uq_wait;
    assign core_store_data_valid = !mem_mdq_empty;
    
    
@@ -1212,6 +1239,7 @@ module exec(clk,
     * written. */
    fp_regfile #(.WIDTH(`M_WIDTH), .LG_DEPTH(`LG_PRF_ENTRIES))
    fpprf (.clk(clk),
+	  .reset(reset),
 	  .rdptr0(fp_uq.srcA),
 	  .rdptr1(fp_uq.srcB),
 	  .rdptr2(t_mem_uq.srcB),
@@ -1446,16 +1474,24 @@ module exec(clk,
      end
    always_ff@(posedge clk)
      begin
-	if(reset || t_flash_clear)
+	/* NOT flushed on t_flash_clear: an FP op already in the pipeline (popped from
+	 * fp_uq) must run to completion so it clears its r_rob_inflight bit -- otherwise
+	 * EXCEPTION_DRAIN (which waits for r_rob_inflight==0 with flash_clear held high
+	 * the whole drain) deadlocks.  Matches mipscore (fq_wait drops the *waiting* ops;
+	 * the in-flight pipe drains naturally).  fpu0's internal pipe likewise only resets. */
+	if(reset)
 	  r_fp_wb_bitvec <= 'd0;
 	else
 	  r_fp_wb_bitvec <= n_fp_wb_bitvec;
      end
 
-   /* FP read/issue stage register: aligns with the fp_regfile rd0/rd1 latency */
+   /* FP read/issue stage register: aligns with the fp_regfile rd0/rd1 latency.
+    * NOT flushed on t_flash_clear -- a just-popped op must reach fpu0 and complete
+    * so its r_rob_inflight clears (see r_fp_wb_bitvec note).  t_pop_fp_uq is gated by
+    * !t_flash_clear, so no NEW op enters; this only lets the one caught op proceed. */
    always_ff@(posedge clk)
      begin
-	if(reset || t_flash_clear)
+	if(reset)
 	  r_fp_iss_valid <= 1'b0;
 	else
 	  r_fp_iss_valid <= t_pop_fp_uq;
@@ -1525,7 +1561,9 @@ module exec(clk,
 		.out(w_f2f_out), .denorm(w_f2f_denorm), .fflags(w_f2f_fflags));
    always_ff@(posedge clk)
      begin
-	if(reset || t_flash_clear)
+	/* NOT flushed on t_flash_clear: the single-cycle convert in flight must complete
+	 * so its r_rob_inflight clears (see r_fp_wb_bitvec note). */
+	if(reset)
 	  r_cvt_valid <= 1'b0;
 	else
 	  r_cvt_valid <= r_fp_iss_valid & w_iss_is_sc;
@@ -1587,7 +1625,11 @@ module exec(clk,
 	if(reset)
 	  complete_valid_2 <= 1'b0;
 	else
-	  complete_valid_2 <= (w_fpu_result_valid || w_fpu_fcr_valid || r_cvt_valid) & !ds_done;
+	  /* NOT gated by !ds_done: an in-flight FP op must be allowed to COMPLETE during
+	   * EXCEPTION_DRAIN (ds_done held high the whole drain) so it clears its
+	   * r_rob_inflight bit -- otherwise the drain's r_rob_inflight==0 exit never fires
+	   * and the machine deadlocks.  Matches mipscore (FP complete has no ds_done gate). */
+	  complete_valid_2 <= (w_fpu_result_valid || w_fpu_fcr_valid || r_cvt_valid);
      end
    always_ff@(posedge clk)
      begin
@@ -2851,8 +2893,9 @@ module exec(clk,
      end
 
 
-   rf4r2w #(.WIDTH(`M_WIDTH), .LG_DEPTH(`LG_PRF_ENTRIES)) 
+   rf4r2w #(.WIDTH(`M_WIDTH), .LG_DEPTH(`LG_PRF_ENTRIES))
    intprf (.clk(clk),
+	   .reset(reset),
 	   .rdptr0(t_picked_uop.srcA),
 	   .rdptr1(t_picked_uop.srcB),
 	   .rdptr2(t_mem_uq.srcA),
@@ -3077,6 +3120,26 @@ module exec(clk,
 `endif
    always_ff@(posedge clk)
      begin
+`ifdef VERILATOR
+	if(reset && (have_checkpoint() != 0)) begin : ckpt_cp0a
+	   logic [31:0] c13, c2, c3, c5;
+	   logic [63:0] c10, c4, c20;
+	   c13 = loadcp0(13); c2 = loadcp0(2); c3 = loadcp0(3); c5 = loadcp0(5);
+	   c10 = loadcp0_64(10); c4 = loadcp0_64(4); c20 = loadcp0_64(20);
+	   r_epc      <= loadcp0_64(14);
+	   r_badvaddr <= loadcp0_64(8);
+	   r_cause    <= c13[6:2];   r_ce <= c13[29:28];
+	   r_ip0      <= c13[8];     r_ip1 <= c13[9];   r_exc_in_ds <= c13[31];
+	   r_entryhi_asid <= c10[7:0]; r_entryhi_r <= c10[63:62]; r_entryhi_vpn2 <= c10[39:13];
+	   r_pagemask <= c5[24:13];
+	   r_entrylo0_g <= c2[0]; r_entrylo0_v <= c2[1]; r_entrylo0_d <= c2[2];
+	   r_entrylo0_c <= c2[5:3]; r_entrylo0_pfn <= c2[(`PFN_WIDTH+5):6];
+	   r_entrylo1_g <= c3[0]; r_entrylo1_v <= c3[1]; r_entrylo1_d <= c3[2];
+	   r_entrylo1_c <= c3[5:3]; r_entrylo1_pfn <= c3[(`PFN_WIDTH+5):6];
+	   r_ptebase  <= c4[31:23]; r_xptebase <= c20[63:33]; r_badvpn2 <= 'd0;
+	end
+	else begin
+`endif
 	r_epc <= reset ? 'd0 : n_epc;
 	r_badvaddr <= reset ? 'd0 : n_badvaddr;
 	r_cause <= reset ? 'd0 : n_cause;
@@ -3101,6 +3164,9 @@ module exec(clk,
 	r_ptebase <= reset ? 'd0 : n_ptebase;
 	r_xptebase <= reset ? 'd0 : n_xptebase;
 	r_badvpn2 <= reset ? 'd0 : n_badvpn2;
+`ifdef VERILATOR
+	end // else: !if(reset && have_checkpoint)
+`endif
      end // always_ff@ (posedge clk)
 
    
@@ -3383,6 +3449,20 @@ module exec(clk,
 
    always@(posedge clk)
      begin
+`ifdef VERILATOR
+	if(reset && (have_checkpoint() != 0)) begin : ckpt_status
+	   logic [31:0] s12, c6, c1;
+	   s12 = loadcp0(12);  c6 = loadcp0(6);  c1 = loadcp0(1);
+	   r_sr_ie  <= s12[0];   r_sr_exl <= s12[1];  r_sr_erl <= s12[2];
+	   r_sr_ksu <= s12[4:3]; r_sr_ux  <= s12[5];  r_sr_sx  <= s12[6];  r_sr_kx <= s12[7];
+	   r_sr_cu0 <= s12[28];  r_sr_cu1 <= s12[29]; r_sr_fr  <= s12[26]; r_sr_bev <= s12[22];
+	   r_sr_ts  <= s12[21];  r_sr_im  <= s12[15:8];
+	   r_wired   <= c6[5:0];     r_random <= c1[5:0];     r_count <= loadcp0(9);  r_toggle <= 1'b0;
+	   r_compare <= loadcp0(11); r_fcsr   <= loadfcsr();
+	   r_watchlo <= loadcp0(18); r_watchhi<= loadcp0(19); r_timer_ip <= 1'b0;
+	end
+	else begin
+`endif
 	r_sr_ie <= reset ? 'd0 : n_sr_ie;
 	r_sr_exl <= reset ? 'd0 : n_sr_exl;
 	r_sr_erl <= reset ? 1'b1 : n_sr_erl;
@@ -3407,6 +3487,9 @@ module exec(clk,
 	r_watchlo <= reset ? 32'd0 : n_watchlo;
 	r_watchhi <= reset ? 32'd0 : n_watchhi;
 	r_timer_ip <= reset ? 1'b0 : n_timer_ip;
+`ifdef VERILATOR
+	end // else: !if(reset && have_checkpoint)
+`endif
      end
 
    assign cu1 = r_sr_cu1;

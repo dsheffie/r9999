@@ -1,6 +1,14 @@
 `include "rob.vh"
 `include "machine.vh"
 
+`ifdef VERILATOR
+/* checkpoint resume: seed the 48-entry CAM from the ISS TLB at reset. have_checkpoint
+ * is also imported in exec.sv, so alias it to a distinct SV name here (one compilation
+ * unit -> no duplicate-declaration). */
+import "DPI-C" have_checkpoint = function int have_ckpt_t();
+import "DPI-C" function longint loadtlb(input int entry, input int field);
+`endif
+
 module tlb(clk,
 	   reset,
 	   asid,	   
@@ -79,12 +87,39 @@ module tlb(clk,
      begin
 	if(reset)
 	  begin
+`ifdef VERILATOR
+	     if(have_ckpt_t() != 0)
+	       begin : ckpt_tlb
+		  logic [63:0] ehi, elo0, elo1, pm;
+		  for(ri = 0; ri < N; ri = ri + 1)
+		    begin
+		       ehi  = loadtlb(ri, 0);  elo0 = loadtlb(ri, 1);
+		       elo1 = loadtlb(ri, 2);  pm   = loadtlb(ri, 3);
+		       r_tlb_written[ri] <= 1'b1;
+		       r_tlb[ri].pagemask <= pm[11:0];
+		       r_tlb[ri].asid     <= ehi[7:0];
+		       r_tlb[ri].r        <= ehi[63:62];
+		       r_tlb[ri].vpn      <= ehi[39:13];
+		       r_tlb[ri].g0       <= elo0[0];  r_tlb[ri].v0 <= elo0[1];
+		       r_tlb[ri].d0       <= elo0[2];  r_tlb[ri].c0 <= elo0[5:3];
+		       r_tlb[ri].pfn0     <= elo0[(`PFN_WIDTH+5):6];
+		       r_tlb[ri].g1       <= elo1[0];  r_tlb[ri].v1 <= elo1[1];
+		       r_tlb[ri].d1       <= elo1[2];  r_tlb[ri].c1 <= elo1[5:3];
+		       r_tlb[ri].pfn1     <= elo1[(`PFN_WIDTH+5):6];
+		    end
+	       end
+	     else
+	       begin
+`endif
 	     r_tlb_written <= '0;
 	     for(ri = 0; ri < N; ri = ri + 1)
 	       begin
 		  r_tlb[ri].v0 <= 1'b0;
 		  r_tlb[ri].v1 <= 1'b0;
 	       end
+`ifdef VERILATOR
+	       end
+`endif
 	  end
 	else if(tlb_entry_in_valid)
 	  begin

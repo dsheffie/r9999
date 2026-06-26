@@ -448,7 +448,7 @@ module core(clk,
    logic [5:0]			   core_fcsr_cause6;
    logic [4:0]			   core_fcsr_flags5;
 
-   logic [N_ROB_ENTRIES-1:0] 	    uq_wait, mq_wait;
+   logic [N_ROB_ENTRIES-1:0] 	    uq_wait, mq_wait, fp_uq_wait;
    
 
    
@@ -2568,7 +2568,7 @@ module core(clk,
 
    always_comb
      begin
-	t_clr_mask = uq_wait|mq_wait;
+	t_clr_mask = uq_wait|mq_wait|fp_uq_wait;
 	if(t_complete_valid_1)
 	  begin
 	     t_clr_mask[t_complete_bundle_1.rob_ptr] = 1'b1;
@@ -3108,6 +3108,7 @@ module core(clk,
 	   .cpr0_status_reg(status_reg),
 	   .mq_wait(mq_wait),
 	   .uq_wait(uq_wait),
+	   .fp_uq_wait(fp_uq_wait),
 	   .uq_full(t_uq_full),
 	   .uq_next_full(t_uq_next_full),
 	   .uq_uop(t_push_1 ? t_alloc_uop : t_alloc_uop2),

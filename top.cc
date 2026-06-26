@@ -1,6 +1,21 @@
 #include "top.hh"
 #include "sgi_indy.hh"
 
+/* Checkpoint-resume DPI seed hooks (used by the henry full-system tb to inject a
+ * fast-forwarded ISS state at reset).  ooo_core never resumes from a checkpoint, so
+ * have_checkpoint() returns 0 -> the RTL seed branches are dead; these stubs only
+ * satisfy the linker for the `ifdef VERILATOR` DPI imports in the core RTL. */
+extern "C" {
+  int       have_checkpoint(void)               { return 0; }
+  long long loadgpr(int regid)                  { (void)regid; return 0; }
+  long long loadfpr(int regid)                  { (void)regid; return 0; }
+  int       loadcp0(int regid)                  { (void)regid; return 0; }
+  long long loadcp0_64(int regid)               { (void)regid; return 0; }
+  long long loadhilo(int half)                  { (void)half;  return 0; }
+  int       loadfcsr(void)                      { return 0; }
+  long long loadtlb(int entry, int field)       { (void)entry; (void)field; return 0; }
+}
+
 #define BRANCH_DEBUG 1
 #define CACHE_STATS 1
 
