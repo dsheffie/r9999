@@ -134,7 +134,16 @@ module l1d(clk,
    localparam LG_DWORDS_PER_CL = `LG_L1D_CL_LEN - 3;
    
    localparam WORDS_PER_CL = 1<<(LG_WORDS_PER_CL);
-   localparam N_TAG_BITS = `PA_WIDTH - `LG_L1D_NUM_SETS - `LG_L1D_CL_LEN;
+   /* Tag is taken down to LG_PG_SZ (not IDX_STOP) so it INCLUDES the alias bits
+    * -- the index bits above the page offset (VIPT synonym bits).  At <=page-size
+    * (4KB: IDX_STOP==LG_PG_SZ) this is identical to the old tag.  When the L1D is
+    * larger than a page (8KB: IDX_STOP>LG_PG_SZ), including PA[12..] in the tag is
+    * what lets the speculatively-VA-indexed port-2 read detect an alias as a tag
+    * miss; it then replays through the (already physical) miss-queue retry, which
+    * re-indexes with the physical address -> no synonym/duplicate lines can form.
+    * (rv64core nu_l1d scheme; see machine.vh LG_L1D_NUM_SETS.) */
+   localparam LG_ALIAS_BITS = (`LG_L1D_CL_LEN + `LG_L1D_NUM_SETS) - `LG_PG_SZ;
+   localparam N_TAG_BITS = `PA_WIDTH - `LG_PG_SZ;
    localparam IDX_START = `LG_L1D_CL_LEN;
    localparam IDX_STOP  = `LG_L1D_CL_LEN + `LG_L1D_NUM_SETS;
    localparam WORD_START = 2;
@@ -389,7 +398,7 @@ endfunction
     * tag (r_cache_tag2).  For unmapped accesses w_mapped_addr == va (1:1) so this
     * is equivalent; for mapped accesses it is the real physical tag.  Aligned
     * with r_tag_out2/r_req2 (both clocked off the same port-2 request). */
-   wire [N_TAG_BITS-1:0]     w_tlb_tag2 = w_mapped_addr[`PA_WIDTH-1:IDX_STOP];
+   wire [N_TAG_BITS-1:0]     w_tlb_tag2 = w_mapped_addr[`PA_WIDTH-1:`LG_PG_SZ];
    
    
    logic [31:0] 			 r_cycle;
@@ -906,7 +915,7 @@ endfunction
       .rd_addr0(t_cache_idx),
       .rd_addr1(t_cache_idx2),
       .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
-      .wr_data(r_mem_req_addr[`PA_WIDTH-1:IDX_STOP]),
+      .wr_data(r_mem_req_addr[`PA_WIDTH-1:`LG_PG_SZ]),
       .wr_en(w_cacheable_mem_rsp_valid),
       .rd_data0(r_tag_out),
       .rd_data1(r_tag_out2)
@@ -1880,7 +1889,7 @@ endfunction
 			      n_state = UNCACHE_WB;
 			      if(r_dirty_out)
 				begin
-				   n_mem_req_addr = {r_tag_out, r_cache_idx, {`LG_L1D_CL_LEN{1'b0}}};
+				   n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS], r_cache_idx, {`LG_L1D_CL_LEN{1'b0}}};
 				   n_mem_req_cacheable = 1'b1;
 				   n_mem_req_opcode = MEM_SW;
 				   n_mem_req_store_data = t_data;
@@ -1954,7 +1963,7 @@ endfunction
 			 if(r_hit_busy_addr && r_is_retry || !r_hit_busy_addr)
 			   begin
 			      n_reload_issue = 1'b1;
-			      n_mem_req_addr = {r_tag_out,r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_opcode = MEM_SW;
 			      n_mem_req_store_data = t_data;
@@ -2004,7 +2013,7 @@ endfunction
 			    
 			    if((rr_cache_idx == r_cache_idx) && rr_last_wr)
 			      begin
-				 n_mem_req_addr = {r_tag_out,r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+				 n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
 			    n_lock_cache = 1'b1;
 			    n_mem_req_opcode = MEM_SW;
 			    n_state = WAIT_INJECT_RELOAD;
@@ -2043,7 +2052,7 @@ endfunction
 				 n_req = t_mem_head;
 				 n_req.data = core_store_data.data;
 				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:IDX_STOP];
+				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:`LG_PG_SZ];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
 				 n_is_retry = 1'b1;
@@ -2069,7 +2078,7 @@ endfunction
 				 n_req.data = core_store_data.data;
 				 core_store_data_ack = 1'b1;
 				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:IDX_STOP];
+				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:`LG_PG_SZ];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
 				 n_is_retry = 1'b1;
@@ -2082,7 +2091,7 @@ endfunction
 			    t_pop_mq = 1'b1;
 			    n_req = t_mem_head;
 			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:IDX_STOP];
+			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:`LG_PG_SZ];
 			    t_addr = t_mem_head.addr;
 			    t_got_req = 1'b1;
 			    n_is_retry = 1'b1;
@@ -2112,7 +2121,7 @@ endfunction
 	       begin
 		  //use 2nd read port
 		  t_cache_idx2 = core_mem_req.addr[IDX_STOP-1:IDX_START];
-		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:IDX_STOP];
+		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:`LG_PG_SZ];
 		  n_tlb_addr = core_mem_req.addr;
 		  n_req2 = core_mem_req;
 		  core_mem_req_ack = 1'b1;
@@ -2208,7 +2217,7 @@ endfunction
 		    n_uncache_wb_dirty = 1'b0;
 		    t_got_req = 1'b1;
 		    t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
-		    t_cache_tag = r_req.addr[`PA_WIDTH-1:IDX_STOP];
+		    t_cache_tag = r_req.addr[`PA_WIDTH-1:`LG_PG_SZ];
 		    t_addr = r_req.addr;
 		    n_state = ACTIVE;
 		 end
@@ -2216,7 +2225,7 @@ endfunction
 	  HANDLE_RELOAD:
 	    begin
 	       t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_req.addr[`PA_WIDTH-1:IDX_STOP];
+	       t_cache_tag = r_req.addr[`PA_WIDTH-1:`LG_PG_SZ];
 	       n_last_wr = n_req.is_store;
 	       t_got_req = 1'b1;
 	       //$display("firing got req at cycle %d, rob ptr %d from HANDLE_RELOAD for uuid %d", r_cycle, r_req.rob_ptr, r_req.uuid);
@@ -2233,7 +2242,7 @@ endfunction
 		     * but only on a real hit (tag match) so we never discard a
 		     * different dirty line that happens to alias this index. Then tell
 		     * L2 to drop its copy too (caches are non-inclusive). */
-		    if(r_valid_out && (r_tag_out == flush_cl_addr[`PA_WIDTH-1:IDX_STOP]))
+		    if(r_valid_out && (r_tag_out == flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ]))
 		      t_mark_invalid = 1'b1;
 		    n_mem_req_addr = {flush_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_opcode = MEM_INVL;
@@ -2244,7 +2253,7 @@ endfunction
 		 end
 	       else if(r_dirty_out)
 		 begin
-		    n_mem_req_addr = {r_tag_out,r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
 	       n_mem_req_opcode = MEM_SW;
 	       n_mem_req_store_data = t_data;
 	       n_state = FLUSH_CL_WAIT;
@@ -2282,7 +2291,7 @@ endfunction
 		 end
 	       else
 		 begin
-		    n_mem_req_addr = {r_tag_out,r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
 	       n_mem_req_opcode = MEM_SW;
 	       n_mem_req_store_data = t_data;
 	       n_state = (r_cache_idx == (L1D_NUM_SETS-1)) ? FLUSH_CACHE_LAST_WAIT : FLUSH_CACHE_WAIT;
