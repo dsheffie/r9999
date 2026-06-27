@@ -160,6 +160,13 @@ s_e13: .asciz "OSLoadPartition=scsi(0)disk(1)rdisk(0)partition(0)"
 s_e14: .asciz "OSLoadFilename=/unix"
 s_e15: .asciz "OSLoader=sash"
 s_e16: .asciz "kernname=scsi(0)disk(1)rdisk(0)partition(0)/unix"
+#ifdef SINGLE_USER
+/* boot to single-user: the kernel reads initstate via arcs_getenv and compares
+ * it to "SINGLE" (IP22.c), dropping init to the single-user root shell instead
+ * of multi-user. Built into a separate henry_arcs_single.bin; the FPGA/default
+ * henry_arcs.bin (no -DSINGLE_USER) stays multi-user. */
+s_e17: .asciz "initstate=SINGLE"
+#endif
     .align  2
 arcs_argv_arr:
     .word   ARCS_BB+(s_a0-arcs_argv_blob), ARCS_BB+(s_a1-arcs_argv_blob)
@@ -177,6 +184,9 @@ arcs_envp_arr:
     .word   ARCS_BB+(s_e12-arcs_argv_blob), ARCS_BB+(s_e13-arcs_argv_blob)
     .word   ARCS_BB+(s_e14-arcs_argv_blob), ARCS_BB+(s_e15-arcs_argv_blob)
     .word   ARCS_BB+(s_e16-arcs_argv_blob)
+#ifdef SINGLE_USER
+    .word   ARCS_BB+(s_e17-arcs_argv_blob)
+#endif
     .word   0
     .globl  arcs_argv_blob_end
 arcs_argv_blob_end:
@@ -221,9 +231,25 @@ stub_mdesc:
 1:  jr      $ra
     move    $v0, $zero
 
-/* char *GetEnvironmentVariable(char *name): return a fixed eaddr (MAC) string. */
+/* char *GetEnvironmentVariable(char *name): the real PROM reads NVRAM env vars;
+ * we synthesize the two the kernel needs at boot.  Default: return the eaddr
+ * (MAC) string for every query (etoh parses it; harmless for others).  With
+ * -DSINGLE_USER, a query whose name starts with 'i' (initstate) returns "SINGLE"
+ * so the kernel's IP22.c init drops to the single-user root shell. */
     .globl  stub_getenv
 stub_getenv:
+#ifdef SINGLE_USER
+    beq     $a0, $zero, 2f          /* null name -> eaddr (safe default) */
+    nop
+    lbu     $t0, 0($a0)             /* first char of the requested var name */
+    li      $t1, 'i'                /* 'initstate' -> "SINGLE" */
+    bne     $t0, $t1, 2f
+    nop
+    la      $v0, single_str
+    jr      $ra
+    nop
+2:
+#endif
     la      $v0, eaddr_str
     jr      $ra
     nop
@@ -290,6 +316,10 @@ arch_name:
     .align  2
 eaddr_str:
     .asciz  "08:00:69:12:34:56"     /* getenv("eaddr") -> SGI MAC (etoh parses this) */
+#ifdef SINGLE_USER
+single_str:
+    .asciz  "SINGLE"                /* getenv("initstate") -> single-user boot */
+#endif
 
 /* ====================================================================
  * RAM image: ARCS System Parameter Block + romvec + pvec, linked at kseg1
