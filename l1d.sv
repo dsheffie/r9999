@@ -2253,12 +2253,18 @@ endfunction
 		 end
 	       else if(r_dirty_out)
 		 begin
+		    /* CACHE D-writeback (Hit/Index-WB-(Inval)): write the dirty line
+		     * through to DRAM via MEM_WB -- L2 flushes its copy (or writes the
+		     * carried data straight to DRAM on an L2 miss) so the line actually
+		     * reaches memory instead of going dirty into L2 (the DMA-descriptor
+		     * coherence bug). */
 		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
-	       n_mem_req_opcode = MEM_SW;
-	       n_mem_req_store_data = t_data;
-	       n_state = FLUSH_CL_WAIT;
-	       n_inhibit_write = 1'b1;
-	            n_mem_req_valid = 1'b1;
+		    n_mem_req_opcode = MEM_WB;
+		    n_mem_req_cacheable = 1'b1;
+		    n_mem_req_store_data = t_data;
+		    n_state = FLUSH_CL_WAIT;
+		    n_inhibit_write = 1'b1;
+		    n_mem_req_valid = 1'b1;
 		 end
 	       else
 		 begin

@@ -499,6 +499,23 @@ module l2(clk,
 		    n_state = IDLE;
 		    n_rsp_valid = 1'b1;
 		 end
+	       else if(r_opcode == MEM_WB)
+		 begin
+		    /* CACHE writeback-through: r_store_data is the latest (L1D dirty)
+		     * line. Write it straight to DRAM; if L2 also holds the line, drop
+		     * the now-stale L2 copy. Reuse UNCACHE_STORE to wait for the DRAM
+		     * ack, then ack the L1. */
+		    n_mem_req_store_data = r_store_data;
+		    n_addr = r_saveaddr;
+		    n_mem_opcode = 5'd7;
+		    n_store_mask = 16'hffff;
+		    n_mem_req = 1'b1;
+		    if(w_hit)
+		      begin
+			 t_wr_valid = 1'b1; t_valid = 1'b0;
+		      end
+		    n_state = UNCACHE_STORE;
+		 end
 	       else if(w_hit)
 		 begin
 		    n_reload = 1'b0;
@@ -712,5 +729,5 @@ module l2(clk,
 	    end
 	endcase
      end
-   
+
 endmodule
