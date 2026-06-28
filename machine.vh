@@ -153,8 +153,11 @@
 /* IRIX /unix branches on PRId.IMP in `start`: imp 0x20 (R4600) takes the
  * Indy per-CPU init path; imp 0x04 (R4000/R4400) falls through to a different
  * cache/TLB-refill path that diverges before the KPTEBASE page-table backing
- * (MAME_QUESTIONS.md Q5). Present R4600 so the kernel runs the right path. */
-`define PRID_VALUE  `PRID_R4600
+ * (MAME_QUESTIONS.md Q5). The old R4000/R4400 divergence turned out to be a
+ * since-fixed TLB bug: R4400 now reaches the SCSI scan, and unlike R4600 (fixed
+ * 32-byte L1 line) its Config DB bit lets IRIX manage 16-byte lines matching
+ * r9999's LG_L1D_CL_LEN=4. Present R4400. */
+`define PRID_VALUE  `PRID_R4400
 
 `define LG_BTB_SZ 7
 

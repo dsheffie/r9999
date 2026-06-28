@@ -1,6 +1,9 @@
 `include "machine.vh"
 `include "rob.vh"
 `include "uop.vh"
+// EXPERIMENT: fence mapped cached loads to ROB-head (non-speculative) -- read-path
+// DMA coherence (stale INQUIRY-buffer reads).  Comment out to disable.
+//`define ENABLE_KERNEL_LOAD_FENCE 1
 
 //`define VERBOSE_L1D 1
 
@@ -668,6 +671,42 @@ endfunction
 	 * does NOT translate it a second time. */
 	t_remapped_req2.mapped = 1'b0;
      end
+
+`ifdef VERILATOR
+   // TEMP: log the segment/cacheability of accesses to the IRIX descriptor page.
+   always_ff @(posedge clk)
+     if(r_got_req2 & (w_mapped_addr[35:12] == 24'h00841d))
+       $display("[desc-acc] va=%x pa=%x mapped=%b cca=%0d cached=%b store=%b op=%0d",
+		r_req2.addr, w_mapped_addr, r_req2.mapped, w_tlb_c,
+		(r_req2.mapped ? (w_tlb_c==3'd3) : r_req2.cached), r_req2.is_store, r_req2.op);
+   // TEMP: CPU reads of the INQUIRY buffer (BP=0x083dcb00).  hit=1 -> served from
+   // L1D (STALE if it predates the DMA write); hit=0 -> miss/refill (FRESH from DRAM).
+   always_ff @(posedge clk)
+     if(r_got_req2 & ~r_req2.is_store & (w_mapped_addr[31:8] == 24'h083dcb))
+       $display("[bufrd] cyc=%0d pa=%09x pc=%x hit=%b op=%0d data=%016x", r_cycle, w_mapped_addr,
+		r_req2.pc, t_hit_cache2, r_req2.op, t_rsp_data2);
+   // CPU STORE accepted to the buffer line (cached OR uncached): pc + cached flag +
+   // cycle settle the store-vs-dma_cache_inv program/drain order (the clobber source).
+   always_ff @(posedge clk)
+     if(r_got_req2 & r_req2.is_store & (w_mapped_addr[31:8] == 24'h083dcb))
+       $display("[bufwr] cyc=%0d pa=%09x va=%x pc=%x op=%0d data=%016x cached=%b",
+		r_cycle, w_mapped_addr, r_req2.addr, r_req2.pc, r_req2.op,
+		r_req2.data, (r_req2.mapped ? (w_tlb_c==3'd3) : r_req2.cached));
+   // L1D FILL of the buffer line: what data lands (fresh INQUIRY or stale DRAM)?
+   always_ff @(posedge clk)
+     if(w_cacheable_mem_rsp_valid & (r_mem_req_addr[35:8] == 28'h0083dcb))
+       $display("[L1Dfill] pa=%09x data=%08x", r_mem_req_addr, mem_rsp_load_data[31:0]);
+   // CPU CACHE op on the buffer line (driver's dma_cache_inv / wback)?
+   always_ff @(posedge clk)
+     if((r_state == FLUSH_CL) & (flush_cl_addr[35:8] == 28'h0083dcb))
+       $display("[L1Dcacheop] cyc=%0d pa=%09x inval=%b", r_cycle, flush_cl_addr, flush_cl_inval);
+   // CPU STORE writing the buffer line in L1D (the clobber?).  pc identifies which
+   // driver store; cross-ref the interp_mips stream for program order vs dma_cache_inv.
+   always_ff @(posedge clk)
+     if(t_wr_array & (r_req.addr[31:8] == 24'h883dcb))
+       $display("[bufst] cyc=%0d va=%x pc=%x op=%0d data=%x rob_ptr=%0d retry=%b",
+		r_cycle, r_req.addr, r_req.pc, r_req.op, t_array_data, r_req.rob_ptr, r_is_retry);
+`endif
 
    always_ff@(posedge clk)
      begin
@@ -1522,8 +1561,18 @@ endfunction
 
    /* memory system should be idle before dealing with an uncachable req */
    wire w_memq_empty = mem_q_empty & (r_n_inflight == 'd0) & (r_state == ACTIVE);
-   wire	w_uncachable_req = core_mem_req_valid & (core_mem_req.cached==1'b0) ? 
-	(/*w_memq_empty &*/ ((head_of_rob_ptr_valid ? (head_of_rob_ptr == core_mem_req.rob_ptr) : 1'b0) | drain_ds_complete)): 1'b1;
+   // EXPERIMENT: fence mapped cached LOADS to ROB-head too (non-speculative), so a
+   // speculative refill can't re-cache a stale DMA-target buffer line ahead of the
+   // driver's dma_cache_inv (the R10000 read-path hazard).  DMA buffers are mapped
+   // CCA=3 pages, so this targets them while leaving unmapped kseg0 at full speed.
+`ifdef ENABLE_KERNEL_LOAD_FENCE
+   wire w_fence_load = core_mem_req_valid & ~core_mem_req.is_store &
+                       core_mem_req.mapped & core_mem_req.cached;
+`else
+   wire w_fence_load = 1'b0;
+`endif
+   wire	w_uncachable_req = (core_mem_req_valid & ((core_mem_req.cached==1'b0) | w_fence_load)) ?
+	(((head_of_rob_ptr_valid ? (head_of_rob_ptr == core_mem_req.rob_ptr) : 1'b0) | drain_ds_complete)): 1'b1;
 
    //always@(negedge clk)
    //begin

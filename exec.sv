@@ -3677,8 +3677,14 @@ module exec(clk,
 		* lines, SC (bit 17) = no secondary cache.  IRIX's mlreset derives
 		* cachecolormask from these cache-size fields; the R4600 value gives
 		* cachecolormask=1 so pagecoloralign converges (MAME_QUESTIONS.md Q5
-		* round-2).  SC=1 still makes the kernel skip the scache probe. */
-	       t_csr0_val = 'h0002e4b3;
+		* round-2).  SC=1 still makes the kernel skip the scache probe.
+		* DB=0 (0x..a3 vs R4600's 0x..b3) advertises a 16-byte L1 line so IRIX's
+		* dma_cache_inv strides by 16 to match r9999's LG_L1D_CL_LEN=4 (R4600
+		* hardcodes a 32-byte line, ignoring Config DB, which would skip every
+		* other 16B line).  Pairs with the R4400 PRId in machine.vh.  NB: the
+		* SCSI disk-attach clobber that first pointed here was actually an L2
+		* stale-dirty-bit bug (fixed in l2.sv), not the cache-line stride. */
+	       t_csr0_val = 'h0002e4a3;
 	    end
 	  'd23:
 	    begin
