@@ -491,10 +491,12 @@ module l2(clk,
 	       else if(r_opcode == MEM_INVL)
 		 begin
 		    /* CACHE D-Hit-Invalidate (DMA-in): drop the L2 line if present,
-		     * WITHOUT writing it back, then ack. On a miss, just ack. */
+		     * WITHOUT writing it back, then ack. On a miss, just ack. Clear
+		     * dirty too so a later reload into this slot can't inherit it. */
 		    if(w_hit)
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
+			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
 		      end
 		    n_state = IDLE;
 		    n_rsp_valid = 1'b1;
@@ -598,6 +600,12 @@ module l2(clk,
 		    n_mem_req = 1'b0;
 		    t_valid = 1'b1;
 		    t_wr_valid = 1'b1;
+		    /* a clean DRAM fill MUST be marked NOT-dirty: otherwise a stale
+		     * dirty bit (left over from a prior invalidate/eviction that cleared
+		     * valid but not dirty) rides into the reloaded line and later writes
+		     * back garbage over a DMA'd buffer (the SCSI INQUIRY clobber). */
+		    t_dirty = 1'b0;
+		    t_wr_dirty = 1'b1;
 		    t_wr_tag = 1'b1;
 		    t_wr_d0 = 1'b1;
 		    n_state = WAIT_CLEAN_RELOAD;
