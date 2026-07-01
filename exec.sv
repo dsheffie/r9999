@@ -229,7 +229,7 @@ module exec(clk,
     * NOT a CAM (TLBP matches on the dtlb instead). Force it into block RAM so it
     * costs ~1 BRAM instead of ~5904 FF/LUTRAM of fabric. 48-deep is too shallow
     * for Vivado to pick BRAM unprompted. */
-   `TLB_SHADOW_RAM_STYLE tlb_stored_t r_shadow_tlb[47:0];
+   `TLB_SHADOW_RAM_STYLE tlb_stored_t r_shadow_tlb[`N_TLB_ENTRIES-1:0];
    
    
    localparam N_INT_SCHED_ENTRIES = 1<<`LG_INT_SCHED_ENTRIES;
@@ -3508,7 +3508,7 @@ module exec(clk,
 	r_sr_ts <= reset ? 1'b0 : n_sr_ts;
 	r_sr_im <= reset ? 8'd0 : n_sr_im;
 	r_wired <= reset ? 'd0 :  n_wired;
-	r_random <= reset ? 'd47 : n_random;
+	r_random <= reset ? (`N_TLB_ENTRIES-1) : n_random;
 	r_count  <= reset ? 32'd0 : n_count;
 	r_toggle <= reset ? 1'b0 : n_toggle;
 	
@@ -3732,11 +3732,11 @@ module exec(clk,
 	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd6)
 	  begin
 	     n_wired = t_srcA[5:0];
-	     n_random = 'd47;
+	     n_random = (`N_TLB_ENTRIES-1);
 	  end
 	else if(retire)
 	  begin
-	     n_random = (r_random==r_wired) ? 'd47 : (r_random-'d1);
+	     n_random = (r_random==r_wired) ? (`N_TLB_ENTRIES-1) : (r_random-'d1);
 	  end
      end
 

@@ -135,6 +135,17 @@
  * it -- no translate-time PA-range check needed). 36-bit PA -> 24-bit PFN. */
 `define PFN_WIDTH (`PA_WIDTH - 12)
 
+/* JTLB entry count -- the knob for the TLB-CAM timing tradeoff. R4000/R4400 is
+ * architecturally 48 (IRIX + Linux both hardcode it by PRId -- there's no Config1
+ * MMU-size reg on R4x00), so 48 is the default and the ONLY value IRIX accepts.
+ * Set 16 for a Linux-only, timing-optimized FPGA build: the fully-associative TLB
+ * CAM is henry's #1 timing path (48->16 measured WNS -0.240 -> +0.191, passes),
+ * but it ALSO requires a matching Linux cpu-probe.c `c->tlbsize = 16` and BREAKS
+ * IRIX. The keeper fix (both OSes + the timing win) is a micro-TLB in front of a
+ * 48-entry JTLB. Single source of truth for tlb.sv (N) + exec.sv (Random reset/
+ * wrap + shadow depth); flip here, nowhere else. */
+`define N_TLB_ENTRIES 48
+
 /* Per-structure block-RAM synthesis-attribute guards. Defined as the attribute =
  * force that array into block RAM (frees the LUT/FF fabric, which is the bottleneck
  * on Ultra96); define empty to let Vivado choose (FF/LUTRAM). These apply only to

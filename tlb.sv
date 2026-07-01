@@ -56,7 +56,7 @@ module tlb(clk,
    /* bits 39 down to 12 */
 
    parameter	       ISIDE = 0;
-   localparam	       N = 48;
+   localparam	       N = `N_TLB_ENTRIES;
    
    localparam	       LG_N = $clog2(N);
    localparam	       NN = 1 << LG_N;
@@ -67,7 +67,7 @@ module tlb(clk,
    wire [NN-1:0]	       w_hits;
 
 
-   tlb_stored_t r_tlb[47:0];   /* stored type: no `entry` (the array index IS the entry) */
+   tlb_stored_t r_tlb[N-1:0];   /* stored type: no `entry` (the array index IS the entry) */
    /* per-slot "written by TLBWR/TLBWI" bit: a slot is matchable once software has
     * written it, NOT when (v0|v1).  Using v0|v1 in the match wrongly excluded a
     * refill-installed both-pages-invalid entry (page-not-present), so the retry
