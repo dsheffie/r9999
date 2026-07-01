@@ -79,7 +79,7 @@ module l1i(clk,
 	   );
 
    input logic clk;
-   output logic [2:0] state;
+   output logic [3:0] state;
    input logic [7:0]  asid;
    
    input logic reset;
@@ -191,6 +191,12 @@ module l1i(clk,
    
    logic [`LG_FQ_ENTRIES:0] r_fq_tail_ptr, n_fq_tail_ptr;
    logic 		    r_resteer_bubble, n_resteer_bubble;
+   /* micro-ITLB always-miss: set for the single cycle after WAIT_FOR_TLB primes the
+    * JTLB, marking that the registered itlb outputs are valid for r_cache_pc. */
+   logic 		    r_itlb_ready, n_itlb_ready;
+   /* WAIT_FOR_TLB dwell counter: hold the (fixed-latency) JTLB lookup for the extra
+    * cycle the 2-cycle CAM split needs before pa/hit are valid for r_miss_pc. */
+   logic [1:0] 		    r_tlb_wait, n_tlb_wait;
    
    
    logic 		    fq_full, fq_next_empty, fq_empty;
@@ -244,14 +250,15 @@ function logic [3:0] select_pd(logic [15:0] cl, logic[LG_WORDS_PER_CL-1:0] pos);
 endfunction
 
    
-   typedef enum logic [2:0] {INITIALIZE = 'd0,
+   typedef enum logic [3:0] {INITIALIZE = 'd0,
 			     IDLE = 'd1,
                              ACTIVE = 'd2,
                              INJECT_RELOAD = 'd3,
 			     RELOAD_TURNAROUND = 'd4,
                              FLUSH_CACHE = 'd5,
 			     WAIT_FOR_NOT_FULL = 'd6,
-			     INIT_PHT = 'd7
+			     INIT_PHT = 'd7,
+			     WAIT_FOR_TLB = 'd8
 			    } state_t;
    
    logic [(`M_WIDTH-1):0] r_pc, n_pc, r_miss_pc, n_miss_pc;
@@ -490,7 +497,7 @@ endfunction
    wire 		w_itlb_hit;
    wire 		w_itlb_valid;   /* V bit of matched page */
 
-   tlb #(.ISIDE(1)) itlb (
+   itlb u_itlb (
 		       .clk(clk),
 		       .reset(reset),
 		       .asid(asid),
@@ -549,6 +556,8 @@ endfunction
 	n_mem_req_cacheable = r_mem_req_cacheable;
 	
 	n_resteer_bubble = 1'b0;
+	n_itlb_ready = 1'b0;   /* 1 only for the cycle after WAIT_FOR_TLB primes */
+	n_tlb_wait = r_tlb_wait;
 	t_next_spec_rs_tos = r_spec_rs_tos+'d1;
 	n_restart_req = restart_valid | r_restart_req;
 
@@ -683,6 +692,19 @@ endfunction
 		    n_state = ACTIVE;
 		    t_clear_fq = 1'b1;
 		 end // if (n_restart_req)
+	       else if(r_req && r_mapped && !r_itlb_ready)
+		 begin
+		    /* MICRO-ITLB always-miss: this mapped fetch's translation is not yet
+		     * primed.  Go prime the (2-cycle) JTLB in WAIT_FOR_TLB, holding
+		     * va = r_cache_pc's translation.  r_pc (may be a branch target for a
+		     * delay-slot fetch) is preserved so the fetch stream resumes correctly.
+		     * On return r_itlb_ready=1 and the normal consume runs with the now-
+		     * valid registered itlb outputs. */
+		    n_pc = r_pc;
+		    n_miss_pc = r_cache_pc;
+		    n_tlb_wait = 2'd0;
+		    n_state = WAIT_FOR_TLB;
+		 end
 	       else if(r_req && r_cache_pc[1:0] != 2'b00 && !fq_full)
 		 begin
 		    t_push_insn = 1'b1;
@@ -926,6 +948,47 @@ endfunction
 		    n_state = ACTIVE;
 		    t_clear_fq = 1'b1;
 		 end // if (n_restart_req)
+	    end
+	  WAIT_FOR_TLB:
+	    begin
+	       /* MICRO-ITLB always-miss prime: re-present r_miss_pc so the itlb holds
+	        * va = its translation for the 2 cycles the JTLB CAM needs; hold r_pc
+	        * (the post-fetch PC / branch target).  When the JTLB has settled
+	        * (!w_itlb_busy) return to ACTIVE with r_itlb_ready=1 so the normal
+	        * consume runs against the now-valid registered itlb outputs. */
+	       t_cache_idx = r_miss_pc[IDX_STOP-1:IDX_START];
+	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):IDX_STOP];
+	       n_cache_pc = r_miss_pc;
+	       n_pc = r_pc;
+	       n_req = 1'b1;
+	       if(n_flush_req)
+		 begin
+		    n_flush_req = 1'b0;
+		    t_clear_fq = 1'b1;
+		    n_state = FLUSH_CACHE;
+		    t_cache_idx = 0;
+		 end
+	       else if(n_restart_req)
+		 begin
+		    n_restart_ack = 1'b1;
+		    n_restart_req = 1'b0;
+		    n_delay_slot = 1'b0;
+		    n_pc = restart_pc;
+		    n_req = 1'b0;
+		    n_state = ACTIVE;
+		    t_clear_fq = 1'b1;
+		 end
+	       else if(r_tlb_wait == 2'd2)
+		 begin
+		    /* JTLB has had its 2 settle cycles with va held -> pa/hit valid for
+		     * r_miss_pc; hand back to ACTIVE with r_itlb_ready=1 to consume it. */
+		    n_itlb_ready = 1'b1;
+		    n_state = ACTIVE;
+		 end
+	       else
+		 begin
+		    n_tlb_wait = r_tlb_wait + 2'd1;
+		 end
 	    end
 	  default:
 	    begin
@@ -1309,6 +1372,8 @@ endfunction
 	     r_cache_hits <= 'd0;
 	     r_cache_accesses <= 'd0;
 	     r_resteer_bubble <= 1'b0;
+	     r_itlb_ready <= 1'b0;
+	     r_tlb_wait <= 2'd0;
 	  end
 	else
 	  begin
@@ -1340,7 +1405,9 @@ endfunction
 	     r_spec_gbl_hist <= n_spec_gbl_hist;
 	     r_cache_hits <= n_cache_hits;
 	     r_cache_accesses <= n_cache_accesses;
-	     r_resteer_bubble <= n_resteer_bubble;	     
+	     r_resteer_bubble <= n_resteer_bubble;
+	     r_itlb_ready <= n_itlb_ready;
+	     r_tlb_wait <= n_tlb_wait;	     
 	  end
      end
    

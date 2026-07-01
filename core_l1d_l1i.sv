@@ -181,7 +181,7 @@ module core_l1d_l1i(clk,
    
    output logic [`LG_ROB_ENTRIES:0] 	  inflight;
    output logic [4:0]			  core_state; 
-   output logic [2:0]			  l1i_state;
+   output logic [3:0]			  l1i_state;
    output logic [3:0]			  l1d_state;
    output logic [3:0]			  l2_state;
    output logic [3:0]			  l2_rsp_state;
