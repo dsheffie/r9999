@@ -31,6 +31,7 @@ module exec(clk,
 	    ip2,
 	    retire,
 	    retire_two,
+	    single_step,
 	    core_epc,
 	    core_wr_epc,
 	    core_cause,
@@ -117,6 +118,7 @@ module exec(clk,
    input logic ip2;
    input logic retire;
    input logic retire_two;
+   input logic single_step;
    input logic [`M_WIDTH-1:0] core_epc;
        
    input logic		      core_wr_epc;
@@ -727,6 +729,17 @@ module exec(clk,
      end // always_ff@ (posedge clk)
    
    logic [31:0]        r_cycle, r_retired_insns;
+`ifdef GHOST_DEBUG
+   always_ff@(negedge clk)
+     begin
+	if(r_start_int & ((int_uop.op == TLBWR) | (int_uop.op == TLBWI)))
+	  $display("[tlbw-exec] cyc=%d pc=%x op=%s rob=%d random=%d idx=%d vpn=%x head=%d hv=%b", 
+		   r_cycle, int_uop.pc, (int_uop.op == TLBWR) ? "wr" : "wi",
+		   int_uop.rob_ptr, r_random, r_index, r_entryhi_vpn2, head_of_rob_ptr, head_of_rob_ptr_valid);
+	if(r_tlb_entry_out_valid)
+	  $display("[tlbwrite] cyc=%d idx=%d vpn=%x ds_done=%b", r_cycle, r_tlb_index, r_entryhi_vpn2, ds_done);
+     end
+`endif
    always_ff@(posedge clk)
      begin
 	r_cycle <= reset ? 'd0 : r_cycle + 'd1;
@@ -1786,8 +1799,14 @@ module exec(clk,
    always_ff@(posedge clk)
      begin
 	r_tlb_index <= reset ? 'd0 : n_tlb_index;
-	r_tlb_entry_out_valid <= reset ? 1'b0 : n_tlb_entry_out_valid;
-	r_tlbr <= reset ? 1'b0 : n_tlbr;
+	/* side-effect intents from the int_uop ALU case must be qualified by the op
+	 * ACTUALLY EXECUTING this cycle (r_start_int) -- int_uop is a sticky register,
+	 * so the unqualified case asserts these for every idle cycle it lingers,
+	 * re-latching n_tlb_index=r_random and SPRAYING one TLBWR across many TLB
+	 * entries (root cause of the IRIX bad-istack TLB corruption).  The CP0-write
+	 * path has the same r_start_int guard. */
+	r_tlb_entry_out_valid <= reset ? 1'b0 : (r_start_int & n_tlb_entry_out_valid);
+	r_tlbr <= reset ? 1'b0 : (r_start_int & n_tlbr);
      end
    
    always_comb
@@ -3047,6 +3066,13 @@ module exec(clk,
    logic [31:0] r_watchlo, n_watchlo, r_watchhi, n_watchhi;
    /* timer interrupt pending: set when Count==Compare, cleared by MTC0 Compare */
    logic        r_timer_ip, n_timer_ip;
+`ifdef TIMER_ACCEL
+   /* sim-only exception-frequency crank: a free-running counter that injects an
+    * EXTRA timer IRQ every `TIMER_ACCEL_PERIOD cycles, ON TOP of the calibrated
+    * timer -- calibration-immune way to multiply interrupt boundaries to hunt the
+    * "corrupt after an interrupt" bug in Verilator. NOT for synth. */
+   logic [31:0] r_irq_accel, n_irq_accel;
+`endif
    /* kernel - 00, supervisor - 01, user - 10 */
    logic [1:0] r_sr_ksu, n_sr_ksu;
    /* 64b user */
@@ -3242,6 +3268,11 @@ module exec(clk,
 	     r_shadow_tlb[r_tlb_index].v1       <= tlb_entry_out.v1;
 	     r_shadow_tlb[r_tlb_index].g1       <= tlb_entry_out.g1;
 	     r_shadow_tlb[r_tlb_index].c1       <= tlb_entry_out.c1;
+`ifdef DUMP_TLB_WRITES
+	     if(r_tlb_index == 6'd0)
+	       $display("[idx0-wr t=%0t] r=%0d vpn=%h pfn0=%h v0=%b pfn1=%h v1=%b",
+	                $time, tlb_entry_out.r, tlb_entry_out.vpn, tlb_entry_out.pfn0, tlb_entry_out.v0, tlb_entry_out.pfn1, tlb_entry_out.v1);
+`endif
 	  end
      end
 
@@ -3412,7 +3443,11 @@ module exec(clk,
 	n_sr_im = r_sr_im;
 	n_toggle = !r_toggle;
 	/* Count increments every other cycle */
-	n_count = r_toggle ? (r_count + 32'd1) : r_count;
+	/* single-step mode: tie Count to RETIREMENT (per retired insn) so the timer
+	 * lands at the same instruction as free-run -- else Count free-runs per-cycle
+	 * and races ahead during the step freeze (distorts timer-driven bugs). */
+	n_count = single_step ? (retire_two ? (r_count + 32'd2) : (retire ? (r_count + 32'd1) : r_count))
+	                      : (r_toggle ? (r_count + 32'd1) : r_count);
 	n_compare = r_compare;
 	n_watchlo = r_watchlo;
 	n_watchhi = r_watchhi;
@@ -3428,6 +3463,11 @@ module exec(clk,
 	  end
 	/* Timer IP: set when Count wraps to Compare, cleared by MTC0 Compare */
 	n_timer_ip = r_timer_ip | (n_count == r_compare);
+`ifdef TIMER_ACCEL
+	n_irq_accel = (r_irq_accel == 32'd0) ? `TIMER_ACCEL_PERIOD : (r_irq_accel - 32'd1);
+	if(r_irq_accel == 32'd0)
+	  n_timer_ip = n_timer_ip | 1'b1;   /* inject an extra timer IRQ */
+`endif
 
 	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd12)
 	  begin
@@ -3467,9 +3507,12 @@ module exec(clk,
 	      * for reset/NMI/cache-error. */
 	     n_sr_exl = 1'b1;
 	  end
-	else if(t_eret)
+	else if(r_start_int & t_eret)
 	  begin
-	     /* ERET: ERL takes precedence over EXL. */
+	     /* ERET: ERL takes precedence over EXL.  r_start_int-gated like the
+	      * CP0 writes above: t_eret comes from the sticky int_uop case, so
+	      * ungated it lingers ~15 idle cycles and re-clears EXL right after
+	      * a new exception sets it (EPC overwritten -> eret-to-vector wedge). */
 	     if(r_sr_erl)
 	       n_sr_erl = 1'b0;
 	     else
@@ -3517,6 +3560,9 @@ module exec(clk,
 	r_watchlo <= reset ? 32'd0 : n_watchlo;
 	r_watchhi <= reset ? 32'd0 : n_watchhi;
 	r_timer_ip <= reset ? 1'b0 : n_timer_ip;
+`ifdef TIMER_ACCEL
+	r_irq_accel <= reset ? `TIMER_ACCEL_PERIOD : n_irq_accel;
+`endif
 `ifdef VERILATOR
 	end // else: !if(reset && have_checkpoint)
 `endif

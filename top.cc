@@ -1038,9 +1038,18 @@ int main(int argc, char **argv) {
     tb->mem_rsp_valid = 0;
 
     if(tb->mem_req_valid && (mem_reply_cycle == -1)) {
-      
-      mem_reply_cycle = globals::cycle + (tb->mem_req_opcode == 4 ? 1 : 2)*mem_lat;
-      
+      /* RANDOM per-request latency (xorshift, machine-deterministic) when MEM_SEED
+       * is set -- perturbs D-side load timing to hunt the mapped load-corruption
+       * race (single outstanding req here, so no ordering issue). Else fixed. */
+      uint64_t lat = mem_lat;
+      { static uint64_t mls = 0; static bool mli = false; static uint64_t lmin=1, lmax=16;
+        if(!mli){ mli=true; const char*es=getenv("MEM_SEED");
+                  if(getenv("MEM_LAT_MIN")) lmin=strtoull(getenv("MEM_LAT_MIN"),0,0);
+                  if(getenv("MEM_LAT_MAX")) lmax=strtoull(getenv("MEM_LAT_MAX"),0,0);
+                  mls = es ? strtoull(es,0,0) : 0;
+                  if(es) fprintf(stderr,"[memlat] RANDOM xorshift [%lu,%lu] seed=%lu\n",lmin,lmax,mls); }
+        if(mls){ mls^=mls<<13; mls^=mls>>7; mls^=mls<<17; lat = lmin + (mls % (lmax-lmin+1)); } }
+      mem_reply_cycle = globals::cycle + (tb->mem_req_opcode == 4 ? 1 : 2)*lat;
     }
     
     if(/*tb->mem_req_valid*/mem_reply_cycle ==globals::cycle) {

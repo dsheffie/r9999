@@ -16,6 +16,7 @@ module core_l1d_l1i(clk,
 		    putchar_fifo_wptr,
 		    putchar_fifo_rptr,
 		    single_step,
+		    bp_enable,
 		    step,
 		    in_flush_mode,
 		    resume,
@@ -100,6 +101,7 @@ module core_l1d_l1i(clk,
    output logic [3:0] putchar_fifo_rptr;
    
    input logic single_step;
+   input logic bp_enable;
    input logic step;
    input logic resume;
    input logic [(`M_WIDTH-1):0] resume_pc;
@@ -663,6 +665,7 @@ module core_l1d_l1i(clk,
 	     .putchar_fifo_wptr(putchar_fifo_wptr),
 	     .putchar_fifo_rptr(putchar_fifo_rptr),
 	     .single_step(single_step),
+	     .bp_enable(bp_enable),
 	     .step(step),
 	     .resume(resume),
 	     .memq_empty(memq_empty),

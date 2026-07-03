@@ -37,6 +37,7 @@ import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 module core(clk,
 	    single_step,
 	    step,
+	    bp_enable,
 	    reset,
 	    ip6,
 	    ip5,
@@ -174,6 +175,7 @@ module core(clk,
    input logic resume;
    input logic single_step;
    input logic step;
+   input logic bp_enable;   /* debug: freeze core after retiring BP_PC */
    input logic memq_empty;
    output logic drain_ds_complete;
    output logic [(1<<`LG_ROB_ENTRIES)-1:0] dead_rob_mask;
@@ -591,8 +593,41 @@ module core(clk,
    logic	r_single_step;
    wire         w_step_edge = step & ~r_step_d;
 
+`ifdef ENABLE_DEBUG_WATCHPOINT
+   /* DEBUG PC breakpoint + value watchpoint -- gated OFF by default; flip
+    * `ENABLE_DEBUG_WATCHPOINT in machine.vh to re-enable the on-silicon HW watchpoint
+    * (see docs/methodology.md "Chasing a bug on silicon").  Once a retiring insn
+    * matches BP_PC, or writes (masked) WP_VAL into $29, latch r_bp_hit/r_wp_hit; this
+    * folds into the step gate below so the core FREEZES (no step edges arrive) --
+    * letting GPRs/DRAM be read coherently at the offending instruction. */
+   localparam [31:0] BP_PC = 32'h880196bc;  // VEC_tlbmiss entry -- triage idle-thread TLB misses
+   logic	r_bp_hit;
+   /* track architectural sp ($29) so the breakpoint gates on the interrupted stack
+    * being the idle stack (0x8834a...) -- catches the idle thread's TLB miss, not
+    * the ~1000 normal ones every other thread takes. */
+   logic [31:0] r_cur_sp;
+   wire         w_idle_sp = (r_cur_sp & 32'hfffff000) == 32'h8834a000;
+   wire		w_bp_match = bp_enable & w_idle_sp &
+		((t_retire     & (t_rob_head.pc[31:0]      == BP_PC)) |
+		 (t_retire_two & (t_rob_next_head.pc[31:0] == BP_PC)));
+
+   /* Value WATCHPOINT.  Compare the already-FLOPPED retire outputs (not the
+    * combinational ROB head) so the 32-bit masked compare sits on a clean
+    * flop->logic->flop path and doesn't lengthen the near-critical retire path (the
+    * combinational version cost -3.6ns WNS).  Costs the freeze ~1-2 insns of latency. */
+   localparam [31:0] WP_VAL  = 32'h00000001; // neutralized: capture via BP_PC (bad-istack), not the sp watchpoint
+   localparam [31:0] WP_MASK = 32'hfffff000;
+   logic	r_wp_hit;
+   wire		w_wp_match = bp_enable &
+		((retire_reg_valid     & (retire_reg_ptr     == 5'd29) & ((retire_reg_data[31:0]     & WP_MASK) == WP_VAL)) |
+		 (retire_reg_two_valid & (retire_reg_two_ptr == 5'd29) & ((retire_reg_two_data[31:0] & WP_MASK) == WP_VAL)));
+
    /* this gets consumed by retirement logic */
+   wire		w_step_ok   = (r_single_step | r_bp_hit | r_wp_hit) ? (t_step_edge) : 1'b1;
+`else
+   /* this gets consumed by retirement logic (debug watchpoint compiled out) */
    wire		w_step_ok   = r_single_step ? (t_step_edge) : 1'b1;
+`endif
 
    logic	n_step_last, r_step_last, t_step_edge;
    always_comb
@@ -615,6 +650,13 @@ module core(clk,
      begin
 	r_step_last <= reset ? 1'b0 : n_step_last;
 	r_single_step <= reset ? 1'b0 : single_step;
+`ifdef ENABLE_DEBUG_WATCHPOINT
+	r_bp_hit <= reset ? 1'b0 : (r_bp_hit | w_bp_match);
+	r_wp_hit <= reset ? 1'b0 : (r_wp_hit | w_wp_match);
+	if(reset) r_cur_sp <= 32'd0;
+	else if(retire_reg_two_valid & (retire_reg_two_ptr == 5'd29)) r_cur_sp <= retire_reg_two_data[31:0];
+	else if(retire_reg_valid     & (retire_reg_ptr     == 5'd29)) r_cur_sp <= retire_reg_data[31:0];
+`endif
      end
 
    logic [31:0] r_restart_cycles, n_restart_cycles;
@@ -659,6 +701,15 @@ module core(clk,
    assign dbg_serialize_cycle      = r_serialize_cycle;
    assign dbg_cycle                = r_cycle[31:0];
    assign dbg_oldest_first_pending = r_oldest_first_pending;
+`ifdef GHOST_DEBUG
+   always_ff@(negedge clk)
+     begin
+	if(t_retire & t_rob_head.faulted & (r_state == ACTIVE))
+	  $display("[flt-retire] cyc=%d pc=%x head=%d has_ds=%b nds=%b", r_cycle, t_rob_head.pc, r_rob_head_ptr, t_rob_head.has_delay_slot, n_ds_done);
+	if((r_state == DRAIN) | (r_state == RAT))
+	  $display("[st] cyc=%d st=%d head=%d hv=%b ds=%b ret=%b hpc=%x", r_cycle, r_state, r_rob_head_ptr, head_of_rob_ptr_valid, r_ds_done, t_retire, t_rob_head.pc);
+     end
+`endif
 
 `ifdef ENABLE_TRACE_BUFFER
    // ---- trace buffer: log head + next_head {pc,counters,flags} on retire OR arch-fault (incl. II) ----
@@ -2968,6 +3019,41 @@ module core(clk,
    //t_push_dq_two
 
    
+`ifdef R4K_HAZARD_BEHAV
+   /* R4400 MTC0->Status[IE] CP0 hazard (Uman Appendix F, Table F-2): a real
+    * R4x00 does NOT accept a pending interrupt for 3 instructions after an mtc0
+    * that writes c0_sr.  r9999 is precise (0-cycle), which breaks the ~32
+    * "mtc0 c0_sr next to a stack switch" sites IRIX/Linux rely on (the IRIX
+    * bad-istack panic).  Replicate it: after a decoded mtc0/dmtc0 to CP0 reg 12
+    * (Status), suppress decode-side irq injection for 4 more decoded insns.
+    * Detected from the raw insn (COP0=0x10, rs=MT/DMT=4/5, rd=12), so no
+    * dependence on the decode output.  NB: REDUNDANT on r9999 -- mtc0 is a
+    * serializing_op that drains the pipe, so a post-mtc0 interrupt already sees the
+    * committed Status (R10000 "handled in hardware").  Kept for R4K-exact study. */
+   wire w_dec0_wr_c0sr = t_push_dq_one & (insn.data[31:26]==6'h10) &
+        ((insn.data[25:21]==5'd4)|(insn.data[25:21]==5'd5)) & (insn.data[15:11]==5'd12);
+   wire w_dec1_wr_c0sr = t_push_dq_two & (insn_two.data[31:26]==6'h10) &
+        ((insn_two.data[25:21]==5'd4)|(insn_two.data[25:21]==5'd5)) & (insn_two.data[15:11]==5'd12);
+   logic [2:0] r_sr_haz, n_sr_haz;
+   always_comb
+     begin
+	n_sr_haz = r_sr_haz;
+	if(t_push_dq_one & t_push_dq_two)
+	  n_sr_haz = (r_sr_haz > 3'd2) ? (r_sr_haz - 3'd2) : 3'd0;
+	else if(t_push_dq_one | t_push_dq_two)
+	  n_sr_haz = (r_sr_haz > 3'd0) ? (r_sr_haz - 3'd1) : 3'd0;
+	if(w_dec0_wr_c0sr | w_dec1_wr_c0sr)
+	  n_sr_haz = 3'd4;
+     end
+   always_ff@(posedge clk)
+     r_sr_haz <= reset ? 3'd0 : n_sr_haz;
+ `define R4K_IRQ_G0 & (r_sr_haz == 3'd0)
+ `define R4K_IRQ_G1 & (r_sr_haz == 3'd0) & !w_dec0_wr_c0sr
+`else
+ `define R4K_IRQ_G0
+ `define R4K_IRQ_G1
+`endif
+
    decode_mips dec0 (
 		     .in_kernel_mode(in_kernel_mode),
 		     .in_supervisor_mode(in_supervisor_mode),
@@ -2977,7 +3063,7 @@ module core(clk,
 		     .in_64b_user_mode(w_in_64b_user_mode),
 		     .cu1(w_cu1),
 		     .fr(w_fr),
-		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0)),
+		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0) `R4K_IRQ_G0),
 		     .tlb_miss(insn.tlb_miss),
 		     .tlb_invalid(insn.tlb_invalid),
 		     .misaligned(insn.misaligned),
@@ -3001,7 +3087,7 @@ module core(clk,
 		     .in_64b_user_mode(w_in_64b_user_mode),
 		     .cu1(w_cu1),
 		     .fr(w_fr),
-		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0)),
+		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0) `R4K_IRQ_G1),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .tlb_invalid(insn_two.tlb_invalid),
 		     .misaligned(insn_two.misaligned),
@@ -3061,6 +3147,7 @@ module core(clk,
 	   .ip2(ip2),
 	   .retire(t_retire),
 	   .retire_two(t_retire_two),
+	   .single_step(single_step),
 	   .core_epc(r_epc),
 	   .core_wr_epc(t_wr_epc),
 	   .core_cause(r_cause),

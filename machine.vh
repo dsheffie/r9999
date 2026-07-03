@@ -8,6 +8,16 @@
  `define ENABLE_TRACE_BUFFER 1
 `endif
 
+// On-silicon HW breakpoint/value-watchpoint in core.sv (freeze the pipe at an offending
+// instruction; read GPRs/DRAM coherently over AXI).  OFF by default -- uncomment to
+// re-enable the on-silicon watchpoint (see docs/methodology.md "Chasing a bug on silicon").
+//`define ENABLE_DEBUG_WATCHPOINT 1  // OFF for verilator TLB-dump run
+// Tiny 8-line L2 (congestion experiment; no real LUT win -- the FPU dominates).  OFF by default.
+//`define TINY_DEBUG_L2 1
+// R4400-exact CP0 hazard: defer irq injection after mtc0 c0_sr. REDUNDANT (mtc0 serializes); study only.
+//`define R4K_HAZARD_BEHAV 1
+//`define DUMP_TLB_WRITES 1  // (off for FPGA synth)
+
 `define FPGA 1
 
 // LL/SC reservation model -- KEEP IN SYNC with interpret.hh (LLSC_BREAK_ON_LOAD).
@@ -33,7 +43,10 @@
 
 `define BIG_ENDIAN 1
 
-`define LG_INT_SCHED_ENTRIES 3
+/* ALU int matrix scheduler: 4 entries (LG=2), downsized from 8 (LG=3).  The O(N^2)
+ * wakeup/select was on the critical path, so 8->4 is a WNS win (timing margin vs
+ * metastability) at a small IPC cost -- kept per functional>IPC.  Bump to 3 for full IPC. */
+`define LG_INT_SCHED_ENTRIES 2
 
 //gshare branch predictor
 `ifdef FORMAL
@@ -113,7 +126,11 @@
 `ifdef FORMAL
  `define LG_L2_NUM_SETS 2
 `else
- `define LG_L2_NUM_SETS 10
+ `ifdef TINY_DEBUG_L2
+  `define LG_L2_NUM_SETS 3
+ `else
+  `define LG_L2_NUM_SETS 10
+ `endif
 `endif
 
 
@@ -145,6 +162,15 @@
  * 48-entry JTLB. Single source of truth for tlb.sv (N) + exec.sv (Random reset/
  * wrap + shadow depth); flip here, nowhere else. */
 `define N_TLB_ENTRIES 48
+
+/* TEMPORARY sim experiment (revert before commit): inject extra timer IRQs to
+ * crank exception frequency ~100x and hunt the "corrupt after an interrupt"
+ * mapped-corruption bug under Verilator. Period in core cycles between injected
+ * IRQs (normal tick ~= 400000 cyc at HZ=250). NOT for synth. */
+/* `define TIMER_ACCEL 1   -- DISABLED: the injected timer ticks advance jiffies
+ * (fast-time) and wedge the boot in a poll loop before the initcalls. Using random
+ * memory latency alone to perturb timing instead. */
+`define TIMER_ACCEL_PERIOD 32'd40000
 
 /* Per-structure block-RAM synthesis-attribute guards. Defined as the attribute =
  * force that array into block RAM (frees the LUT/FF fabric, which is the bottleneck
@@ -290,3 +316,4 @@ function logic [`M_WIDTH-1:0] zero_extend32(logic [31:0] in);
 endfunction // is_mult
 
 `endif
+//`define GHOST_DEBUG 1  // TLB side-effect trace (spray bug diagnosis)
