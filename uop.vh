@@ -126,6 +126,9 @@ typedef enum logic [7:0]
    IRQ,
    CPU,
    CACHE_OP,  /* MIPS CACHE: completes benignly in the ALU, then serializes to flush */
+   CHWB,      /* CACHE D Hit-Writeback -- mem uop, dtlb-translated (mapped K2SEG buffers) */
+   CHWBINV,   /* CACHE D Hit-Writeback-Invalidate -- mem uop */
+   CHINV,     /* CACHE D Hit-Invalidate -- mem uop */
    /* branch-and-link REGIMM variants (BGEZAL/BGEZALL already above) */
    BLTZAL,
    BLTZALL,

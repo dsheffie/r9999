@@ -458,6 +458,31 @@ endfunction
    logic r_sc_should_write;
 
    logic t_reset_graduated;
+   /* CACHE hit-type mem ops (MEM_CHWB/CHWBINV/CHINV): line ops with dtlb-translated
+    * PAs, deferred to post-retirement via store graduation. */
+   wire w_is_chop2 = (r_req2.op == MEM_CHWB) | (r_req2.op == MEM_CHWBINV) | (r_req2.op == MEM_CHINV);
+   wire w_is_chop_head = (t_mem_head.op == MEM_CHWB) | (t_mem_head.op == MEM_CHWBINV) | (t_mem_head.op == MEM_CHINV);
+   wire w_is_chop_r = (r_req.op == MEM_CHWB) | (r_req.op == MEM_CHWBINV) | (r_req.op == MEM_CHINV);
+   logic r_chop_wait, n_chop_wait;
+`ifdef CHOP_DEBUG
+   always_ff@(negedge clk)
+     begin
+	if(t_push_miss)
+	  $display("[push] cyc=%d op=%d pa=%x st=%b rob=%d", r_cycle, r_req2.op, t_remapped_req2.addr, r_req2.is_store, r_req2.rob_ptr);
+	if(t_pop_mq & t_mem_head.is_store & !w_is_chop_head)
+	  $display("[st-fire] cyc=%d pa=%x", r_cycle, t_mem_head.addr);
+	if(t_pop_mq & w_is_chop_head)
+	  $display("[chop-fire] cyc=%d op=%d pa=%x", r_cycle, t_mem_head.op, t_mem_head.addr);
+	if(r_got_req & w_is_chop_r)
+	  $display("[chop-retry] cyc=%d op=%d pa=%x v=%b tagm=%b d=%b -> st=%d wb=%b", r_cycle, r_req.op, r_req.addr,
+		   r_valid_out, (r_tag_out == r_cache_tag), r_dirty_out, n_state, n_mem_req_valid);
+	if(r_state == FLUSH_CL)
+	  $display("[funnel-flcl] cyc=%d pa=%x inval=%b v=%b tagm=%b d=%b -> st=%d", r_cycle, flush_cl_addr, flush_cl_inval,
+		   r_valid_out, (r_tag_out == flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ]), r_dirty_out, n_state);
+	if(n_mem_req_valid & ((n_mem_req_opcode == MEM_WB) | (n_mem_req_opcode == MEM_INVL)) & (r_state != FLUSH_CACHE))
+	  $display("[l2op] cyc=%d op=%s pa=%x data=%x", r_cycle, (n_mem_req_opcode == MEM_WB) ? "WB" : "INVL", n_mem_req_addr, n_mem_req_store_data[31:0]);
+     end
+`endif
 
    always_ff@(posedge clk)
      begin
@@ -651,6 +676,15 @@ endfunction
 	       begin
 		  r_rob_inflight[t_mem_head.rob_ptr] <= 1'b0;
 	       end
+	     /* a CACHE hit-op retry completes the op on THIS pass whether it hits,
+	      * misses, or tag-mismatches (the line op / L2 scrub is issued either
+	      * way) -- clear its inflight bit unconditionally, else a miss/mismatch
+	      * chop leaves rob_inflight stuck and the next op reusing that rob_ptr
+	      * can never be accepted (l1d wedge, MQ empty). */
+	     if(r_got_req & w_is_chop_r)
+	       begin
+		  r_rob_inflight[r_req.rob_ptr] <= 1'b0;
+	       end
 	  end
      end
 
@@ -803,6 +837,7 @@ endfunction
 	     r_flush_complete <= 1'b0;
 	     r_flush_req <= 1'b0;
 	     r_flush_cl_req <= 1'b0;
+	     r_chop_wait <= 1'b0;
 	     r_tlb_addr <= 'd0;
 	     r_cache_idx <= 'd0;
 	     r_cache_tag <= 'd0;
@@ -854,6 +889,7 @@ endfunction
 	     r_flush_complete <= n_flush_complete;
 	     r_flush_req <= n_flush_req;
 	     r_flush_cl_req <= n_flush_cl_req;
+	     r_chop_wait <= n_chop_wait;
 	     r_cache_idx <= t_cache_idx;
 	     r_tlb_addr <= n_tlb_addr;
 	     r_cache_tag <= t_cache_tag;
@@ -1703,6 +1739,7 @@ endfunction
 	t_mark_invalid = 1'b0;
 	n_is_retry = 1'b0;
 	t_reset_graduated = 1'b0;
+	n_chop_wait = r_chop_wait;
 	t_force_clear_busy = 1'b0;
 	
 	t_incr_busy = 1'b0;
@@ -1829,7 +1866,7 @@ endfunction
 			  n_core_mem_rsp.tlb_index = w_tlb_index;
 			  n_core_mem_rsp_valid = 1'b1;
 		       end
-		    else if(r_req2.is_store && (w_tlb_dirty == 1'b0))
+		    else if(r_req2.is_store && (w_tlb_dirty == 1'b0) && !w_is_chop2)   /* CACHE ops don't write the page: no TLB-Mod */
 		       begin
 			  /* R4400: store to valid-but-not-dirty page -> TLB Modified (Mod), common vector; no write */
 			  /* BadVAddr = the faulting VIRTUAL address (r_req2.addr), NOT the
@@ -1925,7 +1962,56 @@ endfunction
 
 	       if(r_got_req)
 		 begin
-		    if(r_req.cached == 1'b0)
+		    if(w_is_chop_r)
+		      begin
+			 /* retried CACHE hit-op: perform the line op on the translated
+			  * PA (mirrors the FLUSH_CL funnel semantics).  Already early-
+			  * acked at translate time -- no rsp here, just clear the
+			  * graduation entry.  CHWB is conservatively treated as
+			  * WB-Invalidate (no clear-dirty-keep-valid path; a refill
+			  * costs a miss, never correctness). */
+			 t_reset_graduated = 1'b1;
+			 if(r_valid_out && (r_tag_out == r_cache_tag) && r_dirty_out && (r_req.op != MEM_CHINV))
+			   begin
+			      /* dirty hit, WB variant: write the line through to DRAM.
+			       * t_got_miss blocks a same-cycle MQ head fire (we're leaving
+			       * ACTIVE; a store fired this cycle would be dropped). */
+			      t_got_miss = 1'b1;
+			      t_mark_invalid = 1'b1;
+			      n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_opcode = MEM_WB;
+			      n_mem_req_store_data = t_data;
+			      n_mem_req_cacheable = 1'b1;
+			      n_mem_req_mask = 16'hffff;
+			      n_mem_req_valid = 1'b1;
+			      n_inhibit_write = 1'b1;
+			      n_chop_wait = 1'b1;
+			      n_state = FLUSH_CL_WAIT;
+			   end
+			 else if(r_req.op != MEM_CHWB)
+			   begin
+			      /* INV variants (clean hit or L1D miss): drop any L1D copy,
+			       * scrub the L2 copy (MEM_INVL, no WB -- DMA-in drop).
+			       * t_got_miss: see WB arm. */
+			      t_got_miss = 1'b1;
+			      if(r_valid_out && (r_tag_out == r_cache_tag))
+				t_mark_invalid = 1'b1;
+			      n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_opcode = MEM_INVL;
+			      n_mem_req_cacheable = 1'b1;
+			      n_mem_req_mask = 16'hffff;
+			      n_mem_req_valid = 1'b1;
+			      n_chop_wait = 1'b1;
+			      n_state = FLUSH_CL_WAIT;
+			   end
+			 else if(r_valid_out && (r_tag_out == r_cache_tag))
+			   begin
+			      /* CHWB clean hit: nothing dirty to push; drop the copy
+			       * (conservative WB-inval semantics, see above) */
+			      t_mark_invalid = 1'b1;
+			   end
+		      end
+		    else if(r_req.cached == 1'b0)
 		      begin
 			 if(r_valid_out && (r_tag_out == r_cache_tag))
 			   begin
@@ -2088,7 +2174,31 @@ endfunction
 	       begin
 		  if(!t_mh_block)
 		    begin
-		       if(t_mem_head.is_store)
+		       if(w_is_chop_head)
+			 begin
+			    /* CACHE hit-op at MQ head: release on graduation alone (no
+			     * store data).  Re-fire through port 1 as a READ pass; the
+			     * retry arm performs the line op on the TLB-translated PA
+			     * the MQ entry carries. */
+			    if(r_graduated[t_mem_head.rob_ptr] == 2'b10)
+			      begin
+				 t_pop_mq = 1'b1;
+				 n_req = t_mem_head;
+				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:`LG_PG_SZ];
+				 t_addr = t_mem_head.addr;
+				 t_got_req = 1'b1;
+				 n_is_retry = 1'b1;
+				 n_last_rd = 1'b1;
+				 t_got_rd_retry = 1'b1;
+			      end
+			    else if(drain_ds_complete && dead_rob_mask[t_mem_head.rob_ptr])
+			      begin
+				 t_pop_mq = 1'b1;
+				 t_force_clear_busy = 1'b1;
+			      end
+			 end
+		       else if(t_mem_head.is_store)
 			 begin
 			    if(r_graduated[t_mem_head.rob_ptr] == 2'b10 && (core_store_data_valid ? (t_mem_head.rob_ptr == core_store_data.rob_ptr) : 1'b0) )
 			      begin
@@ -2192,7 +2302,7 @@ endfunction
 		  
 		  n_cache_accesses =  r_cache_accesses + 'd1;
 	       end // if (core_mem_req_valid &&...
-	       else if(r_flush_req && mem_q_empty && !(r_got_req && r_last_wr))
+	       else if(r_flush_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
 		 begin
 		    n_state = FLUSH_CACHE;
 		    n_mem_req_mask = 16'hffff;
@@ -2206,7 +2316,7 @@ endfunction
 		    t_cache_idx = 'd0;
 		    n_flush_req = 1'b0;
 		 end
-	       else if(r_flush_cl_req && mem_q_empty && !(r_got_req && r_last_wr))
+	       else if(r_flush_cl_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))   /* a chop retry transitions n_state too */
 		 begin
 `ifdef VERILATOR
 		    if(!mem_q_empty) $stop();
@@ -2328,7 +2438,11 @@ endfunction
 		  begin
 		     n_state = ACTIVE;
 		     n_inhibit_write = 1'b0;
-		     n_flush_complete = 1'b1;
+		     /* mem-pipe CACHE hit-ops were early-acked; do NOT pulse the
+		      * core's funnel flush handshake (it latches and would falsely
+		      * satisfy a later CACHE_FLUSH wait). */
+		     n_flush_complete = !r_chop_wait;
+		     n_chop_wait = 1'b0;
 		  end	       
 	    end
 	  FLUSH_CACHE:

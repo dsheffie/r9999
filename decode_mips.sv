@@ -1598,7 +1598,23 @@ module decode_mips(
 		       * I-ops nuke the whole L1I. Compute base+offset so the EA lands
 		       * in rob.data for the per-line D flush. */
 		 begin
-		    if(in_kernel_mode)
+		    if(in_kernel_mode && (insn[17:16] == 2'b01) &&
+		       ((insn[20:18] == 3'b100) || (insn[20:18] == 3'b101) || (insn[20:18] == 3'b110)))
+		      begin
+			 /* primary-D HIT-type ops (Hit-Inval 0x11 / Hit-WB-Inval 0x15 /
+			  * Hit-WB 0x19) are MEM uops: AGU -> mem queue -> l1d, where the
+			  * dtlb translates the EA (IRIX invalidates MAPPED K2SEG buffer-
+			  * cache lines for DMA; the old funnel path masked VA&0x1fffffff,
+			  * wrong for mapped EAs -> stale superblock -> EWRONGFS).  The
+			  * side effect defers to post-retirement via store graduation. */
+			 uop.op = (insn[20:18] == 3'b100) ? CHINV :
+				  (insn[20:18] == 3'b101) ? CHWBINV : CHWB;
+			 uop.is_mem = 1'b1;
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.imm = insn[15:0];
+		      end
+		    else if(in_kernel_mode)
 		      begin
 			 uop.op = CACHE_OP;
 			 uop.is_int = 1'b1;

@@ -2645,6 +2645,30 @@ module exec(clk,
 	t_mem_tail.pc = mem_uq.pc;
 `endif	
 	case(mem_uq.op)
+	  CHWB:
+	    begin
+	       /* CACHE hit-type ops: store-classed in the req (MQ + graduation =
+		* side effect at retirement), but NOT is_store() at the uop level
+		* (no store data, no TLB-Mod fault). */
+	       t_mem_tail.op = MEM_CHWB;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
+	    end
+	  CHWBINV:
+	    begin
+	       t_mem_tail.op = MEM_CHWBINV;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
+	    end
+	  CHINV:
+	    begin
+	       t_mem_tail.op = MEM_CHINV;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
+	    end
 	  SB:
 	    begin
 	       t_mem_tail.op = MEM_SB;
