@@ -1061,7 +1061,7 @@ module exec(clk,
 
    logic t_32b_shift, t_shift_left;
 
-   wire [`M_WIDTH-1:0] w_shifter_out;   
+   wire [`M_WIDTH-1:0] w_shifter_out;
    generate
       if(`M_WIDTH == 64)
 	begin
@@ -3012,7 +3012,11 @@ module exec(clk,
      begin
 	n_wr_pc_idx = r_wr_pc_idx;
 	n_rd_pc_idx = r_rd_pc_idx;
-	t_push_putchar = t_wr_cpr0 & (int_uop.dst == 'd7);
+	/* r_start_int-gated: int_uop is a sticky register, so an ungated push fires
+	 * the reg7 putchar EVERY idle cycle the mtc0 lingers (~10x when the scheduler
+	 * is slow to refill) -> repeated console chars.  Same sticky-int_uop class as
+	 * the TLB-spray/ERET gates (070c810); this one was missed. */
+	t_push_putchar = r_start_int & t_wr_cpr0 & (int_uop.dst == 'd7);
 	if(t_push_putchar)
 	  begin
 	     n_wr_pc_idx = r_wr_pc_idx + 'd1;
