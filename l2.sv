@@ -496,7 +496,12 @@ module l2(clk,
 		     * here that never reached DRAM; a bare drop loses it (copy_page's
 		     * VIPT same-set eviction + a coherence CHWBINV whose L1D line was
 		     * already evicted -> plain INVL -> init SIGSEGV).  Flush w_d0 to
-		     * DRAM via the MEM_WB DRAM-store path, then ack. */
+		     * DRAM, then ack.  Route the writeback through UNCACHE_WB_DRAIN
+		     * (NOT straight to a store) so the mem_req turnaround gap runs --
+		     * without it the AXI master's WAIT can't fall to IDLE and the bus
+		     * DEADLOCKS on silicon (the wirepda class; henry_tb DRAM acks
+		     * instantly so sim missed it).  UNCACHE_WB_TURNAROUND acks when
+		     * r_opcode==MEM_INVL. */
 		    if(w_hit)
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
@@ -508,7 +513,8 @@ module l2(clk,
 			      n_mem_opcode = 5'd7;
 			      n_store_mask = 16'hffff;
 			      n_mem_req = 1'b1;
-			      n_state = UNCACHE_STORE;   /* waits DRAM ack, then acks L1 */
+			      n_got_mem_rsp_valid = 1'b0;
+			      n_state = UNCACHE_WB_DRAIN;   /* drain+turnaround, then ack */
 			   end
 			 else
 			   begin
@@ -745,13 +751,24 @@ module l2(clk,
 	    end
 	  UNCACHE_WB_TURNAROUND:
 	    begin
-	       /* one-cycle mem_req gap is now satisfied; re-issue the uncached op */
-	       n_addr = r_saveaddr;
-	       n_mem_opcode = r_opcode;
-	       n_store_mask = r_uncache_mask;
-	       n_mem_req_store_data = r_store_data;
-	       n_mem_req = 1'b1;
-	       n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+	       /* the mem_req turnaround gap is now satisfied. */
+	       if(r_opcode == MEM_INVL)
+		 begin
+		    /* dirty-INVL writeback drained -- just ack the L1 (no uncached op
+		     * follows the invalidate). */
+		    n_state = IDLE;
+		    n_rsp_valid = 1'b1;
+		 end
+	       else
+		 begin
+		    /* re-issue the uncached op that the dirty-evict writeback preceded */
+		    n_addr = r_saveaddr;
+		    n_mem_opcode = r_opcode;
+		    n_store_mask = r_uncache_mask;
+		    n_mem_req_store_data = r_store_data;
+		    n_mem_req = 1'b1;
+		    n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+		 end
 	    end
 	  default:
 	    begin
