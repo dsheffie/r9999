@@ -776,8 +776,9 @@ module l2(clk,
 	endcase
      end
 
-`ifdef VERILATOR
+`ifdef DESC_TRACE
    // TEMP sim-only trace: the IRIX t1/L0 INQUIRY descriptor page (PA 0x0841d000).
+   // Gated behind DESC_TRACE (was always-on under VERILATOR and spammed the boot).
    always_ff @(posedge clk) begin
       if(l1_mem_req_valid & (l1_mem_req_addr[35:12] == 24'h00841d))
         $display("[desc l1->l2] op=%2d addr=%09x data=%08x", l1_mem_req_opcode,
