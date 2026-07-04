@@ -490,16 +490,37 @@ module l2(clk,
 		 end
 	       else if(r_opcode == MEM_INVL)
 		 begin
-		    /* CACHE D-Hit-Invalidate (DMA-in): drop the L2 line if present,
-		     * WITHOUT writing it back, then ack. On a miss, just ack. Clear
-		     * dirty too so a later reload into this slot can't inherit it. */
+		    /* CACHE-Invalidate: drop the L2 line if present, then ack.
+		     * FIX (a): if the L2 line is DIRTY, WRITE IT BACK TO DRAM FIRST.
+		     * A dirty L2 line means an L1D eviction (MEM_SW) landed valid data
+		     * here that never reached DRAM; a bare drop loses it (copy_page's
+		     * VIPT same-set eviction + a coherence CHWBINV whose L1D line was
+		     * already evicted -> plain INVL -> init SIGSEGV).  Flush w_d0 to
+		     * DRAM via the MEM_WB DRAM-store path, then ack. */
 		    if(w_hit)
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
 			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
+			 if(w_dirty)
+			   begin
+			      n_mem_req_store_data = w_d0;
+			      n_addr = {w_tag, t_idx, 4'd0};
+			      n_mem_opcode = 5'd7;
+			      n_store_mask = 16'hffff;
+			      n_mem_req = 1'b1;
+			      n_state = UNCACHE_STORE;   /* waits DRAM ack, then acks L1 */
+			   end
+			 else
+			   begin
+			      n_state = IDLE;
+			      n_rsp_valid = 1'b1;
+			   end
 		      end
-		    n_state = IDLE;
-		    n_rsp_valid = 1'b1;
+		    else
+		      begin
+			 n_state = IDLE;
+			 n_rsp_valid = 1'b1;
+		      end
 		 end
 	       else if(r_opcode == MEM_WB)
 		 begin
