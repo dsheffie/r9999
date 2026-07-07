@@ -31,6 +31,10 @@ import "DPI-C" function void record_restart(input int restart_cycles);
 import "DPI-C" function void record_ds_restart(input int delay_cycles);
 import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 
+/* timer-IRQ trace: fired once per interrupt taken (IP[7]=timer, IP[1..6] unwired,
+ * so took_irq == a timer interrupt).  The C side records the sim cycle; queryable
+ * from the henry_tb monitor. */
+import "DPI-C" function void log_timer_irq();
 
 `endif
 
@@ -741,6 +745,22 @@ module core(clk,
 `endif
 
    assign took_irq  = t_wr_epc & (r_cause == 5'd0);
+`ifdef VERILATOR
+   /* timer-IRQ trace hook: the ARCH_FAULT state dispatches the taken exception,
+    * and an is_irq head there IS a timer interrupt (IP[1..6] unwired) committing
+    * with n_cause=0.  One-cycle pulse -> DPI records the sim cycle for monitor
+    * query.  (took_irq uses the registered r_cause, which lags, so it misses.) */
+   wire  w_irq_commit = (r_state == ARCH_FAULT) & t_rob_head.is_irq;
+   logic r_irq_commit_d;
+   always_ff@(posedge clk)
+     begin
+	r_irq_commit_d <= reset ? 1'b0 : w_irq_commit;
+	if(w_irq_commit & ~r_irq_commit_d)
+	  begin
+	     log_timer_irq();
+	  end
+     end // always_ff@ (posedge clk)
+`endif
    assign cp0_count = w_cp0_count;
    assign l1i_flush_done = n_l1i_flush_complete;
    assign l1d_flush_done = n_l1d_flush_complete;

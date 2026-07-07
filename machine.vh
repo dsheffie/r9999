@@ -47,7 +47,7 @@
 /* ALU int matrix scheduler: 4 entries (LG=2), downsized from 8 (LG=3).  The O(N^2)
  * wakeup/select was on the critical path, so 8->4 is a WNS win (timing margin vs
  * metastability) at a small IPC cost -- kept per functional>IPC.  Bump to 3 for full IPC. */
-`define LG_INT_SCHED_ENTRIES 2
+`define LG_INT_SCHED_ENTRIES 3
 
 //gshare branch predictor
 `ifdef FORMAL

@@ -92,6 +92,10 @@ void record_branches(int n_branches) {
   branch_distribution[n_branches]++;
 }
 
+// timer-IRQ trace DPI: only henry_tb records it (for its monitor `timer` query);
+// ooo_core just needs the symbol, so this is a no-op here.
+void log_timer_irq(void) {}
+
 void record_faults(int n_faults) {
   fault_distribution[n_faults]++;
   if(n_faults && not(pending_fault)) {
