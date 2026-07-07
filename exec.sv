@@ -2643,6 +2643,7 @@ module exec(clk,
 	t_mem_tail.mapped = w_mapped;
 `ifdef VERILATOR
 	t_mem_tail.pc = mem_uq.pc;
+	t_mem_tail.uuid = {32'd0, r_cycle};
 `endif	
 	case(mem_uq.op)
 	  CHWB:

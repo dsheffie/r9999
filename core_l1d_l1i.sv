@@ -250,6 +250,17 @@ module core_l1d_l1i(clk,
    flush_state_t n_flush_state, r_flush_state;
    logic 	r_flush, n_flush;
    logic 	r_flush_l2, n_flush_l2;
+   /* sticky latches for the flush handshake: flush_req_l1i/l1d and
+    * l1i/l1d_flush_complete arrive as SINGLE-CYCLE pulses.  The old arbiter checked
+    * each pulse only in one specific state, so a pulse that arrived when the arbiter
+    * was elsewhere (blast_icache32 fires CACHE ops back-to-back and timing drifts --
+    * e.g. ROB-16 / skid-off) was LOST -> arbiter never chained the L2 flush -> the
+    * core's CACHE_FLUSH waited forever on l2_flush_complete -> boot deadlock.  Latch
+    * the pulses so none is dropped; cleared at sequence end (FLUSH_L2 done). */
+   logic 	r_req_l1i_l, n_req_l1i_l;
+   logic 	r_req_l1d_l, n_req_l1d_l;
+   logic 	r_dn_l1i, n_dn_l1i;
+   logic 	r_dn_l1d, n_dn_l1d;
    wire 	w_l2_flush_complete;
    wire 	w_l1_mem_rsp_valid;   
    logic 	memq_empty;   
@@ -264,12 +275,20 @@ module core_l1d_l1i(clk,
 	     r_flush_state <= FLUSH_IDLE;
 	     r_flush <= 1'b0;
 	     r_flush_l2 <= 1'b0;
+	     r_req_l1i_l <= 1'b0;
+	     r_req_l1d_l <= 1'b0;
+	     r_dn_l1i <= 1'b0;
+	     r_dn_l1d <= 1'b0;
 	  end
 	else
 	  begin
 	     r_flush_state <= n_flush_state;
 	     r_flush <= n_flush;
 	     r_flush_l2 <= n_flush_l2;
+	     r_req_l1i_l <= n_req_l1i_l;
+	     r_req_l1d_l <= n_req_l1d_l;
+	     r_dn_l1i <= n_dn_l1i;
+	     r_dn_l1d <= n_dn_l1d;
 	  end
      end // always_ff@ (posedge clk)
 
@@ -279,21 +298,30 @@ module core_l1d_l1i(clk,
 	n_flush_state = r_flush_state;
 	n_flush = r_flush;
 	n_flush_l2 = 1'b0;
-	
+	/* accumulate the single-cycle req/complete pulses so no state can miss one */
+	n_req_l1i_l = r_req_l1i_l | flush_req_l1i;
+	n_req_l1d_l = r_req_l1d_l | flush_req_l1d;
+	n_dn_l1i    = r_dn_l1i    | l1i_flush_complete;
+	n_dn_l1d    = r_dn_l1d    | l1d_flush_complete;
+
 	case(r_flush_state)
 	  FLUSH_IDLE:
 	    begin
-	       if(flush_req_l1i && flush_req_l1d)
+	       /* between sequences the complete-latches must read clear so a stale
+		* prior-sequence pulse can't pre-satisfy this one. */
+	       n_dn_l1i = 1'b0;
+	       n_dn_l1d = 1'b0;
+	       if(n_req_l1i_l && n_req_l1d_l)
 		 begin
 		    n_flush_state = WAIT_FOR_L1D_L1I;
 		    n_flush = 1'b1;
 		 end
-	       else if(flush_req_l1i && !flush_req_l1d)
+	       else if(n_req_l1i_l && !n_req_l1d_l)
 		 begin
 		    n_flush_state = GOT_L1D;
 		    n_flush = 1'b1;
 		 end
-	       else if(!flush_req_l1i && flush_req_l1d)
+	       else if(!n_req_l1i_l && n_req_l1d_l)
 		 begin
 		    n_flush_state = GOT_L1I;
 		    n_flush = 1'b1;
@@ -301,15 +329,15 @@ module core_l1d_l1i(clk,
 	    end
 	  WAIT_FOR_L1D_L1I:
 	    begin
-	       if(l1d_flush_complete && !l1i_flush_complete)
+	       if(n_dn_l1d && !n_dn_l1i)
 		 begin
-		    n_flush_state = GOT_L1D;		    
+		    n_flush_state = GOT_L1D;
 		 end
-	       else if(!l1d_flush_complete && l1i_flush_complete)
+	       else if(!n_dn_l1d && n_dn_l1i)
 		 begin
 		    n_flush_state = GOT_L1I;
 		 end
-	       else if(l1d_flush_complete && l1i_flush_complete)
+	       else if(n_dn_l1d && n_dn_l1i)
 		 begin
 		    $display("flush l2");
 		    n_flush_state = FLUSH_L2;
@@ -318,16 +346,23 @@ module core_l1d_l1i(clk,
 	    end
 	  GOT_L1D:
 	    begin
-	       if(l1i_flush_complete)
+	       /* L1I-only flush (the I-side CACHE op): DONE once the L1I is
+		* invalidated.  Do NOT chain an L2 flush -- the I-cache is read-only
+		* and L2 is its refill source; flushing L2 here was wrong and the
+		* deadlock/O(n^2) source.  Return to IDLE and clear the latches. */
+	       if(n_dn_l1i)
 		 begin
-		    $display("flush l2");
-		    n_flush_state = FLUSH_L2;
-		    n_flush_l2 = 1'b1;
+		    n_flush = 1'b0;
+		    n_flush_state = FLUSH_IDLE;
+		    n_req_l1i_l = 1'b0;
+		    n_req_l1d_l = 1'b0;
+		    n_dn_l1i = 1'b0;
+		    n_dn_l1d = 1'b0;
 		 end
 	    end
 	  GOT_L1I:
 	    begin
-	       if(l1d_flush_complete)
+	       if(n_dn_l1d)
 		 begin
 		    $display("flush l2");
 		    n_flush_state = FLUSH_L2;
@@ -341,6 +376,11 @@ module core_l1d_l1i(clk,
 		    $display("L2 FLUSH COMPLETE");
 		    n_flush = 1'b0;
 		    n_flush_state = FLUSH_IDLE;
+		    /* sequence done: clear all handshake latches */
+		    n_req_l1i_l = 1'b0;
+		    n_req_l1d_l = 1'b0;
+		    n_dn_l1i = 1'b0;
+		    n_dn_l1d = 1'b0;
 		 end
 	    end
 	  default:

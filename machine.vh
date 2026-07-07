@@ -37,7 +37,8 @@
  * microbench (tests/memlat), randgen 400/400 + FP co-sim 15/15 clean, henry synth
  * WNS +0.204 (worst path unchanged = ITLB CAM, not the bypass).  Comment out to
  * fall back to the plain enqueue-then-dequeue path. */
-`define ENABLE_L1D_SKID 1
+
+//`define ENABLE_L1D_SKID 1
 
 `define LG_M_WIDTH 6
 
@@ -46,7 +47,7 @@
 /* ALU int matrix scheduler: 4 entries (LG=2), downsized from 8 (LG=3).  The O(N^2)
  * wakeup/select was on the critical path, so 8->4 is a WNS win (timing margin vs
  * metastability) at a small IPC cost -- kept per functional>IPC.  Bump to 3 for full IPC. */
-`define LG_INT_SCHED_ENTRIES 3
+`define LG_INT_SCHED_ENTRIES 2
 
 //gshare branch predictor
 `ifdef FORMAL
@@ -74,7 +75,7 @@
 `ifdef FORMAL
  `define LG_ROB_ENTRIES 2
 `else
- `define LG_ROB_ENTRIES 5
+ `define LG_ROB_ENTRIES 4
 `endif
 
 `define LG_RET_STACK_ENTRIES 2
@@ -162,6 +163,13 @@
  * 48-entry JTLB. Single source of truth for tlb.sv (N) + exec.sv (Random reset/
  * wrap + shadow depth); flip here, nowhere else. */
 `define N_TLB_ENTRIES 48
+
+/* Micro-ITLB: a small fully-associative cache of translations in front of the
+ * 48-way JTLB CAM (itlb.sv).  Hit = 1-cycle translate (skips WAIT_FOR_TLB); miss =
+ * probe the 48-way, install with LFSR-random replacement.  Flushed on TLBWR/TLBWI
+ * (tlb_entry_in_valid) and on ASID change.  Small = small CAM = closes timing AND
+ * removes the per-fetch JTLB re-prime stall.  Power of 2 (for the LFSR replace). */
+`define N_UITLB_ENTRIES 2
 
 /* TEMPORARY sim experiment (revert before commit): inject extra timer IRQs to
  * crank exception frequency ~100x and hunt the "corrupt after an interrupt"

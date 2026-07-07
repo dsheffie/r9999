@@ -699,7 +699,11 @@ endfunction
 	 * w_tlb_c is registered in lockstep with w_mapped_addr, so it lines up
 	 * with r_req2 here. (This is the proper fix the L2 UNCACHE_WB_TURNAROUND
 	 * worked around: a cacheable mapped store was being routed uncached.) */
+`ifdef FORCE_UNCACHED
+	t_remapped_req2.cached = 1'b0;   /* SCIENCE: force ALL data traffic uncached */
+`else
 	t_remapped_req2.cached = r_req2.mapped ? (w_tlb_c == 3'd3) : r_req2.cached;
+`endif
 	/* the queued/replayed req now carries the TLB-translated PHYSICAL address;
 	 * mark it unmapped so the replay refills from / re-tags with the PA and
 	 * does NOT translate it a second time. */

@@ -497,6 +497,16 @@ endfunction
    wire 		w_itlb_hit;
    wire 		w_itlb_valid;   /* V bit of matched page */
 
+   /* micro-ITLB fast path: combinational lookup (w_ufast_*, aligned to w_la_pc =
+    * seg(n_cache_pc)), registered to r_ufast_* to line up with r_cache_pc/r_mapped
+    * one stage later.  install_en re-loads the micro-TLB from the 48-way when a
+    * prime lands a hit (r_itlb_ready & w_itlb_hit). */
+   wire 		w_ufast_hit, w_ufast_valid;
+   wire [`PA_WIDTH-1:0] w_ufast_pa;
+   logic 		r_ufast_hit, r_ufast_valid;
+   logic [`PA_WIDTH-1:0] r_ufast_pa;
+   wire 		w_itlb_install = r_itlb_ready & w_itlb_hit;
+
    itlb u_itlb (
 		       .clk(clk),
 		       .reset(reset),
@@ -512,7 +522,11 @@ endfunction
 		       .cache_attr(),     /* i-side cacheability unused (i-fetch cached) */
 		       .out_of_range(),   /* i-side address-error: TODO (d-side first) */
 		       .tlb_entry_in_valid(tlb_entry_in_valid),
-		       .tlb_entry_in(tlb_entry_in)
+		       .tlb_entry_in(tlb_entry_in),
+		       .install_en(w_itlb_install),
+		       .ufast_hit(w_ufast_hit),
+		       .ufast_pa(w_ufast_pa),
+		       .ufast_valid(w_ufast_valid)
 		       );
 
    always@(posedge clk)
@@ -524,8 +538,22 @@ endfunction
 	r_bad_va <= reset ? 1'b0 : w_bad_perms;
      end
 
+   /* register the micro-TLB lookup one stage so it aligns with r_cache_pc/r_mapped */
+   always_ff@(posedge clk)
+     begin
+	r_ufast_hit   <= reset ? 1'b0 : w_ufast_hit;
+	r_ufast_valid <= reset ? 1'b0 : w_ufast_valid;
+	r_ufast_pa    <= reset ? 'd0  : w_ufast_pa;
+     end
+
+   /* effective (source-agnostic) itlb result: a micro-TLB hit short-circuits the
+    * 48-way so the consume/fault logic below is oblivious to which supplied the PA. */
+   wire 		w_eff_hit   = w_itlb_hit | r_ufast_hit;
+   wire 		w_eff_valid = r_ufast_hit ? r_ufast_valid : w_itlb_valid;
+   wire [`PA_WIDTH-1:0] w_eff_pa = r_ufast_hit ? r_ufast_pa : w_itlb_pa;
+
    /* For mapped (kuseg) addresses use TLB-translated PA; unmapped uses mipsseg output directly */
-   assign w_tlb_pc = (r_mapped && w_itlb_hit) ? w_itlb_pa : r_la_pc[`PA_WIDTH-1:0];
+   assign w_tlb_pc = (r_mapped && w_eff_hit) ? w_eff_pa : r_la_pc[`PA_WIDTH-1:0];
    
    wire w_hit = (r_tag_out == w_tlb_pc[(`PA_WIDTH-1):IDX_STOP]);
    //always@(negedge clk)
@@ -564,7 +592,7 @@ endfunction
 	/* I-TLB fault: mapped address with no TLB entry (refill) or V=0 (invalid).
 	 * In these cases suppress normal cache hit/miss — the pipeline will take
 	 * an ITLB exception instead of trying to fetch from memory. */
-	if(r_mapped && !(w_itlb_hit && w_itlb_valid))
+	if(r_mapped && !(w_eff_hit && w_eff_valid))
 	  begin
 	     t_miss = 1'b0;
 	     t_hit  = 1'b0;
@@ -692,7 +720,7 @@ endfunction
 		    n_state = ACTIVE;
 		    t_clear_fq = 1'b1;
 		 end // if (n_restart_req)
-	       else if(r_req && r_mapped && !r_itlb_ready)
+	       else if(r_req && r_mapped && !r_itlb_ready && !r_ufast_hit)
 		 begin
 		    /* MICRO-ITLB always-miss: this mapped fetch's translation is not yet
 		     * primed.  Go prime the (2-cycle) JTLB in WAIT_FOR_TLB, holding
@@ -716,12 +744,12 @@ endfunction
 		    n_miss_pc = r_cache_pc;
 		    n_state = WAIT_FOR_NOT_FULL;
 		 end
-	       else if(r_req && r_mapped && !(w_itlb_hit && w_itlb_valid) && !fq_full)
+	       else if(r_req && r_mapped && !(w_eff_hit && w_eff_valid) && !fq_full)
 		 begin
 		    t_push_insn = 1'b1;
 		    n_pc = r_cache_pc + 'd4;
 		 end
-	       else if(r_req && r_mapped && !(w_itlb_hit && w_itlb_valid) && fq_full)
+	       else if(r_req && r_mapped && !(w_eff_hit && w_eff_valid) && fq_full)
 		 begin
 		    n_pc = r_pc;
 		    n_miss_pc = r_cache_pc;
@@ -1014,8 +1042,8 @@ endfunction
      begin
 	t_insn.data = t_insn_data;
 	t_insn.misaligned  = r_req & (r_cache_pc[1:0] != 2'b00);
-	t_insn.tlb_miss    = r_mapped & r_req & !w_itlb_hit & (r_cache_pc[1:0] == 2'b00);
-	t_insn.tlb_invalid = r_mapped & r_req &  w_itlb_hit & !w_itlb_valid;
+	t_insn.tlb_miss    = r_mapped & r_req & !w_eff_hit & (r_cache_pc[1:0] == 2'b00);
+	t_insn.tlb_invalid = r_mapped & r_req &  w_eff_hit & !w_eff_valid;
 	t_insn.bad_va      = r_req & r_bad_va;   /* AdEL; decode prioritizes over tlb_miss */
 	t_insn.pc = r_cache_pc;
 	t_insn.pred_target = n_pc;

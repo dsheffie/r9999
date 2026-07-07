@@ -19,7 +19,11 @@ module itlb(clk,
 	   cache_attr,
 	   out_of_range,
 	   tlb_entry_in_valid,
-	   tlb_entry_in);
+	   tlb_entry_in,
+	   install_en,
+	   ufast_hit,
+	   ufast_pa,
+	   ufast_valid);
    
    input logic clk;
    input logic reset;
@@ -54,6 +58,13 @@ module itlb(clk,
 
    input logic	       tlb_entry_in_valid;
    input 	       tlb_data_t tlb_entry_in;
+
+   /* micro-ITLB (Step 2) fast path: install_en pulses when the 48-way prime lands a
+    * hit (driven by l1i); ufast_* are the combinational 1-cycle micro-TLB lookup. */
+   input logic	       install_en;
+   output logic	       ufast_hit;
+   output logic [`PA_WIDTH-1:0] ufast_pa;
+   output logic	       ufast_valid;
    
    /* bits 39 down to 12 */
 
@@ -220,6 +231,99 @@ module itlb(clk,
 	/* PA can't exceed MAX_PA now (pfn is exactly PA_WIDTH-12 wide) -> always 0 */
 	out_of_range <= 1'b0;
      end
+
+   /* ===== micro-ITLB (Step 2): small fully-assoc cache in front of the 48-way =====
+    * A NU-entry translation cache; a hit gives the PA combinationally (1 cycle) so
+    * l1i skips WAIT_FOR_TLB.  A miss falls to the 2-cycle 48-way, whose result l1i
+    * re-installs here (install_en) with LFSR-random replacement.  Flushed wholesale
+    * on any JTLB write (tlb_entry_in_valid = TLBWR/TLBWI) or ASID change -- the same
+    * events that could stale an entry (the match below uses ASID, mirroring the
+    * 48-way w_addr_space_match & w_hit8k exactly). */
+   localparam NU    = `N_UITLB_ENTRIES;
+   localparam LG_NU = $clog2(NU);
+
+   logic [26:0]           r_u_vpn  [NU-1:0];
+   logic [1:0]            r_u_r    [NU-1:0];
+   logic [7:0]            r_u_asid [NU-1:0];
+   logic                  r_u_g    [NU-1:0];
+   logic [`PFN_WIDTH-1:0] r_u_pfn0 [NU-1:0], r_u_pfn1 [NU-1:0];
+   logic                  r_u_v0   [NU-1:0], r_u_v1   [NU-1:0];
+   logic [NU-1:0]         r_u_valid;
+   integer 		  uu;
+
+   /* xorshift-8 LFSR (maximal, taps 8,6,5,4) -> pseudo-random replacement slot */
+   logic [7:0] 		  r_u_lfsr;
+   wire [LG_NU-1:0] 	  w_u_repl = r_u_lfsr[LG_NU-1:0];
+
+   /* ASID-change detect -> flush (the match uses ASID) */
+   logic [7:0] 		  r_u_asid_seen;
+   wire 		  w_u_asid_change = (r_u_asid_seen != asid);
+   wire 		  w_u_flush = tlb_entry_in_valid | w_u_asid_change;
+
+   /* combinational match -- mirrors the 48-way (w_addr_space_match & w_hit8k) */
+   wire [NU-1:0] 	  w_u_hits;
+   generate
+      for(genvar u = 0; u < NU; u = u + 1)
+	begin : u_hits
+	   assign w_u_hits[u] = r_u_valid[u]
+	                        & (r_u_vpn[u] == va[39:13])
+	                        & (r_u_r[u]   == va[63:62])
+	                        & ((r_u_asid[u] == asid) | r_u_g[u]);
+	end
+   endgenerate
+   wire 		  w_u_any = |w_u_hits;
+
+   /* one-hot select the matched entry's per-page fields */
+   logic [`PFN_WIDTH-1:0] t_u_pfn0, t_u_pfn1;
+   logic 		  t_u_v0, t_u_v1;
+   always_comb
+     begin
+	t_u_pfn0 = '0;
+	t_u_pfn1 = '0;
+	t_u_v0   = 1'b0;
+	t_u_v1   = 1'b0;
+	for(uu = 0; uu < NU; uu = uu + 1)
+	  begin
+	     if(w_u_hits[uu])
+	       begin
+		  t_u_pfn0 = r_u_pfn0[uu];
+		  t_u_pfn1 = r_u_pfn1[uu];
+		  t_u_v0   = r_u_v0[uu];
+		  t_u_v1   = r_u_v1[uu];
+	       end
+	  end
+     end // always_comb
+
+   wire                   w_u_odd = va[12];
+   wire [`PFN_WIDTH-1:0]  w_u_pfn = w_u_odd ? t_u_pfn1 : t_u_pfn0;
+   wire [`PFN_WIDTH+11:0] w_u_pa_full = {w_u_pfn, va[11:0]};
+
+   assign ufast_hit   = active & req & w_u_any;
+   assign ufast_pa    = w_u_pa_full[`PA_WIDTH-1:0];
+   assign ufast_valid = w_u_odd ? t_u_v1 : t_u_v0;
+
+   always_ff@(posedge clk)
+     begin
+	r_u_asid_seen <= reset ? 8'd0 : asid;
+	r_u_lfsr <= reset ? 8'h5a
+	                  : {r_u_lfsr[6:0], r_u_lfsr[7]^r_u_lfsr[5]^r_u_lfsr[4]^r_u_lfsr[3]};
+	if(reset | w_u_flush)
+	  begin
+	     r_u_valid <= '0;
+	  end
+	else if(install_en & hit)   /* 48-way prime landed a hit: cache r_tlb[hit_index] */
+	  begin
+	     r_u_vpn[w_u_repl]   <= r_tlb[hit_index].vpn[26:0];
+	     r_u_r[w_u_repl]     <= r_tlb[hit_index].r;
+	     r_u_asid[w_u_repl]  <= r_tlb[hit_index].asid;
+	     r_u_g[w_u_repl]     <= r_tlb[hit_index].g0 & r_tlb[hit_index].g1;
+	     r_u_pfn0[w_u_repl]  <= r_tlb[hit_index].pfn0;
+	     r_u_pfn1[w_u_repl]  <= r_tlb[hit_index].pfn1;
+	     r_u_v0[w_u_repl]    <= r_tlb[hit_index].v0;
+	     r_u_v1[w_u_repl]    <= r_tlb[hit_index].v1;
+	     r_u_valid[w_u_repl] <= 1'b1;
+	  end
+     end // always_ff
 
 
    

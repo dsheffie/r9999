@@ -107,6 +107,7 @@ typedef struct packed {
    logic [(`M_WIDTH-1):0]      data;
 `ifdef VERILATOR
    logic [(`M_WIDTH-1):0]      pc;
+   logic [(`M_WIDTH-1):0]      uuid;
 `endif
 } mem_req_t;
 
