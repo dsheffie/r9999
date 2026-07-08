@@ -31,10 +31,6 @@ import "DPI-C" function void record_restart(input int restart_cycles);
 import "DPI-C" function void record_ds_restart(input int delay_cycles);
 import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 
-/* timer-IRQ trace: fired once per interrupt taken (IP[7]=timer, IP[1..6] unwired,
- * so took_irq == a timer interrupt).  The C side records the sim cycle; queryable
- * from the henry_tb monitor. */
-import "DPI-C" function void log_timer_irq();
 
 `endif
 
@@ -566,7 +562,6 @@ module core(clk,
    logic 		     r_ds_done, n_ds_done;
    
    logic 		     t_can_retire_rob_head;
-		     
    logic 		     t_faulted_head_and_serializing_delay;
    logic 		     t_arch_fault;
    
@@ -745,22 +740,6 @@ module core(clk,
 `endif
 
    assign took_irq  = t_wr_epc & (r_cause == 5'd0);
-`ifdef VERILATOR
-   /* timer-IRQ trace hook: the ARCH_FAULT state dispatches the taken exception,
-    * and an is_irq head there IS a timer interrupt (IP[1..6] unwired) committing
-    * with n_cause=0.  One-cycle pulse -> DPI records the sim cycle for monitor
-    * query.  (took_irq uses the registered r_cause, which lags, so it misses.) */
-   wire  w_irq_commit = (r_state == ARCH_FAULT) & t_rob_head.is_irq;
-   logic r_irq_commit_d;
-   always_ff@(posedge clk)
-     begin
-	r_irq_commit_d <= reset ? 1'b0 : w_irq_commit;
-	if(w_irq_commit & ~r_irq_commit_d)
-	  begin
-	     log_timer_irq();
-	  end
-     end // always_ff@ (posedge clk)
-`endif
    assign cp0_count = w_cp0_count;
    assign l1i_flush_done = n_l1i_flush_complete;
    assign l1d_flush_done = n_l1d_flush_complete;
@@ -836,6 +815,35 @@ module core(clk,
 
 `ifdef VERILATOR
    logic [31:0] r_clear_cnt;
+   logic [31:0]	r_fault_cnt;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_fault_cnt <= 'd0;
+	  end
+	else
+	  begin
+	     if(r_fault_cnt > 'd10)
+	       begin
+		  $display("you've recursively faulted yourself to death");
+		  $stop();
+	       end
+	     
+	     if(t_retire &( t_rob_head.opcode == ERET))
+	       begin
+		  if(r_fault_cnt != 32'd0)
+		    begin
+		       r_fault_cnt <= r_fault_cnt - 32'd1;
+		    end
+	       end
+	     else if(t_wr_epc)
+	       begin
+		  r_fault_cnt <= r_fault_cnt + 'd1;
+	       end
+	  end
+     end
+   
    always_ff@(posedge clk)
      begin
 	if(reset)
@@ -1033,9 +1041,32 @@ module core(clk,
    	  end
      end
 `ifdef VERILATOR
+   logic [63:0] last_retire_pc;
+   always_ff@(posedge clk)
+     begin
+	if(retire_valid)
+	  begin
+	     last_retire_pc <= retire_pc;
+	  end
+     end
    always_ff@(negedge clk)
      begin
 	localparam ZP = (64-`M_WIDTH);	
+	
+	/* sim-only "ran off into nowhere" guard.  EXCLUDE the kseg1 boot PROM
+	 * (0xbfc00000-0xbfc0ffff): the ARCS console-write stub (stub_write) lives
+	 * there, so console=arc output (prom_console_write -> ArcWrite -> call_o32
+	 * -> stub_write CP0 putchar) legitimately executes at 0xbfc004xx.  The FPGA
+	 * has no such guard; this only false-tripped the Verilator TB. */
+	if(retire_valid & retire_pc[63] & (retire_pc[31:0] > 32'h89000000)
+	   & ~((retire_pc[31:0] >= 32'hbfc00000) & (retire_pc[31:0] <= 32'hbfc0ffff)))
+	  begin
+	     $display("jumped into lala land at with pc %x at cycle %d, last retire pc %x", retire_pc, r_cycle, last_retire_pc);
+	     $stop();
+	  end
+	
+	
+
 	record_alloc(t_rob_full ? 32'd1 : 32'd0,
 		     t_alloc ? 32'd1 : 32'd0,
 		     t_alloc_two ? 32'd1 : 32'd0,
@@ -1072,6 +1103,8 @@ module core(clk,
 			       32'd0,
 			       32'd0);	     
    	  end // if (t_retire_two)
+
+
 	if(r_state == RAT && n_state == ACTIVE)
 	  begin
 	     record_restart(r_restart_cycles);
@@ -1115,9 +1148,58 @@ module core(clk,
      end
 `endif
    
+//`define DUMP_ROB
+`ifdef DUMP_ROB
+   rob_entry_t t_dbg_dump;
+   always_ff@(negedge clk)
+     begin
+ 	if(r_cycle > 'd50)
+	  begin
+	     $display("cycle %d : oldp %b, state = %d, aluc  %b, memc %b,head_ptr %d, inflight %d, complete %b,  can_retire_rob_head %b, t_faulted_head_and_serializing_delay %b, head pc %x, empty %b, full %b", 
+		      r_cycle,
+		      r_oldest_first_pending,
+		      r_state,
+		      t_complete_valid_1,
+		      core_mem_rsp_valid,
+		      r_rob_head_ptr,
+		      r_rob_inflight,
+		      t_rob_head_complete && !t_rob_empty, 
+		      t_can_retire_rob_head,
+		      t_faulted_head_and_serializing_delay,
+		      t_rob_head.pc,
+		      t_rob_empty, 
+		      t_rob_full);
+
+	     for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
+	       begin
+		  t_dbg_dump = i[0] ? r_rob_odd[i[`LG_ROB_ENTRIES-1:1]] : r_rob_even[i[`LG_ROB_ENTRIES-1:1]];
+		  $display("\trob entry %d, pc %x, complete %b, is br %b, faulted %b",
+			   i[`LG_ROB_ENTRIES-1:0],
+			   t_dbg_dump.pc,
+			   r_rob_complete[i[`LG_ROB_ENTRIES-1:0]],
+			   t_dbg_dump.is_br,
+			   t_dbg_dump.faulted,
+			   );
+	       end
+	  end
+     end // always_ff@ (negedge clk)
+`endif
    logic t_wr_epc, t_wr_cause, t_wr_badvaddr;
    logic t_restart_complete;
    
+   wire	w_rob_next_empty = (r_rob_next_head_ptr == r_rob_tail_ptr);
+   wire w_rob_empty = (r_rob_head_ptr == r_rob_tail_ptr);
+
+   wire w_rob_head_complete = r_rob_sd_complete[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]] &
+	r_rob_complete[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
+   
+   wire	w_rob_next_head_complete = r_rob_sd_complete[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]] &
+	r_rob_complete[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]];
+   
+								      
+   wire	w_can_retire = w_rob_empty ? 1'b0 : w_rob_head_complete;
+   
+								      
    always_comb
      begin
 	t_wr_epc = 1'b0;
@@ -1232,26 +1314,21 @@ module core(clk,
 	t_can_retire_rob_head = 1'b0;
 	t_faulted_head_and_serializing_delay = 1'b0;
 	
-	if(t_rob_head_complete && !t_rob_empty)
+	if(w_can_retire)
 	  begin
-	     /* A faulted (mispredicted) head with a REGULAR delay slot must wait
-	      * for the delay slot to COMPLETE so its fault is final before we
-	      * retire+DRAIN -- otherwise a faulting delay slot slips past the
-	      * flush and a younger insn corrupts arch state (the go a0 bug).
-	      * BUT a "branch likely" (satan's branch) NULLIFIES its delay slot
-	      * when not taken, so that slot NEVER completes -- only require it be
-	      * PRESENT, else the head waits forever and the machine deadlocks.
-	      * CHECK NULLIFYING FIRST: decode_mips sets BOTH has_delay_slot and
-	      * has_nullifying_delay_slot for a branch-likely, so the nullifying
-	      * arm must win or the regular arm's wait-for-complete deadlocks. */
+	     /* A faulted (mispredicted) branch with a REGULAR delay slot must wait for
+	      * the delay slot to COMPLETE before retiring -- else the branch retires and
+	      * issues its fall-through restart while the delay slot is still in flight, so
+	      * if the delay slot then faults (e.g. store TLB miss) the fall-through has
+	      * already been fetched/retired and corrupts a live reg (go SIGSEGV, bug #3).
+	      * Nullifying (branch-likely) delay slot only needs to be present. */
 	     t_can_retire_rob_head = ( t_rob_head.faulted ?
-				       ( t_rob_head.has_nullifying_delay_slot ? (t_rob_next_empty==1'b0) :
-					 t_rob_head.has_delay_slot            ? ((t_rob_next_empty==1'b0) & t_rob_next_head_complete) :
+				       ( t_rob_head.has_nullifying_delay_slot ? !w_rob_next_empty :
+					 t_rob_head.has_delay_slot            ? (!w_rob_next_empty & w_rob_next_head_complete) :
 					 1'b1 )
 				       : 1'b1 ) & w_step_ok;
 	     t_faulted_head_and_serializing_delay = (t_rob_head.has_delay_slot || t_rob_head.has_nullifying_delay_slot) && t_rob_head.faulted && !t_dq_empty 
 						    && t_rob_next_empty && t_uop.serializing_op;
-
 	  end
 
 	if(t_complete_valid_1)
@@ -1305,7 +1382,7 @@ module core(clk,
 			      n_state = DRAIN;
 			      n_restart_cycles = 'd1;
 			      n_restart_valid = 1'b1;
-			      t_bump_rob_head = 1'b1;
+			      t_bump_rob_head = 1'b1;			      
 			   end // else: !if(t_rob_head.is_ii)
 			 n_machine_clr = 1'b1;
 			 n_restart_pc = t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
@@ -1364,7 +1441,7 @@ module core(clk,
 			   end // else: !if(t_uop.serializing_op && !t_dq_empty)
 		      end // if (!t_dq_empty)
 		    t_retire = t_rob_head_complete & !t_arch_fault;
-		    t_retire_two = !t_rob_next_empty
+		    t_retire_two = !t_rob_next_empty & 1'b0
 		    		   & !t_rob_head.faulted
 		    		   & !t_rob_next_head.faulted 				    
 		    		   & t_rob_head_complete
@@ -1373,7 +1450,8 @@ module core(clk,
 				   & !t_rob_next_head.is_ret
 				   & !t_rob_next_head.is_call
 		    		   & !t_rob_next_head.valid_hilo_dst
-				   & !t_rob_next_head.valid_fcr_dst & ~single_step;
+				   & !t_rob_next_head.valid_fcr_dst 
+				   & ~single_step;
 		    /* non-trapping FP ops retiring this cycle: accumulate IEEE flags
 		     * into FCSR.Flags and set Cause to the youngest's exceptions. */
 		    if(t_retire & t_rob_head.fp_set_flags)
@@ -1441,6 +1519,11 @@ module core(clk,
 		 begin
 		    if(r_take_br)
 		      begin
+			 $display(">>>> real fault in nullifying delay slot -> t_rob_head.pc = %x, opcode = %d", 
+				  t_rob_head.pc,
+				  t_rob_head.opcode);		
+			 $stop();
+			 
 			 if(t_arch_fault)
 			   begin
 			      n_state = ARCH_FAULT;
@@ -1459,18 +1542,37 @@ module core(clk,
 	       else if(r_has_delay_slot && t_rob_head_complete && !r_ds_done)
 		 begin
 		    n_ds_done = 1'b1;
+		    if(t_rob_head.faulted)
+		      begin
+			 $display(">>>> real fault in delay slot -> t_rob_head.pc = %x, opcode = %d", 
+				  t_rob_head.pc,
+				  t_rob_head.opcode);
+			 if( (is_store(t_rob_head.opcode) | is_load(t_rob_head.opcode)) == 1'b0)
+			   begin
+			      $display(">>>> WARNING - not a load or store fault");
+			      //$stop();
+			   end
+		      end
 		    if(t_arch_fault)
 		      begin
+			 /* faulted delay slot (e.g. store TLB miss) -> arch exception.
+			  * MUST flush the speculatively-fetched fall-through: the ACTIVE-path
+			  * faulted-head handler sets n_machine_clr + restart setup, but this
+			  * DRAIN path did not -- so wrong-path insns after the delay slot
+			  * (fetched past the mispredicted branch) retired and corrupted a live
+			  * register before the vector was taken (go SIGSEGV, bug #3). */
 			 n_state = ARCH_FAULT;
+			 n_machine_clr = 1'b1;
+			 n_restart_pc = t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
+			 n_restart_src_pc = t_rob_head.pc;
+			 n_restart_src_is_indirect = t_rob_head.is_indirect && !t_rob_head.is_ret;
 		      end
 		    else
 		      begin
-			 t_retire = 1'b1;			 
+			 t_retire = 1'b1;
 		      end
-		 end // if (r_has_delay_slot && t_rob_head_complete && !r_ds_done)
+		 end
 
-	       //$display("t_divide_ready = %b", t_divide_ready);
-	       
 	       if(r_rob_inflight == 'd0 && r_ds_done && memq_empty && t_divide_ready)
 		 begin
 		    //$display("%d : wait for drain and memq_empty  took  %d cycles",r_cycle, r_restart_cycles);		    
@@ -1543,16 +1645,8 @@ module core(clk,
 			   end
 			 else
 			   begin
-			      /* I-side CACHE op: INVALIDATE the L1I (drop stale lines) and
-			       * restart to refetch fresh code from L2.  The L1I is read-only
-			       * (never dirty) and L2 is its REFILL SOURCE -- invalidating the
-			       * L1I must NOT flush L2.  Chaining an L2 flush here was both wrong
-			       * (you don't write back the source you refill from) and the source
-			       * of the boot deadlock + O(n^2) blast_icache32 cost.  Fake L1D and
-			       * L2 completes; wait only on the real (direct) L1I flush. */
 			      n_flush_req_l1i = 1'b1;
 			      n_l1d_flush_complete = 1'b1;          /* not flushing L1D */
-			      n_l2_flush_complete  = 1'b1;          /* I-cache inval never touches L2 */
 			   end
 			 n_state = CACHE_FLUSH;
 		      end
@@ -1707,8 +1801,6 @@ module core(clk,
 		 end
 	       else if(t_rob_head.tlb_refill | t_rob_head.tlb_invalid)
 		 begin
-		    //$display("tlb fault, refill = %b, invalid = %b at cycle %d", t_rob_head.tlb_refill, t_rob_head.tlb_invalid, r_cycle);
-		    
 		    /* A refill uses the special refill vector only when EXL=0 at
 		     * fault time; a nested refill (EXL already set) falls through
 		     * to the general vector (0x180). */
@@ -1732,18 +1824,23 @@ module core(clk,
 		    n_pending_bad_addr = 1'b1;
 		    n_has_badvaddr = 1'b1;		    
 		 end
-
 	       t_bump_rob_head = 1'b1;
 	       n_state = WRITE_EPC;
 	       n_epc = (t_rob_head.in_delay_slot ? (t_rob_head.pc - 'd4) : t_rob_head.pc);
+	       $display(">>>>>>>> at cycle %d, taking fault for EPC %x, cause %d, store %b, load %b, badaddr %x, opcode %d, fault cnt %d", 
+			r_cycle, n_epc, n_cause, is_store(t_rob_head.opcode), is_load(t_rob_head.opcode), n_badvaddr,
+			t_rob_head.opcode,
+			r_fault_cnt);
+	       if(n_badvaddr == 'h744b)
+		 begin
+		    $stop();
+		 end
+	       if(n_epc < 'd1000)
+		 begin
+		    $stop();
+		 end
+	       
 	       n_exc_in_delay = t_rob_head.in_delay_slot;
-
-	       //$display("arch fault for pc %x, in delay slot %d at cycle %d, fault type %d, debug fault condition %b, bad addr %x", 
-	       //n_epc, n_exc_in_delay, r_cycle, n_cause, r_fault_in_head_and_delay_slot, n_badvaddr);
-	       //if(r_fault_in_head_and_delay_slot)
-	       //begin
-	       ///$stop();
-	       // end
 	    end
 	  WRITE_EPC:
 	    begin
@@ -2812,6 +2909,7 @@ module core(clk,
 	  end
      end // always_ff@ (posedge clk)
 
+
    always_ff@(posedge clk)
      begin
 	if(reset)
@@ -3378,6 +3476,7 @@ module core(clk,
 	else if(t_retire && (t_rob_head.is_br || t_rob_head.is_call || t_rob_head.is_indirect))
 	  r_last_branch_target <= t_rob_head.target_pc;
      end
+
 
 
 

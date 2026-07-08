@@ -106,29 +106,29 @@ typedef enum logic [7:0]
    DMFC0  = 'd99,
    DMTC0  = 'd100,
    LWU    = 'd101,
-   DMULT,
-   DMULTU,
-   DDIV,
-   DDIVU,
-   LDL,
-   LDR,
-   SDL,
-   SDR,
-   LL,
-   LLD,
-   SCD,
-   TNE,
-   FETCH_MISALIGNED,
-   FETCH_ADDR_ERROR,   /* i-side AdEL: access-level / VA-range violation (BadVAddr=PC, ExcCode 4) */
-   FETCH_TLB_MISS,
-   FETCH_TLB_INVALID,
-   II,
-   IRQ,
-   CPU,
-   CACHE_OP,  /* MIPS CACHE: completes benignly in the ALU, then serializes to flush */
-   CHWB,      /* CACHE D Hit-Writeback -- mem uop, dtlb-translated (mapped K2SEG buffers) */
-   CHWBINV,   /* CACHE D Hit-Writeback-Invalidate -- mem uop */
-   CHINV,     /* CACHE D Hit-Invalidate -- mem uop */
+   DMULT  = 'd102,
+   DMULTU = 'd103,
+   DDIV   = 'd104,
+   DDIVU  = 'd105,
+   LDL    = 'd106,
+   LDR    = 'd107,
+   SDL    = 'd108,
+   SDR    = 'd109,
+   LL     = 'd110,
+   LLD    = 'd111,
+   SCD    = 'd112,
+   TNE    = 'd113,
+   FETCH_MISALIGNED = 'd114,
+   FETCH_ADDR_ERROR = 'd115,   /* i-side AdEL: access-level / VA-range violation (BadVAddr=PC, ExcCode 4) */
+   FETCH_TLB_MISS = 'd116,
+   FETCH_TLB_INVALID = 'd117,
+   II = 'd118,
+   IRQ = 'd119,
+   CPU = 'd120,
+   CACHE_OP = 'd121,  /* MIPS CACHE: completes benignly in the ALU, then serializes to flush */
+   CHWB = 'd122,      /* CACHE D Hit-Writeback -- mem uop, dtlb-translated (mapped K2SEG buffers) */
+   CHWBINV = 'd123,   /* CACHE D Hit-Writeback-Invalidate -- mem uop */
+   CHINV = 'd124,     /* CACHE D Hit-Invalidate -- mem uop */
    /* branch-and-link REGIMM variants (BGEZAL/BGEZALL already above) */
    BLTZAL,
    BLTZALL,
@@ -265,6 +265,38 @@ function logic is_store(opcode_t op);
    return x;
 endfunction // is_store
 
+function logic is_load(opcode_t op);
+   logic     x;
+   case(op)
+     LB:
+       x = 1'b1;
+     LBU:
+       x = 1'b1;     
+     LH:
+       x = 1'b1;
+     LHU:
+       x = 1'b1;     
+     LW:
+       x = 1'b1;
+     LWU:
+       x = 1'b1;     
+     LD:
+       x = 1'b1;
+     LWR:
+       x = 1'b1;
+     LWL:
+       x = 1'b1;
+     LDL:
+       x = 1'b1;
+     LDR:
+       x = 1'b1;
+     LLD:
+       x = 1'b1;
+     default:
+       x = 1'b0;
+   endcase // case (op)
+   return x;
+endfunction // is_load
 
 
 typedef struct packed {

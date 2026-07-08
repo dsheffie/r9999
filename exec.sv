@@ -2985,7 +2985,7 @@ module exec(clk,
 	   .rd2(w_mem_srcA),
 	   .rd3(w_mem_srcB)
 	   );
-   
+
    
 
   
@@ -3857,6 +3857,16 @@ module exec(clk,
 	  end
 	//(uq.rob_ptr == 'd5) ? 1'b1 : 1'b0;
      end
+   
 
+`ifdef VERILATOR
+   always_ff@(negedge clk)
+     begin
+	if(r_start_int & (ERET == int_uop.op))
+	   begin
+	      $display("ERET to %x at cycle %d", t_pc, r_cycle);
+	   end
+     end
+`endif
 
 endmodule
