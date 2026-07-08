@@ -72,6 +72,7 @@ module core_l1d_l1i(clk,
 		    took_irq,
 		    cp0_count,
 		    dbg_head_pc,
+		    dbg_head_status,
 		    dbg_head_fetch_cycle,
 		    dbg_head_alloc_cycle,
 		    dbg_serialize_cycle,
@@ -201,6 +202,7 @@ module core_l1d_l1i(clk,
    output logic			 took_irq;
    output logic [31:0]		 cp0_count;
    output logic [31:0]  dbg_head_pc;
+   output logic [31:0]  dbg_head_status;
    output logic [31:0]  dbg_head_fetch_cycle;
    output logic [31:0]  dbg_head_alloc_cycle;
    output logic [31:0]  dbg_serialize_cycle;
@@ -796,15 +798,64 @@ module core_l1d_l1i(clk,
 	     .took_irq(took_irq),
 	     .cp0_count(cp0_count),
 	     .dbg_head_pc(dbg_head_pc),
+	     .dbg_head_status(dbg_head_status),
 	     .dbg_head_fetch_cycle(dbg_head_fetch_cycle),
 	     .dbg_head_alloc_cycle(dbg_head_alloc_cycle),
 	     .dbg_serialize_cycle(dbg_serialize_cycle),
 	     .dbg_cycle(dbg_cycle),
 	     .dbg_oldest_first_pending(dbg_oldest_first_pending),
 	     .dbg_trace_index(dbg_trace_index),
-	     .dbg_trace_data(dbg_trace_data),
-	     .dbg_trace_wptr(dbg_trace_wptr)
+	     .dbg_trace_data(w_core_trace_data),
+	     .dbg_trace_wptr(w_core_trace_wptr)
 	     );
+
+   /* ---- L2<->AXI event trace ring (debug the uncached-turnaround deadlock) ----
+    * Logs the L2<->AXI boundary on each AXI req-issue (mem_req_valid rising) and
+    * each response (mem_rsp_valid): {dbg_cycle, l2_state, req, rsp, opcode, addr}.
+    * On a freeze the last entries show the exact req->rsp sequence + the L2 state
+    * at each -- e.g. a req issued with no following rsp = stuck AXI turnaround.
+    * Muxed into the existing dbg_trace readback on dbg_trace_index[11] (1=L2 ring,
+    * 0=core retire ring), so it reuses the driver's trace readback path. */
+   logic [31:0] w_core_trace_data;
+   logic [8:0]  w_core_trace_wptr;
+   /* Gated debug: define ENABLE_L2_EVENT_RING (e.g. sv2v -DENABLE_L2_EVENT_RING, or
+    * a Verilator +define) to synthesize the ring; a bare per-file `ifdef strips
+    * cleanly through sv2v (unlike the machine.vh-scoped ENABLE_TRACE_BUFFER). When
+    * off, dbg_trace_data/wptr pass through the core retire ring unchanged. */
+`ifdef ENABLE_L2_EVENT_RING
+   (* ram_style = "block" *) logic [3:0][31:0] r_l2trace_ram [255:0];
+   logic [7:0] 	     r_l2trace_wptr;
+   logic [3:0][31:0] r_l2trace_row;
+   logic 	     r_mem_req_valid_d;
+   wire 	     w_l2_evt = (mem_req_valid & ~r_mem_req_valid_d) | mem_rsp_valid;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_l2trace_wptr    <= 8'd0;
+	     r_mem_req_valid_d <= 1'b0;
+	  end
+	else
+	  begin
+	     r_mem_req_valid_d <= mem_req_valid;
+	     if(w_l2_evt)
+	       begin
+		  r_l2trace_ram[r_l2trace_wptr] <=
+		    { {28'd0, mem_req_addr[`PA_WIDTH-1:32]},
+		      mem_req_addr[31:0],
+		      {l2_state, 21'd0, mem_req_valid, mem_rsp_valid, mem_req_opcode},
+		      dbg_cycle };
+		  r_l2trace_wptr <= r_l2trace_wptr + 8'd1;
+	       end
+	  end
+	r_l2trace_row <= r_l2trace_ram[dbg_trace_index[9:2]];
+     end // always_ff
+   assign dbg_trace_data = dbg_trace_index[11] ? r_l2trace_row[dbg_trace_index[1:0]] : w_core_trace_data;
+   assign dbg_trace_wptr = dbg_trace_index[11] ? {1'b0, r_l2trace_wptr}              : w_core_trace_wptr;
+`else
+   assign dbg_trace_data = w_core_trace_data;
+   assign dbg_trace_wptr = w_core_trace_wptr;
+`endif
 
    
 

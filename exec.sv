@@ -3864,7 +3864,9 @@ module exec(clk,
      begin
 	if(r_start_int & (ERET == int_uop.op))
 	   begin
+`ifdef ERET_TRACE
 	      $display("ERET to %x at cycle %d", t_pc, r_cycle);
+`endif
 	   end
      end
 `endif

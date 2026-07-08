@@ -142,6 +142,7 @@ module core(clk,
 	    l1d_flush_done,
 	    l2_flush_done,
 	    dbg_head_pc,
+	    dbg_head_status,
 	    dbg_head_fetch_cycle,
 	    dbg_head_alloc_cycle,
 	    dbg_serialize_cycle,
@@ -286,6 +287,7 @@ module core(clk,
    output logic				  l2_flush_done;
 
    output logic [31:0]			  dbg_head_pc;
+   output logic [31:0]			  dbg_head_status;
    output logic [31:0]			  dbg_head_fetch_cycle;
    output logic [31:0]			  dbg_head_alloc_cycle;
    output logic [31:0]			  dbg_serialize_cycle;
@@ -709,6 +711,21 @@ module core(clk,
    assign cause = r_cause;
 
    assign dbg_head_pc              = t_rob_head.pc[31:0];
+   /* why is the head stuck? read-only debug packing of existing head signals.
+    * [0] rob_empty (stall is upstream/fetch, not the head)
+    * [1] head_complete (head done but not retiring => retire-gate blocked)
+    * [2] can_retire   [3] faulted
+    * [4] has_delay_slot  [5] has_nullifying_delay_slot
+    * [6] next_head_complete  [7] decode-queue empty */
+   assign dbg_head_status = { 24'd0,
+			      t_dq_empty,
+			      w_rob_next_head_complete,
+			      t_rob_head.has_nullifying_delay_slot,
+			      t_rob_head.has_delay_slot,
+			      t_rob_head.faulted,
+			      t_can_retire_rob_head,
+			      w_rob_head_complete,
+			      w_rob_empty };
 `ifdef ENABLE_CYCLE_ACCOUNTING
    assign dbg_head_fetch_cycle     = t_rob_head.fetch_cycle[31:0];
    assign dbg_head_alloc_cycle     = t_rob_head.alloc_cycle[31:0];
