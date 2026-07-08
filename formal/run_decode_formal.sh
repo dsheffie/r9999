@@ -11,7 +11,7 @@
 set -e
 cd "$(dirname "$0")"
 V=$(mktemp -d)/formal_decode.v
-sv2v machine.vh uop.vh decode_mips.sv formal_decode.sv > "$V" 2>/dev/null
+sv2v ../machine.vh ../uop.vh ../decode_mips.sv formal_decode.sv > "$V" 2>/dev/null
 
 echo "=== sanity: dst_valid must be reachable (flow non-vacuous) ==="
 yosys -p "read_verilog $V; hierarchy -check -top formal_decode; proc; flatten; opt -fast; sat -set dv 1" \
