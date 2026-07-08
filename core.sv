@@ -58,6 +58,8 @@ module core(clk,
 	    head_of_rob_ptr_valid,
 	    head_of_rob_ptr,
 	    head_of_rob_has_delay_slot,
+	    next_head_of_rob_ptr,
+	    head_of_rob_ds_committable,
 	    resume,
 	    memq_empty,
 	    drain_ds_complete,
@@ -172,6 +174,8 @@ module core(clk,
    output logic head_of_rob_ptr_valid;
    output logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
    output logic			      head_of_rob_has_delay_slot;
+   output logic [`LG_ROB_ENTRIES-1:0] next_head_of_rob_ptr;
+   output logic			      head_of_rob_ds_committable;
    input logic resume;
    input logic single_step;
    input logic step;
@@ -675,6 +679,20 @@ module core(clk,
    assign head_of_rob_ptr_valid = (r_state == ACTIVE) | ( (r_state==DRAIN) && !r_ds_done);
    assign head_of_rob_ptr = r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
    assign head_of_rob_has_delay_slot = t_rob_head.has_delay_slot | t_rob_head.has_nullifying_delay_slot;
+   /* Fix A (uncached-delay-slot deadlock): a REGULAR (non-nullifying) delay slot
+    * of a COMPLETE, FAULTED (mispredicted) branch at the ROB head is guaranteed to
+    * commit -- the branch has no execute-stage exception and nothing older can
+    * squash it, so the delay slot is non-speculative even though the branch has not
+    * retired yet.  l1d uses this to let a delay-slot UNCACHED op (e.g. the ip22
+    * eeprom store behind a mispredicted `jr ra`) issue to the device; otherwise the
+    * branch's retire gate (waits for delay-slot complete) and the uncached issue
+    * gate (waits for at-head/drain) deadlock.  next_head_of_rob_ptr IS the delay
+    * slot (the ROB entry right after the head). */
+   assign next_head_of_rob_ptr = r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0];
+   assign head_of_rob_ds_committable = w_rob_head_complete
+					 & t_rob_head.faulted
+					 & t_rob_head.has_delay_slot
+					 & ~t_rob_head.has_nullifying_delay_slot;
 				      
    assign flush_req_l1d = r_flush_req_l1d;
    assign flush_req_l1i = r_flush_req_l1i;

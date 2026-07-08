@@ -27,6 +27,8 @@ module l1d(clk,
 	   head_of_rob_ptr,
 	   head_of_rob_ptr_valid,
 	   head_of_rob_has_delay_slot,
+	   next_head_of_rob_ptr,
+	   head_of_rob_ds_committable,
 	   retired_rob_ptr_valid,
 	   retired_rob_ptr_two_valid,
 	   retired_rob_ptr,
@@ -86,6 +88,8 @@ module l1d(clk,
    input logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
    input logic 			     head_of_rob_ptr_valid;
    input logic			     head_of_rob_has_delay_slot;
+   input logic [`LG_ROB_ENTRIES-1:0] next_head_of_rob_ptr;
+   input logic			     head_of_rob_ds_committable;
    
    input logic retired_rob_ptr_valid;
    input logic retired_rob_ptr_two_valid;
@@ -1611,8 +1615,17 @@ endfunction
 `else
    wire w_fence_load = 1'b0;
 `endif
+   /* Fix A: an uncached op that is the REGULAR delay slot of a complete, faulted
+    * branch at the ROB head is non-speculative (the delay slot is guaranteed to
+    * commit), so let it issue even though it is not itself at the head and the
+    * branch has not retired into DRAIN yet.  Without this, a mispredicted `jr ra`
+    * with an uncached-store delay slot (ip22_eeprom_read) deadlocks: the branch's
+    * retire gate waits for the delay slot to complete, but the delay slot's uncached
+    * issue waits for at-head/drain_ds_complete, which needs the branch to retire. */
+   wire w_uncached_ds_ok = head_of_rob_ds_committable &
+			   (next_head_of_rob_ptr == core_mem_req.rob_ptr);
    wire	w_uncachable_req = (core_mem_req_valid & ((core_mem_req.cached==1'b0) | w_fence_load)) ?
-	(((head_of_rob_ptr_valid ? (head_of_rob_ptr == core_mem_req.rob_ptr) : 1'b0) | drain_ds_complete)): 1'b1;
+	(((head_of_rob_ptr_valid ? (head_of_rob_ptr == core_mem_req.rob_ptr) : 1'b0) | drain_ds_complete | w_uncached_ds_ok)): 1'b1;
 
    //always@(negedge clk)
    //begin
