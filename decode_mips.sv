@@ -170,7 +170,7 @@ module decode_mips(
 			   uop.srcA_valid = 1'b1;
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = is_nop||is_ehb ? NOP :SLL;
+			   uop.op = (rd == 'd0) ? NOP : SLL; /* rd==0 (nop/ssnop/ehb/any sll $0) -> NOP, never writes p0 */
 			   uop.is_int = 1'b1;
 			   uop.imm = {10'b0, shamt};
 			end
@@ -998,7 +998,7 @@ module decode_mips(
 		      begin /* mfc0 */
 			 uop.op = MFC0;
 			 uop.dst = rt;
-			 uop.dst_valid = 1'b1;
+			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.srcA = rd;
 			 uop.is_int = 1'b1;
 			 uop.oldest_first = 1'b1;
@@ -1009,7 +1009,7 @@ module decode_mips(
 			   begin
 			      uop.op = DMFC0;
 			      uop.dst = rt;
-			      uop.dst_valid = 1'b1;
+			      uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			      uop.srcA = rd;
 			      uop.is_int = 1'b1;
 			      uop.oldest_first = 1'b1;
@@ -1072,7 +1072,7 @@ module decode_mips(
 		    if((insn[25:21]==5'd0) && (insn[10:0] == 11'd0))
 		      begin /* mfc1: GPR[rt] <- FPR[fs] */
 			 uop.dst = rt;
-			 uop.dst_valid = 1'b1;
+			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.op = MFC1;
 			 /* FR=0: read the EVEN reg of the pair; jmp_imm[0]=fs[0] picks the
 			  * 32b half to extract (low=even, high=odd).  FR=1: whole reg, low32. */
@@ -1109,7 +1109,7 @@ module decode_mips(
 		      begin /* cfc1: GPR[rt] <- FCR[fs] (fs=insn[15:11]: 0=FIR, 31=FCSR) */
 			 uop.op = CFC1;
 			 uop.dst = rt;
-			 uop.dst_valid = 1'b1;
+			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.srcA = fs;        /* carry the FCR number (NOT a PRF read) */
 			 uop.is_int = 1'b1;
 			 uop.oldest_first = 1'b1;
@@ -1129,7 +1129,7 @@ module decode_mips(
 			   begin
 			      uop.op = DMFC1;
 			      uop.dst = rt;
-			      uop.dst_valid = 1'b1;
+			      uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			      uop.srcB = fs;
 			      uop.fp_srcB_valid = 1'b1;
 			      uop.is_mem = 1'b1;

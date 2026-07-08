@@ -78,7 +78,10 @@ module rf4r2w(clk, reset,
 	rd2 <= rdptr2=='d0 ? 'd0 : (rdptr2[LG_DEPTH-1] ? r_ram_mem[rdptr2[LG_DEPTH-2:0]] : r_ram_alu[rdptr2[LG_DEPTH-2:0]]);
 	rd3 <= rdptr3=='d0 ? 'd0 : (rdptr3[LG_DEPTH-1] ? r_ram_mem[rdptr3[LG_DEPTH-2:0]] : r_ram_alu[rdptr3[LG_DEPTH-2:0]]);
 `endif
-	if(wen0)
+	/* NEVER write phys reg 0 ($0): the FPGA read path dropped the rdptr==0->0 mux
+	 * on the invariant that $0 is never written, but an r0-dest op (e.g. ssnop =
+	 * sll $0,$0,1) reaches here with wrptr0==0 & wen0.  This gate enforces it. */
+	if(wen0 & (wrptr0 != 'd0))
 	  r_ram_alu[wrptr0[LG_DEPTH-2:0]] <= wr0;
 	if(wen1)
 	  r_ram_mem[wrptr1[LG_DEPTH-2:0]] <= wr1;
