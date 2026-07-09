@@ -11,6 +11,17 @@
 #include "sparse_mem.hh"
 #include "mips_insns.hh"
 
+#include <deque>
+/* Co-sim store-check (ported from rv64core): the golden ISS records each committed
+ * store; the RTL reports its store-writes via the wr_log DPI; henry_tb compares.
+ * Only active when interpret.cc is built with -DSTORE_CHECK (henry_tb); r9999's own
+ * builds leave the push #ifdef'd out and never reference g_iss_stores. */
+struct store_rec {
+  uint64_t pc, addr, data;
+  store_rec(uint64_t p, uint64_t a, uint64_t d) : pc(p), addr(a), data(d) {}
+};
+extern std::deque<store_rec> g_iss_stores;
+
 /* LL/SC reservation model -- MUST MATCH machine.vh's `define LLSC_BREAK_ON_LOAD.
  * default (undefined) = BERI/CHERI (store to the linked line breaks the link);
  * define = R10000 conservative (any intervening load/store breaks it). */

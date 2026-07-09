@@ -15,6 +15,16 @@ import "DPI-C" function void record_l1d(input int req,
 					input int stall_reason);
 `endif
 
+`ifdef ENABLE_STORE_CHECK
+// Co-sim store-check (forward-ported from rv64core l1d.sv across the shared MIPS
+// ancestor): report each committed store-write so henry_tb can compare vs the golden
+// ISS store stream.  Gated by ENABLE_STORE_CHECK (henry_tb only) -- r9999's own
+// ooo_core Verilator build never sees it.
+import "DPI-C" function void wr_log(input longint pc, input int rob_ptr,
+				    input longint unsigned addr,
+				    input longint unsigned data, int is_atomic);
+`endif
+
 module l1d(clk,
 	   reset,
 	   asid,
@@ -2580,5 +2590,14 @@ endfunction
      end
 `endif
     
+`ifdef ENABLE_STORE_CHECK
+   // forward-ported store-check hook: report each committed store cache-array write
+   // (t_wr_array) so henry_tb can diff it against the golden ISS store stream.
+   always_ff @(negedge clk)
+     if(t_wr_array & ((r_req.op == MEM_SW) | (r_req.op == MEM_SD)))
+       wr_log(r_req.pc, {27'd0, r_req.rob_ptr}, r_req.addr, r_req.data,
+	      r_req.is_atomic ? 32'd1 : 32'd0);
+`endif
+
 endmodule // l1d
 

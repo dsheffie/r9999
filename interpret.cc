@@ -30,6 +30,47 @@ state_t::~state_t() {
 static void execCoproc0(uint32_t inst, state_t *s);
 static void execCoproc2(uint32_t inst, state_t *s);
 
+#ifdef STORE_CHECK
+/* Non-faulting full-TLB VA->PA probe -- forward-ported verbatim from interp_mips
+ * (interpret.cc tlb_probe_ro): mirrors va_translate's segment + 48-entry CAM
+ * lookup, minus the fault paths.  Used by the co-sim store-check so the ISS store
+ * address is the REAL PA (matching the RTL's TLB) instead of the 1:1 va2pa stub.
+ * Returns true + sets *pa on a valid (V=1) mapping; false if unmapped. */
+static bool tlb_probe_ro(state_t *s, uint64_t va, uint32_t *pa) {
+  uint32_t hi32 = (uint32_t)(va >> 32);
+  uint32_t lo32 = (uint32_t)va;
+  if(hi32 == 0x00000000u || hi32 == 0xffffffffu) {
+    uint32_t seg = lo32 >> 29;
+    if(seg == 0x4 || seg == 0x5) { *pa = lo32 & 0x1fffffff; return true; }
+  } else if(((va >> 62) & 0x3) == 0x2) {
+    *pa = (uint32_t)(va & 0xffffffffffULL); return true;
+  }
+  bool wide = !(hi32 == 0x00000000u || hi32 == 0xffffffffu);
+  uint64_t cur_asid = s->cpr0_64[CPR0_ENTRYHI] & 0xffULL;
+  uint64_t cmp_mask = wide ? ~0x3ULL : 0xffffffffULL;
+  for(int i = 0; i < state_t::NUM_TLB_ENTRIES; i++) {
+    uint64_t pm     = s->tlb[i].page_mask & 0x1ffe000ULL;
+    uint64_t mask   = (~(uint64_t)(pm | 0x1fffULL)) & cmp_mask;
+    uint64_t e_hi   = s->tlb[i].entry_hi;
+    bool global     = (s->tlb[i].entry_lo0 & 1u) && (s->tlb[i].entry_lo1 & 1u);
+    bool vpn_match  = (va & mask) == (e_hi & mask);
+    if(wide) vpn_match = vpn_match && (((va >> 62) & 0x3) == ((e_hi >> 62) & 0x3));
+    bool asid_match = global || (cur_asid == (e_hi & 0xffULL));
+    if(!(vpn_match && asid_match)) continue;
+    uint64_t pair_mask = pm | 0x1fffULL;
+    uint64_t off_mask  = pair_mask >> 1;
+    uint64_t sel_bit   = (pair_mask + 1) >> 1;
+    bool odd           = (va & sel_bit) != 0;
+    uint64_t e_lo      = odd ? s->tlb[i].entry_lo1 : s->tlb[i].entry_lo0;
+    if(!(e_lo & 0x2u)) return false;
+    uint64_t pfn = (e_lo >> 6) & 0xfffffffULL;
+    *pa = (uint32_t)((pfn << 12) | (va & off_mask));
+    return true;
+  }
+  return false;
+}
+#endif
+
 template <bool EL> void execMips(state_t *s);
 
 void execMips(state_t *s) {
@@ -1803,6 +1844,22 @@ void execMips(state_t *s) {
     }
 #endif
   }
+
+#ifdef STORE_CHECK
+  /* record committed ISS integer stores in program order for the henry_tb store-check.
+   * Captured at dispatch (source regs are ready; the store itself runs below). */
+  {
+    bool int_store = (opcode == 0x2b) || (opcode == 0x3f); /* sw, sd only -- match the RTL wr_log filter (MEM_SW/MEM_SD) so the two store streams stay aligned */
+    if(int_store) {
+      int32_t simm_sc = (int32_t)(int16_t)(inst & 0xffffu);
+      uint64_t sva = s->gpr[rs] + simm_sc;
+      uint32_t spa = 0;                                  /* REAL PA via the ported TLB probe */
+      if(!tlb_probe_ro(s, sva, &spa)) spa = va2pa(sva);  /* unmapped/kseg fallback */
+      uint32_t srt = (inst >> 16) & 31;
+      g_iss_stores.emplace_back((uint64_t)s->pc, spa, (uint64_t)s->gpr[srt]);
+    }
+  }
+#endif
 
   if(isRType) {
     uint32_t funct = inst & 63;
