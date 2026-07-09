@@ -859,12 +859,17 @@ module core(clk,
 	  end
 	else
 	  begin
-	     if(r_fault_cnt > 'd10)
-	       begin
-		  $display("you've recursively faulted yourself to death");
-		  $stop();
-	       end
-	     
+	     /* DISABLED: net exception-vs-ERET count > 10 is not a reliable livelock
+	      * signal on a long healthy boot -- IRIX's R4000 clock-calibration spin
+	      * (get_r4k_counter @0x880058xx) takes a periodic timer IRQ every ~660k
+	      * cycles, and the +1/-1 accounting drifts.  The no-retire watchdog in
+	      * henry_tb (64k cycles with zero retirement) is the reliable hang detector. */
+	     // if(r_fault_cnt > 'd10)
+	     //   begin
+	     //      $display("you've recursively faulted yourself to death");
+	     //      $stop();
+	     //   end
+
 	     if(t_retire &( t_rob_head.opcode == ERET))
 	       begin
 		  if(r_fault_cnt != 32'd0)
@@ -1088,17 +1093,17 @@ module core(clk,
      begin
 	localparam ZP = (64-`M_WIDTH);	
 	
-	/* sim-only "ran off into nowhere" guard.  EXCLUDE the kseg1 boot PROM
-	 * (0xbfc00000-0xbfc0ffff): the ARCS console-write stub (stub_write) lives
-	 * there, so console=arc output (prom_console_write -> ArcWrite -> call_o32
-	 * -> stub_write CP0 putchar) legitimately executes at 0xbfc004xx.  The FPGA
-	 * has no such guard; this only false-tripped the Verilator TB. */
-	if(retire_valid & retire_pc[63] & (retire_pc[31:0] > 32'h89000000)
-	   & ~((retire_pc[31:0] >= 32'hbfc00000) & (retire_pc[31:0] <= 32'hbfc0ffff)))
-	  begin
-	     $display("jumped into lala land at with pc %x at cycle %d, last retire pc %x", retire_pc, r_cycle, last_retire_pc);
-	     $stop();
-	  end
+	/* sim-only "ran off into nowhere" guard, tuned for the Linux kernel (all
+	 * kseg0 @ 0x88xxxxxx).  DISABLED: it false-trips on IRIX, which legitimately
+	 * executes uncached in kseg1 -- its cache-init jumps to the kseg1 alias of its
+	 * own text (e.g. `or v0,0x88011734,0xa0000000; jr v0` -> 0xa8011734) to size/
+	 * flush the caches uncached.  The FPGA has no such guard anyway. */
+	// if(retire_valid & retire_pc[63] & (retire_pc[31:0] > 32'h89000000)
+	//    & ~((retire_pc[31:0] >= 32'hbfc00000) & (retire_pc[31:0] <= 32'hbfc0ffff)))
+	//   begin
+	//      $display("jumped into lala land at with pc %x at cycle %d, last retire pc %x", retire_pc, r_cycle, last_retire_pc);
+	//      $stop();
+	//   end
 	
 	
 
