@@ -1849,14 +1849,20 @@ void execMips(state_t *s) {
   /* record committed ISS integer stores in program order for the henry_tb store-check.
    * Captured at dispatch (source regs are ready; the store itself runs below). */
   {
-    bool int_store = (opcode == 0x2b) || (opcode == 0x3f); /* sw, sd only -- match the RTL wr_log filter (MEM_SW/MEM_SD) so the two store streams stay aligned */
-    if(int_store) {
+    /* aligned single-write stores only (sb/sh/sw/sd) -- each fires the RTL's
+     * t_wr_array exactly once, so the two FIFOs stay aligned.  The UNALIGNED
+     * swl/swr/sdl/sdr are excluded (they can fire multiple array-writes/insn). */
+    int store_sz = (opcode == 0x28) ? 1 : (opcode == 0x29) ? 2 :
+                   (opcode == 0x2b) ? 4 : (opcode == 0x3f) ? 8 : 0;
+    if(store_sz) {
       int32_t simm_sc = (int32_t)(int16_t)(inst & 0xffffu);
       uint64_t sva = s->gpr[rs] + simm_sc;
       uint32_t spa = 0;                                  /* REAL PA via the ported TLB probe */
       if(!tlb_probe_ro(s, sva, &spa)) spa = va2pa(sva);  /* unmapped/kseg fallback */
       uint32_t srt = (inst >> 16) & 31;
-      g_iss_stores.emplace_back((uint64_t)s->pc, spa, (uint64_t)s->gpr[srt]);
+      uint64_t sdata = s->gpr[srt];
+      if(store_sz < 8) sdata &= (UINT64_C(1) << (store_sz * 8)) - 1;  /* mask to store size */
+      g_iss_stores.emplace_back((uint64_t)s->pc, spa, sdata);
     }
   }
 #endif
