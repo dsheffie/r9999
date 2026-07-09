@@ -73,6 +73,8 @@ module exec(clk,
 	    restart_complete,
 	    head_of_rob_ptr_valid,
 	    head_of_rob_ptr,
+	    next_head_of_rob_ptr,
+	    head_of_rob_ds_committable,
 	    cpr0_status_reg,
 	    uq_wait,
 	    mq_wait,
@@ -173,6 +175,8 @@ module exec(clk,
    input logic restart_complete;
    input logic head_of_rob_ptr_valid;
    input logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
+   input logic [`LG_ROB_ENTRIES-1:0] next_head_of_rob_ptr;
+   input logic			     head_of_rob_ds_committable;
    output logic [31:0]     cpr0_status_reg;
       
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);   
@@ -989,7 +993,16 @@ module exec(clk,
 					(t_alu_fcr_match[i] |r_alu_fcr_rdy[i]) &
 					(!r_alu_sched_uops[i].oldest_first ||
 					 (head_of_rob_ptr_valid &&
-					  (r_alu_sched_uops[i].rob_ptr == head_of_rob_ptr))) ) : 1'b0;
+					  (r_alu_sched_uops[i].rob_ptr == head_of_rob_ptr)) ||
+					 /* Fix A sibling: an oldest_first op (e.g. mfc0) that is the
+					  * REGULAR delay slot of a complete, faulted branch at the head
+					  * is non-speculative (guaranteed to commit), so let it issue
+					  * even though the branch -- not it -- is the head.  Without
+					  * this, the branch's retire waits for the delay slot to
+					  * complete while the delay slot waits to be oldest -> deadlock
+					  * (IRIX boot: faulted beqz + mfc0 c0_cause delay slot). */
+					 (head_of_rob_ds_committable &&
+					  (r_alu_sched_uops[i].rob_ptr == next_head_of_rob_ptr))) ) : 1'b0;
 	     end // always_comb
 	   
 	   always_ff@(posedge clk)
