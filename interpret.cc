@@ -30,11 +30,11 @@ state_t::~state_t() {
 static void execCoproc0(uint32_t inst, state_t *s);
 static void execCoproc2(uint32_t inst, state_t *s);
 
-#ifdef STORE_CHECK
 /* Non-faulting full-TLB VA->PA probe -- forward-ported verbatim from interp_mips
  * (interpret.cc tlb_probe_ro): mirrors va_translate's segment + 48-entry CAM
- * lookup, minus the fault paths.  Used by the co-sim store-check so the ISS store
- * address is the REAL PA (matching the RTL's TLB) instead of the 1:1 va2pa stub.
+ * lookup, minus the fault paths.  Used where we need the real PA WITHOUT raising a
+ * TLB exception -- the co-sim store-check and the LL/CACHE cache-line address (the
+ * real load/store handler does the faulting va_translate).
  * Returns true + sets *pa on a valid (V=1) mapping; false if unmapped. */
 static bool tlb_probe_ro(state_t *s, uint64_t va, uint32_t *pa) {
   uint32_t hi32 = (uint32_t)(va >> 32);
@@ -69,7 +69,6 @@ static bool tlb_probe_ro(state_t *s, uint64_t va, uint32_t *pa) {
   }
   return false;
 }
-#endif
 
 template <bool EL> void execMips(state_t *s);
 
@@ -321,6 +320,132 @@ static uint32_t getConditionCode(state_t *s, uint32_t cc) {
   return ((s->fcr1[CP1_CR25] & (1U<<cc)) >> cc) & 0x1;
 }
 
+/* ===== TLB address translation (forward-ported from interp_mips) ===========
+ * r9999's interp historically used a 1:1 va2pa STUB (kseg0/1 strip, else
+ * identity), which mistranslates every MAPPED (useg/kseg2/xkseg) access.  That is
+ * fine for the ooo_core kseg0/identity-TLB co-sim but WRONG as the henry_tb golden
+ * ISS for IRIX (kseg2-heavy): a kseg2 load the stub sent to the wrong PA read 0
+ * while the RTL (real TLB) read the correct seeded value -> a false divergence.
+ * This is interp_mips's real TLB (va_translate), so the golden ISS translates
+ * exactly like the RTL. */
+
+enum class tlb_op { fetch, load, store };
+
+/* TLB-refill/XTLB-aware exception vector (interp_mips exc_vector): refill uses
+ * offset 0x000 (TLB) / 0x080 (XTLB) only when EXL==0, else the 0x180 common
+ * offset (a nested miss inside the refill handler). */
+static inline uint32_t exc_vector(state_t *s, bool is_refill, bool exl_was_set,
+                                  bool is_xtlb) {
+  uint32_t base   = (s->cpr0[CPR0_SR] & SR_BEV) ? 0xBFC00200u : 0x80000000u;
+  uint32_t offset = 0x180u;
+  if(is_refill && !exl_was_set)
+    offset = is_xtlb ? 0x080u : 0x000u;
+  return base + offset;
+}
+
+/* Fold the faulting VA into BadVAddr / EntryHi.VPN2 / Context / XContext
+ * (interp_mips tlb_set_fault_state), preserving the software PTEBase + ASID. */
+static void tlb_set_fault_state(state_t *s, uint64_t va) {
+  s->cpr0[CPR0_BADVADDR]     = (uint32_t)va;
+  s->cpr0_64[CPR0_BADVADDR]  = va;
+  uint64_t r    = (va >> 62) & 0x3;
+  uint64_t vpn2 = (va >> 13) & 0x7ffffffULL;             /* VPN2[39:13] -> 27 bits */
+  uint64_t asid = s->cpr0_64[CPR0_ENTRYHI] & 0xffULL;
+  uint64_t ehi  = (r << 62) | (vpn2 << 13) | asid;
+  s->cpr0_64[CPR0_ENTRYHI] = ehi;
+  s->cpr0[CPR0_ENTRYHI]    = (uint32_t)ehi;
+  uint64_t ctx = s->cpr0_64[CPR0_CONTEXT] & ~0x7fffffULL; /* preserve PTEBase */
+  ctx |= ((va >> 13) & 0x7ffffULL) << 4;                  /* VA[31:13] -> Context[22:4] */
+  s->cpr0_64[CPR0_CONTEXT] = ctx;
+  s->cpr0[CPR0_CONTEXT]    = (uint32_t)ctx;
+  uint64_t xctx = s->cpr0_64[CPR0_XCONTEXT] & ~0x1ffffffffULL;
+  xctx |= ((va >> 13) & 0x7ffffffULL) << 4;               /* BadVPN2 -> XContext[30:4] */
+  xctx |= r << 31;                                        /* R -> XContext[32:31] */
+  s->cpr0_64[CPR0_XCONTEXT] = xctx;
+  s->cpr0[CPR0_XCONTEXT]    = (uint32_t)xctx;
+}
+
+/* Raise a TLB exception (Refill/Invalid/Modified) and set s->tlb_fault so the
+ * calling load/store/fetch handler aborts.  Mirrors r9999's other raise_* helpers
+ * (set_exc_pc -> Cause.ExcCode -> SR.EXL -> pc=vector) with the refill vector. */
+static void raise_tlb(state_t *s, uint64_t va, uint32_t exccode,
+                      bool is_refill, bool is_xtlb) {
+  bool exl_was_set = (s->cpr0[CPR0_SR] & SR_EXL) != 0;
+  tlb_set_fault_state(s, va);
+  set_exc_pc(s);
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2)) | (exccode << 2);
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->pc = sext32(exc_vector(s, is_refill && !exl_was_set, exl_was_set, is_xtlb));
+  s->tlb_fault = true;
+}
+
+/* Software micro-TLB: a direct-mapped cache of recent (VPN,ASID)->PPN in front of
+ * the 48-entry architectural CAM (a pure sim accelerator; the CAM stays the source
+ * of truth).  Flushed on any TLB write (TLBWI/TLBWR) so a hit can never diverge. */
+static const int UTLB_SZ = 64;
+struct utlb_entry { uint64_t vpn, asid; uint32_t ppn; bool dirty, valid; };
+static utlb_entry g_utlb[UTLB_SZ];
+static inline void utlb_flush() { for(auto &e : g_utlb) e.valid = false; }
+
+/* Translate a virtual address (interp_mips va_translate).  On a TLB exception,
+ * sets s->tlb_fault and returns 0 -- the caller MUST check s->tlb_fault and abort.
+ * Unmapped kseg0/kseg1 and xkphys are fast paths with no lookup. */
+static uint32_t va_translate(state_t *s, uint64_t va, tlb_op op) {
+  uint32_t hi32 = (uint32_t)(va >> 32);
+  uint32_t lo32 = (uint32_t)va;
+  if(hi32 == 0x00000000u || hi32 == 0xffffffffu) {
+    uint32_t seg = lo32 >> 29;
+    if(seg == 0x4 || seg == 0x5) {                 /* kseg0/kseg1: unmapped */
+      return lo32 & 0x1fffffff;
+    }
+  } else {
+    if(((va >> 62) & 0x3) == 0x2) {                /* xkphys: unmapped direct PA */
+      return (uint32_t)(va & 0xffffffffffULL);
+    }
+  }
+  bool xtlb = !(hi32 == 0x00000000u || hi32 == 0xffffffffu);
+  uint64_t cur_asid = s->cpr0_64[CPR0_ENTRYHI] & 0xffULL;
+  uint64_t vpn = va >> 12;
+  utlb_entry &ce = g_utlb[vpn & (UTLB_SZ - 1)];
+  if(ce.valid && ce.vpn == vpn && ce.asid == cur_asid &&
+     !(op == tlb_op::store && !ce.dirty)) {        /* store to clean page -> CAM (Modified) */
+    return (ce.ppn << 12) | (uint32_t)(va & 0xfffULL);
+  }
+  for(int i = 0; i < state_t::NUM_TLB_ENTRIES; i++) {
+    uint64_t pm      = s->tlb[i].page_mask & 0x1ffe000ULL;
+    uint64_t vpnMask = (~(uint64_t)(pm | 0x1fffULL)) & 0x000000ffffffe000ULL; /* VPN2[39:13] */
+    uint64_t e_hi    = s->tlb[i].entry_hi;
+    bool global      = (s->tlb[i].entry_lo0 & 1u) && (s->tlb[i].entry_lo1 & 1u);
+    bool vpn_match   = ((va & vpnMask) == (e_hi & vpnMask))
+                    && (((va >> 62) & 0x3) == ((e_hi >> 62) & 0x3));
+    bool asid_match  = global || (cur_asid == (e_hi & 0xffULL));
+    if(!(vpn_match && asid_match))
+      continue;
+    uint64_t pair_mask = pm | 0x1fffULL;
+    uint64_t off_mask  = pair_mask >> 1;
+    uint64_t sel_bit   = (pair_mask + 1) >> 1;
+    bool odd           = (va & sel_bit) != 0;
+    uint64_t e_lo      = odd ? s->tlb[i].entry_lo1 : s->tlb[i].entry_lo0;
+    if(!(e_lo & 0x2u)) {                           /* V == 0 -> TLB Invalid */
+      uint32_t code = (op == tlb_op::store) ? 3u : 2u;
+      raise_tlb(s, va, code, /*is_refill=*/false, xtlb);
+      return 0;
+    }
+    if(op == tlb_op::store && !(e_lo & 0x4u)) {     /* D == 0 -> TLB Modified */
+      raise_tlb(s, va, 1u, /*is_refill=*/false, xtlb);
+      return 0;
+    }
+    uint64_t pfn = (e_lo >> 6) & 0xfffffffULL;
+    uint64_t pa  = (pfn << 12) | (va & off_mask);
+    ce.vpn = vpn; ce.asid = cur_asid; ce.ppn = (uint32_t)(pa >> 12);
+    ce.dirty = (e_lo & 0x4u) != 0; ce.valid = true;
+    return (uint32_t)pa;
+  }
+  uint32_t code = (op == tlb_op::store) ? 3u : 2u;   /* no match -> TLB Refill */
+  raise_tlb(s, va, code, /*is_refill=*/true, xtlb);
+  return 0;
+}
+
 static void setConditionCode(state_t *s, uint32_t v, uint32_t cc) {
   uint32_t m0,m1,m2;
   m0 = 1U<<cc;
@@ -361,7 +486,7 @@ struct c1xExec {
 template <bool EL, typename T>
 void lxc1(uint32_t inst, state_t *s) {
   mips_t mi(inst);
-  uint32_t ea = va2pa(s->gpr[mi.lc1x.base] + s->gpr[mi.lc1x.index]);
+  uint32_t ea = va_translate(s, s->gpr[mi.lc1x.base] + s->gpr[mi.lc1x.index], tlb_op::load); if(s->tlb_fault) return;
   *reinterpret_cast<T*>(s->cpr1 + mi.lc1x.fd) = bswap<EL>(s->mem.get<T>(ea));
   s->pc += 4;
 }
@@ -596,7 +721,7 @@ void _lw(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   if(ea & 3) { raise_adel(s); return; }
   s->gpr[rt] = bswap<EL>(s->mem.get<int32_t>(ea));
   //#define TRACE_MEM
@@ -614,7 +739,7 @@ void _lh(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
 
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   if(ea & 1) { raise_adel(s); return; }
   int16_t mem = bswap<EL>(s->mem.get<int16_t>(ea));
   
@@ -633,7 +758,7 @@ static void _lb(uint32_t inst, state_t *s){
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   s->gpr[rt] = static_cast<int32_t>(s->mem.get<int8_t>(ea));
 #ifdef TRACE_MEM
   printf("_lb from %x = %x\n", ea, s->gpr[rt]);
@@ -648,7 +773,7 @@ static void _lbu(uint32_t inst, state_t *s){
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
 
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   uint32_t zExt = s->mem.get<uint8_t>(ea);
   *((uint64_t*)&(s->gpr[rt])) = zExt;
   s->pc += 4;
@@ -663,7 +788,7 @@ void _lhu(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
 
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   if(ea & 1) { raise_adel(s); return; }
   uint32_t zExt = bswap<EL>(s->mem.get<uint16_t>(ea));
   *((uint64_t*)&(s->gpr[rt])) = zExt;
@@ -679,7 +804,7 @@ void _sw(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   if(ea & 3) { raise_ades(s); return; }
   s->mem.set<int32_t>(ea,  bswap<EL>(static_cast<int32_t>(s->gpr[rt])));
   s->pc += 4;
@@ -691,7 +816,7 @@ void _sd(uint32_t inst, state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
   int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   if(ea & 7) { raise_ades(s); return; }
   s->mem.set<int64_t>(ea, bswap<EL>(s->gpr[rt]));
   s->pc += 4;
@@ -703,7 +828,7 @@ void _ld(uint32_t inst, state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
   int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   if(ea & 7) { raise_adel(s); return; }
   s->gpr[rt] = bswap<EL>(s->mem.get<int64_t>(ea));
   s->pc += 4;
@@ -716,7 +841,7 @@ void _sc(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   /* SC succeeds iff the reservation is still valid and on this cache line. */
   bool ok = s->ll_link_valid && (s->ll_link_addr == (ea & ~UINT64_C(0xf)));
   if(ok) s->mem.set<int32_t>(ea,  bswap<EL>(static_cast<int32_t>(s->gpr[rt])));
@@ -731,7 +856,7 @@ void _lld(uint32_t inst, state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
   int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   if(ea & 7) { raise_adel(s); return; }
   /* load-linked doubleword: 64-bit load (link bit is a no-op in a functional sim) */
   s->gpr[rt] = bswap<EL>(s->mem.get<int64_t>(ea));
@@ -744,7 +869,7 @@ void _scd(uint32_t inst, state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
   int32_t imm = (int32_t)(int16_t)(inst & 0xffffu);
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   if(ea & 7) { raise_ades(s); return; }
   /* SCD succeeds iff the reservation is still valid and on this cache line. */
   bool ok = s->ll_link_valid && (s->ll_link_addr == (ea & ~UINT64_C(0xf)));
@@ -763,7 +888,7 @@ void _sh(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
     
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   if(ea & 1) { raise_ades(s); return; }
   s->mem.set<int16_t>(ea,  bswap<EL>(((int16_t)s->gpr[rt])));
   s->pc += 4;
@@ -776,7 +901,7 @@ static void _sb(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
     
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   s->mem.set<uint8_t>(ea, static_cast<uint8_t>(s->gpr[rt]));
   
   s->pc +=4;
@@ -871,7 +996,7 @@ void _swl(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   uint32_t ma = ea & 3;
   ea &= 0xfffffffc;
   if(EL)
@@ -902,7 +1027,7 @@ void _swr(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   uint32_t ma = ea & 3;
   if(EL)
     ma = 3 - ma;
@@ -926,7 +1051,7 @@ void _lwl(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   
-  uint32_t ea = va2pa((uint32_t)s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, (uint32_t)s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   uint32_t u_ea = ea;
   uint32_t ma = ea & 3;
   ea &= 0xfffffffc;
@@ -964,7 +1089,7 @@ void _lwr(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
  
-  uint32_t ea = va2pa((uint32_t)s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, (uint32_t)s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   uint32_t u_ea = ea;
   uint32_t ma = ea & 3;
   ea &= 0xfffffffc;
@@ -1003,7 +1128,7 @@ void _ldl(uint32_t inst, state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
   int32_t imm = (int32_t)(int16_t)(inst & 0xffff);
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   uint32_t ma = ea & 7;
   ea &= ~7u;
   if(EL) ma = 7 - ma;
@@ -1031,7 +1156,7 @@ void _ldr(uint32_t inst, state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
   int32_t imm = (int32_t)(int16_t)(inst & 0xffff);
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   uint32_t ma = ea & 7;
   ea &= ~7u;
   if(EL) ma = 7 - ma;
@@ -1058,7 +1183,7 @@ void _sdl(uint32_t inst, state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
   int32_t imm = (int32_t)(int16_t)(inst & 0xffff);
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   uint32_t ma = ea & 7;
   ea &= ~7u;
   if(EL) ma = 7 - ma;
@@ -1081,7 +1206,7 @@ void _sdr(uint32_t inst, state_t *s) {
   uint32_t rt = (inst >> 16) & 31;
   uint32_t rs = (inst >> 21) & 31;
   int32_t imm = (int32_t)(int16_t)(inst & 0xffff);
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   uint32_t ma = ea & 7;
   ea &= ~7u;
   if(EL) ma = 7 - ma;
@@ -1127,7 +1252,7 @@ void _ldc1(uint32_t inst, state_t *s) {
   if(((s->cpr0[CPR0_SR] & SR_FR) == 0) && (ft & 1)) { take_exception_ri(s); return; }
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   /* FR=1: the whole 64-bit register ft (no even/odd pair) */
   s->cpr1[ft] = bswap<EL>(s->mem.get<uint64_t>(ea));
   s->pc += 4;
@@ -1142,7 +1267,7 @@ void _sdc1(uint32_t inst, state_t *s) {
   if(((s->cpr0[CPR0_SR] & SR_FR) == 0) && (ft & 1)) { take_exception_ri(s); return; }
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   s->mem.set<uint64_t>(ea, bswap<EL>(s->cpr1[ft]));
   s->pc += 4;
   s->insn_histo[mipsInsn::SDC1]++;
@@ -1154,7 +1279,7 @@ void _lwc1(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   uint32_t v = bswap<EL>(s->mem.get<uint32_t>(ea));
   if((s->cpr0[CPR0_SR] & SR_FR) == 0) {
     /* FR=0: merge the loaded word into the ft[0]-selected half of the even reg,
@@ -1176,7 +1301,7 @@ void _swc1(uint32_t inst, state_t *s) {
   uint32_t rs = (inst >> 21) & 31;
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
-  uint32_t ea = va2pa(s->gpr[rs] + imm);
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::store); if(s->tlb_fault) return;
   /* FR=1 / FR=0-even: low 32; FR=0-odd: high 32 of the even reg. */
   uint64_t rv = s->cpr1[((s->cpr0[CPR0_SR] & SR_FR) == 0) ? (ft & ~1u) : ft];
   uint32_t v = (((s->cpr0[CPR0_SR] & SR_FR) == 0) && (ft & 1)) ? (uint32_t)(rv >> 32)
@@ -1787,7 +1912,10 @@ template <bool EL>
 void execMips(state_t *s) {
   sparse_mem &mem = s->mem;
   s->gpr[0] = 0;   /* MIPS $0 is hardwired to zero; e.g. `mflo $0` must not stick */
-  uint32_t inst = bswap<EL>(mem.get<uint32_t>(va2pa(s->pc)));
+  s->tlb_fault = false;   /* fresh each instruction; set by va_translate on a TLB fault */
+  uint32_t ipa = va_translate(s, (uint64_t)s->pc, tlb_op::fetch);
+  if(s->tlb_fault) return;   /* instruction-fetch TLB miss -> already vectored */
+  uint32_t inst = bswap<EL>(mem.get<uint32_t>(ipa));
   if(globals::trace_retirement and false) {
     std::cout << std::hex
 	      << "cosim "
@@ -1839,7 +1967,9 @@ void execMips(state_t *s) {
     /* BERI/CHERI (default): only a STORE to the linked cache line breaks it. */
     if(is_mem_store && s->ll_link_valid) {
       int32_t simm = (int32_t)(int16_t)(inst & 0xffffu);
-      uint64_t sline = va2pa(s->gpr[rs] + simm) & ~UINT64_C(0xf);
+      uint32_t spa2 = 0;   /* non-faulting: the store handler does the real va_translate */
+      if(!tlb_probe_ro(s, s->gpr[rs] + simm, &spa2)) spa2 = va2pa(s->gpr[rs] + simm);
+      uint64_t sline = (uint64_t)spa2 & ~UINT64_C(0xf);
       if(sline == s->ll_link_addr) s->ll_link_valid = false;
     }
 #endif
@@ -1858,11 +1988,14 @@ void execMips(state_t *s) {
       int32_t simm_sc = (int32_t)(int16_t)(inst & 0xffffu);
       uint64_t sva = s->gpr[rs] + simm_sc;
       uint32_t spa = 0;                                  /* REAL PA via the ported TLB probe */
-      if(!tlb_probe_ro(s, sva, &spa)) spa = va2pa(sva);  /* unmapped/kseg fallback */
-      uint32_t srt = (inst >> 16) & 31;
-      uint64_t sdata = s->gpr[srt];
-      if(store_sz < 8) sdata &= (UINT64_C(1) << (store_sz * 8)) - 1;  /* mask to store size */
-      g_iss_stores.emplace_back((uint64_t)s->pc, spa, sdata);
+      /* only record stores that translate cleanly -- a store that will TLB-fault
+       * writes nothing (the RTL faults too), so pushing it would drift the FIFO. */
+      if(tlb_probe_ro(s, sva, &spa)) {
+        uint32_t srt = (inst >> 16) & 31;
+        uint64_t sdata = s->gpr[srt];
+        if(store_sz < 8) sdata &= (UINT64_C(1) << (store_sz * 8)) - 1;  /* mask to store size */
+        g_iss_stores.emplace_back((uint64_t)s->pc, spa, sdata);
+      }
     }
   }
 #endif
@@ -2287,6 +2420,7 @@ void execMips(state_t *s) {
 	    s->tlb[idx].entry_lo1 = s->cpr0_64[CPR0_ENTRYLO1];
 	    s->tlb[idx].page_mask = s->cpr0[CPR0_PAGEMASK];
 	  }
+	  utlb_flush();   /* a mapping changed -> drop the micro-TLB */
 	  s->insn_histo[mipsInsn::TLBWI]++;
 	  break;
 	}
@@ -2298,6 +2432,7 @@ void execMips(state_t *s) {
 	    s->tlb[idx].entry_lo1 = s->cpr0_64[CPR0_ENTRYLO1];
 	    s->tlb[idx].page_mask = s->cpr0[CPR0_PAGEMASK];
 	  }
+	  utlb_flush();   /* a mapping changed -> drop the micro-TLB */
 	  /* Decrement Random, wrap to NUM_TLB_ENTRIES-1 when it reaches Wired */
 	  {
 	    uint32_t wired  = s->cpr0[CPR0_WIRED] & 63;
@@ -2436,7 +2571,9 @@ void execMips(state_t *s) {
     /* Set the reservation on the linked cache line before the load: if the load
      * faults, the exception path (set_exc_pc) clears it again -> no stale link. */
     int32_t llimm = (int32_t)(int16_t)(inst & 0xffffu);
-    uint64_t ll_ea = va2pa(s->gpr[rs] + llimm);
+    uint32_t llpa = 0;   /* non-faulting: the _lw/_lld below does the real va_translate */
+    if(!tlb_probe_ro(s, s->gpr[rs] + llimm, &llpa)) llpa = va2pa(s->gpr[rs] + llimm);
+    uint64_t ll_ea = llpa;
     s->ll_link_valid = true;
     s->ll_link_addr  = ll_ea & ~UINT64_C(0xf);   /* 16B line (LG_L1D_CL_LEN=4) */
     if(opcode == 0x34) _lld<EL>(inst, s);   /* lld = 64-bit */
@@ -2566,7 +2703,7 @@ void execMips(state_t *s) {
 	uint32_t rs_ = (inst >> 21) & 31;
 	uint32_t rt_ = (inst >> 16) & 31;
 	int32_t imm  = (int32_t)(int16_t)(inst & 0xffffu);
-	uint32_t ea  = va2pa(s->gpr[rs_] + imm);
+	uint32_t ea  = va_translate(s, s->gpr[rs_] + imm, tlb_op::load); if(s->tlb_fault) break;
 	if(ea & 3) { raise_adel(s); break; }
 	s->gpr[rt_] = (uint64_t)(uint32_t)bswap<EL>(s->mem.get<int32_t>(ea));
 	s->pc += 4;
