@@ -714,7 +714,10 @@ endfunction
 	t_remapped_req2.mapped = 1'b0;
      end
 
-`ifdef VERILATOR
+`ifdef SCSI_CLOBBER_TRACE
+   // SCSI INQUIRY-clobber debug (address-hardwired to 0x0841d / 0x083dcb). Was under
+   // `ifdef VERILATOR, so it fired on EVERY sim run and floods when a kernel happens
+   // to touch 0x083dcb (e.g. IRIX's boot memory-clear). Gated behind its own define.
    // TEMP: log the segment/cacheability of accesses to the IRIX descriptor page.
    always_ff @(posedge clk)
      if(r_got_req2 & (w_mapped_addr[35:12] == 24'h00841d))
