@@ -22,6 +22,9 @@ struct store_rec {
 };
 extern std::deque<store_rec> g_iss_stores;
 
+/* co-sim checker: ISS TLB is written solely by the RTL mirror (see interpret.cc). */
+extern bool g_iss_tlb_ext;
+
 /* LL/SC reservation model -- MUST MATCH machine.vh's `define LLSC_BREAK_ON_LOAD.
  * default (undefined) = BERI/CHERI (store to the linked line breaks the link);
  * define = R10000 conservative (any intervening load/store breaks it). */

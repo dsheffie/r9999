@@ -1562,8 +1562,11 @@ module core(clk,
 			 $display(">>>> real fault in nullifying delay slot -> t_rob_head.pc = %x, opcode = %d", 
 				  t_rob_head.pc,
 				  t_rob_head.opcode);		
-			 $stop();
-			 
+			 // $stop() relaxed 2026-07-09: this is a TAKEN branch-likely whose
+			 // (executed, non-nullified) delay slot takes a real fault -- fall
+			 // through to the handler below (ARCH_FAULT on fault, else retire),
+			 // as silicon does, instead of halting the sim.  First exercised by
+			 // miniroot userspace (a normal userspace TLB miss in the slot).
 			 if(t_arch_fault)
 			   begin
 			      n_state = ARCH_FAULT;

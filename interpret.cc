@@ -370,6 +370,12 @@ static void tlb_set_fault_state(state_t *s, uint64_t va) {
  * (set_exc_pc -> Cause.ExcCode -> SR.EXL -> pc=vector) with the refill vector. */
 static void raise_tlb(state_t *s, uint64_t va, uint32_t exccode,
                       bool is_refill, bool is_xtlb) {
+  static const bool g_tlbfaultdbg = getenv("TLBFAULTDBG") != nullptr;
+  if(g_tlbfaultdbg)
+    fprintf(stderr, "[iss-tlbfault] pc=%016llx va=%016llx exc=%u refill=%d xtlb=%d sr=%08x entryhi=%016llx wired=%u random=%u\n",
+            (unsigned long long)s->pc, (unsigned long long)va, exccode, is_refill, is_xtlb,
+            s->cpr0[CPR0_SR], (unsigned long long)s->cpr0_64[CPR0_ENTRYHI],
+            s->cpr0[CPR0_WIRED] & 63, s->cpr0[CPR0_RANDOM] & 63);
   bool exl_was_set = (s->cpr0[CPR0_SR] & SR_EXL) != 0;
   tlb_set_fault_state(s, va);
   set_exc_pc(s);
@@ -387,10 +393,50 @@ struct utlb_entry { uint64_t vpn, asid; uint32_t ppn; bool dirty, valid; };
 static utlb_entry g_utlb[UTLB_SZ];
 static inline void utlb_flush() { for(auto &e : g_utlb) e.valid = false; }
 
+/* Apply an RTL TLB-write (TLBWI/TLBWR) to the golden ISS so its TLB stays bit-identical
+ * to the RTL's -- the co-sim drives ISS TLB state from the RTL via a DPI hook (itlb.sv),
+ * exactly like cp0_count.  Overrides the ISS's own tlbwr result (which can drift when a
+ * refill nested-faults).  Flushes the micro-TLB.  Called from henry_tb's tlb_wr_log. */
+void iss_apply_tlb_write(state_t *s, int idx, uint64_t ehi, uint64_t elo0, uint64_t elo1, uint32_t pm) {
+  if(idx < 0 || idx >= state_t::NUM_TLB_ENTRIES) return;
+  s->tlb[idx].entry_hi  = ehi;
+  s->tlb[idx].entry_lo0 = elo0;
+  s->tlb[idx].entry_lo1 = elo1;
+  s->tlb[idx].page_mask = pm;
+  utlb_flush();
+}
+
 /* Translate a virtual address (interp_mips va_translate).  On a TLB exception,
  * sets s->tlb_fault and returns 0 -- the caller MUST check s->tlb_fault and abort.
  * Unmapped kseg0/kseg1 and xkphys are fast paths with no lookup. */
+/* Last load's VA (co-sim device-load classification): a delay-slot load that
+ * clobbers its own base reg (lwu v0,off(v0)) can't be re-decoded post-exec, so the
+ * checker reads the VA the ISS actually translated here.  Harmless for ooo_core. */
+uint64_t g_iss_last_ld_va = 0;
+
+/* co-sim checker: when true, the ISS's 48-entry TLB is written SOLELY by the RTL's mirror
+ * (henry_tb tlb_wr_log -> iss_apply_tlb_write, applied as a lossless queue) -- the ISS's own
+ * tlbwi/tlbwr writes (and the tlbwr Random decrement) are suppressed, so the ISS TLB stays
+ * bit-identical to the RTL's.  Default false = standalone ISS keeps its self-contained model. */
+bool g_iss_tlb_ext = false;
+
+/* R4000 addressing-mode width for the XTLB-vs-TLB refill vector: XTLB (offset 0x080)
+ * when the CURRENT operating mode uses 64-bit addressing (kernel&KX | super&SX |
+ * user&UX) -- NOT the VA form.  A sign-extended kseg2 address in a KX=1 kernel still
+ * uses XTLB.  Matches the RTL exactly (core.sv n_xtlb_refill =
+ * in_64b_kernel_mode | in_64b_supervisor_mode | in_64b_user_mode). */
+static inline bool is_64b_addr_mode(state_t *s) {
+  uint32_t sr = s->cpr0[CPR0_SR];
+  uint32_t ksu = (sr >> 3) & 3u;
+  bool exl = (sr & SR_EXL) != 0, erl = (sr & SR_ERL) != 0;
+  bool kernel = (ksu == 0u) || exl || erl;
+  bool user   = (ksu == 2u) && !exl && !erl;
+  bool super  = (ksu == 1u) && !exl && !erl;
+  return (kernel && (sr & SR_KX)) || (super && (sr & SR_SX)) || (user && (sr & SR_UX));
+}
+
 static uint32_t va_translate(state_t *s, uint64_t va, tlb_op op) {
+  if(op == tlb_op::load) g_iss_last_ld_va = va;
   uint32_t hi32 = (uint32_t)(va >> 32);
   uint32_t lo32 = (uint32_t)va;
   if(hi32 == 0x00000000u || hi32 == 0xffffffffu) {
@@ -403,11 +449,12 @@ static uint32_t va_translate(state_t *s, uint64_t va, tlb_op op) {
       return (uint32_t)(va & 0xffffffffffULL);
     }
   }
-  bool xtlb = !(hi32 == 0x00000000u || hi32 == 0xffffffffu);
+  bool xtlb = is_64b_addr_mode(s);   /* RTL: XTLB vector iff the operating mode is 64-bit-addressed (KX/SX/UX) */
   uint64_t cur_asid = s->cpr0_64[CPR0_ENTRYHI] & 0xffULL;
   uint64_t vpn = va >> 12;
   utlb_entry &ce = g_utlb[vpn & (UTLB_SZ - 1)];
-  if(ce.valid && ce.vpn == vpn && ce.asid == cur_asid &&
+  static const bool no_utlb = getenv("NOUTLB") != nullptr;   /* micro-TLB bypass (debug) */
+  if(!no_utlb && ce.valid && ce.vpn == vpn && ce.asid == cur_asid &&
      !(op == tlb_op::store && !ce.dirty)) {        /* store to clean page -> CAM (Modified) */
     return (ce.ppn << 12) | (uint32_t)(va & 0xfffULL);
   }
@@ -437,11 +484,31 @@ static uint32_t va_translate(state_t *s, uint64_t va, tlb_op op) {
     }
     uint64_t pfn = (e_lo >> 6) & 0xfffffffULL;
     uint64_t pa  = (pfn << 12) | (va & off_mask);
+    { static const char *w = getenv("WATCHTLBVA");
+      static const uint32_t wv = w ? (uint32_t)strtoull(w, 0, 0) : 0;
+      if(wv && (uint32_t)va == wv)
+        fprintf(stderr, "[tlbmap] va=%08x -> pa=%08x  tlb[%d] ehi=%016llx elo0=%016llx elo1=%016llx pm=%08x asid=%llx\n",
+                (uint32_t)va, (uint32_t)pa, i, (unsigned long long)e_hi,
+                (unsigned long long)s->tlb[i].entry_lo0, (unsigned long long)s->tlb[i].entry_lo1,
+                s->tlb[i].page_mask, (unsigned long long)cur_asid); }
     ce.vpn = vpn; ce.asid = cur_asid; ce.ppn = (uint32_t)(pa >> 12);
     ce.dirty = (e_lo & 0x4u) != 0; ce.valid = true;
     return (uint32_t)pa;
   }
   uint32_t code = (op == tlb_op::store) ? 3u : 2u;   /* no match -> TLB Refill */
+  { static const char *w = getenv("WATCHTLBVA");
+    static const uint32_t wv = w ? (uint32_t)strtoull(w, 0, 0) : 0;
+    static int nrf = 0;
+    if(wv && (uint32_t)va == wv && nrf++ < 6) {
+      fprintf(stderr, "[tlb-refill] va=%08x asid=%llx xtlb=%d -- NO CAM MATCH; entries w/ this VPN2:\n",
+              (uint32_t)va, (unsigned long long)cur_asid, xtlb);
+      for(int i = 0; i < state_t::NUM_TLB_ENTRIES; i++) {
+        uint64_t e_hi = s->tlb[i].entry_hi;
+        if(((e_hi ^ va) & 0xffffe000ULL) == 0)   /* same VPN2[27:13] */
+          fprintf(stderr, "   tlb[%d] ehi=%016llx elo0=%016llx elo1=%016llx pm=%08x\n", i,
+                  (unsigned long long)e_hi, (unsigned long long)s->tlb[i].entry_lo0,
+                  (unsigned long long)s->tlb[i].entry_lo1, s->tlb[i].page_mask); }
+    } }
   raise_tlb(s, va, code, /*is_refill=*/true, xtlb);
   return 0;
 }
@@ -661,6 +728,11 @@ void branch(uint32_t inst, state_t *s) {
 	s->pc = (imm+npc);
     }
   }
+  { static const bool dbg = getenv("BRDBG") != nullptr;
+    if(dbg && (uint32_t)(npc-4) == 0x80000198)
+      fprintf(stderr, "[br] pc=%08x inst=%08x rs=%u(%016llx) rt=%u(%016llx) take=%d newpc=%016llx\n",
+              (uint32_t)(npc-4), inst, rs, (unsigned long long)s->gpr[rs], rt,
+              (unsigned long long)s->gpr[rt], takeBranch, (unsigned long long)s->pc); }
 }
 
 template <bool EL>
@@ -1916,6 +1988,10 @@ void execMips(state_t *s) {
   uint32_t ipa = va_translate(s, (uint64_t)s->pc, tlb_op::fetch);
   if(s->tlb_fault) return;   /* instruction-fetch TLB miss -> already vectored */
   uint32_t inst = bswap<EL>(mem.get<uint32_t>(ipa));
+  { static const bool dbg = getenv("FETCHDBG") != nullptr;
+    uint32_t p = (uint32_t)s->pc;
+    if(dbg && p >= 0x80000180 && p <= 0x80000220)
+      fprintf(stderr, "[fetch] pc=%08x ipa=%08x inst=%08x op=%02x dslot=%d\n", p, ipa, inst, inst>>26, s->in_delay_slot); }
   if(globals::trace_retirement and false) {
     std::cout << std::hex
 	      << "cosim "
@@ -1991,10 +2067,16 @@ void execMips(state_t *s) {
       /* only record stores that translate cleanly -- a store that will TLB-fault
        * writes nothing (the RTL faults too), so pushing it would drift the FIFO. */
       if(tlb_probe_ro(s, sva, &spa)) {
-        uint32_t srt = (inst >> 16) & 31;
-        uint64_t sdata = s->gpr[srt];
-        if(store_sz < 8) sdata &= (UINT64_C(1) << (store_sz * 8)) - 1;  /* mask to store size */
-        g_iss_stores.emplace_back((uint64_t)s->pc, spa, sdata);
+        /* skip UNCACHED stores (kseg1 VA / device-range PA): the RTL routes these
+         * around the L1D cache array so wr_log never fires -> pushing them drifts the FIFO. */
+        bool uncached = (((uint32_t)sva & 0xe0000000u) == 0xa0000000u) ||
+                        (spa >= 0x1f000000u && spa <= 0x1fffffffu);
+        if(!uncached) {
+          uint32_t srt = (inst >> 16) & 31;
+          uint64_t sdata = s->gpr[srt];
+          if(store_sz < 8) sdata &= (UINT64_C(1) << (store_sz * 8)) - 1;  /* mask to store size */
+          g_iss_stores.emplace_back((uint64_t)s->pc, spa, sdata);
+        }
       }
     }
   }
@@ -2414,7 +2496,8 @@ void execMips(state_t *s) {
 	}
 	case 0x2: { /* TLBWI -- write staging regs to TLB[Index] */
 	  uint32_t idx = s->cpr0[CPR0_INDEX] & 63;
-	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
+	  /* checker mode: the RTL mirror is the sole TLB writer -> suppress the ISS's own write. */
+	  if(!g_iss_tlb_ext && idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
 	    s->tlb[idx].entry_hi  = s->cpr0_64[CPR0_ENTRYHI];
 	    s->tlb[idx].entry_lo0 = s->cpr0_64[CPR0_ENTRYLO0];
 	    s->tlb[idx].entry_lo1 = s->cpr0_64[CPR0_ENTRYLO1];
@@ -2426,14 +2509,17 @@ void execMips(state_t *s) {
 	}
 	case 0x6: { /* TLBWR -- write staging regs to TLB[Random] */
 	  uint32_t idx = s->cpr0[CPR0_RANDOM] & 63;
-	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
+	  /* checker mode: the RTL mirror is the sole TLB writer -> suppress the ISS's own write. */
+	  if(!g_iss_tlb_ext && idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
 	    s->tlb[idx].entry_hi  = s->cpr0_64[CPR0_ENTRYHI];
 	    s->tlb[idx].entry_lo0 = s->cpr0_64[CPR0_ENTRYLO0];
 	    s->tlb[idx].entry_lo1 = s->cpr0_64[CPR0_ENTRYLO1];
 	    s->tlb[idx].page_mask = s->cpr0[CPR0_PAGEMASK];
 	  }
 	  utlb_flush();   /* a mapping changed -> drop the micro-TLB */
-	  /* Decrement Random, wrap to NUM_TLB_ENTRIES-1 when it reaches Wired */
+	  /* Decrement Random (wrap at Wired).  In checker mode the RTL owns the TLB via the
+	   * mirror and the ISS never writes it, so its Random is irrelevant -> skip. */
+	  if(!g_iss_tlb_ext)
 	  {
 	    uint32_t wired  = s->cpr0[CPR0_WIRED] & 63;
 	    uint32_t random = s->cpr0[CPR0_RANDOM] & 63;

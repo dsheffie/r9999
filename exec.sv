@@ -3488,8 +3488,16 @@ module exec(clk,
 	/* single-step mode: tie Count to RETIREMENT (per retired insn) so the timer
 	 * lands at the same instruction as free-run -- else Count free-runs per-cycle
 	 * and races ahead during the step freeze (distorts timer-driven bugs). */
+`ifdef INSN_PACED_COUNT
+	/* co-sim only: force Count = retired-instruction count so the RTL's timer matches
+	 * the interpreter's insn-paced Count -> CPU-freq calibration / delays / interrupt
+	 * timing align for the retired-PC co-sim diff.  NEVER for silicon (real R4000 Count
+	 * is cycle-paced; this is +define+INSN_PACED_COUNT in the henry co-sim build only). */
+	n_count = retire_two ? (r_count + 32'd2) : (retire ? (r_count + 32'd1) : r_count);
+`else
 	n_count = single_step ? (retire_two ? (r_count + 32'd2) : (retire ? (r_count + 32'd1) : r_count))
 	                      : (r_toggle ? (r_count + 32'd1) : r_count);
+`endif
 	n_compare = r_compare;
 	n_watchlo = r_watchlo;
 	n_watchhi = r_watchhi;

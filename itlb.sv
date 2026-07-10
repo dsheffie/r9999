@@ -154,7 +154,23 @@ module itlb(clk,
 	     r_tlb[tlb_entry_in.entry].c1       <= tlb_entry_in.c1;
 	  end
      end
-   
+
+`ifdef ENABLE_STORE_CHECK
+   /* Co-sim TLB mirror: on every runtime TLB write (TLBWI/TLBWR), hand the installed
+    * entry to the golden ISS (henry_tb) already packed into the ISS's CP0 bit layout --
+    * EntryHi[63:62]=R,[39:13]=VPN2,[7:0]=ASID; EntryLo[33:6]=PFN,[5:3]=C,[2]=D,[1]=V,[0]=G.
+    * Keeps the ISS's 48-entry TLB bit-identical to the RTL's (see iss_apply_tlb_write). */
+   import "DPI-C" function void tlb_wr_log(input int entry, input longint ehi,
+					   input longint elo0, input longint elo1, input int pm);
+   always_ff @(negedge clk)
+     if(tlb_entry_in_valid)
+       tlb_wr_log(int'(tlb_entry_in.entry),
+		  (longint'(tlb_entry_in.r)  << 62) | (longint'(tlb_entry_in.vpn) << 13) | longint'(tlb_entry_in.asid),
+		  (longint'(tlb_entry_in.pfn0) << 6) | (longint'(tlb_entry_in.c0) << 3) | (longint'(tlb_entry_in.d0) << 2) | (longint'(tlb_entry_in.v0) << 1) | longint'(tlb_entry_in.g0),
+		  (longint'(tlb_entry_in.pfn1) << 6) | (longint'(tlb_entry_in.c1) << 3) | (longint'(tlb_entry_in.d1) << 2) | (longint'(tlb_entry_in.v1) << 1) | longint'(tlb_entry_in.g1),
+		  int'(tlb_entry_in.pagemask));
+`endif
+
    wire [LG_N:0]	       w_idx;
    generate
       for(genvar i = N; i < NN; i=i+1)
