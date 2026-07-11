@@ -398,7 +398,10 @@ endfunction
 			      * (addr+16) so IRIX's 32B-aligned/32B-stride dma_cache_inv
 			      * (built for a 32B primary line) covers BOTH 16B lines. Same
 			      * page -> same tag; only the index is +1. */
-			     CHOP_BEAT2 = 'd14
+			     CHOP_BEAT2 = 'd14,
+			     /* 1-cycle re-index: drive t_cache_idx to (addr+16)'s set so
+			      * the registered RAM outputs are valid for CHOP_BEAT2. */
+			     CHOP_BEAT2_RD = 'd15
                              } state_t;
 
    
@@ -488,6 +491,11 @@ endfunction
    wire w_is_chop2 = (r_req2.op == MEM_CHWB) | (r_req2.op == MEM_CHWBINV) | (r_req2.op == MEM_CHINV);
    wire w_is_chop_head = (t_mem_head.op == MEM_CHWB) | (t_mem_head.op == MEM_CHWBINV) | (t_mem_head.op == MEM_CHINV);
    wire w_is_chop_r = (r_req.op == MEM_CHWB) | (r_req.op == MEM_CHWBINV) | (r_req.op == MEM_CHINV);
+   /* second-beat set index = (r_req.addr + 16)'s set = this set + 1 (the CACHE op
+    * is 32B-aligned, so addr[LG_L1D_CL_LEN]=0 and +16 just increments the index).
+    * From r_req.addr (stable) -- NOT r_cache_idx, which the FLUSH_CL_WAIT default
+    * t_cache_idx='d0 clobbers to 0 during the mem-rsp wait. */
+   wire [`LG_L1D_NUM_SETS-1:0] w_beat2_idx = r_req.addr[IDX_STOP-1:IDX_START] + 1'b1;
    logic r_chop_wait, n_chop_wait;
    logic r_chop_beat, n_chop_beat;
 `ifdef CHOP_DEBUG
@@ -2015,7 +2023,7 @@ endfunction
 			  * graduation entry.  CHWB is conservatively treated as
 			  * WB-Invalidate (no clear-dirty-keep-valid path; a refill
 			  * costs a miss, never correctness). */
-			 t_reset_graduated = 1'b1;
+			 /* double-beat: graduation DEFERRED to beat 2 (addr+16) -- see CHWB tail / FLUSH_CL_WAIT / CHOP_BEAT2 */
 			 if(r_valid_out && (r_tag_out == r_cache_tag) && r_dirty_out && (r_req.op != MEM_CHINV))
 			   begin
 			      /* dirty hit, WB variant: write the line through to DRAM.
@@ -2054,6 +2062,15 @@ endfunction
 			      /* CHWB clean hit: nothing dirty to push; drop the copy
 			       * (conservative WB-inval semantics, see above) */
 			      t_mark_invalid = 1'b1;
+			   end
+			 /* double-beat: if beat 0 issued NO flush (CHWB clean-hit or a
+			  * full miss), FLUSH_CL_WAIT never runs -- go straight to beat 2.
+			  * The WB/INV arms set n_chop_wait=1 and reach beat 2 via the
+			  * wait.  (t_mark_invalid above hit r_cache_idx = beat-0's set.) */
+			 if(!n_chop_wait)
+			   begin
+			      n_chop_beat = 1'b1;
+			      n_state = CHOP_BEAT2_RD;
 			   end
 		      end
 		    else if(r_req.cached == 1'b0)
@@ -2481,14 +2498,82 @@ endfunction
 	    begin
 	       	if(mem_rsp_valid)
 		  begin
-		     n_state = ACTIVE;
 		     n_inhibit_write = 1'b0;
+		     n_chop_wait = 1'b0;
 		     /* mem-pipe CACHE hit-ops were early-acked; do NOT pulse the
 		      * core's funnel flush handshake (it latches and would falsely
 		      * satisfy a later CACHE_FLUSH wait). */
-		     n_flush_complete = !r_chop_wait;
-		     n_chop_wait = 1'b0;
+		     if(r_chop_wait && !r_chop_beat)
+		       begin
+			  /* beat 0 of a Hit-op chop done -> beat 1 on (addr+16) */
+			  n_chop_beat = 1'b1;
+			  n_state = CHOP_BEAT2_RD;
+		       end
+		     else if(r_chop_wait && r_chop_beat)
+		       begin
+			  /* beat 1 done -> both 16B lines covered; graduate the chop */
+			  t_reset_graduated = 1'b1;
+			  n_chop_beat = 1'b0;
+			  n_state = ACTIVE;
+		       end
+		     else
+		       begin
+			  /* Index / whole-line FLUSH_CL (not a Hit-op chop) */
+			  n_flush_complete = 1'b1;
+			  n_state = ACTIVE;
+		       end
 		  end	       
+	    end
+	  CHOP_BEAT2_RD:
+	    begin
+	       /* re-index the tag/data RAM to (addr+16)'s set (this set + 1); its
+		* registered outputs are valid next cycle in CHOP_BEAT2. r_chop_beat
+		* is already 1. */
+	       t_cache_idx = w_beat2_idx;
+	       t_cache_tag = r_req.addr[`PA_WIDTH-1:`LG_PG_SZ];
+	       n_state = CHOP_BEAT2;
+	    end
+	  CHOP_BEAT2:
+	    begin
+	       /* beat 2: the same D-Hit CACHE op on the next 16B line (addr+16).
+		* Same page => same tag (r_cache_tag). r_cache_idx and the RAM outputs
+		* are now (addr+16)'s set. WB/INV wait via FLUSH_CL_WAIT (it graduates
+		* since r_chop_beat==1); CHWB clean/miss graduates here. */
+	       if(r_valid_out && (r_tag_out == r_cache_tag) && r_dirty_out && (r_req.op != MEM_CHINV))
+		 begin
+		    t_got_miss = 1'b1;
+		    t_mark_invalid = 1'b1;
+		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_opcode = MEM_WB;
+		    n_mem_req_store_data = t_data;
+		    n_mem_req_cacheable = 1'b1;
+		    n_mem_req_mask = 16'hffff;
+		    n_mem_req_valid = 1'b1;
+		    n_inhibit_write = 1'b1;
+		    n_chop_wait = 1'b1;
+		    n_state = FLUSH_CL_WAIT;
+		 end
+	       else if(r_req.op != MEM_CHWB)
+		 begin
+		    t_got_miss = 1'b1;
+		    if(r_valid_out && (r_tag_out == r_cache_tag))
+		      t_mark_invalid = 1'b1;
+		    n_mem_req_addr = {(r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN] + 1'b1),{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_opcode = MEM_INVL;
+		    n_mem_req_cacheable = 1'b1;
+		    n_mem_req_mask = 16'hffff;
+		    n_mem_req_valid = 1'b1;
+		    n_chop_wait = 1'b1;
+		    n_state = FLUSH_CL_WAIT;
+		 end
+	       else
+		 begin
+		    if(r_valid_out && (r_tag_out == r_cache_tag))
+		      t_mark_invalid = 1'b1;
+		    t_reset_graduated = 1'b1;
+		    n_chop_beat = 1'b0;
+		    n_state = ACTIVE;
+		 end
 	    end
 	  FLUSH_CACHE:
 	    begin
