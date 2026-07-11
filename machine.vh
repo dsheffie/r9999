@@ -129,6 +129,8 @@
 `else
  `ifdef TINY_DEBUG_L2
   `define LG_L2_NUM_SETS 3
+ `elsif BIG_SIM_L2
+  `define LG_L2_NUM_SETS 16     /* 65536 lines x 16B = 1MB (sim-only; too big for FPGA BRAM) */
  `else
   `define LG_L2_NUM_SETS 10
  `endif

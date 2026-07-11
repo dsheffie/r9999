@@ -23,6 +23,11 @@ import "DPI-C" function void record_l1d(input int req,
 import "DPI-C" function void wr_log(input longint pc, input int rob_ptr,
 				    input longint unsigned addr,
 				    input longint unsigned data, int is_atomic);
+// L1D->L2 writeback watch: report each dirty-line writeback so henry_tb can tell whether
+// the L1D hands L2 a clean or already-corrupted cache line (vs the L2->DRAM store DESCWATCH sees).
+import "DPI-C" function void l1d_wb_log(input longint unsigned pa,
+					input longint unsigned data_lo,
+					input longint unsigned data_hi);
 `endif
 
 module l1d(clk,
@@ -2601,6 +2606,16 @@ endfunction
 	      (r_req.op == MEM_SH) ? {48'd0, r_req.data[15:0]} :
 	      (r_req.op == MEM_SW) ? {32'd0, r_req.data[31:0]} : r_req.data,
 	      r_req.is_atomic ? 32'd1 : 32'd0);
+   // L1D->L2 store/writeback watch: fire on each accepted store-type request to the L2
+   // (MEM_SW carries dirty-line writebacks too; MEM_WB = explicit CACHE writeback).
+   reg r_wbwatch_prev;
+   always_ff @(posedge clk) r_wbwatch_prev <= reset ? 1'b0 : r_mem_req_valid;
+   always_ff @(negedge clk)
+     if(r_mem_req_valid & ~r_wbwatch_prev &          // rising edge of a new L1D->L2 request
+	((r_mem_req_opcode == MEM_WB)  | (r_mem_req_opcode == MEM_INVL) |
+	 (r_mem_req_opcode == MEM_SW)  | (r_mem_req_opcode == MEM_SD)))
+       l1d_wb_log({{(64-`PA_WIDTH){1'b0}}, r_mem_req_addr},
+		  r_mem_req_store_data[63:0], r_mem_req_store_data[127:64]);
 `endif
 
 endmodule // l1d

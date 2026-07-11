@@ -119,6 +119,15 @@ module l2(clk,
 			     } flush_state_t;
 
    logic 	r_need_l1i,n_need_l1i,r_need_l1d,n_need_l1d;
+   /* An L1I-only flush (the I-side CACHE op) must NOT walk every L2 line -- the
+    * I-cache is read-only and the D-side already writes its lines through to DRAM,
+    * so the O(L2_size) writeback walk was pure waste (dominated the boot on a large
+    * L2; TIP charged 95% of cycles to the cache-op PC). r_had_l1d = did THIS flush
+    * sequence involve an L1D flush (-> a real L2 writeback is needed); r_flush_skip =
+    * the pending flush should complete WITHOUT the walk. */
+   logic 	r_had_l1d, n_had_l1d;
+   logic 	t_l2_skip_walk;
+   logic 	r_flush_skip, n_flush_skip;
    logic 	t_l2_flush_req;
    
    flush_state_t n_flush_state, r_flush_state;
@@ -229,6 +238,8 @@ module l2(clk,
 	     r_flush_req <= 1'b0;
 	     r_need_l1d <= 1'b0;
 	     r_need_l1i <= 1'b0;
+	     r_had_l1d <= 1'b0;
+	     r_flush_skip <= 1'b0;
 	     r_got_mem_rsp_valid <= 1'b0;
 	     r_cache_hits <= 'd0;
 	     r_cache_accesses <= 'd0;
@@ -256,7 +267,9 @@ module l2(clk,
 	     r_flush_req <= n_flush_req;
 	     r_need_l1i <= n_need_l1i;
 	     r_need_l1d <= n_need_l1d;
-	     r_got_mem_rsp_valid <= n_got_mem_rsp_valid;	     
+	     r_had_l1d <= n_had_l1d;
+	     r_flush_skip <= n_flush_skip;
+	     r_got_mem_rsp_valid <= n_got_mem_rsp_valid;
 	     r_cache_hits <= n_cache_hits;
 	     r_cache_accesses <= n_cache_accesses;	     
 	  end
@@ -281,7 +294,9 @@ module l2(clk,
 	n_flush_state = r_flush_state;
 	n_need_l1d = r_need_l1d | l1d_flush_req;
 	n_need_l1i = r_need_l1i | l1i_flush_req;
+	n_had_l1d = r_had_l1d | l1d_flush_req;   /* sticky over the sequence */
 	t_l2_flush_req = 1'b0;
+	t_l2_skip_walk = 1'b0;
 	case(r_flush_state)
 	  WAIT_FOR_FLUSH:
 	    begin
@@ -309,6 +324,8 @@ module l2(clk,
 		    //$display("-> firing l2 flush at cycle %d", r_cycle);
 		    n_flush_state = WAIT_FOR_FLUSH;
 		    t_l2_flush_req = 1'b1;
+		    t_l2_skip_walk = ~n_had_l1d;   /* L1I-only -> skip the O(L2_size) walk */
+		    n_had_l1d = 1'b0;              /* reset for the next sequence */
 		 end
 	    end
 	endcase
@@ -320,6 +337,56 @@ module l2(clk,
      begin
 	r_cycle <= reset ? 'd0 : (r_cycle + 'd1);
      end
+
+`ifdef VERILATOR
+   // L2 line tracer (L2DBG): watch every boundary of the SCSI-descriptor cache
+   // line 0x083e4000 -- L1D->L2 stores/writebacks in (side 0), L2 fills from DRAM
+   // (side 2), and L2->DRAM evictions out (side 1).  Lets us see whether the L2
+   // faithfully passes the line or corrupts it between in and out.
+   import "DPI-C" function void l2_line_log(input int side,
+					    input longint unsigned pa,
+					    input longint unsigned d0,
+					    input longint unsigned d1,
+					    input int op,
+					    input int mask);
+   // decision log at CHECK_VALID_AND_TAG for the descriptor line: shows whether the
+   // op hit, whether the held line is dirty, and its current content w_d0.
+   import "DPI-C" function void l2_chk_log(input longint unsigned pa,
+					   input int whit, input int wvalid, input int wdirty,
+					   input int op,
+					   input longint unsigned d0lo, input longint unsigned d0hi);
+   reg r_l2wb_prev;
+   always_ff@(posedge clk)
+     begin
+	r_l2wb_prev <= reset ? 1'b0 : r_mem_req;
+     end
+   always_ff@(negedge clk)
+     begin
+	if(l1_mem_req_valid & r_req_ack & (l1_mem_req_addr[31:4] == 28'h083e400))
+	  begin
+	     l2_line_log(0, {{(64-`PA_WIDTH){1'b0}}, l1_mem_req_addr},
+			 l1_mem_req_store_data[63:0], l1_mem_req_store_data[127:64],
+			 {27'd0, l1_mem_req_opcode}, {16'd0, l1_mem_req_mask});
+	  end
+	if(r_mem_req & ~r_l2wb_prev & (r_addr[31:4] == 28'h083e400))
+	  begin
+	     l2_line_log(1, {{(64-`PA_WIDTH){1'b0}}, r_addr},
+			 r_mem_req_store_data[63:0], r_mem_req_store_data[127:64],
+			 {27'd0, r_mem_opcode}, {16'd0, r_store_mask});
+	  end
+	if(mem_rsp_valid & (r_addr[31:4] == 28'h083e400))
+	  begin
+	     l2_line_log(2, {{(64-`PA_WIDTH){1'b0}}, r_addr},
+			 mem_rsp_load_data[63:0], mem_rsp_load_data[127:64], 32'd0, 32'd0);
+	  end
+	if((r_state == CHECK_VALID_AND_TAG) & (r_saveaddr[31:4] == 28'h083e400))
+	  begin
+	     l2_chk_log({{(64-`PA_WIDTH){1'b0}}, r_saveaddr},
+			{31'd0, w_hit}, {31'd0, w_valid}, {31'd0, w_dirty},
+			{27'd0, r_opcode}, w_d0[63:0], w_d0[127:64]);
+	  end
+     end // always_ff
+`endif
 
    state_t r_last_state;
    always_ff@(posedge clk)
@@ -369,6 +436,7 @@ module l2(clk,
 	n_is_uncache = r_is_uncache;
 	n_uncache_mask = r_uncache_mask;
 	n_flush_req = r_flush_req | t_l2_flush_req;
+	n_flush_skip = r_flush_skip | (t_l2_flush_req & t_l2_skip_walk);
 	n_mem_req_store_data = r_mem_req_store_data;
 
 	n_cache_hits = r_cache_hits;
@@ -408,7 +476,16 @@ module l2(clk,
 	       //    $stop();
 	       //end
 	       
-	       if(n_flush_req)
+	       if(n_flush_req & n_flush_skip)
+		 begin
+		    /* L1I-only flush: nothing to write back from L2 (I-cache read-only;
+		     * the D-side already wrote its lines through to DRAM). Complete the
+		     * handshake WITHOUT walking every L2 line. */
+		    n_flush_complete = 1'b1;
+		    n_flush_req = 1'b0;
+		    n_flush_skip = 1'b0;
+		 end
+	       else if(n_flush_req)
 		 begin
 		    t_idx = 'd0;
 		    n_state = FLUSH_WAIT;
@@ -567,8 +644,14 @@ module l2(clk,
 		 end
 	       else
 		 begin
-		    n_cache_hits = r_cache_hits - 64'd1;			 		    
-		    if(w_dirty)
+		    n_cache_hits = r_cache_hits - 64'd1;
+		    /* Evict the resident line only if it is BOTH valid and dirty
+		     * (w_need_wb). A bare w_dirty test wrote back lines that a prior
+		     * MEM_WB left valid=0/dirty=1 (MEM_WB clears valid but not dirty,
+		     * unlike MEM_INVL) -> a stale copy clobbered the SCSI-DMA descriptor
+		     * in DRAM (armed {08398f80,0x40} regressed to {883e4800,0}) -> IRIX
+		     * XFS panic. The CLEAN_RELOAD fill site already defends the same leak. */
+		    if(w_need_wb)
 		      begin
 			 n_mem_req_store_data = w_d0;
 			 n_addr = {w_tag, t_idx, 4'd0};
