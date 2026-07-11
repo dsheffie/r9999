@@ -392,7 +392,13 @@ endfunction
                              HANDLE_RELOAD = 'd10,
 			     INJECT_UNCACHE_STORE = 'd11,
 			     INJECT_UNCACHE_LOAD = 'd12,
-			     UNCACHE_WB = 'd13
+			     UNCACHE_WB = 'd13,
+			     /* second "beat" of a D-Hit CACHE op: after the op on the
+			      * addressed 16B line completes, re-run it on the next 16B line
+			      * (addr+16) so IRIX's 32B-aligned/32B-stride dma_cache_inv
+			      * (built for a 32B primary line) covers BOTH 16B lines. Same
+			      * page -> same tag; only the index is +1. */
+			     CHOP_BEAT2 = 'd14
                              } state_t;
 
    
@@ -483,6 +489,7 @@ endfunction
    wire w_is_chop_head = (t_mem_head.op == MEM_CHWB) | (t_mem_head.op == MEM_CHWBINV) | (t_mem_head.op == MEM_CHINV);
    wire w_is_chop_r = (r_req.op == MEM_CHWB) | (r_req.op == MEM_CHWBINV) | (r_req.op == MEM_CHINV);
    logic r_chop_wait, n_chop_wait;
+   logic r_chop_beat, n_chop_beat;
 `ifdef CHOP_DEBUG
    always_ff@(negedge clk)
      begin
@@ -864,6 +871,7 @@ endfunction
 	     r_flush_req <= 1'b0;
 	     r_flush_cl_req <= 1'b0;
 	     r_chop_wait <= 1'b0;
+	     r_chop_beat <= 1'b0;
 	     r_tlb_addr <= 'd0;
 	     r_cache_idx <= 'd0;
 	     r_cache_tag <= 'd0;
@@ -916,6 +924,7 @@ endfunction
 	     r_flush_req <= n_flush_req;
 	     r_flush_cl_req <= n_flush_cl_req;
 	     r_chop_wait <= n_chop_wait;
+	     r_chop_beat <= n_chop_beat;
 	     r_cache_idx <= t_cache_idx;
 	     r_tlb_addr <= n_tlb_addr;
 	     r_cache_tag <= t_cache_tag;
@@ -1775,6 +1784,7 @@ endfunction
 	n_is_retry = 1'b0;
 	t_reset_graduated = 1'b0;
 	n_chop_wait = r_chop_wait;
+	n_chop_beat = r_chop_beat;
 	t_force_clear_busy = 1'b0;
 	
 	t_incr_busy = 1'b0;
