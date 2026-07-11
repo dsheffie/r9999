@@ -379,7 +379,7 @@ endfunction
    mem_req_t t_mem_tail, t_mem_head;
    logic 	mem_q_full, mem_q_empty, mem_q_almost_full;
    
-   typedef enum logic [3:0] {INITIALIZE = 'd0, //0
+   typedef enum logic [4:0] {INITIALIZE = 'd0, //0
 			     INIT_CACHE = 'd1, //1
 			     ACTIVE = 'd2, //2
                              INJECT_RELOAD = 'd3, //3
@@ -401,7 +401,12 @@ endfunction
 			     CHOP_BEAT2 = 'd14,
 			     /* 1-cycle re-index: drive t_cache_idx to (addr+16)'s set so
 			      * the registered RAM outputs are valid for CHOP_BEAT2. */
-			     CHOP_BEAT2_RD = 'd15
+			     CHOP_BEAT2_RD = 'd15,
+			     /* D-Index CACHE-op (FLUSH_CL funnel) second beat: same idea as
+			      * CHOP_BEAT2 but for the whole-cache-flush path -- re-index to
+			      * set+1 and re-run FLUSH_CL so a 32B-stride Index_WB_Invalidate
+			      * covers both 16B lines. */
+			     FLUSH_CL_BEAT2_RD = 'd16
                              } state_t;
 
    
@@ -411,7 +416,11 @@ endfunction
    logic 	n_did_reload, r_did_reload;
    logic 	n_uncache_wb_dirty, r_uncache_wb_dirty;
 
-   assign state = r_state;
+   /* debug/trace-only observability port (kept 4b to avoid rippling the width
+    * up through core_l1d_l1i/henry_soc/ILA); r_state is now 5b (17 states) so
+    * FLUSH_CL_BEAT2_RD=16 aliases INITIALIZE=0 in the trace -- a transient
+    * 1-cycle re-index state, acceptable to lose in observability. */
+   assign state = r_state[3:0];
    
    logic	r_mem_req_cacheable, n_mem_req_cacheable;
    logic [15:0]	t_mem_req_mask, r_mem_req_mask, n_mem_req_mask;
@@ -496,8 +505,11 @@ endfunction
     * From r_req.addr (stable) -- NOT r_cache_idx, which the FLUSH_CL_WAIT default
     * t_cache_idx='d0 clobbers to 0 during the mem-rsp wait. */
    wire [`LG_L1D_NUM_SETS-1:0] w_beat2_idx = r_req.addr[IDX_STOP-1:IDX_START] + 1'b1;
+   /* D-Index (FLUSH_CL funnel) second-beat set: flush_cl_addr's set + 1. */
+   wire [`LG_L1D_NUM_SETS-1:0] w_flush_cl_idx1 = flush_cl_addr[IDX_STOP-1:IDX_START] + 1'b1;
    logic r_chop_wait, n_chop_wait;
    logic r_chop_beat, n_chop_beat;
+   logic r_flush_cl_beat, n_flush_cl_beat;
 `ifdef CHOP_DEBUG
    always_ff@(negedge clk)
      begin
@@ -880,6 +892,7 @@ endfunction
 	     r_flush_cl_req <= 1'b0;
 	     r_chop_wait <= 1'b0;
 	     r_chop_beat <= 1'b0;
+	     r_flush_cl_beat <= 1'b0;
 	     r_tlb_addr <= 'd0;
 	     r_cache_idx <= 'd0;
 	     r_cache_tag <= 'd0;
@@ -933,6 +946,7 @@ endfunction
 	     r_flush_cl_req <= n_flush_cl_req;
 	     r_chop_wait <= n_chop_wait;
 	     r_chop_beat <= n_chop_beat;
+	     r_flush_cl_beat <= n_flush_cl_beat;
 	     r_cache_idx <= t_cache_idx;
 	     r_tlb_addr <= n_tlb_addr;
 	     r_cache_tag <= t_cache_tag;
@@ -1793,6 +1807,7 @@ endfunction
 	t_reset_graduated = 1'b0;
 	n_chop_wait = r_chop_wait;
 	n_chop_beat = r_chop_beat;
+	n_flush_cl_beat = r_flush_cl_beat;
 	t_force_clear_busy = 1'b0;
 	
 	t_incr_busy = 1'b0;
@@ -2489,9 +2504,20 @@ endfunction
 		 end
 	       else
 		 begin
-		    n_state = ACTIVE;
+		    /* clean (or non-hit) line: nothing to write back.  Still
+		     * double-beat so both 16B lines of the 32B block get invalidated. */
 		    t_mark_invalid = 1'b1;
-		    n_flush_complete = 1'b1;
+		    if(!r_flush_cl_beat)
+		      begin
+			 n_flush_cl_beat = 1'b1;
+			 n_state = FLUSH_CL_BEAT2_RD;
+		      end
+		    else
+		      begin
+			 n_flush_cl_beat = 1'b0;
+			 n_flush_complete = 1'b1;
+			 n_state = ACTIVE;
+		      end
 		 end
 	    end // case: FLUSH_CL
 	  FLUSH_CL_WAIT:
@@ -2516,13 +2542,31 @@ endfunction
 			  n_chop_beat = 1'b0;
 			  n_state = ACTIVE;
 		       end
+		     else if(!r_flush_cl_beat)
+		       begin
+			  /* Index / whole-line FLUSH_CL writeback beat 0 done ->
+			   * re-run on set+1 so 32B-stride Index_WB_Invalidate covers
+			   * both 16B lines. */
+			  n_flush_cl_beat = 1'b1;
+			  n_state = FLUSH_CL_BEAT2_RD;
+		       end
 		     else
 		       begin
-			  /* Index / whole-line FLUSH_CL (not a Hit-op chop) */
+			  /* beat 1 done -> both 16B lines covered; complete the funnel */
+			  n_flush_cl_beat = 1'b0;
 			  n_flush_complete = 1'b1;
 			  n_state = ACTIVE;
 		       end
-		  end	       
+		  end
+	    end
+	  FLUSH_CL_BEAT2_RD:
+	    begin
+	       /* re-index the tag/data RAM to (flush_cl_addr+16)'s set (this set + 1);
+		* its registered outputs are valid next cycle in FLUSH_CL, which then
+		* writes that line back by its OWN cached tag (r_tag_out/r_cache_idx).
+		* r_flush_cl_beat is already 1. */
+	       t_cache_idx = w_flush_cl_idx1;
+	       n_state = FLUSH_CL;
 	    end
 	  CHOP_BEAT2_RD:
 	    begin
