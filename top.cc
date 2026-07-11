@@ -1,6 +1,14 @@
 #include "top.hh"
 #include "sgi_indy.hh"
 
+/* l2.sv's `ifdef VERILATOR` L2DBG descriptor-line tracer DPI probes are only
+ * implemented in the henry full-system tb (henry_tb.cpp).  ooo_core does no L2
+ * tracing, so give it no-op defs to satisfy the link. */
+extern "C" void l2_line_log(int, unsigned long long, unsigned long long,
+                            unsigned long long, int, int) {}
+extern "C" void l2_chk_log(unsigned long long, int, int, int, int,
+                           unsigned long long, unsigned long long) {}
+
 /* Checkpoint-resume DPI seed hooks (used by the henry full-system tb to inject a
  * fast-forwarded ISS state at reset).  ooo_core never resumes from a checkpoint, so
  * have_checkpoint() returns 0 -> the RTL seed branches are dead; these stubs only

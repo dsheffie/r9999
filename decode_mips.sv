@@ -754,7 +754,7 @@ module decode_mips(
 			   uop.dst_valid = 1'b1;
 			   uop.dst = 'd31;
 			   uop.srcB = 'd31;
-			   uop.srcB_valid = (rs == 'd0) ? 1'b0 : 1'b1;
+			   uop.srcB_valid = 1'b0;   /* *al links unconditionally: no old-r31 src */
 			end
 		      'd16:
 			begin /* BLTZAL */
@@ -762,7 +762,7 @@ module decode_mips(
 			   uop.dst_valid = 1'b1;
 			   uop.dst = 'd31;
 			   uop.srcB = 'd31;
-			   uop.srcB_valid = 1'b1;
+			   uop.srcB_valid = 1'b0;   /* *al links unconditionally: no old-r31 src */
 			end
 		      'd18:
 			begin /* BLTZALL (likely) */
@@ -771,7 +771,7 @@ module decode_mips(
 			   uop.dst_valid = 1'b1;
 			   uop.dst = 'd31;
 			   uop.srcB = 'd31;
-			   uop.srcB_valid = 1'b1;
+			   uop.srcB_valid = 1'b0;   /* *al links unconditionally: no old-r31 src */
 			end
 		      'd19:
 			begin /* BGEZALL (likely) */
@@ -780,7 +780,7 @@ module decode_mips(
 			   uop.dst_valid = 1'b1;
 			   uop.dst = 'd31;
 			   uop.srcB = 'd31;
-			   uop.srcB_valid = 1'b1;
+			   uop.srcB_valid = 1'b0;   /* *al links unconditionally: no old-r31 src */
 			end
 		      /* trap-immediates: srcA=rs (set above), compare vs sign-ext imm;
 		       * reuse the register-trap ops with srcB_valid=0.  These are NOT

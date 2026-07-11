@@ -708,9 +708,11 @@ void branch(uint32_t inst, state_t *s) {
 
   s->pc += 4;
   if(isLikely) {
+    /* BLTZALL/BGEZALL: link (ra <- pc+8) is UNCONDITIONAL; only the branch
+     * direction is conditional.  Fire it even when NOT taken. */
+    if(saveReturn)
+      s->gpr[31] = npc + 4;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
     if(takeBranch) {
-      if(saveReturn)
-	s->gpr[31] = npc + 4;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
       if(!run_delay_slot<EL>(s))
 	s->pc = (imm+npc);
     }
@@ -720,10 +722,12 @@ void branch(uint32_t inst, state_t *s) {
   }
   else {
     bool ds_faulted = run_delay_slot<EL>(s);
+    /* BLTZAL/BGEZAL: link UNCONDITIONALLY (not gated on takeBranch).  The PIC
+     * bootstrap idiom `bltzal rX,.+8` with rX>=0 is the not-taken-but-link case. */
+    if(saveReturn) {
+      s->gpr[31] = npc + 4;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
+    }
     if(takeBranch){
-      if(saveReturn) {
-	s->gpr[31] = npc + 4;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
-      }
       if(!ds_faulted)
 	s->pc = (imm+npc);
     }

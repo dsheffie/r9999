@@ -2206,8 +2206,8 @@ module exec(clk,
 	    begin
 	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
 	       t_mispred_br = int_uop.br_pred != t_take_br;
-	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;	  
-     	       t_result = t_take_br ?  int_uop.pc[`M_WIDTH-1:0] + 'd8 : t_srcB;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+     	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end // case: BGEZAL
@@ -2281,7 +2281,7 @@ module exec(clk,
 	       t_take_br = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}}));
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-	       t_result = t_take_br ? int_uop.pc[`M_WIDTH-1:0] + 'd8 : t_srcB;
+	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -2290,7 +2290,7 @@ module exec(clk,
 	       t_take_br = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}}));
 	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-	       t_result = t_take_br ? int_uop.pc[`M_WIDTH-1:0] + 'd8 : t_srcB;
+	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -2299,7 +2299,7 @@ module exec(clk,
 	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
 	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-	       t_result = t_take_br ? int_uop.pc[`M_WIDTH-1:0] + 'd8 : t_srcB;
+	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
