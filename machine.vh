@@ -132,7 +132,7 @@
  `elsif BIG_SIM_L2
   `define LG_L2_NUM_SETS 16     /* 65536 lines x 16B = 1MB (sim-only; too big for FPGA BRAM) */
  `else
-  `define LG_L2_NUM_SETS 10
+  `define LG_L2_NUM_SETS 13     /* 8192 lines x 16B = 128KB (default; fits henry xczu3eg BRAM) */
  `endif
 `endif
 
