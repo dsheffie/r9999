@@ -2709,7 +2709,7 @@ module exec(clk,
 	       t_mem_tail.op = MEM_SC;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.is_atomic = 1'b1;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;		    
 	    end // case: SW
@@ -2730,19 +2730,19 @@ module exec(clk,
 	  LW:
 	    begin
 	       t_mem_tail.op = MEM_LW;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
 	    end // case: LW
 	  LWU:
 	    begin
 	       t_mem_tail.op = MEM_LWU;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
 	    end
 	  LWL:
 	    begin
 	       t_mem_tail.op = MEM_LWL;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.bad_addr = w_bad_seg_perms;
 	    end // case: LWL
@@ -2750,37 +2750,37 @@ module exec(clk,
 	    begin
 	       t_mem_tail.op = MEM_LWR;
 	       t_mem_tail.rob_ptr = mem_uq.rob_ptr;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = w_bad_seg_perms;	       
 	    end // case: LWR
 	  LB:
 	    begin
 	       t_mem_tail.op = MEM_LB;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = w_bad_seg_perms;	       
 	    end
 	  LBU:
 	    begin
 	       t_mem_tail.op = MEM_LBU;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = w_bad_seg_perms;
 	    end // case: LBU
 	  LHU:
 	    begin
 	       t_mem_tail.op = MEM_LHU;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = w_agu[0] | w_bad_seg_perms;
 	    end // case: LBU
 	  LH:
 	    begin
 	       t_mem_tail.op = MEM_LH;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = w_agu[0] | w_bad_seg_perms;
 	    end // case: LH
 	  LD:
 	    begin
 	       t_mem_tail.op = MEM_LD;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
 	    end
 	  SD:
@@ -2793,14 +2793,14 @@ module exec(clk,
 	  LDL:
 	    begin
 	       t_mem_tail.op = MEM_LDL;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.bad_addr = w_bad_seg_perms;
 	    end
 	  LDR:
 	    begin
 	       t_mem_tail.op = MEM_LDR;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.bad_addr = w_bad_seg_perms;
 	    end
@@ -2821,14 +2821,14 @@ module exec(clk,
 	  LL:
 	    begin
 	       t_mem_tail.op = MEM_LL;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = (w_agu[1:0] != 2'd0) | w_bad_seg_perms;
 	       t_mem_tail.is_atomic = 1'b1;
 	    end
 	  LLD:
 	    begin
 	       t_mem_tail.op = MEM_LLD;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
 	       t_mem_tail.is_atomic = 1'b1;
 	    end
@@ -2836,7 +2836,7 @@ module exec(clk,
 	    begin
 	       t_mem_tail.op = MEM_SCD;
 	       t_mem_tail.is_store = 1'b1;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.bad_addr = (w_agu[2:0] != 3'd0) | w_bad_seg_perms;
 	       t_mem_tail.is_atomic = 1'b1;	       
@@ -2870,7 +2870,7 @@ module exec(clk,
 	       t_mem_tail.op = MEM_MOV;
 	       t_mem_tail.addr = mem_uq.jmp_imm[0] ? {{32{r_fp_rd_srcB[63]}}, r_fp_rd_srcB[63:32]}
 						   : {{32{r_fp_rd_srcB[31]}}, r_fp_rd_srcB[31:0]};
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.fp_dst = 1'b0;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.mapped = 1'b0;
@@ -2892,7 +2892,7 @@ module exec(clk,
 	       /* FPR->GPR 64-bit move: GPR[rt] = FPR[fs] (full register) */
 	       t_mem_tail.op = MEM_MOV;
 	       t_mem_tail.addr = r_fp_rd_srcB;
-	       t_mem_tail.dst_valid = 1'b1;
+	       t_mem_tail.dst_valid = mem_uq.dst_valid;
 	       t_mem_tail.fp_dst = 1'b0;
 	       t_mem_tail.dst_ptr = mem_uq.dst;
 	       t_mem_tail.mapped = 1'b0;
