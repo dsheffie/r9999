@@ -2,7 +2,7 @@ UNAME_S = $(shell uname -s)
 
 OBJ = top.o verilated.o verilated_vcd_c.o loadelf.o interpret.o disassemble.o helper.o saveState.o sparse_mem.o sgi_hpc.o sgi_mc.o sgi_scc.o
 
-SV_SRC = core_l1d_l1i.sv core.sv exec.sv decode_mips.sv shiftregbit.sv shift_right.sv mul.sv fpu.sv fpu_add.sv fpu_mul.sv fpu_compare.sv fpu_f2i.sv fpu_i2f.sv fpu_f2f.sv fp_regfile.sv find_first_set.sv divider.sv l1d.sv l1i.sv machine.vh rob.vh uop.vh fp_compare.vh ram1r1w.sv ram2r1w.sv popcount.sv count_leading_zeros.sv unsigned_divider.sv fair_sched.sv ppa32.sv csa.sv rf4r2w.sv reg_ram1rw.sv l2.sv mipsseg.sv tlb.sv predecode.sv
+SV_SRC = core_l1d_l1i.sv core.sv exec.sv decode_mips.sv shiftregbit.sv shift_right.sv mul.sv fpu.sv fpu_add.sv fpu_mul.sv fpu_compare.sv fpu_f2i.sv fpu_i2f.sv fpu_f2f.sv fp_regfile.sv find_lowest_set_bit.sv divider.sv l1d.sv l1i.sv machine.vh rob.vh uop.vh fp_compare.vh ram1r1w.sv ram2r1w.sv popcount.sv count_leading_zeros.sv unsigned_divider.sv fair_sched.sv ppa32.sv csa.sv rf4r2w.sv reg_ram1rw.sv l2.sv mipsseg.sv tlb.sv predecode.sv
 
 ifeq ($(UNAME_S),Linux)
 	CXX = clang++-16 -flto

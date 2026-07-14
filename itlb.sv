@@ -219,7 +219,7 @@ module itlb(clk,
    logic [NN-1:0] r_hits;
    always_ff@(posedge clk) r_hits <= reset ? '0 : w_hits;
 
-   find_first_set#(.LG_N(LG_N))
+   find_lowest_set_bit#(.LG_N(LG_N))
    ffs(.in(r_hits),
        .y(w_idx));
 

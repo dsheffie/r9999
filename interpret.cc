@@ -308,10 +308,13 @@ static void raise_trap(state_t *s) {
   s->pc = sext32(exc_vector_general(s));
 }
 
-void raise_int(state_t *s, uint32_t epc) {
+void raise_int(state_t *s, uint32_t epc, uint32_t ip) {
   s->ll_link_valid = false;   /* interrupt breaks the LL/SC link */
   s->cpr0[CPR0_EPC]   = epc;
-  s->cpr0[CPR0_CAUSE] = (1u << 15);  /* IP[7]=1 (timer), ExcCode=0, BD=0 */
+  /* Cause.IP[7:0] = the REAL pending bits (from the RTL's w_ip in the checker),
+   * ExcCode=0 (Int), BD=0.  Was hardcoded to IP[7] (timer) which mis-dispatched
+   * every software (IP[1]) / device (IP[2]) interrupt in the IRIX ISR. */
+  s->cpr0[CPR0_CAUSE] = (ip & 0xffu) << 8;
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(exc_vector_general(s));
 }
@@ -419,6 +422,7 @@ uint64_t g_iss_last_ld_va = 0;
  * tlbwi/tlbwr writes (and the tlbwr Random decrement) are suppressed, so the ISS TLB stays
  * bit-identical to the RTL's.  Default false = standalone ISS keeps its self-contained model. */
 bool g_iss_tlb_ext = false;
+bool g_iss_os_mode = false;
 
 /* R4000 addressing-mode width for the XTLB-vs-TLB refill vector: XTLB (offset 0x080)
  * when the CURRENT operating mode uses 64-bit addressing (kernel&KX | super&SX |
@@ -2148,10 +2152,23 @@ void execMips(state_t *s) {
       }
       case 0x0C: /* syscall */
       case 0x0D: /* break */
-	s->brk = 1;
-	s->pc += 4;    /* advance so the checker stays in sync */
-	if(!s->silent) {
-	  std::cout << "got break or syscall\n";
+	if(g_iss_os_mode) {
+	  /* Real OS (henry checker): trap into the kernel general-exception vector
+	   * (0x180) with ExcCode 8 (Syscall) / 9 (Break), exactly like the RTL --
+	   * NOT a halt.  IRIX userspace issues syscalls constantly; halting here is
+	   * what silently killed the golden ISS at the first userspace syscall and
+	   * left the crash region un-checked. */
+	  set_exc_pc(s);   /* EPC + BD, gated on EXL==0 */
+	  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~0x0000007cu) |
+	                        (((funct == 0x0C) ? 8u : 9u) << 2);
+	  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+	  s->pc = sext32(exc_vector_general(s));
+	} else {
+	  s->brk = 1;
+	  s->pc += 4;    /* advance so the checker stays in sync */
+	  if(!s->silent) {
+	    std::cout << "got break or syscall\n";
+	  }
 	}
 	s->insn_histo[mipsInsn::BREAK]++;
 	break;
@@ -2827,9 +2844,20 @@ void execMips(state_t *s) {
       case 0x2e:
 	_swr<EL>(inst, s);
 	break;
-      case 0x2f: /* cache -- treated as NOP for now */
+      case 0x2f: { /* cache: Hit-type ops (op[4:2]>=4) TRANSLATE the VA and take a TLB
+		    * refill/invalid on a mapped miss, exactly like the RTL (the co-sim
+		    * checker was flooding TLB-DELTAs here because the ISS NOP'd the
+		    * translation).  Index-type ops + the cache effect itself stay NOPs. */
+	uint32_t cop = (inst >> 16) & 0x1f;
+	if(cop >= 0x10) {                                   /* Hit_* -> translates */
+	  uint32_t base = (inst >> 21) & 0x1f;
+	  int16_t  off  = (int16_t)(inst & 0xffff);
+	  (void)va_translate(s, s->gpr[base] + (int64_t)off, tlb_op::load);
+	  if(s->tlb_fault) break;                           /* exception raised; pc -> vector */
+	}
 	s->pc += 4;
 	break;
+      }
       case 0x31:
 	_lwc1<EL>(inst, s);
 	break;

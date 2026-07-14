@@ -184,7 +184,7 @@ module tlb(clk,
    //	       {r_pa_data[w_idx[LG_N-1:0]][51:4], va[15:0]};
 	       
 	       	          
-   find_first_set#(.LG_N(LG_N))
+   find_lowest_set_bit#(.LG_N(LG_N))
    ffs(.in(w_hits),
        .y(w_idx));
 

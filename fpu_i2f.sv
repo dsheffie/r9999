@@ -23,7 +23,7 @@ module fpu_i2f(in, src_long, fmt, rm, out, fflags);
 
    // ---- normalize: leading-1 index = unbiased exponent ----
    wire [6:0] 	 ffs;                  // 0..64
-   find_first_set #(.LG_N(6)) z0 (.in(mag), .y(ffs));
+   find_lowest_set_bit #(.LG_N(6)) z0 (.in(mag), .y(ffs));
    wire [63:0] 	 shifted = mag << (7'd64 - ffs);   // leading 1 -> bit 64 (out)
 
    // ---- rounding (fmt-dependent fraction width) ----

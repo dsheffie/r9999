@@ -43,6 +43,7 @@ module exec(clk,
 	    core_fcsr_cause6,
 	    core_fcsr_flags5,
 	    exec_epc,
+	    cause_ip,
 	    core_wr_tlbp,
 	    core_tlbp_hit,
 	    core_tlbp_index,
@@ -142,6 +143,7 @@ module exec(clk,
    input logic [5:0]	       core_tlbp_index;
    
    output logic [7:0]	       asid;
+   output logic [7:0]	       cause_ip;   /* Cause.IP[7:0] pending bits, for co-sim ISR dispatch */
    
    output logic		       sr_bev;
    output logic		       sr_exl;
@@ -855,10 +857,10 @@ module exec(clk,
    
    wire [N_INT_SCHED_ENTRIES-1:0] w_alu_sched_oldest_ready;
    
-   find_first_set#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc( .in(~r_alu_sched_valid),
+   find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc( .in(~r_alu_sched_valid),
 							      .y(t_alu_sched_alloc_ptr));
 
-   find_first_set#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_select( .in(w_alu_sched_oldest_ready),
+   find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_select( .in(w_alu_sched_oldest_ready),
 								.y(t_alu_sched_select_ptr));
 
    
@@ -3550,6 +3552,17 @@ module exec(clk,
 	  begin
 	     n_compare = t_srcA[31:0];
 	     n_timer_ip = 1'b0;
+`ifdef TIMER_RARE
+	     /* CO-SIM ONLY (never silicon): stretch the LARGE periodic scheduler tick
+	      * `TIMER_RARE`-fold so timer-driven context switches -- the checker's main
+	      * divergence points -- become rare, letting the lockstep checker run far
+	      * past the ~62M scheduler wall.  Leave short calibration intervals
+	      * (get_r4k_counter ~4096) untouched so IRIX still boots. */
+	     if((t_srcA[31:0] - r_count) > 32'd100000)
+	       begin
+		  n_compare = r_count + ((t_srcA[31:0] - r_count) * `TIMER_RARE);
+	       end
+`endif
 	  end
 	else if(core_wr_cause)
 	  begin
@@ -3642,6 +3655,7 @@ module exec(clk,
      end
    
    wire [7:0] w_ip = {r_timer_ip, r_ip6, r_ip5, r_ip4, r_ip3, r_ip2, r_ip1, r_ip0};
+   assign cause_ip = w_ip;
    /* interrupt is pending when IE=1, EXL=0, ERL=0, and any (IP & IM) bit set */
    assign irq_pending = r_sr_ie & ~r_sr_exl & ~r_sr_erl & |(w_ip & r_sr_im);
    assign cp0_count   = r_count;

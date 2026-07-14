@@ -132,6 +132,7 @@ module core(clk,
 	    status_reg,
 	    badvaddr,
 	    cause,
+	    cause_ip,
 	    asid,
 	    tlb_entry_out,
 	    tlb_entry_out_valid,
@@ -275,6 +276,7 @@ module core(clk,
    output logic [`M_WIDTH-1:0]		  badvaddr;
    
    output logic [4:0]			  cause;
+   output logic [7:0]			  cause_ip;
    output logic [7:0]			  asid;
    output tlb_data_t		          tlb_entry_out;
    output logic				  tlb_entry_out_valid;
@@ -2973,10 +2975,10 @@ module core(clk,
 
 
    
-   find_first_set#(`LG_HILO_PRF_ENTRIES) ffs_hilo(.in(r_hilo_prf_free),
+   find_lowest_set_bit#(`LG_HILO_PRF_ENTRIES) ffs_hilo(.in(r_hilo_prf_free),
 						 .y(t_hilo_ffs));
 
-   find_first_set#(`LG_FCR_PRF_ENTRIES) ffs_fcr(.in(r_fcr_prf_free),
+   find_lowest_set_bit#(`LG_FCR_PRF_ENTRIES) ffs_fcr(.in(r_fcr_prf_free),
 						.y(t_fcr_ffs));
    always_comb
      begin
@@ -3005,8 +3007,8 @@ module core(clk,
 	   assign w_fp_free_b1[fpgi] = (fpgi >= N_PRF_ENTRIES/2) ? r_fp_prf_free[fpgi] : 1'b0;
 	end
    endgenerate
-   find_first_set#(`LG_PRF_ENTRIES) ffs_fp0(.in(w_fp_free_b0), .y(t_fp_ffs0));
-   find_first_set#(`LG_PRF_ENTRIES) ffs_fp1(.in(w_fp_free_b1), .y(t_fp_ffs1));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_fp0(.in(w_fp_free_b0), .y(t_fp_ffs0));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_fp1(.in(w_fp_free_b1), .y(t_fp_ffs1));
    always_comb
      begin
 	n_fp_prf_free = r_fp_prf_free;
@@ -3058,10 +3060,10 @@ module core(clk,
    assign w_mem_even_full = (|w_mem_even) == 1'b0;
    assign w_mem_odd_full  = (|w_mem_odd)  == 1'b0;
 
-   find_first_set#(`LG_PRF_ENTRIES) ffs_ae(.in(w_alu_even), .y(w_ffs_alu_even));
-   find_first_set#(`LG_PRF_ENTRIES) ffs_ao(.in(w_alu_odd),  .y(w_ffs_alu_odd));
-   find_first_set#(`LG_PRF_ENTRIES) ffs_me(.in(w_mem_even), .y(w_ffs_mem_even));
-   find_first_set#(`LG_PRF_ENTRIES) ffs_mo(.in(w_mem_odd),  .y(w_ffs_mem_odd));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_ae(.in(w_alu_even), .y(w_ffs_alu_even));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_ao(.in(w_alu_odd),  .y(w_ffs_alu_odd));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_me(.in(w_mem_even), .y(w_ffs_mem_even));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_mo(.in(w_mem_odd),  .y(w_ffs_mem_odd));
 
    always_ff@(posedge clk)
      begin
@@ -3312,6 +3314,7 @@ module core(clk,
 	   .core_cause(r_cause),
 	   .core_ce(r_ce),
 	   .exec_epc(w_exec_epc),
+	   .cause_ip(cause_ip),
 	   .core_wr_tlbp(t_wr_tlbp),
 	   .core_tlbp_hit(t_tlbp_hit),
 	   .core_tlbp_index(t_tlbp_index),
