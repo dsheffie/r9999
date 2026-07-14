@@ -73,6 +73,17 @@ static bool tlb_probe_ro(state_t *s, uint64_t va, uint32_t *pa, bool for_store =
   return false;
 }
 
+/* Co-sim retire_trace: fetch the big-endian instruction word at a virtual PC via the
+ * ISS TLB.  Code is identical in RTL & ISS memory (only DATA diverges), so this yields
+ * the RTL's retired instruction for the trace even when data state has diverged.  Sets
+ * *ppa to the physical address; returns 0 (and *ppa=0) on an untranslatable PC. */
+uint32_t iss_fetch_inst(state_t *s, uint64_t vpc, uint32_t *ppa) {
+  uint32_t pa = 0;
+  if(!tlb_probe_ro(s, vpc, &pa)) { if(ppa) { *ppa = 0; } return 0; }
+  if(ppa) { *ppa = pa; }
+  return bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(pa));
+}
+
 template <bool EL> void execMips(state_t *s);
 
 void execMips(state_t *s) {

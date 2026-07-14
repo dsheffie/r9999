@@ -332,6 +332,9 @@ static inline uint32_t get_branch_target(uint32_t pc, uint32_t inst) {
 
 void initState(state_t *s);
 void execMips(state_t *s);
+/* co-sim retire_trace: fetch the BE instruction word at a virtual PC via the ISS TLB
+ * (code is identical in RTL & ISS memory); *ppa gets the PA.  0 on untranslatable PC. */
+uint32_t iss_fetch_inst(state_t *s, uint64_t vpc, uint32_t *ppa);
 void raise_int(state_t *s, uint32_t epc, uint32_t ip = (1u << 7));
 
 
