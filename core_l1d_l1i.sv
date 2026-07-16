@@ -66,6 +66,7 @@ module core_l1d_l1i(clk,
 		    status_reg,
 		    badvaddr,
 		    cause,
+		    cause_ip,
 		    l1i_flush_done,
 		    l1d_flush_done,
 		    l2_flush_done,
@@ -193,6 +194,7 @@ module core_l1d_l1i(clk,
    output logic [31:0]			  status_reg;
    output logic [`M_WIDTH-1:0]		  badvaddr;
    output logic [4:0]			  cause;
+   output logic [7:0]			  cause_ip;
 
    
       
@@ -789,6 +791,7 @@ module core_l1d_l1i(clk,
 	     .status_reg(status_reg),
 	     .badvaddr(badvaddr),
 	     .cause(cause),
+	     .cause_ip(cause_ip),
 	     .asid(w_asid),
 	     .tlb_entry_out_valid(tlb_entry_out_valid),
 	     .tlb_entry_out(tlb_entry_out),	   	     

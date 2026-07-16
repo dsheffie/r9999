@@ -33,7 +33,7 @@ module fair_sched#(parameter LG_N = 2)(clk, rst, in, y);
 	  end
      end // always_ff@ (posedge clk)
 
-   find_first_set#(LG_N) f (.in(t_in), .y(t_y));
+   find_lowest_set_bit#(LG_N) f (.in(t_in), .y(t_y));
    wire [LG_N-1:0] w_yy = t_y[LG_N-1:0] - r_cnt;
    
    always_comb
