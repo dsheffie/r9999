@@ -9,6 +9,15 @@ import "DPI-C" function void record_fetch(int push1, int push2, int push3, int p
 
 `endif
 
+`ifdef ENABLE_STORE_CHECK
+// L1I line-lifecycle trace (henry_tb only): l1i_fill records the fetch pc/cycle that brought
+// an instruction line into the L1I (speculative if a wrong-path fetch); l1i_flush marks the
+// whole L1I invalidated (r9999 only does whole-cache I-flush).  Pairs with the L1D hooks to
+// answer "is the stale reservoir the L1D (data) or the L1I (code)?"
+import "DPI-C" function void l1i_fill(input longint unsigned cycle, input longint unsigned pa);
+import "DPI-C" function void l1i_flush(input longint unsigned cycle);
+`endif
+
 
 
 
@@ -325,6 +334,22 @@ endfunction
      begin
 	r_cycle <= reset ? 'd0 : r_cycle + 'd1;
      end
+
+`ifdef ENABLE_STORE_CHECK
+   always_ff@(posedge clk)
+     begin
+	if(!reset)
+	  begin
+	     /* L1I line fill: the reload data arrived for r_miss_pc's line (the fetch
+	      * that missed brought it in -- speculative if a mispredicted-path fetch). */
+	     if((r_state == INJECT_RELOAD) & mem_rsp_valid)
+	       l1i_fill(r_cycle, {r_miss_pc[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}});
+	     /* whole-L1I flush completed (I-cache CACHE op / code-coherence flush). */
+	     if(n_flush_complete)
+	       l1i_flush(r_cycle);
+	  end
+     end
+`endif
 
    assign flush_complete = r_flush_complete;
    

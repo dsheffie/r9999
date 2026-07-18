@@ -39,8 +39,12 @@ module l2(clk,
 	  mem_rsp_load_data,
 
 	  cache_hits,
-	  cache_accesses
-	  
+	  cache_accesses,
+
+	  // DMA-coherence snoop (from henry's snoop FIFO): invalidate one L2 line per request.
+	  snoop_req_valid,
+	  snoop_req_addr,
+	  snoop_req_ack
 	  );
 
    input logic clk;
@@ -59,6 +63,17 @@ module l2(clk,
    output logic l1_mem_req_ack;
    input logic [`PA_WIDTH-1:0] l1_mem_req_addr;
    input logic	      l1_mem_req_cacheable;
+`ifdef ENABLE_L2_NOCACHE
+   /* EXPERIMENT: entirely disable the L2 as a cache.  Route cacheable DATA ops
+    * (loads/stores/line-fills, opcode < MEM_INVL=24) down the uncached
+    * pass-through-to-DRAM path so the L2 NEVER fills a line -> holds nothing ->
+    * no stale reservoir AND no inclusivity vs the L1D.  Keep CACHE-management ops
+    * (MEM_INVL=24, MEM_WB=26, ... >= 24) on the normal cacheable path so their
+    * handlers still run (they find an empty L2 and just ack / write through). */
+   wire w_l2_cacheable = l1_mem_req_cacheable & (l1_mem_req_opcode >= 5'd24);
+`else
+   wire w_l2_cacheable = l1_mem_req_cacheable;
+`endif
    input logic [15:0] l1_mem_req_mask;
    
    input logic [127:0] l1_mem_req_store_data;
@@ -81,6 +96,14 @@ module l2(clk,
 
    output logic [63:0] cache_hits;
    output logic [63:0] cache_accesses;
+   input logic 	       snoop_req_valid;
+   input logic [`PA_WIDTH-1:0] snoop_req_addr;
+   output logic        snoop_req_ack;
+   logic 	       r_snoop_ack, n_snoop_ack;
+   assign snoop_req_ack = r_snoop_ack;
+`ifdef VERILATOR
+   logic [63:0]        r_snoop_hit, n_snoop_hit, r_snoop_dirty, n_snoop_dirty;
+`endif
    
    
    localparam LG_L2_LINES = `LG_L2_NUM_SETS;
@@ -231,6 +254,11 @@ module l2(clk,
 	     r_rsp_valid <= 1'b0;
 	     r_reload <= 1'b0;
 	     r_req_ack <= 1'b0;
+	     r_snoop_ack <= 1'b0;
+`ifdef VERILATOR
+	     r_snoop_hit <= 64'd0;
+	     r_snoop_dirty <= 64'd0;
+`endif
 	     r_store_data <= 'd0;
 	     r_store_mask <= 'd0;	     
 	     r_is_uncache <= 1'b0;
@@ -260,6 +288,13 @@ module l2(clk,
 	     r_rsp_valid <= n_rsp_valid;
 	     r_reload <= n_reload;
 	     r_req_ack <= n_req_ack;
+	     r_snoop_ack <= n_snoop_ack;
+`ifdef VERILATOR
+	     r_snoop_hit <= n_snoop_hit;
+	     r_snoop_dirty <= n_snoop_dirty;
+	     if((r_cycle[23:0] == 24'd0) & ((r_snoop_hit != 64'd0) | (r_snoop_dirty != 64'd0)))
+	       $display("[snoopstat] cyc=%0d snoop_hits=%0d dirty=%0d", r_cycle, r_snoop_hit, r_snoop_dirty);
+`endif
 	     r_store_data <= n_store_data;
 	     r_store_mask <= n_store_mask;
 	     r_is_uncache <= n_is_uncache;
@@ -419,6 +454,11 @@ module l2(clk,
 	n_saveaddr = r_saveaddr;
 	
 	n_req_ack = 1'b0;
+	n_snoop_ack = 1'b0;
+`ifdef VERILATOR
+	n_snoop_hit = r_snoop_hit;
+	n_snoop_dirty = r_snoop_dirty;
+`endif
 	n_mem_req = r_mem_req;
 	n_mem_opcode = r_mem_opcode;
 		
@@ -492,9 +532,29 @@ module l2(clk,
 		    n_store_mask = 16'hffff;
 		    //$display("GOT FLUSH REQUEST at cycle %d", r_cycle);
 		 end
+	       else if(snoop_req_valid)
+		 begin
+		    /* DMA-coherence snoop: the SCSI DMA engine wrote this line to DRAM
+		     * behind the CPU caches, and IRIX can't invalidate r9999's (hidden)
+		     * L2.  Synthesize a MEM_INVL so CHECK_VALID_AND_TAG drops the now-
+		     * stale L2 copy (a subsequent L1 miss then refetches fresh DRAM).
+		     * Priority above the L1 request; the L1 holds its req one more cycle. */
+		    t_idx = snoop_req_addr[LG_L2_LINES+3:4];
+		    n_tag = snoop_req_addr[`PA_WIDTH-1:LG_L2_LINES+4];
+		    n_addr = {snoop_req_addr[`PA_WIDTH-1:4], 4'd0};
+		    n_saveaddr = {snoop_req_addr[`PA_WIDTH-1:4], 4'd0};
+		    n_opcode = MEM_SNOOP_INVL;
+		    n_snoop_ack = 1'b1;
+		    /* IDLE presents t_idx to the SYNCHRONOUS tag/valid/dirty RAMs; their
+		     * output is valid only NEXT cycle.  Go through WAIT_FOR_RAM (as the
+		     * CPU path does) so CHECK_VALID_AND_TAG sees w_hit/w_dirty for THIS
+		     * line -- skipping it reads the prior index and invalidates the wrong
+		     * line (the boot wedge). */
+		    n_state = WAIT_FOR_RAM;
+		 end
 	       else if(l1_mem_req_valid)
 		 begin
-		    if(l1_mem_req_cacheable == 1'b0)
+		    if(w_l2_cacheable == 1'b0)
 		      begin
 			 /* L2 inclusive of L1: always look the line up first; on an
 			  * uncached hit, evict (write back if dirty) + invalidate before
@@ -604,6 +664,31 @@ module l2(clk,
 			 n_state = IDLE;
 			 n_rsp_valid = 1'b1;
 		      end
+		 end
+	       else if(r_opcode == MEM_SNOOP_INVL)
+		 begin
+		    /* DMA-coherence snoop discard: the SCSI DMA overwrote DRAM for this
+		     * line behind the caches, and IRIX (in-order R4x00 model) never issues
+		     * a CACHE op for a buffer it didn't touch -- so a speculatively-cached
+		     * stale L2 copy would survive.  Drop it WITHOUT a writeback: DRAM now
+		     * holds the fresh DMA data, so writing a stale L2 copy back (as MEM_INVL
+		     * does) would clobber it.  A dirty stale copy is a recycled prior-owner
+		     * page, never live data.  No L1 response (FIFO acked in IDLE). */
+		    if(w_hit)
+		      begin
+			 t_wr_valid = 1'b1; t_valid = 1'b0;
+		      end
+`ifdef VERILATOR
+		    if(w_hit)
+		      begin
+			 n_snoop_hit  = r_snoop_hit  + 64'd1;
+			 n_snoop_dirty = r_snoop_dirty + (w_dirty ? 64'd1 : 64'd0);
+			 if(w_dirty & (r_snoop_dirty < 64'd40))
+			   $display("[snoopdirty] cyc=%0d snoop_pa=%x tag=%x idx=%x d0=%x",
+				    r_cycle, r_saveaddr, w_tag, t_idx, w_d0[31:0]);
+		      end
+`endif
+		    n_state = IDLE;
 		 end
 	       else if(r_opcode == MEM_WB)
 		 begin

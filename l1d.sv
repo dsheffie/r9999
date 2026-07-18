@@ -4,6 +4,12 @@
 // EXPERIMENT: fence mapped cached loads to ROB-head (non-speculative) -- read-path
 // DMA coherence (stale INQUIRY-buffer reads).  Comment out to disable.
 //`define ENABLE_KERNEL_LOAD_FENCE 1
+// EXPERIMENT (speculation-off test): gate EVERY cached mem request (loads AND
+// stores, mapped or kseg0) on being at the ROB head / its committable delay slot,
+// so nothing accesses the L1D speculatively -> no speculative fill of a DMA buffer
+// (the R10000-class non-coherent-DMA hazard).  Very slow (serializes memory), a
+// correctness knob to prove the speculation root cause on silicon.
+//`define ENABLE_MEM_HEAD_SERIALIZE 1
 
 //`define VERBOSE_L1D 1
 
@@ -28,6 +34,28 @@ import "DPI-C" function void wr_log(input longint pc, input int rob_ptr,
 import "DPI-C" function void l1d_wb_log(input longint unsigned pa,
 					input longint unsigned data_lo,
 					input longint unsigned data_hi);
+// IRIX o32 .data stale-load debug: fill-cycle map + bcopy-load read trace.  rd_log = a
+// committed load's pc/pa/data/hit; l1d_fill_log = a line fill (pa+data) so henry_tb can
+// record WHEN each line was last loaded; l1d_cacheop_log = a CACHE-op invalidate (pa).
+// Together they timeline the source line: filled-before-DMA (speculative refill) vs a
+// never-invalidated stale line (incomplete CACHE-inval).
+import "DPI-C" function void rd_log(input longint pc, input longint unsigned addr,
+				    input longint unsigned data, input int hit);
+// L1D line-lifecycle trace: l1d_fill records WHICH instruction (pc) at WHICH cycle brought
+// a line into the L1D (fill); l1d_cacheop records a CACHE-op invalidate/writeback hitting a
+// line (pc = the CACHE-op instruction if known, else 0).  henry_tb correlates: a line filled
+// (speculatively?) and never CACHE-op'd before a DMA overwrote DRAM = the stale-read bug.
+import "DPI-C" function void l1d_fill(input longint unsigned cycle, input longint pc,
+				      input longint unsigned pa,
+				      input longint unsigned data_lo, input longint unsigned data_hi);
+import "DPI-C" function void l1d_cacheop(input longint unsigned cycle, input longint pc,
+					 input longint unsigned pa, input int inval);
+// dirty-set-drop watch: fires when a store commit (t_wr_array, wants dirty=1) coincides with a
+// dirty-CLEAR event (refill or invalidate, which win the single dc_dirty write port) -> the
+// store's dirty=1 is DROPPED -> the line looks clean -> evicted with no writeback.  by_refill
+// distinguishes the refill-clear (1) from the invalidate-clear (0).
+import "DPI-C" function void dirtydrop(input longint unsigned cycle, input longint pc,
+				      input longint unsigned pa, input int by_refill);
 `endif
 
 module l1d(clk,
@@ -164,10 +192,15 @@ module l1d(clk,
     * miss; it then replays through the (already physical) miss-queue retry, which
     * re-indexes with the physical address -> no synonym/duplicate lines can form.
     * (rv64core nu_l1d scheme; see machine.vh LG_L1D_NUM_SETS.) */
-   localparam LG_ALIAS_BITS = (`LG_L1D_CL_LEN + `LG_L1D_NUM_SETS) - `LG_PG_SZ;
-   localparam N_TAG_BITS = `PA_WIDTH - `LG_PG_SZ;
    localparam IDX_START = `LG_L1D_CL_LEN;
    localparam IDX_STOP  = `LG_L1D_CL_LEN + `LG_L1D_NUM_SETS;
+   /* TAG_LSB = min(LG_PG_SZ, IDX_STOP).  For cache >= page the tag is still taken down to
+    * LG_PG_SZ (carries the VIPT alias bits, unchanged).  For a SUB-page cache
+    * (IDX_STOP < LG_PG_SZ) it extends down to IDX_STOP so PA[IDX_STOP..LG_PG_SZ-1] stays
+    * tagged (no aliasing) and {tag,idx,offset} reconstructs the full PA_WIDTH address. */
+   localparam TAG_LSB = (IDX_STOP < `LG_PG_SZ) ? IDX_STOP : `LG_PG_SZ;
+   localparam LG_ALIAS_BITS = IDX_STOP - TAG_LSB;   // == max(0, IDX_STOP - LG_PG_SZ)
+   localparam N_TAG_BITS = `PA_WIDTH - TAG_LSB;
    localparam WORD_START = 2;
    localparam WORD_STOP = WORD_START+LG_WORDS_PER_CL;
    localparam DWORD_START = 3;
@@ -438,7 +471,7 @@ endfunction
     * tag (r_cache_tag2).  For unmapped accesses w_mapped_addr == va (1:1) so this
     * is equivalent; for mapped accesses it is the real physical tag.  Aligned
     * with r_tag_out2/r_req2 (both clocked off the same port-2 request). */
-   wire [N_TAG_BITS-1:0]     w_tlb_tag2 = w_mapped_addr[`PA_WIDTH-1:`LG_PG_SZ];
+   wire [N_TAG_BITS-1:0]     w_tlb_tag2 = w_mapped_addr[`PA_WIDTH-1:TAG_LSB];
    
    
    logic [31:0] 			 r_cycle;
@@ -524,7 +557,7 @@ endfunction
 		   r_valid_out, (r_tag_out == r_cache_tag), r_dirty_out, n_state, n_mem_req_valid);
 	if(r_state == FLUSH_CL)
 	  $display("[funnel-flcl] cyc=%d pa=%x inval=%b v=%b tagm=%b d=%b -> st=%d", r_cycle, flush_cl_addr, flush_cl_inval,
-		   r_valid_out, (r_tag_out == flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ]), r_dirty_out, n_state);
+		   r_valid_out, (r_tag_out == flush_cl_addr[`PA_WIDTH-1:TAG_LSB]), r_dirty_out, n_state);
 	if(n_mem_req_valid & ((n_mem_req_opcode == MEM_WB) | (n_mem_req_opcode == MEM_INVL)) & (r_state != FLUSH_CACHE))
 	  $display("[l2op] cyc=%d op=%s pa=%x data=%x", r_cycle, (n_mem_req_opcode == MEM_WB) ? "WB" : "INVL", n_mem_req_addr, n_mem_req_store_data[31:0]);
      end
@@ -794,6 +827,45 @@ endfunction
        $display("[bufst] cyc=%0d va=%x pc=%x op=%0d data=%x rob_ptr=%0d retry=%b",
 		r_cycle, r_req.addr, r_req.pc, r_req.op, t_array_data, r_req.rob_ptr, r_is_retry);
 `endif
+`ifdef ENABLE_STORE_CHECK
+   // Fill-cycle map + bcopy-load read trace for the IRIX o32 .data stale-load bug (henry_tb
+   // only; FPGA path unaffected).  Record every line fill (from ~reconfigure on) so the read
+   // trace can report when the source line was last loaded; trace the kernel bcopy loads
+   // (0x88018f2c..0x88018f48, near the crash) with hit/data.
+   always_ff @(posedge clk)
+     begin
+	if(w_cacheable_mem_rsp_valid)
+	  begin
+	     /* a line fill: t_mem_head is the miss being serviced -> its pc is the
+	      * instruction that brought the line in (speculative if wrong-path). */
+	     l1d_fill({32'd0, r_cycle}, t_mem_head.pc, r_mem_req_addr,
+		      mem_rsp_load_data[63:0], mem_rsp_load_data[127:64]);
+	  end
+	if(r_state == FLUSH_CL)
+	  begin
+	     /* CACHE-op (Index/Hit) invalidate/writeback on this line (funnel path). */
+	     l1d_cacheop({32'd0, r_cycle}, 64'd0, flush_cl_addr, flush_cl_inval ? 32'd1 : 32'd0);
+	  end
+	/* mem-pipe CACHE ops (Hit-Invalidate 0x11 -> CHINV etc.) — these carry the op's pc. */
+	if(r_got_req & w_is_chop_r)
+	  begin
+	     l1d_cacheop({32'd0, r_cycle}, r_req.pc, {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}},
+			 (r_req.op == MEM_CHINV) ? 32'd1 : 32'd0);
+	  end
+	if(r_got_req2 & ~r_req2.is_store & (r_req2.pc[31:0] >= 32'h88018f2c)
+	   & (r_req2.pc[31:0] <= 32'h88018f48))
+	  begin
+	     rd_log(r_req2.pc, w_mapped_addr, t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
+	  end
+	/* config_cache epilogue stack reloads (small-L1D derail): ld ra/s2/s1/s0,(sp)
+	 * at 0x8800f89c-a8 -- probe hit/miss + returned data to pin the stale reload. */
+	if(r_got_req2 & ~r_req2.is_store & (r_req2.pc[31:0] >= 32'h8800f89c)
+	   & (r_req2.pc[31:0] <= 32'h8800f8a8))
+	  begin
+	     rd_log(r_req2.pc, w_mapped_addr, t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
+	  end
+     end // always_ff
+`endif
 
    always_ff@(posedge clk)
      begin
@@ -1047,7 +1119,7 @@ endfunction
       .rd_addr0(t_cache_idx),
       .rd_addr1(t_cache_idx2),
       .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
-      .wr_data(r_mem_req_addr[`PA_WIDTH-1:`LG_PG_SZ]),
+      .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
       .wr_en(w_cacheable_mem_rsp_valid),
       .rd_data0(r_tag_out),
       .rd_data1(r_tag_out2)
@@ -1673,7 +1745,12 @@ endfunction
     * issue waits for at-head/drain_ds_complete, which needs the branch to retire. */
    wire w_uncached_ds_ok = head_of_rob_ds_committable &
 			   (next_head_of_rob_ptr == core_mem_req.rob_ptr);
-   wire	w_uncachable_req = (core_mem_req_valid & ((core_mem_req.cached==1'b0) | w_fence_load)) ?
+`ifdef ENABLE_MEM_HEAD_SERIALIZE
+   wire w_serialize_all = core_mem_req_valid;   /* fence EVERY mem op to ROB head */
+`else
+   wire w_serialize_all = 1'b0;
+`endif
+   wire	w_uncachable_req = (core_mem_req_valid & ((core_mem_req.cached==1'b0) | w_fence_load | w_serialize_all)) ?
 	(((head_of_rob_ptr_valid ? (head_of_rob_ptr == core_mem_req.rob_ptr) : 1'b0) | drain_ds_complete | w_uncached_ds_ok)): 1'b1;
 
    //always@(negedge clk)
@@ -2262,7 +2339,7 @@ endfunction
 				 t_pop_mq = 1'b1;
 				 n_req = t_mem_head;
 				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:`LG_PG_SZ];
+				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
 				 n_is_retry = 1'b1;
@@ -2288,7 +2365,7 @@ endfunction
 				 n_req = t_mem_head;
 				 n_req.data = core_store_data.data;
 				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:`LG_PG_SZ];
+				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
 				 n_is_retry = 1'b1;
@@ -2314,7 +2391,7 @@ endfunction
 				 n_req.data = core_store_data.data;
 				 core_store_data_ack = 1'b1;
 				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:`LG_PG_SZ];
+				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
 				 n_is_retry = 1'b1;
@@ -2327,7 +2404,7 @@ endfunction
 			    t_pop_mq = 1'b1;
 			    n_req = t_mem_head;
 			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:`LG_PG_SZ];
+			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 			    t_addr = t_mem_head.addr;
 			    t_got_req = 1'b1;
 			    n_is_retry = 1'b1;
@@ -2357,7 +2434,7 @@ endfunction
 	       begin
 		  //use 2nd read port
 		  t_cache_idx2 = core_mem_req.addr[IDX_STOP-1:IDX_START];
-		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:`LG_PG_SZ];
+		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:TAG_LSB];
 		  n_tlb_addr = core_mem_req.addr;
 		  n_req2 = core_mem_req;
 		  core_mem_req_ack = 1'b1;
@@ -2453,7 +2530,7 @@ endfunction
 		    n_uncache_wb_dirty = 1'b0;
 		    t_got_req = 1'b1;
 		    t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
-		    t_cache_tag = r_req.addr[`PA_WIDTH-1:`LG_PG_SZ];
+		    t_cache_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
 		    t_addr = r_req.addr;
 		    n_state = ACTIVE;
 		 end
@@ -2461,7 +2538,7 @@ endfunction
 	  HANDLE_RELOAD:
 	    begin
 	       t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_req.addr[`PA_WIDTH-1:`LG_PG_SZ];
+	       t_cache_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
 	       n_last_wr = n_req.is_store;
 	       t_got_req = 1'b1;
 	       //$display("firing got req at cycle %d, rob ptr %d from HANDLE_RELOAD for uuid %d", r_cycle, r_req.rob_ptr, r_req.uuid);
@@ -2478,7 +2555,7 @@ endfunction
 		     * but only on a real hit (tag match) so we never discard a
 		     * different dirty line that happens to alias this index. Then tell
 		     * L2 to drop its copy too (caches are non-inclusive). */
-		    if(r_valid_out && (r_tag_out == flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ]))
+		    if(r_valid_out && (r_tag_out == flush_cl_addr[`PA_WIDTH-1:TAG_LSB]))
 		      t_mark_invalid = 1'b1;
 		    n_mem_req_addr = {flush_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_opcode = MEM_INVL;
@@ -2574,7 +2651,7 @@ endfunction
 		* registered outputs are valid next cycle in CHOP_BEAT2. r_chop_beat
 		* is already 1. */
 	       t_cache_idx = w_beat2_idx;
-	       t_cache_tag = r_req.addr[`PA_WIDTH-1:`LG_PG_SZ];
+	       t_cache_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
 	       n_state = CHOP_BEAT2;
 	    end
 	  CHOP_BEAT2:
@@ -2745,6 +2822,12 @@ endfunction
 	      (r_req.op == MEM_SH) ? {48'd0, r_req.data[15:0]} :
 	      (r_req.op == MEM_SW) ? {32'd0, r_req.data[31:0]} : r_req.data,
 	      r_req.is_atomic ? 32'd1 : 32'd0);
+   // dirty-set-drop watch: a store's dirty=1 (t_wr_array) is suppressed when a dirty-clear
+   // (refill w_cacheable_mem_rsp_valid, or invalidate t_mark_invalid) wins the dc_dirty port.
+   always_ff @(negedge clk)
+     if(t_wr_array & (t_mark_invalid | w_cacheable_mem_rsp_valid))
+       dirtydrop({32'd0, r_cycle}, r_req.pc, r_req.addr,
+		 w_cacheable_mem_rsp_valid ? 32'd1 : 32'd0);
    // L1D->L2 store/writeback watch: fire on each accepted store-type request to the L2
    // (MEM_SW carries dirty-line writebacks too; MEM_WB = explicit CACHE writeback).
    reg r_wbwatch_prev;

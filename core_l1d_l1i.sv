@@ -70,6 +70,9 @@ module core_l1d_l1i(clk,
 		    l1i_flush_done,
 		    l1d_flush_done,
 		    l2_flush_done,
+		    snoop_req_valid,
+		    snoop_req_addr,
+		    snoop_req_ack,
 		    took_irq,
 		    cp0_count,
 		    dbg_head_pc,
@@ -201,6 +204,9 @@ module core_l1d_l1i(clk,
    output logic			 l1d_flush_done;
    output logic			 l1i_flush_done;
    output logic			 l2_flush_done;
+   input logic 		 snoop_req_valid;
+   input logic [`PA_WIDTH-1:0] snoop_req_addr;
+   output logic		 snoop_req_ack;
    output logic			 took_irq;
    output logic [31:0]		 cp0_count;
    output logic [31:0]  dbg_head_pc;
@@ -560,7 +566,10 @@ module core_l1d_l1i(clk,
 	       .mem_rsp_bad(mem_rsp_bad),
 	       .mem_rsp_load_data(mem_rsp_load_data),
 	       .cache_accesses(l2_cache_accesses),
-	       .cache_hits(l2_cache_hits)
+	       .cache_hits(l2_cache_hits),
+		       .snoop_req_valid(snoop_req_valid),
+		       .snoop_req_addr(snoop_req_addr),
+		       .snoop_req_ack(snoop_req_ack)
 
 	       );
    
