@@ -124,8 +124,20 @@
  `define LG_L1I_NUM_SETS 8
 `endif
 
+// EXPERIMENT: shrink the L2 to 4 lines (LG_L2_NUM_SETS=2).  Keeps the correct
+// write-back path but a 4-set direct-mapped L2 aliases constantly, so a
+// speculatively-filled line is evicted almost immediately and can't survive as a
+// stale reservoir to a later read (the R10000-class non-coherent-DMA bug).
+// Comment out to restore the full 128KB L2.
+//`define ENABLE_L2_TINY 1
+// EXPERIMENT: fully bypass the L2 as a cache (see l2.sv) -- data ops go straight
+// to DRAM, L2 holds nothing.  Comment out to restore the write-back L2.
+//`define ENABLE_L2_NOCACHE 1   // off by default on main; enable for the L2-bypass (non-coherent-DMA) workaround
+
 `ifdef FORMAL
  `define LG_L2_NUM_SETS 2
+`elsif ENABLE_L2_TINY
+ `define LG_L2_NUM_SETS 2        /* 4 lines x 16B = 64B -- effectively no retention */
 `else
  `ifdef TINY_DEBUG_L2
   `define LG_L2_NUM_SETS 3
@@ -240,7 +252,10 @@ typedef enum logic [4:0] {
                         * D-writeback reaches memory instead of sitting dirty in L2) */
    MEM_CHWB    = 5'd27, /* CACHE D Hit-Writeback: mem-pipe (dtlb-translated) per-line op */
    MEM_CHWBINV = 5'd28, /* CACHE D Hit-Writeback-Invalidate (mem-pipe) */
-   MEM_CHINV   = 5'd29  /* CACHE D Hit-Invalidate, no WB (DMA-in drop; mem-pipe) */
+   MEM_CHINV   = 5'd29, /* CACHE D Hit-Invalidate, no WB (DMA-in drop; mem-pipe) */
+   MEM_SNOOP_INVL = 5'd30 /* DMA-coherence snoop: drop the L2 line, DISCARD even if dirty
+                           * (a stale prior-owner dirty line must not clobber DMA data), and
+                           * emit NO L1 response (the request came from the snoop FIFO, not an L1) */
 } mem_op_t;
 
 /* MIPS R10000 exception ordering 
