@@ -249,8 +249,8 @@ fpu/%.elf: fpu/%.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/$*.S -o fpu/$*.o
 	$(LD) $(LDFLAGS) $(STARTUP) fpu/$*.o -o $@
 
-run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf fpu/fp_arith.elf fpu/fp_arith_d.elf fpu/fp_cvt.elf fpu/fp_signop.elf fpu/fp_cmp.elf fpu/fp_cvtf.elf fpu/fp_cvtw.elf fpu/fp_cvtl.elf
-	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst fp_arith fp_arith_d fp_cvt fp_signop fp_cmp fp_cvtf fp_cvtw fp_cvtl; do \
+run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp_cfc1.elf fpu/fp_dmove.elf fpu/fp_dldst.elf fpu/fp_arith.elf fpu/fp_arith_d.elf fpu/fp_cvt.elf fpu/fp_signop.elf fpu/fp_cmp.elf fpu/fp_cvtf.elf fpu/fp_cvtw.elf fpu/fp_cvtl.elf fpu/fp_cvtdw.elf fpu/fp_capacity.elf
+	@for t in fp_move fp_load fp_store fp_sext fp_cfc1 fp_dmove fp_dldst fp_arith fp_arith_d fp_cvt fp_signop fp_cmp fp_cvtf fp_cvtw fp_cvtl fp_cvtdw fp_capacity; do \
 	  echo "== fpu/$$t (co-sim; expect 'P' and no 'does not match') =="; \
 	  ( cd .. && ./ooo_core --file tests/fpu/$$t.elf --checker true 2>&1 \
 	      | grep -iE "does not match|FAIL" ) || echo "  ok (no divergence)"; \
@@ -260,6 +260,15 @@ run-fpu: fpu/fp_move.elf fpu/fp_load.elf fpu/fp_store.elf fpu/fp_sext.elf fpu/fp
 run-fpu-rm: fpu/fp_round.elf
 	@echo "== fpu/fp_round (FCSR.RM self-check; expect 'P') =="
 	cd .. && $(SIM) --file tests/fpu/fp_round.elf -c 0 2>&1 | grep -aoE '[PF]' | head -1
+
+# int->double (cvt.d.w) leading-one exponent regression: (double)116 must be 116.0,
+# not 4.0.  Guards the fpu_i2f find_lowest_set_bit -> count_leading_zeros fix (the
+# IRIX-reconfigure FP hash-capacity crash).  Self-checking; expect 'P'.
+run-fpu-i2f: fpu/fp_cvtdw.elf fpu/fp_capacity.elf
+	@for t in fp_cvtdw fp_capacity; do \
+	  echo "== fpu/$$t (cvt.d.w/i2f self-check; expect 'P') =="; \
+	  $(SIM) --file fpu/$$t.elf -c 0 2>&1 | grep -aoE '[PF][0-9]?' | head -1; \
+	done
 
 # FP-exception (ExcCode 15) directed test: self-check only (the checker models
 # neither FPE nor FCSR enables).
