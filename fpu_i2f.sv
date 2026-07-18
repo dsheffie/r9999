@@ -22,8 +22,13 @@ module fpu_i2f(in, src_long, fmt, rm, out, fflags);
    wire 	 is_zero = (mag == 64'd0);
 
    // ---- normalize: leading-1 index = unbiased exponent ----
-   wire [6:0] 	 ffs;                  // 0..64
-   find_lowest_set_bit #(.LG_N(6)) z0 (.in(mag), .y(ffs));
+   // MUST be the HIGHEST set bit.  This was find_lowest_set_bit, but that shared
+   // helper was flipped from MSB- to LSB-priority for the o32 TLB-Modify fix, which
+   // silently broke i2f for non-power-of-2 magnitudes (e.g. cvt.d.w 116 -> 4.0).
+   // Highest set bit index = 63 - clz.  (fpu_add uses count_leading_zeros the same way.)
+   wire [6:0] 	 w_clz;                // 0..64
+   count_leading_zeros #(.LG_N(6)) z0 (.in(mag), .y(w_clz));
+   wire [6:0] 	 ffs = 7'd63 - w_clz;
    wire [63:0] 	 shifted = mag << (7'd64 - ffs);   // leading 1 -> bit 64 (out)
 
    // ---- rounding (fmt-dependent fraction width) ----
