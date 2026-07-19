@@ -115,13 +115,13 @@
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
 `else
- `define LG_L1D_NUM_SETS 8
+ `define LG_L1D_NUM_SETS 10
 `endif
 
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
 `else
- `define LG_L1I_NUM_SETS 8
+ `define LG_L1I_NUM_SETS 10
 `endif
 
 // EXPERIMENT: shrink the L2 to 4 lines (LG_L2_NUM_SETS=2).  Keeps the correct
