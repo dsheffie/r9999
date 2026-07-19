@@ -115,13 +115,13 @@
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
 `else
- `define LG_L1D_NUM_SETS 1
+ `define LG_L1D_NUM_SETS 10
 `endif
 
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
 `else
- `define LG_L1I_NUM_SETS 1
+ `define LG_L1I_NUM_SETS 10
 `endif
 
 // EXPERIMENT: shrink the L2 to 4 lines (LG_L2_NUM_SETS=2).  Keeps the correct
@@ -132,7 +132,7 @@
 //`define ENABLE_L2_TINY 1
 // EXPERIMENT: fully bypass the L2 as a cache (see l2.sv) -- data ops go straight
 // to DRAM, L2 holds nothing.  Comment out to restore the write-back L2.
-`define ENABLE_L2_NOCACHE 1
+//`define ENABLE_L2_NOCACHE 1
 
 `ifdef FORMAL
  `define LG_L2_NUM_SETS 2
