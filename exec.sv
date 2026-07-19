@@ -3552,6 +3552,17 @@ module exec(clk,
 	  begin
 	     n_compare = t_srcA[31:0];
 	     n_timer_ip = 1'b0;
+`ifdef TIMER_RARE
+	     /* CO-SIM ONLY (never silicon): stretch the LARGE periodic scheduler tick by
+	      * the TIMER_RARE fold so timer-driven context switches -- the checker's main
+	      * divergence points -- become rare, letting the lockstep checker run far past
+	      * the ~62M scheduler wall.  Leave short calibration intervals (get_r4k_counter
+	      * ~4096) untouched so IRIX still boots. */
+	     if((t_srcA[31:0] - r_count) > 32'd100000)
+	       begin
+		  n_compare = r_count + ((t_srcA[31:0] - r_count) * `TIMER_RARE);
+	       end
+`endif
 	  end
 	else if(core_wr_cause)
 	  begin
