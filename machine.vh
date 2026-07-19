@@ -11,7 +11,7 @@
 // On-silicon HW breakpoint/value-watchpoint in core.sv (freeze the pipe at an offending
 // instruction; read GPRs/DRAM coherently over AXI).  OFF by default -- uncomment to
 // re-enable the on-silicon watchpoint (see docs/methodology.md "Chasing a bug on silicon").
-//`define ENABLE_DEBUG_WATCHPOINT 1  // OFF for verilator TLB-dump run
+`define ENABLE_DEBUG_WATCHPOINT 1  // ON: driver-programmable bp_pc breakpoint (slv_reg9)
 // Tiny 8-line L2 (congestion experiment; no real LUT win -- the FPU dominates).  OFF by default.
 //`define TINY_DEBUG_L2 1
 // R4400-exact CP0 hazard: defer irq injection after mtc0 c0_sr. REDUNDANT (mtc0 serializes); study only.
@@ -115,16 +115,20 @@
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
 `else
- `define LG_L1D_NUM_SETS 8
+ `define LG_L1D_NUM_SETS 10
 `endif
 
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
 `else
- `define LG_L1I_NUM_SETS 8
+ `define LG_L1I_NUM_SETS 10
 `endif
 
+//`define ENABLE_L2_TINY 1
+//`define ENABLE_L2_NOCACHE 1   // rung 2: full 128KB write-back L2 (LG_L2_NUM_SETS 13)
 `ifdef FORMAL
+ `define LG_L2_NUM_SETS 2
+`elsif ENABLE_L2_TINY
  `define LG_L2_NUM_SETS 2
 `else
  `ifdef TINY_DEBUG_L2

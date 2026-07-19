@@ -132,9 +132,18 @@ module l1i(clk,
    localparam L1I_CL_LEN_BITS = 1 << (`LG_L1D_CL_LEN + 3);
    localparam LG_WORDS_PER_CL = `LG_L1D_CL_LEN - 2;
    localparam WORDS_PER_CL = 1<<LG_WORDS_PER_CL;
-   localparam N_TAG_BITS = `PA_WIDTH - `LG_L1I_NUM_SETS - `LG_L1D_CL_LEN;
    localparam IDX_START = `LG_L1D_CL_LEN;
    localparam IDX_STOP  = `LG_L1D_CL_LEN + `LG_L1I_NUM_SETS;
+   /* VIPT alias handling (mirrors l1d): take the tag down to LG_PG_SZ so it CARRIES
+    * the alias bits VA[12..] that the index uses but translation changes.  Cache <=
+    * page (IDX_STOP<=LG_PG_SZ): TAG_LSB==IDX_STOP -> identical to the old tag (no-op).
+    * Cache > page: the widened tag makes an aliased VA-indexed fetch MISS, and the
+    * fill is VA-indexed (r_miss_pc, below) so the reload re-lookup finds it.  Read-only
+    * cache: a synonym just makes a harmless duplicate line at the other index -- no
+    * writeback / physical-retry needed (unlike l1d's dirty case). */
+   localparam TAG_LSB = (IDX_STOP < `LG_PG_SZ) ? IDX_STOP : `LG_PG_SZ;
+   localparam LG_ALIAS_BITS = IDX_STOP - TAG_LSB;   // == max(0, IDX_STOP - LG_PG_SZ)
+   localparam N_TAG_BITS = `PA_WIDTH - TAG_LSB;
    localparam WORD_START = 2;
    localparam WORD_STOP = WORD_START+LG_WORDS_PER_CL;
    localparam N_FQ_ENTRIES = 1 << `LG_FQ_ENTRIES;
@@ -555,7 +564,7 @@ endfunction
    /* For mapped (kuseg) addresses use TLB-translated PA; unmapped uses mipsseg output directly */
    assign w_tlb_pc = (r_mapped && w_eff_hit) ? w_eff_pa : r_la_pc[`PA_WIDTH-1:0];
    
-   wire w_hit = (r_tag_out == w_tlb_pc[(`PA_WIDTH-1):IDX_STOP]);
+   wire w_hit = (r_tag_out == w_tlb_pc[(`PA_WIDTH-1):TAG_LSB]);
    //always@(negedge clk)
    //begin
    //if(r_req)
@@ -599,8 +608,8 @@ endfunction
 	  end
 	else
 	  begin
-	     t_miss = r_req & !(r_valid_out & (r_tag_out == w_tlb_pc[`PA_WIDTH-1:IDX_STOP]));
-	     t_hit  = r_req & (r_valid_out & (r_tag_out == w_tlb_pc[`PA_WIDTH-1:IDX_STOP]));
+	     t_miss = r_req & !(r_valid_out & (r_tag_out == w_tlb_pc[`PA_WIDTH-1:TAG_LSB]));
+	     t_hit  = r_req & (r_valid_out & (r_tag_out == w_tlb_pc[`PA_WIDTH-1:TAG_LSB]));
 	  end
 
 	t_insn_idx = r_cache_pc[WORD_STOP-1:WORD_START];
@@ -694,7 +703,7 @@ endfunction
 	  ACTIVE:
 	    begin
 	       t_cache_idx = r_pc[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_pc[(`PA_WIDTH-1):IDX_STOP];
+	       t_cache_tag = r_pc[(`PA_WIDTH-1):TAG_LSB];
 	       /* accessed with this address */
 	       n_cache_pc = r_pc;
 	       n_req = 1'b1;
@@ -851,7 +860,7 @@ endfunction
 			      t_push_insn4 = 1'b1;
 			      t_cache_idx = r_cache_idx + 'd1;
 			      n_cache_pc = r_cache_pc + 'd16;
-			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):IDX_STOP];
+			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):TAG_LSB];
 			      n_pc = r_cache_pc + 'd20;
 			   end
 			 else if(t_first_branch == 'd3 && !fq_full3)
@@ -859,7 +868,7 @@ endfunction
 			      t_push_insn3 = 1'b1;
 			      n_cache_pc = r_cache_pc + 'd12;
 			      n_pc = r_cache_pc + 'd16;
-			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):IDX_STOP];
+			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):TAG_LSB];
 			      if(t_insn_idx != 0)
 				begin
 				   t_cache_idx = r_cache_idx + 'd1;
@@ -873,7 +882,7 @@ endfunction
 			      n_pc = r_cache_pc + 'd8;
 			      //guaranteed to end-up on another cacheline
 			      n_cache_pc = r_cache_pc + 'd8;
-			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):IDX_STOP];
+			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):TAG_LSB];
 			      n_pc = r_cache_pc + 'd12;
 			      if(t_insn_idx == 2)
 				begin
@@ -912,7 +921,7 @@ endfunction
 	  RELOAD_TURNAROUND:
 	    begin
 	       t_cache_idx = r_miss_pc[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):IDX_STOP];
+	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):TAG_LSB];
 	       if(n_flush_req)
 		 begin
 		    n_flush_req = 1'b0;
@@ -951,7 +960,7 @@ endfunction
 	  WAIT_FOR_NOT_FULL:
 	    begin
 	       t_cache_idx = r_miss_pc[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):IDX_STOP];
+	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):TAG_LSB];
 	       n_cache_pc = r_miss_pc;
 	       if(!fq_full)
 		 begin
@@ -985,7 +994,7 @@ endfunction
 	        * (!w_itlb_busy) return to ACTIVE with r_itlb_ready=1 so the normal
 	        * consume runs against the now-valid registered itlb outputs. */
 	       t_cache_idx = r_miss_pc[IDX_STOP-1:IDX_START];
-	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):IDX_STOP];
+	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):TAG_LSB];
 	       n_cache_pc = r_miss_pc;
 	       n_pc = r_pc;
 	       n_req = 1'b1;
@@ -1112,7 +1121,7 @@ endfunction
      begin
 	t_wr_valid_ram_en = mem_rsp_valid || r_state == FLUSH_CACHE;
 	t_valid_ram_value = (r_state != FLUSH_CACHE);
-	t_valid_ram_idx = mem_rsp_valid ? r_mem_req_addr[IDX_STOP-1:IDX_START] : r_cache_idx;
+	t_valid_ram_idx = mem_rsp_valid ? r_miss_pc[IDX_STOP-1:IDX_START] : r_cache_idx;
      end
 
       
@@ -1239,8 +1248,8 @@ endfunction
    tag_array (
 	   .clk(clk),
 	   .rd_addr(t_cache_idx),
-	   .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
-	   .wr_data(r_mem_req_addr[`PA_WIDTH-1:IDX_STOP]),
+	   .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
+	   .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
 	   .wr_en(mem_rsp_valid),
 	   .rd_data(r_tag_out)
 	   );
@@ -1249,7 +1258,7 @@ endfunction
    insn_array (
 	   .clk(clk),
 	   .rd_addr(t_cache_idx),
-	   .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
+	   .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
 	   .wr_data({bswap32(mem_rsp_load_data[127:96]),
 		     bswap32(mem_rsp_load_data[95:64]),
 		     bswap32(mem_rsp_load_data[63:32]), 
@@ -1269,7 +1278,7 @@ endfunction
    pd_data (
 	    .clk(clk),
 	    .rd_addr(t_cache_idx),
-	    .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
+	    .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
 	    .wr_data({w_pd3,w_pd2,w_pd1,w_pd0}),
 	    .wr_en(mem_rsp_valid),
 	    .rd_data(r_jump_out)

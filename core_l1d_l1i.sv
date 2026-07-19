@@ -17,6 +17,10 @@ module core_l1d_l1i(clk,
 		    putchar_fifo_rptr,
 		    single_step,
 		    bp_enable,
+		    fault_clear,
+		    bp_pc,
+		    bp_wp_addr,
+		    bp_wp_val,
 		    step,
 		    in_flush_mode,
 		    resume,
@@ -66,6 +70,8 @@ module core_l1d_l1i(clk,
 		    status_reg,
 		    badvaddr,
 		    cause,
+		    dbg_frozen,
+		    dbg_wp_data,
 		    cause_ip,
 		    l1i_flush_done,
 		    l1d_flush_done,
@@ -104,6 +110,10 @@ module core_l1d_l1i(clk,
    
    input logic single_step;
    input logic bp_enable;
+   input logic fault_clear;
+   input logic [31:0] bp_pc;
+   input logic [31:0] bp_wp_addr;
+   input logic [31:0] bp_wp_val;
    input logic step;
    input logic resume;
    input logic [(`M_WIDTH-1):0] resume_pc;
@@ -194,6 +204,8 @@ module core_l1d_l1i(clk,
    output logic [31:0]			  status_reg;
    output logic [`M_WIDTH-1:0]		  badvaddr;
    output logic [4:0]			  cause;
+   output logic [2:0]			  dbg_frozen;
+   output logic [31:0]			  dbg_wp_data;
    output logic [7:0]			  cause_ip;
 
    
@@ -714,6 +726,10 @@ module core_l1d_l1i(clk,
 	     .putchar_fifo_rptr(putchar_fifo_rptr),
 	     .single_step(single_step),
 	     .bp_enable(bp_enable),
+	     .fault_clear(fault_clear),
+	     .bp_pc(bp_pc),
+	     .bp_wp_addr(bp_wp_addr),
+	     .bp_wp_val(bp_wp_val),
 	     .step(step),
 	     .resume(resume),
 	     .memq_empty(memq_empty),
@@ -791,6 +807,8 @@ module core_l1d_l1i(clk,
 	     .status_reg(status_reg),
 	     .badvaddr(badvaddr),
 	     .cause(cause),
+	     .dbg_frozen(dbg_frozen),
+	     .dbg_wp_data(dbg_wp_data),
 	     .cause_ip(cause_ip),
 	     .asid(w_asid),
 	     .tlb_entry_out_valid(tlb_entry_out_valid),

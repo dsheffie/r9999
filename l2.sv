@@ -59,6 +59,11 @@ module l2(clk,
    output logic l1_mem_req_ack;
    input logic [`PA_WIDTH-1:0] l1_mem_req_addr;
    input logic	      l1_mem_req_cacheable;
+`ifdef ENABLE_L2_NOCACHE
+   wire w_l2_cacheable = l1_mem_req_cacheable & (l1_mem_req_opcode >= 5'd24);
+`else
+   wire w_l2_cacheable = l1_mem_req_cacheable;
+`endif
    input logic [15:0] l1_mem_req_mask;
    
    input logic [127:0] l1_mem_req_store_data;
@@ -494,7 +499,7 @@ module l2(clk,
 		 end
 	       else if(l1_mem_req_valid)
 		 begin
-		    if(l1_mem_req_cacheable == 1'b0)
+		    if(w_l2_cacheable == 1'b0)
 		      begin
 			 /* L2 inclusive of L1: always look the line up first; on an
 			  * uncached hit, evict (write back if dirty) + invalidate before

@@ -36,7 +36,7 @@ static void execCoproc2(uint32_t inst, state_t *s);
  * TLB exception -- the co-sim store-check and the LL/CACHE cache-line address (the
  * real load/store handler does the faulting va_translate).
  * Returns true + sets *pa on a valid (V=1) mapping; false if unmapped. */
-static bool tlb_probe_ro(state_t *s, uint64_t va, uint32_t *pa) {
+static bool tlb_probe_ro(state_t *s, uint64_t va, uint32_t *pa, bool for_store = false) {
   uint32_t hi32 = (uint32_t)(va >> 32);
   uint32_t lo32 = (uint32_t)va;
   if(hi32 == 0x00000000u || hi32 == 0xffffffffu) {
@@ -62,12 +62,26 @@ static bool tlb_probe_ro(state_t *s, uint64_t va, uint32_t *pa) {
     uint64_t sel_bit   = (pair_mask + 1) >> 1;
     bool odd           = (va & sel_bit) != 0;
     uint64_t e_lo      = odd ? s->tlb[i].entry_lo1 : s->tlb[i].entry_lo0;
-    if(!(e_lo & 0x2u)) return false;
+    if(!(e_lo & 0x2u)) return false;                 /* V == 0 -> TLB Invalid (faults, no commit) */
+    if(for_store && !(e_lo & 0x4u)) return false;    /* D == 0 -> TLB Modified: the store faults and
+                                                      * writes nothing (RTL Modifies too), so DON'T
+                                                      * record it -- else a phantom drifts the FIFO. */
     uint64_t pfn = (e_lo >> 6) & 0xfffffffULL;
     *pa = (uint32_t)((pfn << 12) | (va & off_mask));
     return true;
   }
   return false;
+}
+
+/* Co-sim retire_trace: fetch the big-endian instruction word at a virtual PC via the
+ * ISS TLB.  Code is identical in RTL & ISS memory (only DATA diverges), so this yields
+ * the RTL's retired instruction for the trace even when data state has diverged.  Sets
+ * *ppa to the physical address; returns 0 (and *ppa=0) on an untranslatable PC. */
+uint32_t iss_fetch_inst(state_t *s, uint64_t vpc, uint32_t *ppa) {
+  uint32_t pa = 0;
+  if(!tlb_probe_ro(s, vpc, &pa)) { if(ppa) { *ppa = 0; } return 0; }
+  if(ppa) { *ppa = pa; }
+  return bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(pa));
 }
 
 template <bool EL> void execMips(state_t *s);
@@ -224,6 +238,18 @@ static void take_exception_ri(state_t *s) {
   s->pc = sext32(exc_vector_general(s));
 }
 
+/* Coprocessor Unusable (ExcCode=11).  Cause.CE[29:28] = the coprocessor number.
+ * Raised when a CP1/FP op executes with Status.CU1==0 (lazy-FPU: IRIX runs o32
+ * processes with CU1=0 and enables FP on the first-use trap).  Mirrors the RTL
+ * decode_mips.sv gate (op=CPU, cpu_ce1=1) exactly. */
+static void take_exception_cpu(state_t *s, uint32_t ce) {
+  set_exc_pc(s);
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~(0x1fu << 2) & ~(0x3u << 28))
+                        | (11u << 2) | ((ce & 0x3u) << 28);
+  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+  s->pc = sext32(exc_vector_general(s));
+}
+
 /* FP exception (ExcCode 15) with the Unimplemented-Op (E) bit set in FCSR.Cause
  * (bit 17) -- the catch-all for any COP1 op not implemented in hardware (matches
  * the RTL FP_UNIMPL path; the OS soft-float emulator handles it). */
@@ -308,10 +334,13 @@ static void raise_trap(state_t *s) {
   s->pc = sext32(exc_vector_general(s));
 }
 
-void raise_int(state_t *s, uint32_t epc) {
+void raise_int(state_t *s, uint32_t epc, uint32_t ip) {
   s->ll_link_valid = false;   /* interrupt breaks the LL/SC link */
   s->cpr0[CPR0_EPC]   = epc;
-  s->cpr0[CPR0_CAUSE] = (1u << 15);  /* IP[7]=1 (timer), ExcCode=0, BD=0 */
+  /* Cause.IP[7:0] = the REAL pending bits (from the RTL's w_ip in the checker),
+   * ExcCode=0 (Int), BD=0.  Was hardcoded to IP[7] (timer) which mis-dispatched
+   * every software (IP[1]) / device (IP[2]) interrupt in the IRIX ISR. */
+  s->cpr0[CPR0_CAUSE] = (ip & 0xffu) << 8;
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(exc_vector_general(s));
 }
@@ -419,6 +448,7 @@ uint64_t g_iss_last_ld_va = 0;
  * tlbwi/tlbwr writes (and the tlbwr Random decrement) are suppressed, so the ISS TLB stays
  * bit-identical to the RTL's.  Default false = standalone ISS keeps its self-contained model. */
 bool g_iss_tlb_ext = false;
+bool g_iss_os_mode = false;
 
 /* R4000 addressing-mode width for the XTLB-vs-TLB refill vector: XTLB (offset 0x080)
  * when the CURRENT operating mode uses 64-bit addressing (kernel&KX | super&SX |
@@ -2028,6 +2058,16 @@ void execMips(state_t *s) {
     return;
   }
 
+  /* CP1 Coprocessor-Unusable: a CP1/FP op with Status.CU1==0 raises CpU (CE=1),
+   * mirroring the RTL decode_mips.sv gate.  The 5 gated opcodes are COP1 (0x11),
+   * LWC1 (0x31), LDC1 (0x35), SWC1 (0x39), SDC1 (0x3d).  IRIX lazy-FPU: o32
+   * processes run with CU1=0 and take this trap on first FP use. */
+  if((opcode == 0x11 || opcode == 0x31 || opcode == 0x35 ||
+      opcode == 0x39 || opcode == 0x3d) && !(s->cpr0[CPR0_SR] & SR_CU1)) {
+    take_exception_cpu(s, 1);
+    return;
+  }
+
   /* LL/SC link clearing on an intervening access (model in interpret.hh; the mem
    * pipe is in-order so doing this at dispatch is in program order). */
   {
@@ -2063,21 +2103,26 @@ void execMips(state_t *s) {
      * t_wr_array exactly once, so the two FIFOs stay aligned.  The UNALIGNED
      * swl/swr/sdl/sdr are excluded (they can fire multiple array-writes/insn). */
     int store_sz = (opcode == 0x28) ? 1 : (opcode == 0x29) ? 2 :
-                   (opcode == 0x2b) ? 4 : (opcode == 0x3f) ? 8 : 0;
+                   (opcode == 0x2b) ? 4 : (opcode == 0x3f) ? 8 :
+                   (opcode == 0x39) ? 4 : (opcode == 0x3d) ? 8 : 0;  /* +SWC1/SDC1: FP stores also
+                                                      * commit to the L1D array (RTL wr_log fires),
+                                                      * so record them or the RTL FIFO drifts. */
+    bool is_fp_store = (opcode == 0x39 || opcode == 0x3d);
     if(store_sz) {
       int32_t simm_sc = (int32_t)(int16_t)(inst & 0xffffu);
       uint64_t sva = s->gpr[rs] + simm_sc;
       uint32_t spa = 0;                                  /* REAL PA via the ported TLB probe */
       /* only record stores that translate cleanly -- a store that will TLB-fault
        * writes nothing (the RTL faults too), so pushing it would drift the FIFO. */
-      if(tlb_probe_ro(s, sva, &spa)) {
+      if(tlb_probe_ro(s, sva, &spa, /*for_store=*/true)) {
         /* skip UNCACHED stores (kseg1 VA / device-range PA): the RTL routes these
          * around the L1D cache array so wr_log never fires -> pushing them drifts the FIFO. */
         bool uncached = (((uint32_t)sva & 0xe0000000u) == 0xa0000000u) ||
                         (spa >= 0x1f000000u && spa <= 0x1fffffffu);
         if(!uncached) {
-          uint32_t srt = (inst >> 16) & 31;
-          uint64_t sdata = s->gpr[srt];
+          uint32_t srt = (inst >> 16) & 31;              /* ft for FP stores, rt for integer */
+          /* r9999 is flat FR=1: SDC1 stores the full 64b cpr1[ft], SWC1 the low 32b. */
+          uint64_t sdata = is_fp_store ? s->cpr1[srt] : s->gpr[srt];
           if(store_sz < 8) sdata &= (UINT64_C(1) << (store_sz * 8)) - 1;  /* mask to store size */
           g_iss_stores.emplace_back((uint64_t)s->pc, spa, sdata);
         }
@@ -2148,10 +2193,23 @@ void execMips(state_t *s) {
       }
       case 0x0C: /* syscall */
       case 0x0D: /* break */
-	s->brk = 1;
-	s->pc += 4;    /* advance so the checker stays in sync */
-	if(!s->silent) {
-	  std::cout << "got break or syscall\n";
+	if(g_iss_os_mode) {
+	  /* Real OS (henry checker): trap into the kernel general-exception vector
+	   * (0x180) with ExcCode 8 (Syscall) / 9 (Break), exactly like the RTL --
+	   * NOT a halt.  IRIX userspace issues syscalls constantly; halting here is
+	   * what silently killed the golden ISS at the first userspace syscall and
+	   * left the crash region un-checked. */
+	  set_exc_pc(s);   /* EPC + BD, gated on EXL==0 */
+	  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & ~0x0000007cu) |
+	                        (((funct == 0x0C) ? 8u : 9u) << 2);
+	  s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
+	  s->pc = sext32(exc_vector_general(s));
+	} else {
+	  s->brk = 1;
+	  s->pc += 4;    /* advance so the checker stays in sync */
+	  if(!s->silent) {
+	    std::cout << "got break or syscall\n";
+	  }
 	}
 	s->insn_histo[mipsInsn::BREAK]++;
 	break;
@@ -2827,9 +2885,20 @@ void execMips(state_t *s) {
       case 0x2e:
 	_swr<EL>(inst, s);
 	break;
-      case 0x2f: /* cache -- treated as NOP for now */
+      case 0x2f: { /* cache: Hit-type ops (op[4:2]>=4) TRANSLATE the VA and take a TLB
+		    * refill/invalid on a mapped miss, exactly like the RTL (the co-sim
+		    * checker was flooding TLB-DELTAs here because the ISS NOP'd the
+		    * translation).  Index-type ops + the cache effect itself stay NOPs. */
+	uint32_t cop = (inst >> 16) & 0x1f;
+	if(cop >= 0x10) {                                   /* Hit_* -> translates */
+	  uint32_t base = (inst >> 21) & 0x1f;
+	  int16_t  off  = (int16_t)(inst & 0xffff);
+	  (void)va_translate(s, s->gpr[base] + (int64_t)off, tlb_op::load);
+	  if(s->tlb_fault) break;                           /* exception raised; pc -> vector */
+	}
 	s->pc += 4;
 	break;
+      }
       case 0x31:
 	_lwc1<EL>(inst, s);
 	break;
