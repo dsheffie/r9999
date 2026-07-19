@@ -10,6 +10,11 @@ def main():
     if not os.path.isdir('verilog'):
         os.mkdir('verilog')
 
+    # Extra sv2v -D defines, space/comma separated (e.g. henry's gen_mipscore.sh sets
+    # SV2V_DEFINES=ENABLE_DEBUG_WATCHPOINT so the r9999 submodule machine.vh can stay ==
+    # main -- the henry-only build knobs are injected here, not committed in the header).
+    extra_defines = ['-D=' + d for d in os.environ.get('SV2V_DEFINES', '').replace(',', ' ').split()]
+
     outputs = []
     modules = set()
     for sv in svs:
@@ -30,7 +35,7 @@ def main():
         
         r = sv.split('.sv')[0]
         v = r+'.v'
-        cmd = ['sv2v', sv, '--write=verilog/'+v, '-D=FPGA']
+        cmd = ['sv2v', sv, '--write=verilog/'+v, '-D=FPGA'] + extra_defines
         outputs.append('verilog/' + v)
         subprocess.run(cmd)
 

@@ -24,6 +24,7 @@ extern std::deque<store_rec> g_iss_stores;
 
 /* co-sim checker: ISS TLB is written solely by the RTL mirror (see interpret.cc). */
 extern bool g_iss_tlb_ext;
+extern bool g_iss_os_mode;   // true in the henry OS-checker: SYSCALL/BREAK trap to 0x180 (not halt)
 
 /* LL/SC reservation model -- MUST MATCH machine.vh's `define LLSC_BREAK_ON_LOAD.
  * default (undefined) = BERI/CHERI (store to the linked line breaks the link);
@@ -331,7 +332,10 @@ static inline uint32_t get_branch_target(uint32_t pc, uint32_t inst) {
 
 void initState(state_t *s);
 void execMips(state_t *s);
-void raise_int(state_t *s, uint32_t epc);
+/* co-sim retire_trace: fetch the BE instruction word at a virtual PC via the ISS TLB
+ * (code is identical in RTL & ISS memory); *ppa gets the PA.  0 on untranslatable PC. */
+uint32_t iss_fetch_inst(state_t *s, uint64_t vpc, uint32_t *ppa);
+void raise_int(state_t *s, uint32_t epc, uint32_t ip = (1u << 7));
 
 
 std::ostream &operator<<(std::ostream &out, const state_t & s);
