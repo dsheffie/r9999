@@ -323,6 +323,21 @@ dside_tlb/test_dside_tlb.elf: dside_tlb/test_dside_tlb.S $(STARTUP) $(COMMON)/si
 run-dside-tlb: dside_tlb/test_dside_tlb.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
 
+dside_tlb/test_vipt_alias.elf: dside_tlb/test_vipt_alias.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c dside_tlb/test_vipt_alias.S -o dside_tlb/test_vipt_alias.o
+	$(LD) $(LDFLAGS) $(STARTUP) dside_tlb/test_vipt_alias.o -o $@
+
+tlb/test_iside_alias.elf: tlb/test_iside_alias.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c tlb/test_iside_alias.S -o tlb/test_iside_alias.o
+	$(LD) $(LDFLAGS) $(STARTUP) tlb/test_iside_alias.o -o $@
+
+# VIPT L1 alias tests (D-side synonym + I-side false-hit).  Run at >=8KB L1 to
+# actually exercise aliasing via a deliberately mis-colored TLB -- the 1:1-va2pa
+# co-sim golden can't model that, so run -c 0 self-check and grep the console.
+run-vipt-alias: dside_tlb/test_vipt_alias.elf tlb/test_iside_alias.elf
+	cd .. && $(SIM) --file tests/dside_tlb/test_vipt_alias.elf -c 0 2>&1 | grep -aE "passed|FAIL" | head -1
+	cd .. && $(SIM) --file tests/tlb/test_iside_alias.elf -c 0 2>&1 | grep -aE "alias OK|FAIL" | head -1
+
 run-except: except/test_except.elf
 	cd .. && $(SIM) --file tests/$< -c 0 2>&1
 
