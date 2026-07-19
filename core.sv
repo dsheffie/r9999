@@ -38,6 +38,10 @@ module core(clk,
 	    single_step,
 	    step,
 	    bp_enable,
+	    fault_clear,
+	    bp_pc,
+	    bp_wp_addr,
+	    bp_wp_val,
 	    reset,
 	    ip6,
 	    ip5,
@@ -132,6 +136,9 @@ module core(clk,
 	    status_reg,
 	    badvaddr,
 	    cause,
+	    dbg_frozen,
+	    dbg_wp_data,
+	    cause_ip,
 	    asid,
 	    tlb_entry_out,
 	    tlb_entry_out_valid,
@@ -180,7 +187,11 @@ module core(clk,
    input logic resume;
    input logic single_step;
    input logic step;
-   input logic bp_enable;   /* debug: freeze core after retiring BP_PC */
+   input logic bp_enable;   /* debug: freeze core after retiring bp_pc (also arms the fault-trap) */
+   input logic fault_clear; /* debug: clear the fault-trap latch + re-arm + un-freeze (resettable) */
+   input logic [31:0] bp_pc; /* debug: driver-programmable breakpoint PC (slv_reg9) */
+   input logic [31:0] bp_wp_addr; /* debug: driver-programmable store-address watchpoint VA (slv_reg10) */
+   input logic [31:0] bp_wp_val;  /* debug: expected corrupt store value to freeze on (slv_reg11) */
    input logic memq_empty;
    output logic drain_ds_complete;
    output logic [(1<<`LG_ROB_ENTRIES)-1:0] dead_rob_mask;
@@ -275,6 +286,9 @@ module core(clk,
    output logic [`M_WIDTH-1:0]		  badvaddr;
    
    output logic [4:0]			  cause;
+   output logic [7:0]			  cause_ip;
+   output logic [2:0]			  dbg_frozen; /* {r_bp_hit, r_wp_hit, r_fault_hit} -- real freeze vs stall */
+   output logic [31:0]			  dbg_wp_data; /* the DATA of the last store to bp_wp_addr (exact store value) */
    output logic [7:0]			  asid;
    output tlb_data_t		          tlb_entry_out;
    output logic				  tlb_entry_out_valid;
@@ -600,39 +614,56 @@ module core(clk,
    wire         w_step_edge = step & ~r_step_d;
 
 `ifdef ENABLE_DEBUG_WATCHPOINT
-   /* DEBUG PC breakpoint + value watchpoint -- gated OFF by default; flip
-    * `ENABLE_DEBUG_WATCHPOINT in machine.vh to re-enable the on-silicon HW watchpoint
-    * (see docs/methodology.md "Chasing a bug on silicon").  Once a retiring insn
-    * matches BP_PC, or writes (masked) WP_VAL into $29, latch r_bp_hit/r_wp_hit; this
-    * folds into the step gate below so the core FREEZES (no step edges arrive) --
-    * letting GPRs/DRAM be read coherently at the offending instruction. */
-   localparam [31:0] BP_PC = 32'h880196bc;  // VEC_tlbmiss entry -- triage idle-thread TLB misses
+   // On-silicon HW breakpoint + store value+address watchpoint + fault-trap. Gated OFF
+   // by default; henry binds bp_pc/bp_wp_x/fault_clear/dbg_frozen/dbg_wp_data
+   // unconditionally, so when the guard is off the outputs tie to 0 (else branch) and no
+   // compare logic is generated. Retiring insn matching bp_pc, or a store of bp_wp_val to
+   // bp_wp_addr, latches r_bp_hit/r_wp_hit and freezes the core so GPRs/DRAM read coherent.
+   // bp_pc/bp_wp_x are driver-programmable (slv_reg9-11), no re-synth.
    logic	r_bp_hit;
-   /* track architectural sp ($29) so the breakpoint gates on the interrupted stack
-    * being the idle stack (0x8834a...) -- catches the idle thread's TLB miss, not
-    * the ~1000 normal ones every other thread takes. */
-   logic [31:0] r_cur_sp;
-   wire         w_idle_sp = (r_cur_sp & 32'hfffff000) == 32'h8834a000;
-   wire		w_bp_match = bp_enable & w_idle_sp &
-		((t_retire     & (t_rob_head.pc[31:0]      == BP_PC)) |
-		 (t_retire_two & (t_rob_next_head.pc[31:0] == BP_PC)));
+   /* fault_clear (ctrl bit18) doubles as bp resume: clears r_bp_hit so the core runs
+    * full-speed to the NEXT bp_pc match (re-latches next hit). */
+   wire		w_bp_match = bp_enable &
+		((t_retire     & (t_rob_head.pc[31:0]      == bp_pc)) |
+		 (t_retire_two & (t_rob_next_head.pc[31:0] == bp_pc)));
 
-   /* Value WATCHPOINT.  Compare the already-FLOPPED retire outputs (not the
-    * combinational ROB head) so the 32-bit masked compare sits on a clean
-    * flop->logic->flop path and doesn't lengthen the near-critical retire path (the
-    * combinational version cost -3.6ns WNS).  Costs the freeze ~1-2 insns of latency. */
-   localparam [31:0] WP_VAL  = 32'h00000001; // neutralized: capture via BP_PC (bad-istack), not the sp watchpoint
-   localparam [31:0] WP_MASK = 32'hfffff000;
+   /* STORE value+address WATCHPOINT (rob_ptr-correlated).  The store ADDRESS (VA) rides
+    * t_mem_req (with rob_ptr); the store DATA arrives later on core_store_data (same
+    * rob_ptr, decoupled through the mem-data queue).  On a store whose VA==bp_wp_addr,
+    * remember its rob_ptr; when that rob_ptr's data arrives and equals bp_wp_val, FREEZE
+    * -- i.e. freeze on the store that writes the CORRUPT value to the watched slot,
+    * whichever instruction did it. */
    logic	r_wp_hit;
-   wire		w_wp_match = bp_enable &
-		((retire_reg_valid     & (retire_reg_ptr     == 5'd29) & ((retire_reg_data[31:0]     & WP_MASK) == WP_VAL)) |
-		 (retire_reg_two_valid & (retire_reg_two_ptr == 5'd29) & ((retire_reg_two_data[31:0] & WP_MASK) == WP_VAL)));
+   logic	r_wp_pending;
+   logic [`LG_ROB_ENTRIES-1:0] r_wp_robptr;
+   logic [31:0]	r_wp_data;
+   assign dbg_wp_data = r_wp_data;
+   wire		w_wp_addr_match = bp_enable & t_mem_req_valid & t_mem_req.is_store &
+		(t_mem_req.addr[31:0] == bp_wp_addr);
+   wire		w_wp_data_here  = r_wp_pending & core_store_data_valid &
+		(core_store_data.rob_ptr == r_wp_robptr);
+   /* bp_wp_val == 0xffffffff is a WILDCARD: freeze on ANY store to bp_wp_addr. */
+   wire		w_wp_match      = w_wp_data_here & ((bp_wp_val == 32'hffffffff) | (core_store_data.data[31:0] == bp_wp_val));
+
+   /* resettable fault-trap: while armed (bp_enable), the FIRST fatal USERSPACE arch-fault
+    * (AdEL/AdES/IBE/DBE/RI, EPC in useg) latches {epc,cause,badvaddr} + sets r_fault_hit,
+    * which folds into w_step_ok to FREEZE so the ARM can read a coherent fault state (the
+    * latched taps override the live outputs below).  fault_clear clears + re-arms. */
+   logic		r_fault_hit;
+   logic [`M_WIDTH-1:0] r_fault_epc, r_fault_badv;
+   logic [4:0]	r_fault_cause;
+   wire		w_fatal_cause = (n_cause == 5'd4) | (n_cause == 5'd5) | (n_cause == 5'd6) |
+		(n_cause == 5'd7) | (n_cause == 5'd10);
+   wire		w_fault_match = bp_enable & ~r_fault_hit & t_arch_fault & w_fatal_cause & ~n_epc[31];
 
    /* this gets consumed by retirement logic */
-   wire		w_step_ok   = (r_single_step | r_bp_hit | r_wp_hit) ? (t_step_edge) : 1'b1;
+   wire		w_step_ok   = (r_single_step | r_bp_hit | r_wp_hit | r_fault_hit) ? (t_step_edge) : 1'b1;
+   assign dbg_frozen = {r_bp_hit, r_wp_hit, r_fault_hit};
 `else
-   /* this gets consumed by retirement logic (debug watchpoint compiled out) */
+   /* debug watchpoint/fault-trap compiled out -- ports tied off, no compare logic generated */
    wire		w_step_ok   = r_single_step ? (t_step_edge) : 1'b1;
+   assign dbg_frozen  = 3'd0;
+   assign dbg_wp_data = 32'd0;
 `endif
 
    logic	n_step_last, r_step_last, t_step_edge;
@@ -657,13 +688,59 @@ module core(clk,
 	r_step_last <= reset ? 1'b0 : n_step_last;
 	r_single_step <= reset ? 1'b0 : single_step;
 `ifdef ENABLE_DEBUG_WATCHPOINT
-	r_bp_hit <= reset ? 1'b0 : (r_bp_hit | w_bp_match);
-	r_wp_hit <= reset ? 1'b0 : (r_wp_hit | w_wp_match);
-	if(reset) r_cur_sp <= 32'd0;
-	else if(retire_reg_two_valid & (retire_reg_two_ptr == 5'd29)) r_cur_sp <= retire_reg_two_data[31:0];
-	else if(retire_reg_valid     & (retire_reg_ptr     == 5'd29)) r_cur_sp <= retire_reg_data[31:0];
+	r_bp_hit <= reset ? 1'b0 : (fault_clear ? 1'b0 : (r_bp_hit | w_bp_match));
+	r_wp_hit <= reset ? 1'b0 : (fault_clear ? 1'b0 : (r_wp_hit | w_wp_match));
+	if(reset)
+	  r_wp_data <= 32'd0;
+	else if(w_wp_data_here)
+	  r_wp_data <= core_store_data.data[31:0];   /* exact data of the store to bp_wp_addr */
+	/* single pending slot: remember the rob_ptr of a store to bp_wp_addr, cleared when
+	 * its data arrives (or on fault_clear).  A newer match overwrites -- fine, since we
+	 * only care about the store carrying the corrupt value bp_wp_val. */
+	if(reset)
+	  begin
+	     r_wp_pending <= 1'b0;
+	     r_wp_robptr  <= '0;
+	  end
+	else if(fault_clear)
+	  begin
+	     r_wp_pending <= 1'b0;
+	  end
+	else if(w_wp_addr_match)
+	  begin
+	     r_wp_pending <= 1'b1;
+	     r_wp_robptr  <= t_mem_req.rob_ptr;
+	  end
+	else if(w_wp_data_here)
+	  begin
+	     r_wp_pending <= 1'b0;
+	  end
 `endif
      end
+
+`ifdef ENABLE_DEBUG_WATCHPOINT
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_fault_hit   <= 1'b0;
+	     r_fault_epc   <= 'd0;
+	     r_fault_badv  <= 'd0;
+	     r_fault_cause <= 5'd0;
+	  end // if (reset)
+	else if(fault_clear)
+	  begin
+	     r_fault_hit <= 1'b0;   /* clear + re-arm; latched values held until the next hit */
+	  end
+	else if(w_fault_match)
+	  begin
+	     r_fault_hit   <= 1'b1;
+	     r_fault_epc   <= n_epc;
+	     r_fault_badv  <= n_badvaddr;
+	     r_fault_cause <= n_cause;
+	  end // if (w_fault_match)
+     end // always_ff@ (posedge clk)
+`endif
 
    logic [31:0] r_restart_cycles, n_restart_cycles;
    logic t_divide_ready;
@@ -706,9 +783,17 @@ module core(clk,
    assign got_break = r_got_break;
    assign got_ud = r_got_ud;
    assign got_bad_addr = r_got_bad_addr;
+`ifdef ENABLE_DEBUG_WATCHPOINT
+   /* when the fault-trap is frozen, expose the LATCHED fault state on the live taps
+    * so the ARM reads a stable {epc,cause,badvaddr} (not clobbered by the handler). */
+   assign epc      = r_fault_hit ? r_fault_epc   : r_epc;
+   assign badvaddr = r_fault_hit ? r_fault_badv  : r_badvaddr;
+   assign cause    = r_fault_hit ? r_fault_cause : r_cause;
+`else
    assign epc = r_epc;
    assign badvaddr = r_badvaddr;
    assign cause = r_cause;
+`endif
 
    assign dbg_head_pc              = t_rob_head.pc[31:0];
    /* why is the head stuck? read-only debug packing of existing head signals.
@@ -3310,6 +3395,7 @@ module core(clk,
 	   .core_epc(r_epc),
 	   .core_wr_epc(t_wr_epc),
 	   .core_cause(r_cause),
+	   .cause_ip(cause_ip),
 	   .core_ce(r_ce),
 	   .exec_epc(w_exec_epc),
 	   .core_wr_tlbp(t_wr_tlbp),

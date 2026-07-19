@@ -43,6 +43,7 @@ module exec(clk,
 	    core_fcsr_cause6,
 	    core_fcsr_flags5,
 	    exec_epc,
+	    cause_ip,
 	    core_wr_tlbp,
 	    core_tlbp_hit,
 	    core_tlbp_index,
@@ -142,7 +143,8 @@ module exec(clk,
    input logic [5:0]	       core_tlbp_index;
    
    output logic [7:0]	       asid;
-   
+   output logic [7:0]	       cause_ip;   /* Cause.IP[7:0] pending bits, for co-sim ISR dispatch */
+
    output logic		       sr_bev;
    output logic		       sr_exl;
 
@@ -3642,6 +3644,7 @@ module exec(clk,
      end
    
    wire [7:0] w_ip = {r_timer_ip, r_ip6, r_ip5, r_ip4, r_ip3, r_ip2, r_ip1, r_ip0};
+   assign cause_ip = w_ip;   /* expose IP[7:0] for co-sim ISR dispatch (free tap; w_ip already drives irq) */
    /* interrupt is pending when IE=1, EXL=0, ERL=0, and any (IP & IM) bit set */
    assign irq_pending = r_sr_ie & ~r_sr_exl & ~r_sr_erl & |(w_ip & r_sr_im);
    assign cp0_count   = r_count;
