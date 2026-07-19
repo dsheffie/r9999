@@ -2973,10 +2973,10 @@ module core(clk,
 
 
    
-   find_first_set#(`LG_HILO_PRF_ENTRIES) ffs_hilo(.in(r_hilo_prf_free),
+   find_lowest_set_bit#(`LG_HILO_PRF_ENTRIES) ffs_hilo(.in(r_hilo_prf_free),
 						 .y(t_hilo_ffs));
 
-   find_first_set#(`LG_FCR_PRF_ENTRIES) ffs_fcr(.in(r_fcr_prf_free),
+   find_lowest_set_bit#(`LG_FCR_PRF_ENTRIES) ffs_fcr(.in(r_fcr_prf_free),
 						.y(t_fcr_ffs));
    always_comb
      begin
@@ -3005,8 +3005,8 @@ module core(clk,
 	   assign w_fp_free_b1[fpgi] = (fpgi >= N_PRF_ENTRIES/2) ? r_fp_prf_free[fpgi] : 1'b0;
 	end
    endgenerate
-   find_first_set#(`LG_PRF_ENTRIES) ffs_fp0(.in(w_fp_free_b0), .y(t_fp_ffs0));
-   find_first_set#(`LG_PRF_ENTRIES) ffs_fp1(.in(w_fp_free_b1), .y(t_fp_ffs1));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_fp0(.in(w_fp_free_b0), .y(t_fp_ffs0));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_fp1(.in(w_fp_free_b1), .y(t_fp_ffs1));
    always_comb
      begin
 	n_fp_prf_free = r_fp_prf_free;
@@ -3058,10 +3058,10 @@ module core(clk,
    assign w_mem_even_full = (|w_mem_even) == 1'b0;
    assign w_mem_odd_full  = (|w_mem_odd)  == 1'b0;
 
-   find_first_set#(`LG_PRF_ENTRIES) ffs_ae(.in(w_alu_even), .y(w_ffs_alu_even));
-   find_first_set#(`LG_PRF_ENTRIES) ffs_ao(.in(w_alu_odd),  .y(w_ffs_alu_odd));
-   find_first_set#(`LG_PRF_ENTRIES) ffs_me(.in(w_mem_even), .y(w_ffs_mem_even));
-   find_first_set#(`LG_PRF_ENTRIES) ffs_mo(.in(w_mem_odd),  .y(w_ffs_mem_odd));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_ae(.in(w_alu_even), .y(w_ffs_alu_even));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_ao(.in(w_alu_odd),  .y(w_ffs_alu_odd));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_me(.in(w_mem_even), .y(w_ffs_mem_even));
+   find_lowest_set_bit#(`LG_PRF_ENTRIES) ffs_mo(.in(w_mem_odd),  .y(w_ffs_mem_odd));
 
    always_ff@(posedge clk)
      begin

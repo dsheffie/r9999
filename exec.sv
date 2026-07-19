@@ -855,10 +855,10 @@ module exec(clk,
    
    wire [N_INT_SCHED_ENTRIES-1:0] w_alu_sched_oldest_ready;
    
-   find_first_set#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc( .in(~r_alu_sched_valid),
+   find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc( .in(~r_alu_sched_valid),
 							      .y(t_alu_sched_alloc_ptr));
 
-   find_first_set#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_select( .in(w_alu_sched_oldest_ready),
+   find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_select( .in(w_alu_sched_oldest_ready),
 								.y(t_alu_sched_select_ptr));
 
    
