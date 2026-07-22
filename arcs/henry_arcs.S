@@ -59,6 +59,17 @@ arcs_boot:
 arcs_kentry_slot:                   /* 0xBFC00008: driver patches kernel e_entry (BE) */
     .word   ARCS_KENTRY
 fsbl:
+    /* (-1) program MC MEMCFG0 = 256 MB (2x128MB banks) so IRIX hinv sees full RAM.
+     * MC base 0x1fa00000 + MEMCFG0 offset 0xc4 = kseg1 0xbfa000c4; value 0x3f203f40.
+     * (The committed source was missing this; the deployed FSBL carried it as an
+     * uncommitted edit -- see reference_ip22_mc_memcfg. Restored here.) */
+    lui     $t0, 0x3f20
+    ori     $t0, $t0, 0x3f40        /* MEMCFG0 = 0x3f203f40 (2 banks x 128MB) */
+    lui     $t1, 0xbfa0
+    ori     $t1, $t1, 0x00c4        /* &MC MEMCFG0 */
+    sw      $t0, 0($t1)
+    nop
+
     /* (0) FSBL: copy the SPB/romvec block PROM(_spb_lma) -> RAM 0xA0001000.
      * 0xA0001000 is kseg1 (uncached, so the kernel's later reads see it) and the
      * System Memory Alias lands it in real DRAM @ 0x08001000. */
@@ -90,6 +101,165 @@ fsbl:
     b       2b
     nop
 3:
+    /* (1b) program the station MAC into the ds1386 bbRAM @0xbfbe04e8..fc
+     * (HPC3 base 0x1fb80000 + bbram EADDR offset 0x604e8), so IRIX if_ec reads a
+     * valid address instead of 00:00:00:00:00:00.  One byte per word, in [31:24]
+     * (same lane convention as hpc3.sv reads).  MAC = 08:00:69:12:34:56 (real SGI
+     * OUI; matches eaddr_str and the interp_mips bbRAM). */
+    lui     $t0, 0xbfbe
+    ori     $t0, $t0, 0x04e8        /* &bbram[EADDR], kseg1 uncached */
+    lui     $t1, 0x0800
+    sw      $t1, 0($t0)             /* byte 0 = 0x08 */
+    sw      $zero, 4($t0)           /* byte 1 = 0x00 */
+    lui     $t1, 0x6900
+    sw      $t1, 8($t0)             /* byte 2 = 0x69 */
+    lui     $t1, 0x1200
+    sw      $t1, 12($t0)            /* byte 3 = 0x12 */
+    lui     $t1, 0x3400
+    sw      $t1, 16($t0)            /* byte 4 = 0x34 */
+    lui     $t1, 0x5600
+    sw      $t1, 20($t0)            /* byte 5 = 0x56 */
+    /* TEMP DEBUG: read back 0x604e8 (t0) via lw and lbu, print both as hex over SCC */
+    lui     $t4, 0xbfbd
+    ori     $t5, $t4, 0x9830        /* SCC RR0 status (TxEmpty = bit 0x04) */
+    ori     $t6, $t4, 0x9837        /* SCC data */
+    move    $t9, $zero              /* lbu all 6 MAC bytes at t0+{0,4,8,12,16,20} */
+dbg_macl:
+    addu    $a2, $t0, $t9
+    lw      $t8, 0($a2)             /* IRIX Guiness path: lw then & 0xff */
+    andi    $t8, $t8, 0xff
+    bal     dbg_phex
+    nop
+    addiu   $t9, $t9, 4
+    sltiu   $a3, $t9, 24
+    bne     $a3, $zero, dbg_macl
+    nop
+dbg_nl:
+    lbu     $a0, 0($t5)             /* newline: poll TxEmpty */
+    andi    $a0, $a0, 0x04
+    beq     $a0, $zero, dbg_nl
+    nop
+    ori     $a0, $zero, 0x0a
+    sb      $a0, 0($t6)
+    /* TEMP DEBUG: read NMC93CS56 eeprom words 125,126,127 (MAC) via Microwire, print */
+    ori     $s0, $zero, 125
+    ori     $s1, $zero, 128
+dbg_ee_loop:
+    move    $a0, $s0
+    bal     ee_read                 /* $v0 = 16-bit eeprom word */
+    nop
+    move    $t8, $v0
+    bal     dbg_phex
+    nop
+    addiu   $s0, $s0, 1
+    bne     $s0, $s1, dbg_ee_loop
+    nop
+dbg_ee_nl:
+    lbu     $a0, 0($t5)
+    andi    $a0, $a0, 0x04
+    beq     $a0, $zero, dbg_ee_nl
+    nop
+    ori     $a0, $zero, 0x0a
+    sb      $a0, 0($t6)
+    b       dbg_done
+    nop
+dbg_phex:                           /* print $t8 as 8 hex nibbles + space; leaf (uses ra) */
+    ori     $t7, $zero, 8
+dbg_ph_loop:
+    srl     $a0, $t8, 28
+    andi    $a0, $a0, 0xf
+    sltiu   $a1, $a0, 10
+    beq     $a1, $zero, dbg_ph_af
+    nop
+    addiu   $a0, $a0, 0x30          /* '0'..'9' */
+    b       dbg_ph_emit
+    nop
+dbg_ph_af:
+    addiu   $a0, $a0, 0x57          /* 'a'..'f' */
+dbg_ph_emit:
+    lbu     $a1, 0($t5)
+    andi    $a1, $a1, 0x04
+    beq     $a1, $zero, dbg_ph_emit
+    nop
+    sb      $a0, 0($t6)
+    sll     $t8, $t8, 4
+    addiu   $t7, $t7, -1
+    bne     $t7, $zero, dbg_ph_loop
+    nop
+dbg_ph_sp:                          /* trailing space */
+    lbu     $a1, 0($t5)
+    andi    $a1, $a1, 0x04
+    beq     $a1, $zero, dbg_ph_sp
+    nop
+    ori     $a0, $zero, 0x20
+    sb      $a0, 0($t6)
+    jr      $ra
+    nop
+
+/* ee_read: NMC93CS56 Microwire READ of word $a0 -> $v0 (16-bit). Leaf (uses ra).
+ * ctrl reg @ HPC3 0x30008 = kseg1 0xbfbb0008. bits: 0x01 EPROT 0x02 CSEL 0x04 ECLK
+ * 0x08 DATO 0x10 DATI.  Mirrors ip22-nvram.c ip22_eeprom_read(). t1 = shadow ctrl. */
+ee_read:
+    lui     $t0, 0xbfbb
+    ori     $t0, $t0, 0x0008
+    /* cs_on: all low, then CSEL, then ECLK */
+    sw      $zero, 0($t0)
+    ori     $t1, $zero, 0x02        /* CSEL */
+    sw      $t1, 0($t0)
+    ori     $t1, $t1, 0x04          /* + ECLK */
+    sw      $t1, 0($t0)
+    /* ser_cmd = 0xc000 | (reg<<5), clock 11 bits MSB-first */
+    sll     $a1, $a0, 5
+    ori     $t3, $zero, 0xc000      /* READ opcode (start+10) in low 16 bits */
+    or      $a1, $a1, $t3
+    andi    $a1, $a1, 0xffff
+    ori     $a2, $zero, 11
+ee_c:
+    andi    $t4, $a1, 0x8000        /* DATO = bit15 */
+    ori     $t1, $zero, 0x02        /* CSEL, ECLK=0, DATO=0 */
+    beq     $t4, $zero, ee_c0
+    nop
+    ori     $t1, $t1, 0x08          /* DATO=1 */
+ee_c0:
+    sw      $t1, 0($t0)             /* ECLK=0 */
+    ori     $t1, $t1, 0x04
+    sw      $t1, 0($t0)             /* ECLK=1 (rising) */
+    sll     $a1, $a1, 1
+    addiu   $a2, $a2, -1
+    bne     $a2, $zero, ee_c
+    nop
+    ori     $t1, $zero, 0x06        /* DATO=0, CSEL+ECLK */
+    sw      $t1, 0($t0)
+    /* clock 16 data bits out of DATI, MSB-first */
+    move    $v0, $zero
+    ori     $a2, $zero, 16
+ee_d:
+    ori     $t1, $zero, 0x02        /* CSEL, ECLK=0 */
+    sw      $t1, 0($t0)
+    ori     $t1, $t1, 0x04
+    sw      $t1, 0($t0)             /* ECLK=1 (rising) */
+    sll     $v0, $v0, 1
+    lw      $t2, 0($t0)
+    andi    $t2, $t2, 0x10          /* DATI */
+    beq     $t2, $zero, ee_d0
+    nop
+    ori     $v0, $v0, 1
+ee_d0:
+    addiu   $a2, $a2, -1
+    bne     $a2, $zero, ee_d
+    nop
+    /* cs_off */
+    ori     $t1, $zero, 0x02
+    sw      $t1, 0($t0)             /* ECLK=0 */
+    sw      $zero, 0($t0)           /* CSEL=0 */
+    ori     $t1, $zero, 0x01
+    sw      $t1, 0($t0)             /* EPROT=1 */
+    ori     $t1, $zero, 0x05
+    sw      $t1, 0($t0)             /* + ECLK=1 */
+    jr      $ra
+    nop
+dbg_done:
+
     /* (2) copy the argv/envp blob to kseg0 0x88fff000 */
     la      $t0, arcs_argv_blob
     la      $t2, arcs_argv_blob_end
