@@ -105,8 +105,8 @@ typedef struct packed {
    logic 		       fp_hi;
    logic [31:0]		       fp_pres;
    logic [(`M_WIDTH-1):0]      data;
+   logic [(`M_WIDTH-1):0]      pc;   /* un-guarded for synth: store-tracer PC watchpoint (be birth catch) */
 `ifdef VERILATOR
-   logic [(`M_WIDTH-1):0]      pc;
    logic [(`M_WIDTH-1):0]      uuid;
 `endif
 } mem_req_t;

@@ -115,13 +115,13 @@
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
 `else
- `define LG_L1D_NUM_SETS 10
+ `define LG_L1D_NUM_SETS 8   // 256 sets x 16B = 4KB (= page size -> VIPT alias-free)
 `endif
 
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
 `else
- `define LG_L1I_NUM_SETS 10
+ `define LG_L1I_NUM_SETS 8   // 256 sets x 16B = 4KB (= page size -> VIPT alias-free)
 `endif
 
 // EXPERIMENT: shrink the L2 to 4 lines (LG_L2_NUM_SETS=2).  Keeps the correct
@@ -144,7 +144,7 @@
  `elsif BIG_SIM_L2
   `define LG_L2_NUM_SETS 16     /* 65536 lines x 16B = 1MB (sim-only; too big for FPGA BRAM) */
  `else
-  `define LG_L2_NUM_SETS 13     /* 8192 lines x 16B = 128KB (default; fits henry xczu3eg BRAM) */
+  `define LG_L2_NUM_SETS 9      /* 512 lines x 16B = 8KB (shrunk to free BRAM for the 32K retire ring) */
  `endif
 `endif
 

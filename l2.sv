@@ -20,6 +20,7 @@ module l2(clk,
 	  l1_mem_req_mask,
 	  l1_mem_req_store_data,
 	  l1_mem_req_opcode,
+	  l2_nocache,
 
 	  //l2 -> l1
 	  l1_mem_rsp_valid,
@@ -63,17 +64,14 @@ module l2(clk,
    output logic l1_mem_req_ack;
    input logic [`PA_WIDTH-1:0] l1_mem_req_addr;
    input logic	      l1_mem_req_cacheable;
-`ifdef ENABLE_L2_NOCACHE
-   /* EXPERIMENT: entirely disable the L2 as a cache.  Route cacheable DATA ops
-    * (loads/stores/line-fills, opcode < MEM_INVL=24) down the uncached
-    * pass-through-to-DRAM path so the L2 NEVER fills a line -> holds nothing ->
-    * no stale reservoir AND no inclusivity vs the L1D.  Keep CACHE-management ops
-    * (MEM_INVL=24, MEM_WB=26, ... >= 24) on the normal cacheable path so their
-    * handlers still run (they find an empty L2 and just ack / write through). */
-   wire w_l2_cacheable = l1_mem_req_cacheable & (l1_mem_req_opcode >= 5'd24);
-`else
-   wire w_l2_cacheable = l1_mem_req_cacheable;
-`endif
+   /* l2_nocache (driver-set BEFORE `go`, static during a run): entirely disable the L2 as a
+    * cache.  Route cacheable DATA ops (loads/stores/line-fills, opcode < MEM_INVL=24) down the
+    * uncached pass-through-to-DRAM path so the L2 NEVER fills a line -> holds nothing -> no stale
+    * reservoir AND no inclusivity vs the L1D.  CACHE-management ops (>=24) stay cacheable so their
+    * handlers still run (find an empty L2, ack/write through).  l2_nocache=0 => normal L2.  Set
+    * before-go only, so no mid-run flush needed (no lines exist to go stale). Was `ENABLE_L2_NOCACHE. */
+   wire w_l2_cacheable = l1_mem_req_cacheable & (~l2_nocache | (l1_mem_req_opcode >= 5'd24));
+   input logic l2_nocache;
    input logic [15:0] l1_mem_req_mask;
    
    input logic [127:0] l1_mem_req_store_data;

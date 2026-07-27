@@ -91,6 +91,9 @@ module decode_mips(
    always_comb
      begin
 	uop.op = II;
+`ifdef ENABLE_EXC_RING
+	uop.insn = insn;   /* debug: ferry the raw fetched word to the ROB alloc (exception ring) */
+`endif
 	uop.srcA = 'd0;
 	uop.srcB = 'd0;
 	uop.dst = 'd0;
@@ -1724,7 +1727,7 @@ module decode_mips(
 			 uop.op = LDC1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
-			 uop.dst = ft;
+			 uop.dst = fr ? ft : {ft[`LG_PRF_ENTRIES-1:1], 1'b0}; /* FR=0 odd ft: force even */
 			 uop.fp_dst_valid = 1'b1;
 			 uop.imm = insn[15:0];
 			 uop.is_mem = 1'b1;
@@ -1768,7 +1771,7 @@ module decode_mips(
 			 uop.op = SDC1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
-			 uop.srcB = ft;
+			 uop.srcB = fr ? ft : {ft[`LG_PRF_ENTRIES-1:1], 1'b0}; /* FR=0 odd ft: force even */
 			 uop.fp_srcB_valid = 1'b1;
 			 uop.imm = insn[15:0];
 			 uop.is_mem = 1'b1;
@@ -1834,9 +1837,7 @@ module decode_mips(
 	      * (R10000 UM p.305, "if the register selected is odd, the load/store is
 	      * invalid").  Singleword lwc1/swc1/mtc1/mfc1 are NOT faulted here -- odd
 	      * selects the high half (Part 2b merge/extract). */
-	     if((fr == 1'b0) &&
-		((uop.is_fp && (insn[11] | insn[16] | insn[6])) ||
-		 ((uop.op == LDC1 || uop.op == SDC1) && insn[16])))
+	     if((fr == 1'b0) && uop.is_fp && (insn[11] | insn[16] | insn[6]))
 	       begin
 		  uop.op            = II;   /* -> is_ii -> ARCH_FAULT -> cause 10 (ResI) */
 		  uop.is_fp         = 1'b0;

@@ -21,6 +21,8 @@ module core_l1d_l1i(clk,
 		    bp_pc,
 		    bp_wp_addr,
 		    bp_wp_val,
+		    bp_fault_only,
+		    l2_nocache,
 		    step,
 		    in_flush_mode,
 		    resume,
@@ -117,6 +119,8 @@ module core_l1d_l1i(clk,
    input logic [31:0] bp_pc;
    input logic [31:0] bp_wp_addr;
    input logic [31:0] bp_wp_val;
+   input logic bp_fault_only;
+   input logic l2_nocache;
    input logic step;
    input logic resume;
    input logic [(`M_WIDTH-1):0] resume_pc;
@@ -563,6 +567,7 @@ module core_l1d_l1i(clk,
 	       .l1_mem_req_mask(t_l2_req_mask),
 	       .l1_mem_req_store_data(l1d_mem_req_store_data),
 	       .l1_mem_req_opcode(t_l2_req_opcode),
+		       .l2_nocache(l2_nocache),
 	       
 	       .l1_mem_rsp_valid(w_l1_mem_rsp_valid),
 	       .l1_mem_load_data(w_l1_mem_load_data),
@@ -739,6 +744,7 @@ module core_l1d_l1i(clk,
 	     .bp_pc(bp_pc),
 	     .bp_wp_addr(bp_wp_addr),
 	     .bp_wp_val(bp_wp_val),
+	     .bp_fault_only(bp_fault_only),
 	     .step(step),
 	     .resume(resume),
 	     .memq_empty(memq_empty),
