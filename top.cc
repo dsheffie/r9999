@@ -9,20 +9,35 @@ extern "C" void l2_line_log(int, unsigned long long, unsigned long long,
 extern "C" void l2_chk_log(unsigned long long, int, int, int, int,
                            unsigned long long, unsigned long long) {}
 
-/* Checkpoint-resume DPI seed hooks (used by the henry full-system tb to inject a
- * fast-forwarded ISS state at reset).  ooo_core never resumes from a checkpoint, so
- * have_checkpoint() returns 0 -> the RTL seed branches are dead; these stubs only
- * satisfy the linker for the `ifdef VERILATOR` DPI imports in the core RTL. */
-extern "C" {
-  int       have_checkpoint(void)               { return 0; }
-  long long loadgpr(int regid)                  { (void)regid; return 0; }
-  long long loadfpr(int regid)                  { (void)regid; return 0; }
-  int       loadcp0(int regid)                  { (void)regid; return 0; }
-  long long loadcp0_64(int regid)               { (void)regid; return 0; }
-  long long loadhilo(int half)                  { (void)half;  return 0; }
-  int       loadfcsr(void)                      { return 0; }
-  long long loadtlb(int entry, int field)       { (void)entry; (void)field; return 0; }
+/* Checkpoint-resume DPI seed hooks: when --checkpoint loads an ISS checkpoint,
+ * g_have_ckpt=1 and the RTL seed branches (rf4r2w/fp_regfile/exec/tlb) pull the
+ * fast-forwarded arch state from these at reset.  g_ckpt = the loaded interp state.
+ * sx32() sign-extends 32-bit compat (kseg) addresses into 64b to match how the RTL
+ * represents them -- the interp zero-extends kseg pc/ra/gpr (the FF blocker). */
+static state_t *g_ckpt = nullptr;
+static int      g_have_ckpt = 0;
+static inline long long sx32(long long v){
+  unsigned long long u = (unsigned long long)v;
+  return ((u >> 32) == 0 && (u & 0x80000000ull)) ? (long long)(int)(unsigned)u : v;
 }
+extern "C" {
+  int       have_checkpoint(void)   { return g_have_ckpt; }
+  long long loadgpr(int r)          { return g_ckpt ? sx32((long long)g_ckpt->gpr[r]) : 0; }
+  long long loadfpr(int r)          { return g_ckpt ? (long long)g_ckpt->cpr1[r] : 0; }
+  int       loadcp0(int r)          { return g_ckpt ? (int)g_ckpt->cpr0[r] : 0; }
+  long long loadcp0_64(int r)       { if(!g_ckpt) return 0;
+                                      long long v = (long long)g_ckpt->cpr0_64[r];
+                                      return (r==14 || r==8) ? sx32(v) : v; }  /* EPC, BadVAddr are addrs */
+  long long loadhilo(int half)      { return g_ckpt ? (long long)(half ? g_ckpt->hi : g_ckpt->lo) : 0; }
+  int       loadfcsr(void)          { return g_ckpt ? (int)g_ckpt->fcr1[31] : 0; }
+  long long loadtlb(int e, int f)   { if(!g_ckpt) return 0;
+    switch(f){ case 0:  return (long long)g_ckpt->tlb[e].entry_hi;
+               case 1:  return (long long)g_ckpt->tlb[e].entry_lo0;
+               case 2:  return (long long)g_ckpt->tlb[e].entry_lo1;
+               default: return (long long)g_ckpt->tlb[e].page_mask; } }
+}
+
+void loadState(state_t &s, const std::string &filename);   /* saveState.cc (fwd decl if not in a header) */
 
 #define BRANCH_DEBUG 1
 #define CACHE_STATS 1
@@ -405,6 +420,7 @@ int main(int argc, char **argv) {
   std::string mips_binary = "dhrystone3";
   std::string arcs_image;
   std::string memdump_spec;
+  std::string ckpt_name;
   std::string log_name = "log.txt";
   std::string pushout_name = "pushout.txt";
   std::string branch_name = "branch_info.txt";
@@ -422,6 +438,7 @@ int main(int argc, char **argv) {
       ("help", "Print help messages")
       ("checker,c", po::value<bool>(&enable_checker)->default_value(true), "use checker")
       ("file,f", po::value<std::string>(&mips_binary), "mips binary")
+      ("checkpoint", po::value<std::string>(&ckpt_name)->default_value(""), "resume from an ISS checkpoint (fast-forward the fast interp, then seed + run the RTL from that state)")
       ("heartbeat,h", po::value<uint64_t>(&heartbeat)->default_value(1<<24), "heartbeat for stats")
       ("log,l", po::value<std::string>(&log_name), "stats log filename")
       ("pushout", po::value<std::string>(&pushout_name), "pushout log filename")
@@ -490,6 +507,13 @@ int main(int argc, char **argv) {
     }
     load_elf(mips_binary.c_str(), s);
     load_elf(mips_binary.c_str(), ss);
+    if(!ckpt_name.empty()){
+      loadState(*s, ckpt_name);   /* override the fresh boot with the FF'd ISS state */
+      loadState(*ss, ckpt_name);
+      g_ckpt = s; g_have_ckpt = 1;   /* enables the RTL seed branches (have_checkpoint()) */
+      fprintf(stderr, "[ckpt-resume] %s -> pc=%08x icnt=%lu (seeding RTL from FF state)\n",
+              ckpt_name.c_str(), (uint32_t)s->pc, (unsigned long)s->icnt);
+    }
 
     /* Optional synthetic ARCS firmware: the kernel's PROMLIB reads the ARCS
      * System Parameter Block at kseg1 0xA0001000 (physical 0x1000).  Load the
@@ -892,11 +916,21 @@ int main(int argc, char **argv) {
 	   * counter. */
 	  uint32_t rtl_pc32 = (uint32_t)tb->retire_pc;
 	  uint32_t sim_pc32 = (uint32_t)ss->pc;
+	  /* Exception-vector regions: the BEV=1 ROM vectors (bfc00180-bfc003ff)
+	   * AND the BEV=0 RAM vectors (80000000-800001ff: TLB-refill 0x000,
+	   * XTLB-refill 0x080, cache-err 0x100, general 0x180).  IRIX runs BEV=0,
+	   * so a mapped I-fetch TLB miss vectors the RTL to 0x80000000/0x80000080
+	   * while the sim is still poised at the faulting (mapped) PC -- the sim
+	   * takes the identical fetch fault on its next execMips step. */
 	  bool rtl_in_exc_handler = (rtl_pc32 >= 0xbfc00180u &&
-				     rtl_pc32 <  0xbfc00400u);
-	  /* "sim in user code" = sim is not in the entire bfc00xxx ROM area */
-	  bool sim_in_user_code   = !(sim_pc32 >= 0xbfc00000u &&
-				      sim_pc32 <  0xbfc00400u);
+				     rtl_pc32 <  0xbfc00400u) ||
+				    (rtl_pc32 >= 0x80000000u &&
+				     rtl_pc32 <  0x80000200u);
+	  /* "sim in user code" = sim is not in either vector area */
+	  bool sim_in_user_code   = !((sim_pc32 >= 0xbfc00000u &&
+				       sim_pc32 <  0xbfc00400u) ||
+				      (sim_pc32 >= 0x80000000u &&
+				       sim_pc32 <  0x80000200u));
 	  bool caught_up = false;
 
 	  if(rtl_in_exc_handler && sim_in_user_code) {
