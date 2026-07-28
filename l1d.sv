@@ -1318,50 +1318,11 @@ endfunction
 	       t_rsp_data2 = bswap64(select_cl64(t_data2, r_req2.addr[DWORD_START]));
 	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
 	    end
-	  MEM_LWR:
-	    begin
-	       case(r_req2.addr[1:0])
-		 2'd0:
-		   begin
-		      t_rsp_data2 = {{32{r_req2.data[31]}}, r_req2.data[31:8], t_bswap_w32_2[31:24]};
-		   end
-		 2'd1:
-		   begin
-		      t_rsp_data2 = {{32{r_req2.data[31]}}, r_req2.data[31:16], t_bswap_w32_2[31:16]};
-		   end
-		 2'd2:
-		   begin
-		      t_rsp_data2 = {{32{r_req2.data[31]}}, r_req2.data[31:24], t_bswap_w32_2[31:8]};				       
-		   end
-		 2'd3:
-		   begin
-		      t_rsp_data2 = {{32{t_bswap_w32_2[31]}}, t_bswap_w32_2};
-		   end
-	       endcase // case (r_req.addr[1:0])
-	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
-	    end
-	  MEM_LWL:
-	    begin
-	       case(r_req2.addr[1:0])
-		 2'd0:
-		   begin
-		      t_rsp_data2 = {{32{t_bswap_w32_2[31]}}, t_bswap_w32_2};
-		   end
-		 2'd1:
-		   begin
-		      t_rsp_data2 = {{32{t_bswap_w32_2[23]}}, t_bswap_w32_2[23:0], r_req2.data[7:0]};
-		   end
-		 2'd2:
-		   begin
-		      t_rsp_data2 = {{32{t_bswap_w32_2[15]}}, t_bswap_w32_2[15:0], r_req2.data[15:0]};
-		   end
-		 2'd3:
-		   begin
-		      t_rsp_data2 = {{32{t_bswap_w32_2[7]}}, t_bswap_w32_2[7:0], r_req2.data[23:0]};
-		   end
-	       endcase // case (r_req.addr[1:0])
-	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;	       
-	    end // case: MEM_LWL
+	  /* LWL/LWR/LDL/LDR are NEVER served on port 2: the FSM forces them to
+	   * t_push_miss (see the r_req2.op==MEM_LWL/LWR/LDL/LDR branch), so they
+	   * retire on the port-1 path where core_store_data is spliced into
+	   * r_req.data as the merge base.  Port 2 has no merge base (r_req2.data is
+	   * the zero default) -> no port-2 merge arm; fall through to default. */
 	  default:
 	    begin
 	    end
@@ -1726,6 +1687,17 @@ endfunction
 
    /* memory system should be idle before dealing with an uncachable req */
    wire w_memq_empty = mem_q_empty & (r_n_inflight == 'd0) & (r_state == ACTIVE);
+
+`ifdef L1D_ONE_MEMOP
+   /* DIAGNOSTIC (opt-in via SV2V_DEFINES=L1D_ONE_MEMOP): accept a new core memory op
+    * ONLY when the L1D is fully idle -- nothing in either pipe stage (r_got_req/req2),
+    * no outstanding miss (r_n_inflight==0), and the store queue drained (mem_q_empty).
+    * This removes ALL inter-memop overlap/forwarding, to test whether the long-lived
+    * pointer corruption is a concurrent-memop (store-forward / bypass) race.  Slow. */
+   wire w_one_memop_ok = mem_q_empty & (r_n_inflight == 'd0) & !r_got_req & !r_got_req2;
+`else
+   wire w_one_memop_ok = 1'b1;
+`endif
    // EXPERIMENT: fence mapped cached LOADS to ROB-head too (non-speculative), so a
    // speculative refill can't re-cache a stale DMA-target buffer line ahead of the
    // driver's dma_cache_inv (the R10000 read-path hazard).  DMA buffers are mapped
@@ -2427,8 +2399,9 @@ endfunction
 		  !(r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) && 
 		  !t_cm_block_stall &&
 		  w_uncachable_req &&
-		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) && 
+		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) &&
 		  /*(r_graduated[core_mem_req.rob_ptr] == 2'b00) && */
+		  w_one_memop_ok &&
 		  (!r_rob_inflight[core_mem_req.rob_ptr])
 		  )
 	       begin

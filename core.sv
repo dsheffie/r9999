@@ -751,6 +751,7 @@ module core(clk,
 `ifdef ENABLE_TRACE_BUFFER
    // ---- trace buffer: log head + next_head {pc,counters,flags} on retire OR arch-fault (incl. II) ----
    // row = 12 words = 2 records; record = {pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, {valid,faulted,cause}}
+   // NOTE: verilator-only (see machine.vh) -- the 256x384b RAM dominates FPGA build time.
    logic [11:0][31:0] r_trace_ram [255:0];
    logic [7:0] 	      r_trace_wptr;
    logic [11:0][31:0] r_trace_row;
@@ -769,6 +770,155 @@ module core(clk,
 	  end
 	r_trace_row <= r_trace_ram[dbg_trace_index[11:4]];
      end
+`endif
+
+`ifdef ENABLE_EXC_RING
+   // ---- exception ring: FATAL-only (AdEL/AdES/IBE/DBE/RI), explicitly armed by bp_enable,
+   //      cycle-stamped, and carrying the RAW FETCHED insn word so we can diff fetched-vs-DRAM.
+   //      Never freezes the core (record-only) -> cannot wedge AXI like the BEFAULT dump did.
+   //      This is a HENRY/FPGA debug knob (SV2V_DEFINES=ENABLE_EXC_RING), so it is present ON
+   //      SILICON -- unlike ENABLE_TRACE_BUFFER, which is verilator-only.
+   //      Read via dbg_trace_index[10]=1 : entry=index[6:3] (16 deep), word=index[2:0] (6 words):
+   //        w0=cause  w1=epc  w2=badvaddr  w3=cycle  w4={opcode,fault-flags}  w5=fetched-insn
+   logic [31:0]       r_fetch_insn [N_ROB_ENTRIES-1:0]; /* shadow: fetched insn per ROB entry */
+   logic [5:0][31:0]  r_exc_ram [15:0];
+   logic [3:0] 	      r_exc_wptr;
+   logic [5:0][31:0]  r_exc_row;
+   wire 	      w_exc_fatal  = (n_cause==5'd4)|(n_cause==5'd5)|(n_cause==5'd6)|(n_cause==5'd7)|(n_cause==5'd10);
+   wire 	      w_exc_we     = bp_enable & t_arch_fault & w_exc_fatal & (r_state != DEAD);
+   wire [31:0] 	      w_fault_insn = r_fetch_insn[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
+   wire [31:0] 	      w_exc_uop    = {t_rob_head.opcode,
+				      t_rob_head.faulted, t_rob_head.is_ii, t_rob_head.is_cpu,
+				      t_rob_head.is_store, t_rob_head.is_bad_addr, t_rob_head.in_delay_slot,
+				      t_rob_head.tlb_refill, t_rob_head.tlb_invalid, t_rob_head.tlb_modified,
+				      15'd0};
+   always_ff@(posedge clk)
+     begin
+	if(reset | ~bp_enable)
+	  begin
+	     r_exc_wptr <= 4'd0;
+	  end
+	else if(w_exc_we)
+	  begin
+	     r_exc_ram[r_exc_wptr] <= {w_fault_insn, w_exc_uop, r_cycle[31:0], n_badvaddr[31:0], n_epc[31:0], {27'd0, n_cause}};
+	     r_exc_wptr <= r_exc_wptr + 4'd1;
+	  end
+	r_exc_row <= r_exc_ram[dbg_trace_index[6:3]];
+     end // always_ff
+`endif
+
+`ifdef ENABLE_RETIRE_TRACE
+   // ---- freeze-on-fault flight recorder (silicon knob via SV2V_DEFINES): a DEEP circular
+   //      ring of the last RT_DEPTH retired instructions that OVERWRITES at full speed (never
+   //      stalls the core -> no throttle, no ARM/SCSI-drain starvation) and FREEZES on a fatal
+   //      userspace fault (AdEL/AdES/IBE/DBE; RI=10 excluded so IRIX FP/insn emulation does not
+   //      freeze us early; TLB misses (cause 2/3) are routine demand-paging and are NOT caught).
+   //      On freeze, r_rt_raddr is set to the oldest slot; the ARM WALKS the
+   //      ring sequentially -- read a row's 6 words via dbg_trace_index[2:0], then pulse `step`
+   //      (t_step_edge) to advance r_rt_raddr to the next entry. Auto-increment keeps the readback
+   //      address INTERNAL, so the ring is deep without widening the 12-bit dbg_trace_index.
+   //      wptr readback bit8 = frozen (ARM polls it). To thaw/rearm, drop+raise bp_enable (resets
+   //      ring, resumes capture). Row words: 0=pc_lo 1=pc_hi 2=inst 3=val_lo 4=val_hi 5={valid,dst}.
+   //      Uses r_fetch_insn -> needs ENABLE_EXC_RING.
+   localparam RT_DEPTH = 16384;
+   localparam RT_LG    = 14;                  /* log2(RT_DEPTH) */
+   logic [5:0][31:0]  r_rt_ram [RT_DEPTH-1:0];
+   logic [RT_LG-1:0]  r_rt_wptr;              /* circular write ptr (overwrites at full speed) */
+   logic [RT_LG-1:0]  r_rt_raddr;             /* sequential read ptr (ARM walks the ring after freeze) */
+   logic              r_rt_frozen;
+   logic [5:0][31:0]  r_rt_row;
+   wire [31:0]        w_rt_insn   = r_fetch_insn[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
+   /* NOTE: the henny submodule adds a bp_pc-match (SIGSEGV-delivery) freeze here; the r9999
+    * working tree lacks the bp_pc port (watchpoint infra is henny-only), so keep fatal-only here. */
+   wire               w_rt_freeze = t_arch_fault & ((n_cause==5'd4)|(n_cause==5'd5)|(n_cause==5'd6)|(n_cause==5'd7)) & (r_state != DEAD);  /* fatal only: AdEL/AdES/IBE/DBE */
+   always_ff@(posedge clk)
+     begin
+        if(reset | ~bp_enable)   /* arm gate / thaw: unarmed -> reset ring, no freeze (boot runs free) */
+          begin
+             r_rt_wptr   <= 14'd0;
+             r_rt_raddr  <= 14'd0;
+             r_rt_frozen <= 1'b0;
+          end
+        else if(r_rt_frozen)     /* frozen: ARM walks the ring; each `step` advances the read ptr */
+          begin
+             if(t_step_edge)
+               begin
+                  r_rt_raddr <= r_rt_raddr + 14'd1;
+               end
+          end
+        else                     /* armed + running: overwrite circularly, latch on fatal fault */
+          begin
+             if(w_rt_freeze)
+               begin
+                  r_rt_frozen <= 1'b1;
+                  r_rt_raddr  <= r_rt_wptr;   /* readout starts at the oldest slot (ring wrapped) */
+               end
+             else if(t_retire & (r_state != DEAD))
+               begin
+                  r_rt_ram[r_rt_wptr] <= { {26'd0, t_rob_head.valid_dst, t_rob_head.ldst},
+                                           t_rob_head.data[63:32], t_rob_head.data[31:0],
+                                           w_rt_insn, t_rob_head.pc[63:32], t_rob_head.pc[31:0] };
+                  r_rt_wptr <= r_rt_wptr + 14'd1;   /* 14-bit -> wraps at 16384 (circular) */
+               end
+          end
+        r_rt_row <= r_rt_ram[r_rt_raddr];    /* readout follows the sequential read ptr */
+     end // always_ff
+   wire        w_rt_stall    = 1'b0;   /* flight recorder NEVER back-pressures retirement */
+   wire        w_rt_sel      = dbg_trace_index[11];
+   wire [8:0]  w_rt_wptr_out = {r_rt_frozen, 8'd0};   /* bit8 = frozen (ARM polls this) */
+   wire [31:0] w_rt_data_out = r_rt_row[dbg_trace_index[2:0]];
+`else
+   wire        w_rt_stall    = 1'b0;
+   wire        w_rt_sel      = 1'b0;
+   wire [8:0]  w_rt_wptr_out = 9'd0;
+   wire [31:0] w_rt_data_out = 32'd0;
+`endif
+
+   // ---- TLB SHADOW (probeable copy of the DTLB at crash time): snoop tlb_entry_out / tlb_entry_out_valid ----
+`ifdef ENABLE_TLB_SHADOW
+   tlb_stored_t r_tlb_shadow [`N_TLB_ENTRIES-1:0];
+   tlb_stored_t r_tlb_shadow_row;
+   integer      tsi;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     for(tsi = 0; tsi < `N_TLB_ENTRIES; tsi = tsi + 1)
+	       begin
+		  r_tlb_shadow[tsi].v0 <= 1'b0;
+		  r_tlb_shadow[tsi].v1 <= 1'b0;
+	       end
+	  end
+	else if(tlb_entry_out_valid)
+	  begin
+	     r_tlb_shadow[tlb_entry_out.entry] <= tlb_stored_t'(tlb_entry_out);
+`ifdef VERILATOR
+	     $display("[tlbshadow] WRITE entry=%0d vpn=%x pfn0=%x pfn1=%x v0=%b v1=%b",
+		      tlb_entry_out.entry, tlb_entry_out.vpn, tlb_entry_out.pfn0, tlb_entry_out.pfn1, tlb_entry_out.v0, tlb_entry_out.v1);
+`endif
+	  end
+	r_tlb_shadow_row <= r_tlb_shadow[dbg_trace_index[8:3]];
+     end // always_ff
+   wire [31:0] w_tlb_dbg_data =
+	       (dbg_trace_index[2:0] == 3'd0) ? {3'd0,  r_tlb_shadow_row.r,    r_tlb_shadow_row.vpn}      :
+	       (dbg_trace_index[2:0] == 3'd1) ? {12'd0, r_tlb_shadow_row.asid, r_tlb_shadow_row.pagemask} :
+	       (dbg_trace_index[2:0] == 3'd2) ? {{(32-`PFN_WIDTH-6){1'b0}}, r_tlb_shadow_row.pfn0, r_tlb_shadow_row.c0, r_tlb_shadow_row.d0, r_tlb_shadow_row.v0, r_tlb_shadow_row.g0} :
+	       (dbg_trace_index[2:0] == 3'd3) ? {{(32-`PFN_WIDTH-6){1'b0}}, r_tlb_shadow_row.pfn1, r_tlb_shadow_row.c1, r_tlb_shadow_row.d1, r_tlb_shadow_row.v1, r_tlb_shadow_row.g1} :
+	       32'd0;
+`else
+   wire [31:0] w_tlb_dbg_data = 32'd0;
+`endif
+
+   // ---- unified dbg_trace readback: exc ring (index[10]=1) overlays the retire trace ring ----
+`ifdef ENABLE_EXC_RING
+ `ifdef ENABLE_TRACE_BUFFER
+   assign dbg_trace_wptr = w_rt_sel ? w_rt_wptr_out : dbg_trace_index[10] ? {5'd0, r_exc_wptr}              : {1'b0, r_trace_wptr};
+   assign dbg_trace_data = w_rt_sel ? w_rt_data_out : dbg_trace_index[10] ? r_exc_row[dbg_trace_index[2:0]] : dbg_trace_index[9] ? w_tlb_dbg_data : r_trace_row[dbg_trace_index[3:0]];
+ `else
+   assign dbg_trace_wptr = w_rt_sel ? w_rt_wptr_out : dbg_trace_index[10] ? {5'd0, r_exc_wptr}              : 9'd0;
+   assign dbg_trace_data = w_rt_sel ? w_rt_data_out : dbg_trace_index[10] ? r_exc_row[dbg_trace_index[2:0]] : dbg_trace_index[9] ? w_tlb_dbg_data : 32'd0;
+ `endif
+`elsif ENABLE_TRACE_BUFFER
    assign dbg_trace_wptr = {1'b0, r_trace_wptr};
    assign dbg_trace_data = r_trace_row[dbg_trace_index[3:0]];
 `else
@@ -1368,7 +1518,7 @@ module core(clk,
 				       ( t_rob_head.has_nullifying_delay_slot ? !w_rob_next_empty :
 					 t_rob_head.has_delay_slot            ? (!w_rob_next_empty & w_rob_next_head_complete) :
 					 1'b1 )
-				       : 1'b1 ) & w_step_ok;
+				       : 1'b1 ) & w_step_ok & !w_rt_stall;
 	     t_faulted_head_and_serializing_delay = (t_rob_head.has_delay_slot || t_rob_head.has_nullifying_delay_slot) && t_rob_head.faulted && !t_dq_empty 
 						    && t_rob_next_empty && t_uop.serializing_op;
 	  end
@@ -2637,6 +2787,9 @@ module core(clk,
 		    r_rob_odd[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_tail;
 		  else
 		    r_rob_even[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_tail;
+`ifdef ENABLE_EXC_RING
+		  r_fetch_insn[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.insn;
+`endif
 	       end
 	     if(t_alloc_two)
 	       begin
@@ -2644,6 +2797,9 @@ module core(clk,
 		    r_rob_odd[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_next_tail;
 		  else
 		    r_rob_even[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_next_tail;
+`ifdef ENABLE_EXC_RING
+		  r_fetch_insn[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.insn;
+`endif
 	       end
 	     if(t_complete_valid_1)
 	       begin

@@ -350,7 +350,13 @@ typedef struct packed {
 `endif
 `ifdef ENABLE_CYCLE_ACCOUNTING
    logic [63:0] 	    fetch_cycle;
-`endif   
+`endif
+`ifdef ENABLE_EXC_RING
+   /* raw fetched instruction word, carried decode->alloc so the exception ring can
+    * record what the core ACTUALLY decoded -- diff vs DRAM[pc] catches I-side fetch
+    * corruption (fetched != memory). Debug-only; dropped when ENABLE_EXC_RING is off. */
+   logic [31:0] 	    insn;
+`endif
 } uop_t;
 
 

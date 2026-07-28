@@ -42,6 +42,8 @@ static uint64_t pipestart = 0, pipeend = ~(0UL);
 static pipeline_logger *pl = nullptr;
 static uint64_t l1d_misses = 0, l1d_insns = 0;
 static uint64_t last_retire_cycle = 0, last_retire_pc  = 0;
+static uint64_t g_rt_fills=0, g_rt_verified=0, g_rt_inst_mismatch=0, g_rt_last_retired=0;
+static int g_rt_froze=0;
 
 static std::map<uint64_t, uint64_t> retire_map;
 
@@ -562,6 +564,7 @@ int main(int argc, char **argv) {
   bool sim_halted = false;
   //assert reset
   tb->retire_allowed = 1;
+  tb->bp_enable = 1;   /* arm the retirement trace ring */
   tb->mem_rsp_bad = 0;
   for(globals::cycle = 0; (globals::cycle < 4) && !Verilated::gotFinish(); ++globals::cycle) {
     contextp->timeInc(1);  // 1 timeprecision period passes...
@@ -1117,7 +1120,55 @@ int main(int argc, char **argv) {
       tb->putchar_fifo_pop = 0;
       got_putchar = false;
     }    
+    /* ---- FREEZE-ON-FAULT validation: the deep ring overwrites at full speed and freezes on a
+     *      fatal fault (cause 4/5/6/7). Poll frozen (dbg_trace_wptr bit8); on the first freeze,
+     *      WALK the ring sequentially (read 6 words via index[2:0], pulse `step` to advance the
+     *      internal read ptr) from oldest to newest, verify inst==binary[pc], print the last few
+     *      retired PCs before the fault. Empty slots (ring not full) have pc==0 and are skipped. */
+    { tb->dbg_trace_index = (1u<<11); tb->eval();
+      if(((tb->dbg_trace_wptr >> 8) & 1) && !g_rt_froze) {      /* r_rt_frozen */
+        g_rt_froze = 1;
+        const unsigned RTD = 16384;
+        static uint64_t wpc[16384]; static uint32_t wins[16384];
+        tb->clk=1; tb->eval(); tb->clk=0; tb->eval();   /* settle r_rt_row for raddr=wptr (registered read) */
+        for(unsigned e=0;e<RTD;e++){
+          uint32_t w[6];
+          for(unsigned k=0;k<6;k++){ tb->dbg_trace_index=(1u<<11)|k; tb->eval(); w[k]=tb->dbg_trace_data; }
+          wpc[e]=((uint64_t)w[1]<<32)|w[0]; wins[e]=w[2];
+          if(wpc[e]){                                             /* real retire (empties are 0) */
+            uint32_t exp=get_insn(wpc[e] & 0x1fffffffu, s);
+            if(wins[e]==exp) g_rt_verified++;
+            else { if(g_rt_inst_mismatch<8) printf("[FRZ] e %u pc=%016lx inst=%08x != bin %08x\n",e,(unsigned long)wpc[e],wins[e],exp); g_rt_inst_mismatch++; }
+          }
+          tb->step=1; tb->clk=1; tb->eval(); tb->clk=0; tb->eval();  /* advance read ptr */
+          tb->step=0; tb->clk=1; tb->eval(); tb->clk=0; tb->eval();
+        }
+        printf("=== FROZE at cycle %lu (insns_retired=%lu). Walked %u entries (auto-inc). Last 8 before fault:\n",
+               (unsigned long)globals::cycle,(unsigned long)insns_retired,RTD);
+        for(int j=1;j<=8;j++){ unsigned e=RTD-(unsigned)j;
+          printf("   [-%d] pc=%016lx inst=%08x  %s\n",j,(unsigned long)wpc[e],wins[e],getAsmString(wins[e],wpc[e]).c_str()); }
+        break;   /* validation captured -> stop */
+      }
+      tb->dbg_trace_index=0; tb->eval();
+    }
     ++globals::cycle;
+  }
+
+  printf("=== FREEZE-ON-FAULT TEST: froze=%d, %lu entries verified, %lu inst-mismatch -> %s ===\n",
+         g_rt_froze,(unsigned long)g_rt_verified,(unsigned long)g_rt_inst_mismatch,
+         (g_rt_froze && g_rt_inst_mismatch==0)?"PASS":"FAIL");
+
+  // ---- dump TLB SHADOW via the readout path (dbg_trace_index[9]=1, 0x200 region) ----
+  {
+    printf("=== TLB SHADOW READOUT ===\n");
+    for(int e = 0; e < 48; e++) {
+      uint32_t w[4];
+      tb->dbg_trace_index = 0x200u | (e<<3);
+      tb->clk = 1; tb->eval(); tb->clk = 0; tb->eval();   // latch r_tlb_shadow_row
+      for(int k = 0; k < 4; k++) { tb->dbg_trace_index = 0x200u|(e<<3)|k; tb->eval(); w[k] = tb->dbg_trace_data; }
+      if(w[0]||w[1]||w[2]||w[3]) printf("  shadow[%2d] w0=%08x w1=%08x w2=%08x w3=%08x\n", e, w[0], w[1], w[2], w[3]);
+    }
+    tb->dbg_trace_index = 0;
   }
 
   // ---- dump trace buffer (validate the cycle-accounting buffer) ----

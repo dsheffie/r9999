@@ -34,7 +34,16 @@
 #define ARCS_RAM_BASE   0x08004000
 #endif
 #ifndef ARCS_RAM_SIZE
-#define ARCS_RAM_SIZE   0x07ffc000      /* 128 MiB - 16 KiB low-reserved */
+#define ARCS_RAM_SIZE   0x0fffc000      /* 256 MiB - 16 KiB low-reserved */
+#endif
+/* MC MEMCFG0 (IRIX-visible, big-endian) that the FSBL writes during its memory
+ * POST so IRIX szmem sees the DRAM banks -- the real SGI PROM does this; our stub
+ * must too, else MEMCFG stays at mc.sv's reset default.  szmem caps one bank at
+ * 128 MB (banksz = (RMASK 0x1f00 + 0x100) << 14), so 256 MB = two 128 MB banks:
+ *   bank0 = 0x3f20  (VALID|RMASK 0x1f00|base 0x20 -> 128 MB @ 0x08000000)
+ *   bank1 = 0x3f40  (VALID|RMASK 0x1f00|base 0x40 -> 128 MB @ 0x10000000) */
+#ifndef ARCS_MEMCFG0
+#define ARCS_MEMCFG0    0x3f203f40
 #endif
 #define ARCS_RAM_BASE_PG (ARCS_RAM_BASE >> 12)
 #define ARCS_RAM_PAGES   (ARCS_RAM_SIZE >> 12)
@@ -59,6 +68,13 @@ arcs_boot:
 arcs_kentry_slot:                   /* 0xBFC00008: driver patches kernel e_entry (BE) */
     .word   ARCS_KENTRY
 fsbl:
+    /* (0a) MC memory POST: write MEMCFG0 so IRIX szmem detects the DRAM banks.
+     * MC MEMCFG0 @ phys 0x1fa000c4 -> kseg1 uncached 0xbfa000c4. */
+    li      $t0, ARCS_MEMCFG0
+    lui     $t1, 0xbfa0
+    ori     $t1, $t1, 0x00c4
+    sw      $t0, 0($t1)
+    nop
     /* (0) FSBL: copy the SPB/romvec block PROM(_spb_lma) -> RAM 0xA0001000.
      * 0xA0001000 is kseg1 (uncached, so the kernel's later reads see it) and the
      * System Memory Alias lands it in real DRAM @ 0x08001000. */

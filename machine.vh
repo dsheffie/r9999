@@ -6,7 +6,13 @@
 `ifdef VERILATOR
  `define ENABLE_CYCLE_ACCOUNTING 1
  `define ENABLE_TRACE_BUFFER 1
+ `define ENABLE_EXC_RING 1
+`define ENABLE_RETIRE_TRACE 1  // continuous retire trace ring (pc/inst/dst/val) w/ full-stall + ARM drain; silicon via SV2V_DEFINES
+ `define ENABLE_TLB_SHADOW 1   // probeable copy of the 48-entry DTLB (dbg_trace_index[9]); silicon via SV2V_DEFINES
 `endif
+// ENABLE_EXC_RING (fatal-exception ring w/ fetched-insn capture) is ALSO an FPGA/henry
+// debug knob: inject via SV2V_DEFINES=ENABLE_EXC_RING so it reaches silicon (the trace
+// buffer above cannot -- it is verilator-only). Off in production (no define, no area).
 
 // On-silicon HW breakpoint/value-watchpoint in core.sv (freeze the pipe at an offending
 // instruction; read GPRs/DRAM coherently over AXI).  OFF by default -- uncomment to

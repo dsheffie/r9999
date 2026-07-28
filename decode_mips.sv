@@ -91,6 +91,9 @@ module decode_mips(
    always_comb
      begin
 	uop.op = II;
+`ifdef ENABLE_EXC_RING
+	uop.insn = insn;   /* debug: ferry the raw fetched word to the ROB alloc (exception ring) */
+`endif
 	uop.srcA = 'd0;
 	uop.srcB = 'd0;
 	uop.dst = 'd0;
@@ -1724,7 +1727,7 @@ module decode_mips(
 			 uop.op = LDC1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
-			 uop.dst = ft;
+			 uop.dst = fr ? ft : {ft[`LG_PRF_ENTRIES-1:1], 1'b0}; /* FR=0 odd ft: force even (see fp-reg check below) */
 			 uop.fp_dst_valid = 1'b1;
 			 uop.imm = insn[15:0];
 			 uop.is_mem = 1'b1;
@@ -1768,7 +1771,7 @@ module decode_mips(
 			 uop.op = SDC1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
-			 uop.srcB = ft;
+			 uop.srcB = fr ? ft : {ft[`LG_PRF_ENTRIES-1:1], 1'b0}; /* FR=0 odd ft: force even (see fp-reg check below) */
 			 uop.fp_srcB_valid = 1'b1;
 			 uop.imm = insn[15:0];
 			 uop.is_mem = 1'b1;
@@ -1829,14 +1832,14 @@ module decode_mips(
 	      * even-only ops.  Unused reg fields are 0 in valid encodings (compares:
 	      * insn[6]=0; single-src: ft=0), so the uniform fs|ft|fd low-bit test is
 	      * safe and, on a malformed encoding, conservatively faults. */
-	     /* (compute) is_fp ops: any odd fs/ft/fd.  (doubleword) LDC1/SDC1: odd ft
-	      * (insn[20:16]) -- a 64-bit double can't be named by an odd reg in FR=0
-	      * (R10000 UM p.305, "if the register selected is odd, the load/store is
-	      * invalid").  Singleword lwc1/swc1/mtc1/mfc1 are NOT faulted here -- odd
-	      * selects the high half (Part 2b merge/extract). */
-	     if((fr == 1'b0) &&
-		((uop.is_fp && (insn[11] | insn[16] | insn[6])) ||
-		 ((uop.op == LDC1 || uop.op == SDC1) && insn[16])))
+	     /* Only (compute) is_fp ops with an odd fs/ft/fd in FR=0 stay malformed
+	      * -> II -> RI (odd-reg arith is genuinely undefined).  LDC1/SDC1 with an
+	      * odd ft are NOT faulted: real R4K/R10K, MAME, and our iris ISS all treat
+	      * odd-as-even (never RI) -- iris = fpr[reg & !1] -- and the Linux kernel FP
+	      * save (_save_fp_context stores all 32, odd incl.) relies on it.  We force
+	      * ft even at the LDC1/SDC1 decode above; the even doubleword covers both
+	      * FR=0 single halves (lwc1/swc1 already merge them into the even reg). */
+	     if((fr == 1'b0) && uop.is_fp && (insn[11] | insn[16] | insn[6]))
 	       begin
 		  uop.op            = II;   /* -> is_ii -> ARCH_FAULT -> cause 10 (ResI) */
 		  uop.is_fp         = 1'b0;
