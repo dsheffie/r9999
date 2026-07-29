@@ -103,7 +103,11 @@
 /* FP issue queue (in-order, mirrors the int UQ) */
 `define LG_FP_UQ_ENTRIES 3
 
-`define DIV32_LAT (`M_WIDTH+1)
+/* nu_divider worst case = IDLE -> CLZ -> DIVIDE(M_WIDTH) -> PACK -> WAIT: one
+ * cycle longer than the old fixed divider (the extra CLZ state), so the writeback
+ * reservation is M_WIDTH+2 (== rv64core DIV64_LAT=66 for M_WIDTH=64).  Must be
+ * >= the worst-case latency or the deadlock backstop under-reserves. */
+`define DIV32_LAT (`M_WIDTH+2)
 
 `define MAX_LAT (`DIV32_LAT)
 

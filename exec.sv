@@ -1128,10 +1128,16 @@ module exec(clk,
 			 .hilo_prf_ptr_out(t_hilo_prf_ptr_out)
 	 );
 
-   divider #(.LG_W(`LG_M_WIDTH))
+   /* CLZ-accelerated divider (ported from rv64core/nu_divider). It finishes
+    * early and holds the result until a HILO writeback slot is free; the other
+    * two HILO writers are the multiplier (t_hilo_prf_ptr_val_out) and int->HILO
+    * ops (r_start_int & t_wr_hilo). The DIV32/64_LAT reservation above is the
+    * backstop that guarantees a free slot by the worst-case latency. */
+   nu_divider #(.LG_W(`LG_M_WIDTH))
    d0 (
        .clk(clk),
        .reset(reset),
+       .wb_slot_used(t_hilo_prf_ptr_val_out | (r_start_int & t_wr_hilo)),
        .is_32b(t_start_div32),
        .srcA(t_srcA),
        .srcB(t_srcB),
