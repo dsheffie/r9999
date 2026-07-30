@@ -1566,7 +1566,7 @@ module core(clk,
 			   end // else: !if(t_uop.serializing_op && !t_dq_empty)
 		      end // if (!t_dq_empty)
 		    t_retire = t_rob_head_complete & !t_arch_fault;
-		    t_retire_two = !t_rob_next_empty & 1'b0
+		    t_retire_two = !t_rob_next_empty
 		    		   & !t_rob_head.faulted
 		    		   & !t_rob_next_head.faulted 				    
 		    		   & t_rob_head_complete
