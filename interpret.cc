@@ -2293,8 +2293,17 @@ void execMips(state_t *s) {
       }
       case 0x1E: /* ddiv: signed 64-bit divide */
 	if(s->gpr[rt] != 0) {
-	  s->lo = s->gpr[rs] / s->gpr[rt];
-	  s->hi = s->gpr[rs] % s->gpr[rt];
+	  if((int64_t)s->gpr[rs] == INT64_MIN && (int64_t)s->gpr[rt] == -1LL) {
+	    /* INT64_MIN/-1: true quotient 2^63 doesn't fit -> host idiv would SIGFPE.
+	     * MIPS-unpredictable; match nu_divider (abs(INT64_MIN)/1 -> INT64_MIN,
+	     * rem 0). (The 32-bit div above is already safe via int64 promotion.) */
+	    s->lo = s->gpr[rs];   /* INT64_MIN */
+	    s->hi = 0;
+	  }
+	  else {
+	    s->lo = s->gpr[rs] / s->gpr[rt];
+	    s->hi = s->gpr[rs] % s->gpr[rt];
+	  }
 	}
 	s->pc += 4;
 	s->insn_histo[mipsInsn::DDIV]++;

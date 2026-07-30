@@ -1128,10 +1128,22 @@ module exec(clk,
 			 .hilo_prf_ptr_out(t_hilo_prf_ptr_out)
 	 );
 
-   divider #(.LG_W(`LG_M_WIDTH))
+   /* CLZ-accelerated divider (ported from rv64core/nu_divider). It finishes
+    * early and holds the result until a HILO writeback slot is free; the other
+    * two HILO writers are the multiplier (t_hilo_prf_ptr_val_out) and int->HILO
+    * ops (r_start_int & t_wr_hilo). The DIV32/64_LAT reservation above is the
+    * backstop that guarantees a free slot by the worst-case latency. */
+   nu_divider #(.LG_W(`LG_M_WIDTH))
    d0 (
        .clk(clk),
        .reset(reset),
+       /* defer the divide's WB drain for ANY int completion, not just HILO-writing
+	* ones: the divide shares the ROB completion port complete_bundle_1 with plain
+	* ALU ops (r_start_int & t_alu_valid), and div wins that mux -- so draining in
+	* the same cycle an ALU op completes DROPS the ALU op's completion -> its ROB
+	* entry never completes -> head wedge.  (& t_wr_hilo missed plain ALU ops; this
+	* restores rv64core's `r_start_int | t_mul_complete` guard.) */
+       .wb_slot_used(t_hilo_prf_ptr_val_out | r_start_int),
        .is_32b(t_start_div32),
        .srcA(t_srcA),
        .srcB(t_srcB),

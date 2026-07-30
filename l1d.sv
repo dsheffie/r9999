@@ -407,6 +407,10 @@ endfunction
    
    logic [N_MQ_ENTRIES-1:0] r_mq_addr_valid;
    logic [IDX_STOP-IDX_START-1:0] r_mq_addr[N_MQ_ENTRIES-1:0];
+   /* per-MQ-entry byte mask (mirrors rv64core nu_l1d): only STORES carry a mask;
+    * loads store 0.  Used to refine the port-2 same-set hazard from set-index-only
+    * to set-index AND byte-overlap so disjoint-byte accesses no longer serialize. */
+   logic [15:0] 		 r_mq_mask[N_MQ_ENTRIES-1:0];
   
    
    mem_req_t t_mem_tail, t_mem_head;
@@ -867,12 +871,32 @@ endfunction
      end // always_ff
 `endif
 
+   /* incoming byte masks for the port-2 same-set hazard refinement.
+    * t_mq_mask  = the request being PUSHED to the miss-queue (registered port2 = r_req2).
+    * t_req_mask = the INCOMING port-2 request tested against the MQ (core_mem_req,
+    *              the one whose set index feeds t_cache_idx2).  Mirrors nu_l1d. */
+   logic [15:0] t_mq_mask, t_req_mask;
+   always_comb
+     begin
+	t_mq_mask = make_mask(r_req2);
+	t_req_mask = make_mask(core_mem_req);
+     end
+
    always_ff@(posedge clk)
      begin
-	if(t_push_miss)
+	if(reset)
+	  begin
+	     for(integer i = 0; i < N_MQ_ENTRIES; i = i + 1)
+	       begin
+		  r_mq_mask[i] <= 16'd0;
+	       end
+	  end
+	else if(t_push_miss)
 	  begin
 	     r_mem_q[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0] ] <= t_remapped_req2;
 	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_remapped_req2.addr[IDX_STOP-1:IDX_START];
+	     /* only stores carry a mask; loads store 0 (mirror nu_l1d:924) */
+	     r_mq_mask[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_mq_mask & {16{r_req2.is_store}};
 	  end
      end
 
@@ -900,6 +924,7 @@ endfunction
    logic 		   r_hit_busy_addr;
    
    wire [N_MQ_ENTRIES-1:0] w_hit_busy_addrs2;
+   wire [N_MQ_ENTRIES-1:0] w_addr_intersect;
    logic [N_MQ_ENTRIES-1:0] r_hit_busy_addrs2;
    logic 		   r_hit_busy_addr2;
 
@@ -907,10 +932,15 @@ endfunction
       for(genvar i = 0; i < N_MQ_ENTRIES; i=i+1)
 	begin
 	   assign w_hit_busy_addrs[i] = (t_pop_mq && r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0] == i) ? 1'b0 :
-					r_mq_addr_valid[i] ? r_mq_addr[i] == t_cache_idx : 
+					r_mq_addr_valid[i] ? r_mq_addr[i] == t_cache_idx :
 					1'b0;
+	   /* byte-overlap between an in-flight (store) MQ entry and the incoming port-2
+	    * request.  Loads in the MQ carry mask 0 -> no intersect.  A load overlapping
+	    * an in-flight store's bytes still intersects (stays a hazard); only genuinely
+	    * disjoint-byte accesses to the same set are released to hit.  Mirrors nu_l1d. */
+	   assign w_addr_intersect[i] = (|(r_mq_mask[i] & t_req_mask));
 	   assign w_hit_busy_addrs2[i] = //(t_pop_mq && r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0] == i) ? 1'b0 :
-					 r_mq_addr_valid[i] ? r_mq_addr[i] == t_cache_idx2 : 1'b0;	   
+					 r_mq_addr_valid[i] ? ((r_mq_addr[i] == t_cache_idx2) & w_addr_intersect[i]) : 1'b0;
 	end
    endgenerate
    
