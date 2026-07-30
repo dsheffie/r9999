@@ -1137,7 +1137,13 @@ module exec(clk,
    d0 (
        .clk(clk),
        .reset(reset),
-       .wb_slot_used(t_hilo_prf_ptr_val_out | (r_start_int & t_wr_hilo)),
+       /* defer the divide's WB drain for ANY int completion, not just HILO-writing
+	* ones: the divide shares the ROB completion port complete_bundle_1 with plain
+	* ALU ops (r_start_int & t_alu_valid), and div wins that mux -- so draining in
+	* the same cycle an ALU op completes DROPS the ALU op's completion -> its ROB
+	* entry never completes -> head wedge.  (& t_wr_hilo missed plain ALU ops; this
+	* restores rv64core's `r_start_int | t_mul_complete` guard.) */
+       .wb_slot_used(t_hilo_prf_ptr_val_out | r_start_int),
        .is_32b(t_start_div32),
        .srcA(t_srcA),
        .srcB(t_srcB),
