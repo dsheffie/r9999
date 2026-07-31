@@ -165,7 +165,13 @@ module tlb(clk,
 	    * self-consistent.  Validated: Sail-aligned interp_mips boots IRIX clean
 	    * with identical EntryHi storage.  (The old KX-gated low-19 arm aliased the
 	    * kptbl walk -- which runs at KX=0 -- causing the intermittent tlbmiss panic.) */
-	   assign w_hit8k[i] = (r_tlb[i].vpn[26:0] == va[39:13]) & (r_tlb[i].r == va[63:62]);
+	   /* Variable page size (R4000 PageMask): mask off the VPN2 bits that fall
+	    * inside the page.  pagemask[11:0] = PageMask[24:13]; a set bit means the
+	    * corresponding VA bit (va[13+j]) is part of the page and must NOT be
+	    * compared.  vpn[26:12]=va[39:25] is always compared; vpn[11:0]=va[24:13]
+	    * is compared only where pagemask==0.  pagemask==0 (4K) -> full compare,
+	    * identical to the old behavior (no 4K-path regression). */
+	   assign w_hit8k[i] = (((r_tlb[i].vpn[26:0] ^ va[39:13]) & {15'h7fff, ~r_tlb[i].pagemask[11:0]}) == 27'd0) & (r_tlb[i].r == va[63:62]);
 	   /* Match a slot once it has been WRITTEN by software (TLBWR/TLBWI), not when
 	    * (v0|v1).  An entry whose pages are both invalid (a refill for a not-yet-
 	    * present page) must still match so the access takes TLB-Invalid ->
@@ -189,15 +195,34 @@ module tlb(clk,
        .y(w_idx));
 
    wire [LG_N-1:0]     w_hit_idx = w_idx[LG_N-1:0];
-   /* VA[12]=0 → even page (pfn0/d0/v0), VA[12]=1 → odd page (pfn1/d1/v1) */
-   wire                w_odd     = va[12];
+   /* Variable page size (R4000 PageMask), ported from rv64core's discrete-pgsize
+    * TLB.  Map the selected entry's pagemask -> a size index 0..6
+    * (4K/16K/64K/256K/1M/4M/16M).  Both the even/odd page-pair select bit and the
+    * PA offset width scale with the size, using FIXED bit-slices + a mux (no
+    * variable shifts) so it stays off the TLB critical path.  4K (pagemask==0)
+    * collapses to the old {pfn, va[11:0]}. */
+   wire [11:0]         w_pm      = r_tlb[w_hit_idx].pagemask;
+   wire [2:0]          w_pgsz    = (w_pm==12'h000) ? 3'd0 : (w_pm==12'h003) ? 3'd1 :
+                                   (w_pm==12'h00f) ? 3'd2 : (w_pm==12'h03f) ? 3'd3 :
+                                   (w_pm==12'h0ff) ? 3'd4 : (w_pm==12'h3ff) ? 3'd5 : 3'd6;
+   /* even/odd select = VA bit just above the single-page offset (bit 12+2k) */
+   wire                w_odd     = (w_pgsz==3'd0) ? va[12] : (w_pgsz==3'd1) ? va[14] :
+                                   (w_pgsz==3'd2) ? va[16] : (w_pgsz==3'd3) ? va[18] :
+                                   (w_pgsz==3'd4) ? va[20] : (w_pgsz==3'd5) ? va[22] : va[24];
    wire [`PFN_WIDTH-1:0] w_pfn   = w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0;
    wire                w_dirty   = w_odd ? r_tlb[w_hit_idx].d1   : r_tlb[w_hit_idx].d0;
    wire                w_valid   = w_odd ? r_tlb[w_hit_idx].v1   : r_tlb[w_hit_idx].v0;
    wire [2:0]          w_cache   = w_odd ? r_tlb[w_hit_idx].c1   : r_tlb[w_hit_idx].c0;
-   /* 4KB page only (pagemask=0): PA[39:12]=pfn[27:0], PA[11:0]=va[11:0] */
-   wire [`PFN_WIDTH+11:0] w_pa4k_full = {w_pfn, va[11:0]};   /* = PA_WIDTH bits exactly */
-   wire [`PA_WIDTH-1:0] w_pa4k = w_pa4k_full[`PA_WIDTH-1:0];
+   /* PA = {pfn high bits, VA page offset}; offset width scales with page size.
+    * Each case is exactly PA_WIDTH bits (PFN_WIDTH = PA_WIDTH-12). */
+   wire [`PA_WIDTH-1:0] w_pa4k   =
+        (w_pgsz==3'd0) ? {w_pfn,                  va[11:0]} :  /* 4K   */
+        (w_pgsz==3'd1) ? {w_pfn[`PFN_WIDTH-1:2],  va[13:0]} :  /* 16K  */
+        (w_pgsz==3'd2) ? {w_pfn[`PFN_WIDTH-1:4],  va[15:0]} :  /* 64K  */
+        (w_pgsz==3'd3) ? {w_pfn[`PFN_WIDTH-1:6],  va[17:0]} :  /* 256K */
+        (w_pgsz==3'd4) ? {w_pfn[`PFN_WIDTH-1:8],  va[19:0]} :  /* 1M   */
+        (w_pgsz==3'd5) ? {w_pfn[`PFN_WIDTH-1:10], va[21:0]} :  /* 4M   */
+                         {w_pfn[`PFN_WIDTH-1:12], va[23:0]};   /* 16M  */
 
    always_ff@(posedge clk)
      begin
