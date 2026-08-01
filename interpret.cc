@@ -2687,8 +2687,16 @@ void execMips(state_t *s) {
 	  break;
 	case 0x4: /*mtc0*/
 	  if(rd != 15) { /* PRId (reg 15) is read-only */
-	    s->cpr0[rd] = (uint32_t)s->gpr[rt];
-	    s->cpr0_64[rd] = (uint64_t)(uint32_t)s->gpr[rt];
+	    /* Sail mips_insts.sail execute(MTC0 ...EntryHi): EntryHi takes its value from
+	     * the FULL 64-bit GPR; every other CP0 register gets the usual 32-bit write.
+	     * EntryHi's R field is bits [63:62] and the TLB match compares it against
+	     * VA[63:62], so zero-extending here gives a kernel-mapped entry R=0 while any
+	     * kseg2/kseg3/xkseg VA has R=3 -- the entry could then NEVER match and the
+	     * checker took a spurious TLB refill where the RTL translated correctly.
+	     * interp_mips already carries this fix; r9999 had not. */
+	    s->cpr0_64[rd] = (rd == CPR0_ENTRYHI) ? s->gpr[rt]
+	                                          : (uint64_t)(uint32_t)s->gpr[rt];
+	    s->cpr0[rd] = (uint32_t)s->cpr0_64[rd];
 	  }
 	  /* CP0 reg 7 is the simulator putchar port */
 	  if(rd == 7 && !s->silent) {
