@@ -249,6 +249,245 @@ asid_ok:
     la      $a1, msg_asid_ok
     jal     puts
     nop
+
+/* ============ PHASE 3: the real IRIX update flow, tlbp -> tlbr -> modify -> tlbwi ============
+ * IRIX never writes a mapping at a blindly chosen index.  set_tlbpid / tlbdropin / _unmaptlb
+ * all do: EntryHi = VA; tlbp (find the index in the CAM); tlbr (read that entry back, which
+ * comes from the SHADOW RAM); modify EntryLo; tlbwi (write it back at the probed index).
+ * That silently assumes the matching CAM and the shadow RAM agree on index<->entry
+ * association -- and the on-silicon IRIX sweep (unix.tlbsweep2) reported 13/21 live entries
+ * whose shadow key probed to a DIFFERENT CAM index.  Phases 1 and 2 wrote a known index
+ * directly, so neither exercised the probe at all.  Here EVERY remap goes through it, and
+ * all three steps are checked independently: the probe must land on the right index, the
+ * read-back must return what was installed, and the re-pointed mapping must take effect.
+ */
+    li      $s6, 0xc0200000         /* phase-3 VA base; entry i covers VA + i*0x2000 */
+
+    /* install 8 global entries at indices 16..23; entry i -> physical page i */
+    li      $s0, 0
+p3_install:
+    sll     $t1, $s0, 13
+    addu    $t1, $s6, $t1
+    dmtc0   $t1, $10                /* EntryHi = VA_i */
+    li      $t2, 0x300
+    addu    $t2, $t2, $s0
+    sll     $t2, $t2, 6
+    ori     $t2, $t2, 0x1f          /* PFN 0x300+i, C=3 D=1 V=1 G=1 */
+    mtc0    $t2, $2
+    li      $t3, 0x0000c81f
+    mtc0    $t3, $3
+    mtc0    $zero, $5
+    addiu   $t4, $s0, 16
+    mtc0    $t4, $0                 /* Index = 16+i */
+    tlbwi
+    nop
+    nop
+    nop
+    nop
+    addiu   $s0, $s0, 1
+    slti    $t5, $s0, 8
+    bne     $t5, $zero, p3_install
+    nop
+
+    li      $s0, 0
+p3_loop:
+    sll     $s7, $s0, 13
+    addu    $s7, $s6, $s7           /* VA_i */
+    dmtc0   $s7, $10                /* EntryHi = VA_i, for the probe */
+    nop
+    nop
+    nop
+    nop
+    tlbp                            /* --- step 1: find the index in the CAM --- */
+    nop
+    nop
+    nop
+    nop
+    mfc0    $t0, $0                 /* Index */
+    nop
+    bltz    $t0, p3_probe_bad       /* Index[31] set == probe MISSED */
+    nop
+    addiu   $t1, $s0, 16
+    bne     $t0, $t1, p3_probe_bad  /* ...and it must be the index we installed */
+    nop
+
+    tlbr                            /* --- step 2: read that entry back (shadow RAM) --- */
+    nop
+    nop
+    nop
+    nop
+    mfc0    $t2, $2                 /* EntryLo0 as read back */
+    nop
+    li      $t3, 0x300
+    addu    $t3, $t3, $s0
+    sll     $t3, $t3, 6
+    ori     $t3, $t3, 0x1f
+    bne     $t2, $t3, p3_read_bad   /* must equal what we installed at this index */
+    nop
+
+    /* --- step 3: re-point at page j=(i+4)&7 and write back at the PROBED index --- */
+    addiu   $t4, $s0, 4
+    andi    $s1, $t4, 7
+    li      $t5, 0x300
+    addu    $t5, $t5, $s1
+    sll     $t5, $t5, 6
+    ori     $t5, $t5, 0x1f
+    mtc0    $t5, $2                 /* EntryLo0 = page j */
+    mtc0    $t0, $0                 /* Index = the PROBED index */
+    tlbwi
+    nop
+    nop
+    nop
+    nop
+
+    lw      $s3, 0($s7)             /* --- and the remap must be visible through the VA --- */
+    nop
+    li      $t6, 0xA5A50000
+    or      $s2, $t6, $s1
+    bne     $s3, $s2, p3_flow_bad
+    nop
+
+    addiu   $s0, $s0, 1
+    slti    $t7, $s0, 8
+    bne     $t7, $zero, p3_loop
+    nop
+
+p3_ok:
+    la      $a1, msg_probe_ok
+    jal     puts
+    nop
+
+/* ================= PHASE 4: I-SIDE remap -- does TLBWI reach the ITLB? =================
+ * Phases 1-3 only ever did DATA loads through the remapped VA, so they exercised the D-side
+ * translation path exclusively.  r9999 has a SEPARATE instruction-side TLB (the 48-way
+ * compare that is also the timing critical path), and a context switch remaps TEXT pages
+ * exactly as it remaps the u-area.  If a TLBWI does not invalidate the I-side, instruction
+ * fetch through a re-pointed VA runs the OLD page's code -- which would corrupt control flow
+ * directly, with no wild pointer needed.
+ *
+ * Two tiny routines are written into PA 0x340000 / 0x341000 (each just sets $v0 to its own
+ * signature and returns), the same VA is pointed alternately at each, and after every remap
+ * we CALL it and require the signature of the page that is mapped RIGHT NOW.  The routines
+ * are written through the kseg1 UNCACHED alias so no dirty D-cache line has to be pushed out
+ * before the I-side can see them (same trick as test_ixlate.S).
+ */
+    li      $t0, 0xa0340000         /* uncached alias of PA 0x340000 -- routine A */
+    li      $t1, 0x3c02aaaa         /* lui  $v0, 0xaaaa      */
+    sw      $t1, 0($t0)
+    li      $t1, 0x34421111         /* ori  $v0, $v0, 0x1111 */
+    sw      $t1, 4($t0)
+    li      $t1, 0x03e00008         /* jr   $ra              */
+    sw      $t1, 8($t0)
+    sw      $zero, 12($t0)          /* nop (delay slot)      */
+
+    li      $t0, 0xa0341000         /* uncached alias of PA 0x341000 -- routine B */
+    li      $t1, 0x3c02bbbb         /* lui  $v0, 0xbbbb      */
+    sw      $t1, 0($t0)
+    li      $t1, 0x34422222         /* ori  $v0, $v0, 0x2222 */
+    sw      $t1, 4($t0)
+    li      $t1, 0x03e00008         /* jr   $ra              */
+    sw      $t1, 8($t0)
+    sw      $zero, 12($t0)
+
+    li      $s6, 0xc0300000         /* the VA we EXECUTE from */
+    li      $s0, 0
+    li      $s5, 32
+p4_loop:
+    andi    $s1, $s0, 1             /* 0 -> page A (PFN 0x340), 1 -> page B (PFN 0x341) */
+    mtc0    $zero, $5
+    dmtc0   $s6, $10
+    li      $t2, 0x340
+    addu    $t2, $t2, $s1
+    sll     $t2, $t2, 6
+    ori     $t2, $t2, 0x1f          /* C=3 D=1 V=1 G=1 */
+    mtc0    $t2, $2
+    li      $t3, 0x0000c81f
+    mtc0    $t3, $3
+    li      $t4, 12
+    mtc0    $t4, $0                 /* Index = 12 */
+    tlbwi
+    nop
+    nop
+    nop
+    nop
+
+    la      $ra, p4_back
+    jr      $s6                     /* I-FETCH through the remapped VA */
+    nop
+p4_back:
+    bne     $s1, $zero, p4_expect_b
+    nop
+    li      $s2, 0xaaaa1111
+    b       p4_check
+    nop
+p4_expect_b:
+    li      $s2, 0xbbbb2222
+p4_check:
+    move    $s3, $v0
+    bne     $s3, $s2, p4_bad
+    nop
+    addiu   $s0, $s0, 1
+    slt     $t7, $s0, $s5
+    bne     $t7, $zero, p4_loop
+    nop
+
+p4_ok:
+    la      $a1, msg_iside_ok
+    jal     puts
+    nop
+    HALT
+
+p4_bad:
+    la      $a1, msg_iside_bad
+    jal     puts
+    nop
+    move    $a0, $s0                /* iteration */
+    jal     puthex32
+    nop
+    li      $t9, 0x20
+    mtc0    $t9, $7
+    move    $a0, $s2                /* expected signature */
+    jal     puthex32
+    nop
+    li      $t9, 0x20
+    mtc0    $t9, $7
+    move    $a0, $s3                /* got */
+    jal     puthex32
+    nop
+    li      $t9, 0x0a
+    mtc0    $t9, $7
+    HALT
+
+p3_probe_bad:
+    la      $a1, msg_probe_bad
+    move    $s2, $t1                /* expected index */
+    b       p3_report
+    move    $s3, $t0                /* got index (delay slot) */
+p3_read_bad:
+    la      $a1, msg_tlbr_bad
+    move    $s2, $t3                /* expected EntryLo0 */
+    b       p3_report
+    move    $s3, $t2                /* got EntryLo0 (delay slot) */
+p3_flow_bad:
+    la      $a1, msg_flow_bad       /* $s2/$s3 already hold expected/got */
+p3_report:
+    jal     puts
+    nop
+    move    $a0, $s0                /* which entry */
+    jal     puthex32
+    nop
+    li      $t9, 0x20
+    mtc0    $t9, $7
+    move    $a0, $s2
+    jal     puthex32
+    nop
+    li      $t9, 0x20
+    mtc0    $t9, $7
+    move    $a0, $s3
+    jal     puthex32
+    nop
+    li      $t9, 0x0a
+    mtc0    $t9, $7
     HALT
 
 asid_bad:
@@ -336,3 +575,15 @@ msg_asid_ok:
     .asciiz "ASID OK\n"
 msg_asid_bad:
     .asciiz "ASID BAD asid/exp/got "
+msg_probe_ok:
+    .asciiz "PROBE OK\n"
+msg_probe_bad:
+    .asciiz "PROBE BAD i/expidx/gotidx "
+msg_tlbr_bad:
+    .asciiz "TLBR BAD i/exp/got "
+msg_flow_bad:
+    .asciiz "FLOW BAD i/exp/got "
+msg_iside_ok:
+    .asciiz "ISIDE OK\n"
+msg_iside_bad:
+    .asciiz "ISIDE BAD iter/exp/got "
