@@ -435,6 +435,154 @@ p4_ok:
     la      $a1, msg_iside_ok
     jal     puts
     nop
+
+/* ================= PHASE 5: TLB PRESSURE (Wired + TLBWR replacement) =================
+ * Phases 1-4 used a handful of entries at known indices with no eviction; real IRIX runs
+ * all 48 entries live, replaces with TLBWR (random), and keeps a nonzero Wired region.  The
+ * on-silicon sweep's 13/21 shadow-vs-CAM mismatch was measured on a LOADED system, so a
+ * pressure-dependent fault would pass every phase so far and still be real.
+ *
+ * Wired = 8 with 8 wired entries at indices 0..7, then 512 rounds of TLBWR churn over 64
+ * rotating VAs.  Each round checks two invariants: the mapping just installed by TLBWR
+ * translates correctly, and a WIRED entry is still present at its own index with the right
+ * page (TLBWR must never pick a victim below Wired).
+ *
+ * CO-SIM CONSTRAINT: the checker and the RTL may pick DIFFERENT random victims, so the test
+ * must never let a randomly-chosen index reach a GPR -- the GPR comparison would diverge on
+ * a legitimate difference.  Hence the churn probe is reduced to its hit/miss bit (identical
+ * on both), and only the WIRED probe, whose index is deterministic, is compared in full.
+ * For the same reason nothing is ever read through an entry that replacement may have evicted.
+ */
+    li      $t0, 8
+    mtc0    $t0, $6                 /* Wired = 8 */
+    nop
+    nop
+
+    li      $s6, 0xc0400000         /* wired VA base */
+    li      $s0, 0
+p5_install:
+    sll     $t1, $s0, 13
+    addu    $t1, $s6, $t1
+    dmtc0   $t1, $10
+    li      $t2, 0x300
+    addu    $t2, $t2, $s0
+    sll     $t2, $t2, 6
+    ori     $t2, $t2, 0x1f
+    mtc0    $t2, $2
+    li      $t3, 0x0000c81f
+    mtc0    $t3, $3
+    mtc0    $zero, $5
+    mtc0    $s0, $0                 /* Index = i, inside the wired region */
+    tlbwi
+    nop
+    nop
+    nop
+    nop
+    addiu   $s0, $s0, 1
+    slti    $t4, $s0, 8
+    bne     $t4, $zero, p5_install
+    nop
+
+    li      $s0, 0
+    li      $s5, 512
+p5_loop:
+    /* ---- install a churn mapping with TLBWR (random victim, indices 8..47) ---- */
+    andi    $s1, $s0, 63
+    sll     $t1, $s1, 13
+    li      $t0, 0xc0500000
+    addu    $s7, $t0, $t1           /* churn VA */
+    dmtc0   $s7, $10
+    andi    $t2, $s1, 7
+    li      $t3, 0x300
+    addu    $t3, $t3, $t2
+    sll     $t3, $t3, 6
+    ori     $t3, $t3, 0x1f
+    mtc0    $t3, $2
+    li      $t4, 0x0000c81f
+    mtc0    $t4, $3
+    mtc0    $zero, $5
+    tlbwr
+    nop
+    nop
+    nop
+    nop
+
+    /* The entry TLBWR just wrote must translate correctly.  Do NOT probe it: TLBP would
+     * return the RANDOM victim index, and MFC0 puts that in a GPR -- the co-sim compares
+     * registers after every instruction, so a legitimately different victim in the RTL vs
+     * the checker reads as a mismatch (observed: rtl 23 / sim 2f, both above Wired).  The
+     * entry was just installed, so it is present by construction and can be read directly;
+     * masking the index AFTER the MFC0 does not help, the MFC0 itself already diverged. */
+    lw      $s3, 0($s7)
+    nop
+    li      $t6, 0xA5A50000
+    andi    $t7, $s1, 7
+    or      $s2, $t6, $t7
+    bne     $s3, $s2, p5_churn_bad
+    nop
+
+    /* ---- a WIRED entry must never be evicted, and must stay at its own index ---- */
+    andi    $s1, $s0, 7
+    sll     $t1, $s1, 13
+    addu    $s7, $s6, $t1
+    dmtc0   $s7, $10
+    nop
+    nop
+    nop
+    nop
+    tlbp
+    nop
+    nop
+    nop
+    nop
+    mfc0    $t5, $0
+    nop
+    bltz    $t5, p5_wired_bad       /* probe missed -> a wired entry was evicted */
+    nop
+    bne     $t5, $s1, p5_wired_bad  /* ...and it must still be at index i */
+    nop
+    lw      $s3, 0($s7)
+    nop
+    li      $t6, 0xA5A50000
+    or      $s2, $t6, $s1
+    bne     $s3, $s2, p5_wired_bad
+    nop
+
+    addiu   $s0, $s0, 1
+    slt     $t9, $s0, $s5
+    bne     $t9, $zero, p5_loop
+    nop
+
+p5_ok:
+    la      $a1, msg_press_ok
+    jal     puts
+    nop
+    HALT
+
+p5_churn_bad:
+    la      $a1, msg_churn_bad
+    b       p5_report
+    nop
+p5_wired_bad:
+    la      $a1, msg_wired_bad
+p5_report:
+    jal     puts
+    nop
+    move    $a0, $s0                /* round */
+    jal     puthex32
+    nop
+    li      $t9, 0x20
+    mtc0    $t9, $7
+    move    $a0, $s2                /* expected */
+    jal     puthex32
+    nop
+    li      $t9, 0x20
+    mtc0    $t9, $7
+    move    $a0, $s3                /* got */
+    jal     puthex32
+    nop
+    li      $t9, 0x0a
+    mtc0    $t9, $7
     HALT
 
 p4_bad:
@@ -587,3 +735,9 @@ msg_iside_ok:
     .asciiz "ISIDE OK\n"
 msg_iside_bad:
     .asciiz "ISIDE BAD iter/exp/got "
+msg_press_ok:
+    .asciiz "PRESS OK\n"
+msg_churn_bad:
+    .asciiz "CHURN BAD round/exp/got "
+msg_wired_bad:
+    .asciiz "WIRED BAD round/exp/got "
