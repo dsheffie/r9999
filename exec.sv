@@ -3525,8 +3525,22 @@ module exec(clk,
 	     n_fcsr[17:12] = core_fcsr_cause6;          /* Cause = this op's exceptions */
 	     n_fcsr[6:2]   = r_fcsr[6:2] | core_fcsr_flags5; /* Flags accumulate (0 on trap) */
 	  end
-	/* Timer IP: set when Count wraps to Compare, cleared by MTC0 Compare */
-	n_timer_ip = r_timer_ip | (n_count == r_compare);
+	/* Timer IP: set when Count wraps to Compare, cleared by MTC0 Compare.
+	 * A dual retire advances Count by TWO wherever Count is RETIREMENT-paced -- the
+	 * insn-paced co-sim build above, and single_step mode on silicon -- so a plain
+	 * equality match silently SKIPS any Compare that lands on the value the pair
+	 * stepped over.  The tick is then lost until Count wraps 2^32 (~4.3e9), leaving
+	 * the kernel in its idle loop with nothing left to wake it (this wedged the henny
+	 * IRIX co-sim in idler/local_idle).  Match the stepped-over value too.  Free-run
+	 * silicon paces Count by 1 every other cycle and cannot skip, so the extra term is
+	 * gated off there and the synthesized free-run logic is unchanged. */
+`ifdef INSN_PACED_COUNT
+	n_timer_ip = r_timer_ip | (n_count == r_compare)
+		     | (retire_two & ((r_count + 32'd1) == r_compare));
+`else
+	n_timer_ip = r_timer_ip | (n_count == r_compare)
+		     | (single_step & retire_two & ((r_count + 32'd1) == r_compare));
+`endif
 `ifdef TIMER_ACCEL
 	n_irq_accel = (r_irq_accel == 32'd0) ? `TIMER_ACCEL_PERIOD : (r_irq_accel - 32'd1);
 	if(r_irq_accel == 32'd0)
