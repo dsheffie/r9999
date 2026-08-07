@@ -28,6 +28,8 @@ TESTS := hello/hello.elf \
          tlb/test_tlb.elf \
          dside_tlb/test_dside_tlb.elf \
          except/test_except.elf \
+         except/test_bgezall_ds_fault.elf \
+         except/test_regimm_link.elf \
          except/test_overflow.elf \
          except/test_traps.elf \
          except/test_ifetch_adel.elf \
@@ -104,6 +106,16 @@ tlb/test_tlb.elf: tlb/test_tlb.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 except/test_except.elf: except/test_except.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_except.S -o except/test_except.o
 	$(LD) $(LDFLAGS) except/test_except.o -o $@
+
+# REGIMM branch-and-link family: taken/not-taken, delay-slot execute-vs-nullify, link
+except/test_regimm_link.elf: except/test_regimm_link.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_regimm_link.S -o except/test_regimm_link.o
+	$(LD) $(LDFLAGS) except/test_regimm_link.o -o $@
+
+# bgezall whose delay slot takes a TLB refill: the target must not commit twice
+except/test_bgezall_ds_fault.elf: except/test_bgezall_ds_fault.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_bgezall_ds_fault.S -o except/test_bgezall_ds_fault.o
+	$(LD) $(LDFLAGS) except/test_bgezall_ds_fault.o -o $@
 
 except/test_overflow.elf: except/test_overflow.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_overflow.S -o except/test_overflow.o
