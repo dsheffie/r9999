@@ -830,8 +830,14 @@ endfunction
 		      end
 		    else if(t_pd == 4'd9)
 		      begin
-			 //check if insn is bal or cond branch thinks its gonna be taken
-			 if(r_pht_out[1] || t_insn_data[25:21] == 5'd0)
+			 /* REGIMM branch-and-link: rt 16 BLTZAL / 17 BGEZAL / 18 BLTZALL /
+			  * 19 BGEZALL.  The rs==$zero shortcut below means "this is the
+			  * unconditional-call idiom, always taken" -- but that is only true
+			  * for the BGEZ-flavours (rs>=0).  For the BLTZ-flavours rs<0 is
+			  * NEVER true when rs==$zero, so predicting them taken would be
+			  * exactly backwards.  rt bit0 (insn[16]) selects: 1 = BGEZ-type,
+			  * 0 = BLTZ-type. */
+			 if(r_pht_out[1] || (t_insn_data[16] && t_insn_data[25:21] == 5'd0))
 			   begin
 			      t_is_cflow = 1'b1;
 			      n_delay_slot = 1'b1;			      
