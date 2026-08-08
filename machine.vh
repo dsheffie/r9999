@@ -115,18 +115,46 @@
 // cacheline length (in bytes)
 `define LG_L1D_CL_LEN 4
 
+// EXPERIMENT: shrink BOTH L1s to 4 lines (LG_L1*_NUM_SETS=2 -> 4 x 16B = 64B each).
+// Pairs with ENABLE_L2_NOCACHE below to make the whole cache hierarchy effectively a
+// pass-through: nearly every access misses L1 and goes straight to DRAM.  Intent is to
+// perturb eviction/replacement timing radically -- if a corruption survives this it is
+// not a retention/staleness effect in the caches, and if it disappears it is.
+// Downsizing is the SAFE direction for the L1D: it is VIPT and hardwired to
+// cache-size <= page-size, so only GROWING it past 4KB aliases on mapped accesses.
+// Set to 4 or 5 instead of 2 if 64B is too slow to reach the workload.
+`define ENABLE_L1_TINY 1
+
 //number of sets in direct mapped cache
+/* GEOMETRY OVERRIDE: each size below is wrapped in `ifndef, so ANY of them can be set
+ * straight from the build command line and wins over every branch here:
+ *     SV2V_DEFINES="... LG_L2_NUM_SETS=8"      ./gen_mipscore.sh     (FPGA)
+ *     make VFLAGS_EXTRA=+define+LG_L2_NUM_SETS=8                     (verilator)
+ * A size is a NUMBER, so pass the number -- this replaces the per-size boolean knobs
+ * (ENABLE_L1_4K, ENABLE_L2_4K, ...) that were accreting one `elsif per experiment,
+ * and the chosen value is echoed into the build log so the artifact records what it
+ * actually is.  The branches below remain the DEFAULTS when nothing is passed. */
+`ifndef LG_L1D_NUM_SETS
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
+`elsif ENABLE_L1_TINY
+ `define LG_L1D_NUM_SETS 2
 `else
- `define LG_L1D_NUM_SETS 10
+ `define LG_L1D_NUM_SETS 8
+`endif
 `endif
 
+
+`ifndef LG_L1I_NUM_SETS
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
+`elsif ENABLE_L1_TINY
+ `define LG_L1I_NUM_SETS 2
 `else
- `define LG_L1I_NUM_SETS 10
+ `define LG_L1I_NUM_SETS 8
 `endif
+`endif
+
 
 // EXPERIMENT: shrink the L2 to 4 lines (LG_L2_NUM_SETS=2).  Keeps the correct
 // write-back path but a 4-set direct-mapped L2 aliases constantly, so a
@@ -136,8 +164,9 @@
 //`define ENABLE_L2_TINY 1
 // EXPERIMENT: fully bypass the L2 as a cache (see l2.sv) -- data ops go straight
 // to DRAM, L2 holds nothing.  Comment out to restore the write-back L2.
-//`define ENABLE_L2_NOCACHE 1   // off by default on main; enable for the L2-bypass (non-coherent-DMA) workaround
+`define ENABLE_L2_NOCACHE 1   // off by default on main; enable for the L2-bypass (non-coherent-DMA) workaround
 
+`ifndef LG_L2_NUM_SETS
 `ifdef FORMAL
  `define LG_L2_NUM_SETS 2
 `elsif ENABLE_L2_TINY
@@ -151,6 +180,8 @@
   `define LG_L2_NUM_SETS 13     /* 8192 lines x 16B = 128KB (default; fits henry xczu3eg BRAM) */
  `endif
 `endif
+`endif
+
 
 
 `define M_WIDTH (1 << `LG_M_WIDTH)
