@@ -115,16 +115,6 @@
 // cacheline length (in bytes)
 `define LG_L1D_CL_LEN 4
 
-// EXPERIMENT: shrink BOTH L1s to 4 lines (LG_L1*_NUM_SETS=2 -> 4 x 16B = 64B each).
-// Pairs with ENABLE_L2_NOCACHE below to make the whole cache hierarchy effectively a
-// pass-through: nearly every access misses L1 and goes straight to DRAM.  Intent is to
-// perturb eviction/replacement timing radically -- if a corruption survives this it is
-// not a retention/staleness effect in the caches, and if it disappears it is.
-// Downsizing is the SAFE direction for the L1D: it is VIPT and hardwired to
-// cache-size <= page-size, so only GROWING it past 4KB aliases on mapped accesses.
-// Set to 4 or 5 instead of 2 if 64B is too slow to reach the workload.
-`define ENABLE_L1_TINY 1
-
 //number of sets in direct mapped cache
 /* GEOMETRY OVERRIDE: each size below is wrapped in `ifndef, so ANY of them can be set
  * straight from the build command line and wins over every branch here:
@@ -137,8 +127,6 @@
 `ifndef LG_L1D_NUM_SETS
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
-`elsif ENABLE_L1_TINY
- `define LG_L1D_NUM_SETS 2
 `else
  `define LG_L1D_NUM_SETS 8
 `endif
@@ -147,8 +135,6 @@
 
 `ifndef LG_L1I_NUM_SETS
 `ifdef FORMAL
- `define LG_L1I_NUM_SETS 2
-`elsif ENABLE_L1_TINY
  `define LG_L1I_NUM_SETS 2
 `else
  `define LG_L1I_NUM_SETS 8
