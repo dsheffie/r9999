@@ -447,14 +447,46 @@ stub_default:
     jr      $ra
     move    $v0, $zero
 
-/* Halt/PowerDown/Restart/Reboot: stop the simulator (magic-halt register). */
+/* Halt/PowerDown/Restart/Reboot (romvec entries 3..6 -- IRIX `halt` and
+ * `shutdown` both land here).  Announce over the SCC BEFORE stopping.
+ *
+ * Why: this used to write the magic-halt register and spin.  In the simulator
+ * that stops the machine, but on real silicon 0xBFD00000 does nothing, so the
+ * CPU just span forever -- indistinguishable from a hang.  There was no way to
+ * tell that IRIX had finished flushing its filesystems and the board was safe to
+ * power off.  The message is emitted on the same SCC path as the boot banner
+ * (poll RR0.TxEmpty @0xbfbd9830, write DATA @0xbfbd9837).
+ *
+ * Clobbering t-registers is fine: ARCS Halt() is defined never to return, and we
+ * spin immediately after.  Printing happens FIRST so the notice still appears
+ * even if the halt register is unimplemented on this target. */
     .globl  stub_halt
 stub_halt:
+    lui     $t4, 0xbfbd
+    ori     $t5, $t4, 0x9830        /* SCC RR0 status (TxEmpty = bit 0x04) */
+    ori     $t6, $t4, 0x9837        /* SCC data */
+    la      $t1, arcs_halt_str
+4:  lbu     $t2, 0($t1)
+    beq     $t2, $zero, 6f
+    nop
+5:  lbu     $t3, 0($t5)
+    andi    $t3, $t3, 0x04
+    beq     $t3, $zero, 5b
+    nop
+    sb      $t2, 0($t6)
+    addiu   $t1, $t1, 1
+    b       4b
+    nop
+6:
     li      $k0, 0xBFD00000
     li      $k1, 1
     sw      $k1, 0($k0)
 1:  b       1b
     nop
+
+    .align  2
+arcs_halt_str:
+    .asciz  "\n*** ARCS Halt: IRIX has shut down -- SAFE TO POWER OFF ***\n"
 
 /* ARCS memory descriptor { ULONG Type; ULONG BasePage; ULONG PageCount; }
  * Type 2 = FreeContiguous (Linux arc memory.c: type 2 = free RAM). */
