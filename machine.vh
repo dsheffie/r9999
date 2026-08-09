@@ -150,7 +150,7 @@
 //`define ENABLE_L2_TINY 1
 // EXPERIMENT: fully bypass the L2 as a cache (see l2.sv) -- data ops go straight
 // to DRAM, L2 holds nothing.  Comment out to restore the write-back L2.
-`define ENABLE_L2_NOCACHE 1   // off by default on main; enable for the L2-bypass (non-coherent-DMA) workaround
+//`define ENABLE_L2_NOCACHE 1   // off by default on main; enable for the L2-bypass (non-coherent-DMA) workaround
 
 `ifndef LG_L2_NUM_SETS
 `ifdef FORMAL
