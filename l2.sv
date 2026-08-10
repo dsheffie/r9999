@@ -414,7 +414,13 @@ module l2(clk,
 	     l2_line_log(2, {{(64-`PA_WIDTH){1'b0}}, r_addr},
 			 mem_rsp_load_data[63:0], mem_rsp_load_data[127:64], 32'd0, 32'd0);
 	  end
-	if((r_state == CHECK_VALID_AND_TAG) & (r_saveaddr[31:4] == 28'h083e400))
+	/* DMA stale-read detector wants EVERY tag check, not just the one descriptor
+	 * line this probe was originally written for; filter C++-side instead. */
+	if((r_state == CHECK_VALID_AND_TAG)
+`ifndef ENABLE_DMA_STALE_CHK
+	   & (r_saveaddr[31:4] == 28'h083e400)   /* legacy: descriptor-line watch only */
+`endif
+	   )
 	  begin
 	     l2_chk_log({{(64-`PA_WIDTH){1'b0}}, r_saveaddr},
 			{31'd0, w_hit}, {31'd0, w_valid}, {31'd0, w_dirty},

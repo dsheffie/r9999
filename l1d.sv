@@ -868,6 +868,21 @@ endfunction
 	  begin
 	     rd_log(r_req2.pc, w_mapped_addr, t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
 	  end
+`ifdef ENABLE_DMA_STALE_CHK
+	/* DMA stale-read detector: EVERY committed L1D read, BOTH ports.  The two
+	 * rd_log sites above are gated to a couple of leftover debug PC windows, so
+	 * they cannot see general traffic -- and port 1 (the retry / miss-queue /
+	 * graduated-store replay path) was never instrumented at all, which is the
+	 * blind spot that made "no stale hits" meaningless. */
+	if(r_got_req2 & ~r_req2.is_store)
+	  begin
+	     rd_log(r_req2.pc, w_mapped_addr, t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
+	  end
+	if(r_got_req & ~r_req.is_store)
+	  begin
+	     rd_log(r_req.pc, r_req.addr, t_rsp_data, t_hit_cache ? 32'd1 : 32'd0);
+	  end
+`endif
      end // always_ff
 `endif
 
