@@ -86,6 +86,11 @@ module l1d(clk,
 	   flush_cl_req,
 	   flush_cl_addr,
 	   flush_cl_inval,
+	   binval_req,
+	   binval_addr,
+	   binval_ack,
+	   binval_dirty,
+	   binval_data,
 	   //inputs from core
 	   core_mem_req_valid,
 	   core_mem_req,
@@ -149,6 +154,19 @@ module l1d(clk,
    input logic flush_cl_req;
    input logic [`M_WIDTH-1:0] flush_cl_addr;
    input logic 		      flush_cl_inval;
+   /* INCLUSIVE-L2 back-invalidate (design C: DATA-CARRYING ack).  The L2 drives
+    * binval_req when it evicts / snoop-invalidates a line the presence bits say we
+    * hold.  We tag-check, drop the line, and return it on the ack if it was dirty --
+    * the L2 merges it into the line it is already writing to DRAM.
+    * WHY NOT flush_cl_*: that path issues MEM_INVL (hit-inval) or MEM_WB (dirty)
+    * back INTO the L2, which is mid-eviction waiting for this very ack -> deadlock.
+    * Returning the data on the ack means this path issues NO request at all, so the
+    * loop cannot exist by construction. */
+   input logic 		      binval_req;
+   input logic [`PA_WIDTH-1:0] binval_addr;
+   output logic 	      binval_ack;
+   output logic 	      binval_dirty;
+   output logic [127:0]        binval_data;
    input logic 		      flush_req;
    output logic 	      flush_complete;
 
@@ -341,6 +359,11 @@ endfunction
 
    logic 				  r_flush_req, n_flush_req;
    logic 				  r_flush_cl_req, n_flush_cl_req;
+   logic 				  r_binval_pend, n_binval_pend;
+   logic [`PA_WIDTH-1:0] 		  r_binval_addr, n_binval_addr;
+   logic 				  r_binval_ack, n_binval_ack;
+   logic 				  r_binval_dirty, n_binval_dirty;
+   logic [127:0] 			  r_binval_data, n_binval_data;
    logic 				  r_flush_complete, n_flush_complete;
    
 
@@ -443,7 +466,10 @@ endfunction
 			      * CHOP_BEAT2 but for the whole-cache-flush path -- re-index to
 			      * set+1 and re-run FLUSH_CL so a 32B-stride Index_WB_Invalidate
 			      * covers both 16B lines. */
-			     FLUSH_CL_BEAT2_RD = 'd16
+			     FLUSH_CL_BEAT2_RD = 'd16,
+			     /* inclusive-L2 back-invalidate: ACTIVE drives the index, this
+			      * state sees the registered tag/dirty/data and acts. */
+			     BINVAL = 'd17
                              } state_t;
 
    
@@ -480,6 +506,9 @@ endfunction
    
    logic [31:0] 			 r_cycle;
    assign flush_complete = r_flush_complete;
+   assign binval_ack = r_binval_ack;
+   assign binval_dirty = r_binval_dirty;
+   assign binval_data = r_binval_data;
    assign mem_req_addr = r_mem_req_addr;
    assign mem_req_store_data = r_mem_req_store_data;
    assign mem_req_opcode = r_mem_req_opcode;
@@ -1061,6 +1090,11 @@ endfunction
 	     r_flush_complete <= n_flush_complete;
 	     r_flush_req <= n_flush_req;
 	     r_flush_cl_req <= n_flush_cl_req;
+	     r_binval_pend <= n_binval_pend;
+	     r_binval_addr <= n_binval_addr;
+	     r_binval_ack <= n_binval_ack;
+	     r_binval_dirty <= n_binval_dirty;
+	     r_binval_data <= n_binval_data;
 	     r_chop_wait <= n_chop_wait;
 	     r_chop_beat <= n_chop_beat;
 	     r_flush_cl_beat <= n_flush_cl_beat;
@@ -1919,6 +1953,13 @@ endfunction
 	
 	n_flush_req = r_flush_req | flush_req;
 	n_flush_cl_req = r_flush_cl_req | flush_cl_req;
+	/* latch, never sample a pulse: single-cycle requests have been LOST on this
+	 * interface before (hence the sticky latches in core_l1d_l1i). */
+	n_binval_pend = r_binval_pend | binval_req;
+	n_binval_addr = binval_req & ~r_binval_pend ? binval_addr : r_binval_addr;
+	n_binval_ack = 1'b0;
+	n_binval_dirty = r_binval_dirty;
+	n_binval_data = r_binval_data;
 	n_flush_complete = 1'b0;
 	t_addr = 'd0;
 	
@@ -2526,6 +2567,15 @@ endfunction
 		    n_flush_cl_req = 1'b0;
 		    n_state = FLUSH_CL;
 		 end
+	       else if(r_binval_pend && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
+		 begin
+		    /* inclusive-L2 back-invalidate: drive the RAM index now, examine the
+		     * registered tag/dirty/data next cycle in BINVAL.  Entered only when
+		     * the cache is quiescent, so this can never displace a refill the L2
+		     * might itself be waiting on. */
+		    t_cache_idx = r_binval_addr[IDX_STOP-1:IDX_START];
+		    n_state = BINVAL;
+		 end
 	    end // case: ACTIVE
 	  WAIT_INJECT_RELOAD:
 	    begin
@@ -2592,6 +2642,26 @@ endfunction
 	       n_did_reload = 1'b1;
 	       n_state = ACTIVE;
 	    end
+	  BINVAL:
+	    begin
+	       /* Tag-checked so we never drop a different line that merely aliases this
+		* index.  On a hit the line goes away and, if it was dirty, rides back to
+		* the L2 on the ack -- we issue NO memory request here (see the port
+		* comment: a request would deadlock against the L2's pending eviction). */
+	       if(r_valid_out && (r_tag_out == r_binval_addr[`PA_WIDTH-1:TAG_LSB]))
+		 begin
+		    t_mark_invalid = 1'b1;
+		    n_binval_dirty = r_dirty_out;
+		    n_binval_data = t_data;
+		 end
+	       else
+		 begin
+		    n_binval_dirty = 1'b0;   /* miss: nothing held, ack immediately */
+		 end
+	       n_binval_pend = 1'b0;
+	       n_binval_ack = 1'b1;
+	       n_state = ACTIVE;
+	    end // case: BINVAL
 	  FLUSH_CL:
 	    begin
 	       if(flush_cl_inval)
