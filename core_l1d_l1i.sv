@@ -560,6 +560,9 @@ module core_l1d_l1i(clk,
 	       .l1_mem_req_ack(w_l1_mem_req_ack),
 	       .l1_mem_req_addr(t_l2_req_addr),
 	       .l1_mem_req_cacheable(t_l2_req_cacheable),
+	       /* inclusion: tell the L2 which primary cache this fill is for, so it can
+		* record the copy and later back-invalidate only that L1 (task #73) */
+	       .l1_mem_req_from_l1i(r_state == GNT_L1I),
 	       .l1_mem_req_mask(t_l2_req_mask),
 	       .l1_mem_req_store_data(l1d_mem_req_store_data),
 	       .l1_mem_req_opcode(t_l2_req_opcode),
@@ -678,6 +681,11 @@ module core_l1d_l1i(clk,
 	      .in_64b_user_mode(w_in_64b_user_mode),
 	      .flush_req(flush_req_l1i),
 	      .flush_complete(l1i_flush_complete),
+	      /* inclusive-L2 back-invalidate: tied off until the L2 drives it (task #73);
+	       * the port exists now so l1i can be built and tested standalone. */
+	      .inval_req(1'b0),
+	      .inval_addr('d0),
+	      .inval_ack(),
 	      .restart_pc(restart_pc),
 	      .restart_src_pc(restart_src_pc),
 	      .restart_src_is_indirect(restart_src_is_indirect),

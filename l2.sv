@@ -17,6 +17,7 @@ module l2(clk,
 	  l1_mem_req_ack,
 	  l1_mem_req_addr,
 	  l1_mem_req_cacheable,
+	  l1_mem_req_from_l1i,
 	  l1_mem_req_mask,
 	  l1_mem_req_store_data,
 	  l1_mem_req_opcode,
@@ -62,6 +63,11 @@ module l2(clk,
    input logic 	l1_mem_req_valid;
    output logic l1_mem_req_ack;
    input logic [`PA_WIDTH-1:0] l1_mem_req_addr;
+   /* INCLUSIVE L2: which L1 this request came from, so the L2 can record WHICH primary
+    * cache it handed a copy to and later back-invalidate only that one.  Same role as
+    * the R10000 SCTag PIdx field ("locate subset lines in the primary caches"), except
+    * our 4KB direct-mapped L1s need no index bits -- only the D-vs-I selector. */
+   input logic 	l1_mem_req_from_l1i;
    input logic	      l1_mem_req_cacheable;
 `ifdef ENABLE_L2_NOCACHE
    /* EXPERIMENT: entirely disable the L2 as a cache.  Route cacheable DATA ops
@@ -121,6 +127,7 @@ module l2(clk,
    logic [`PA_WIDTH-1:0]	   n_saveaddr, r_saveaddr;
    
    logic [4:0] 		   n_opcode, r_opcode;
+   logic 		   n_from_l1i, r_from_l1i;
 
    logic 		   r_mem_req, n_mem_req;
    logic [4:0] 		   r_mem_opcode, n_mem_opcode;
@@ -233,6 +240,38 @@ module l2(clk,
    reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) dirty_ram
      (.clk(clk), .addr(t_idx), .wr_data(t_dirty), .wr_en(t_wr_dirty), .rd_data(w_dirty));   
 
+   /* ---- INCLUSION: per-line record of which L1 holds a copy ----------------------
+    * Set when the L2 DELIVERS a cacheable line to an L1 (a hit forwarded to an L1
+    * creates a copy just as a DRAM fill does, so this keys off the RESPONSE, not the
+    * fill).  Cleared whenever the line is invalidated or evicted.  Two independent
+    * 1-bit RAMs rather than a 2-bit read-modify-write: each write has a known value,
+    * so there is no hazard against the registered (one-cycle-late) RAM reads.
+    * Over-approximation is SAFE -- a stale set bit costs one redundant
+    * back-invalidate, never a missed one -- which is why L1 evictions are deliberately
+    * NOT reported back to the L2. */
+   logic 		t_wr_l1d_pres, t_wr_l1i_pres;
+   logic 		t_l1d_pres_val, t_l1i_pres_val;
+   wire 		w_l1d_pres, w_l1i_pres;
+
+   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1d_pres_ram
+     (.clk(clk), .addr(t_idx), .wr_data(t_l1d_pres_val), .wr_en(t_wr_l1d_pres), .rd_data(w_l1d_pres));
+
+   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1i_pres_ram
+     (.clk(clk), .addr(t_idx), .wr_data(t_l1i_pres_val), .wr_en(t_wr_l1i_pres), .rd_data(w_l1i_pres));
+
+   /* a cacheable READ response (opcode 4) is exactly the event that hands a line to an
+    * L1; an invalidate/evict is t_wr_valid with t_valid low. */
+   wire 		w_l1_copy_made = n_rsp_valid & (r_opcode == 5'd4);
+   wire 		w_line_dropped = t_wr_valid & ~t_valid;
+
+   always_comb
+     begin
+	t_wr_l1d_pres  = (w_l1_copy_made & ~r_from_l1i) | w_line_dropped;
+	t_l1d_pres_val = (w_l1_copy_made & ~r_from_l1i);
+	t_wr_l1i_pres  = (w_l1_copy_made &  r_from_l1i) | w_line_dropped;
+	t_l1i_pres_val = (w_l1_copy_made &  r_from_l1i);
+     end // always_comb
+
    wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
    wire 		w_need_wb = w_valid ? w_dirty : 1'b0;
       
@@ -246,6 +285,7 @@ module l2(clk,
 	     r_idx <= 'd0;
 	     r_tag <= 'd0;
 	     r_opcode <= 5'd0;
+	     r_from_l1i <= 1'b0;
 	     r_addr <= 'd0;
 	     r_saveaddr <= 'd0;
 	     r_mem_req <= 1'b0;
@@ -280,6 +320,7 @@ module l2(clk,
 	     r_idx <= t_idx;
 	     r_tag <= n_tag;
 	     r_opcode <= n_opcode;
+	     r_from_l1i <= n_from_l1i;
 	     r_addr <= n_addr;
 	     r_saveaddr <= n_saveaddr;
 	     r_mem_req <= n_mem_req;
@@ -456,6 +497,7 @@ module l2(clk,
 	t_idx = r_idx;
 	n_tag = r_tag;
 	n_opcode = r_opcode;
+	n_from_l1i = r_from_l1i;
 	n_addr = r_addr;
 	n_saveaddr = r_saveaddr;
 	
@@ -513,6 +555,7 @@ module l2(clk,
 	       n_tag = l1_mem_req_addr[`PA_WIDTH-1:LG_L2_LINES+4];
 	       n_addr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_saveaddr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
+	       n_from_l1i = l1_mem_req_from_l1i;
 	       n_opcode = l1_mem_req_opcode;
 	       n_store_data = l1_mem_req_store_data;
 	       n_store_mask = 16'h0;

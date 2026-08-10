@@ -40,6 +40,9 @@ module l1i(clk,
 	   in_64b_user_mode,
 	   flush_req,
 	   flush_complete,
+	   inval_req,
+	   inval_addr,
+	   inval_ack,
 	   restart_pc,
 	   restart_src_pc,
 	   restart_src_is_indirect,
@@ -96,6 +99,16 @@ module l1i(clk,
    
    input logic 	      flush_req;
    output logic       flush_complete;
+   /* Per-line invalidate, for an INCLUSIVE L2 (L1D u L1I subset of L2).  The L2 must be
+    * able to drop ONE I-line when it evicts/snoop-invalidates that line, otherwise the
+    * L1I can retain a line the L2 no longer has and a DMA snoop of the L2 alone misses
+    * it.  Previously the only lever here was flush_req = blow away the WHOLE cache.
+    * Invalidate is INDEX-ONLY (no tag compare): dropping an innocent line that shares
+    * the index is safe (a spurious refill) whereas keeping a stale one is not, and it
+    * avoids adding a tag read port.  No writeback path is needed -- the L1I is clean. */
+   input logic 	      inval_req;
+   input logic [`PA_WIDTH-1:0] inval_addr;
+   output logic       inval_ack;
    //restart signals
    input logic [`M_WIDTH-1:0] restart_pc;
    input logic [`M_WIDTH-1:0] restart_src_pc;
@@ -1159,11 +1172,56 @@ endfunction
      end
 
    
+   /* Per-line invalidate handshake.  The valid RAM has ONE write port, owned by the
+    * refill (mem_rsp_valid) and the whole-cache flush walk; an invalidate takes the
+    * first cycle neither of those is writing, so it can never displace a refill. */
+   logic 			r_inval_pend, n_inval_pend;
+   logic [`LG_L1I_NUM_SETS-1:0] r_inval_idx, n_inval_idx;
+   logic 			r_inval_ack, n_inval_ack;
+   wire 			w_do_inval = r_inval_pend & ~mem_rsp_valid &
+					     (r_state != FLUSH_CACHE);
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_inval_pend <= 1'b0;
+	     r_inval_idx <= 'd0;
+	     r_inval_ack <= 1'b0;
+	  end
+	else
+	  begin
+	     r_inval_pend <= n_inval_pend;
+	     r_inval_idx <= n_inval_idx;
+	     r_inval_ack <= n_inval_ack;
+	  end
+     end // always_ff
+
    always_comb
      begin
-	t_wr_valid_ram_en = mem_rsp_valid || r_state == FLUSH_CACHE;
-	t_valid_ram_value = (r_state != FLUSH_CACHE);
-	t_valid_ram_idx = mem_rsp_valid ? r_miss_pc[IDX_STOP-1:IDX_START] : r_cache_idx;
+	n_inval_pend = r_inval_pend;
+	n_inval_idx = r_inval_idx;
+	n_inval_ack = 1'b0;
+	if(inval_req & ~r_inval_pend)
+	  begin
+	     n_inval_pend = 1'b1;
+	     n_inval_idx = inval_addr[IDX_STOP-1:IDX_START];
+	  end
+	else if(w_do_inval)
+	  begin
+	     n_inval_pend = 1'b0;
+	     n_inval_ack = 1'b1;    /* one-cycle ack, the cycle the valid bit is cleared */
+	  end
+     end // always_comb
+
+   assign inval_ack = r_inval_ack;
+
+   always_comb
+     begin
+	t_wr_valid_ram_en = mem_rsp_valid || (r_state == FLUSH_CACHE) || w_do_inval;
+	t_valid_ram_value = (r_state != FLUSH_CACHE) & ~w_do_inval;
+	t_valid_ram_idx = mem_rsp_valid ? r_miss_pc[IDX_STOP-1:IDX_START] :
+			  (w_do_inval ? r_inval_idx : r_cache_idx);
      end
 
       
