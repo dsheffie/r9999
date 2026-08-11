@@ -1260,7 +1260,6 @@ endfunction
 	    begin
 	       if(w_snp_valid && (w_snp_tag == r_snp_addr[`PA_WIDTH-1:TAG_LSB]))
 		 begin
-		    t_snp_clear = t_snp_won;
 		    /* Only retire the invalidate on a cycle with NO request in flight.
 		     * The engine may READ any time, but clearing a valid bit under a
 		     * store that hit and is about to write its data loses that store --
@@ -1278,6 +1277,11 @@ endfunction
 		     * `jr ra` in kmem_heapzone_index_get jumps to PC 0. */
 		    t_snp_won = ~(t_mark_invalid | w_cacheable_mem_rsp_valid | r_got_req |
 				  t_wr_array | r_last_wr | rr_last_wr);
+		    /* Assigned AFTER t_snp_won, not before: blocking assignments run in
+		     * order, so the old placement read the 1'b0 default and the valid bit
+		     * was never actually cleared -- the engine acked an invalidate it had
+		     * not performed. */
+		    t_snp_clear = t_snp_won;
 		    if(t_snp_won)
 		      begin
 			 n_backinv_dirty = w_snp_dirty;

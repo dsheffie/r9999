@@ -442,11 +442,13 @@ module l2(clk,
     * snoop hits, and back-invalidate entries.  A zero here says the mechanism never
     * runs, which is indistinguishable from "it runs and does nothing" in the counters. */
    integer r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req;
+   integer r_n_pres_d_clr;   /* presence CLEARS: distinguishes never-set from set-then-dropped */
    always_ff@(posedge clk)
      begin
 	if(reset)
 	  begin
 	     r_n_pres_d <= 0;
+	     r_n_pres_d_clr <= 0;
 	     r_n_pres_i <= 0;
 	     r_n_backinv <= 0;
 	     r_n_snoop_req <= 0;
@@ -454,12 +456,43 @@ module l2(clk,
 	else
 	  begin
 	     r_n_pres_d <= r_n_pres_d + ((t_wr_l1d_pres & t_l1d_pres_val) ? 1 : 0);
+	     r_n_pres_d_clr <= r_n_pres_d_clr + ((t_wr_l1d_pres & ~t_l1d_pres_val) ? 1 : 0);
 	     r_n_pres_i <= r_n_pres_i + ((t_wr_l1i_pres & t_l1i_pres_val) ? 1 : 0);
 	     r_n_backinv <= r_n_backinv + (((n_backinv_d | n_backinv_i) & ~(r_backinv_d | r_backinv_i)) ? 1 : 0);
 	     /* snoops actually ACCEPTED by the L2.  Zero here means the FIFO in henry_soc
 	      * never pushed (w_dma_store never true) -- i.e. the problem is upstream of
 	      * the L2 entirely, not the snoop address. */
 	     r_n_snoop_req <= r_n_snoop_req + (n_snoop_ack ? 1 : 0);
+`ifdef INCL_ADDR_LOG
+	     /* Which L2 LINES get a presence bit, versus which lines the snoop asks
+	      * about.  Counts alone cannot distinguish "presence set on a different
+	      * index than the snoop reads" from "presence never set at all"; the two
+	      * index lists side by side can.  Sampled in always_ff on purpose -- the
+	      * existing snoop_log sits in an always_comb and double-counts. */
+	     if(t_wr_l1d_pres & t_l1d_pres_val)
+	       begin
+		  $display("[pset] cyc=%0d idx=%0d", r_cycle, t_idx);
+	       end
+	     if((r_state == CHECK_VALID_AND_TAG) & (r_opcode == MEM_SNOOP_INVL))
+	       begin
+		  $display("[snp] cyc=%0d idx=%0d addr=%x hit=%b presd=%b presi=%b bqpush=%b bqfull=%b",
+			   r_cycle, t_idx, r_saveaddr, w_hit, w_l1d_pres, w_l1i_pres,
+			   t_bq_push, w_bq_full);
+	       end
+	     /* the request actually leaving for the L1s, and the L1D's answer.  The
+	      * push and the issue are separate events; only logging one cannot tell
+	      * a queue that never fills from one that never drains. */
+	     if((n_backinv_d | n_backinv_i) & ~(r_backinv_d | r_backinv_i))
+	       begin
+		  $display("[bi-issue] cyc=%0d addr=%x d=%b i=%b", r_cycle,
+			   n_backinv_addr, n_backinv_d, n_backinv_i);
+	       end
+	     if(backinv_d_ack)
+	       begin
+		  $display("[bi-ack] cyc=%0d addr=%x dirty=%b", r_cycle,
+			   r_backinv_addr, backinv_d_dirty);
+	       end
+`endif
 	     /* every 20M: DMA does not start until ~120M cycles, so a 100M-period
 	      * readout samples the machine before any snoop can possibly have fired. */
 	     if((r_cycle % `INCL_PERIOD) == (`INCL_PERIOD-1))
@@ -468,8 +501,8 @@ module l2(clk,
 		   * mismatch between the DMA master's view and the L2's) from "it finds it
 		   * but no L1 holds a copy".  backinv_entries=0 with hits>0 means the
 		   * presence test is wrong; hits=0 means the snoop address is wrong. */
-		  $display("[incl] cyc=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
-			   r_cycle, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
+		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
+			   r_cycle, r_n_pres_d_clr, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
 	       end
 	  end
      end // always_ff
