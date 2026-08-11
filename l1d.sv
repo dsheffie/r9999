@@ -220,6 +220,11 @@ module l1d(clk,
     * tagged (no aliasing) and {tag,idx,offset} reconstructs the full PA_WIDTH address. */
    localparam TAG_LSB = (IDX_STOP < `LG_PG_SZ) ? IDX_STOP : `LG_PG_SZ;
    localparam LG_ALIAS_BITS = IDX_STOP - TAG_LSB;   // == max(0, IDX_STOP - LG_PG_SZ)
+   /* Index bits BELOW the page boundary -- untranslated, so they are the only ones
+    * safe to reconstruct a physical address from.  The bits above (LG_ALIAS_BITS of
+    * them, nonzero only when the cache exceeds a page) are VIRTUAL; the tag already
+    * carries their physical counterparts because it runs down to TAG_LSB. */
+   localparam IDX_PA_BITS = TAG_LSB - IDX_START;
    localparam N_TAG_BITS = `PA_WIDTH - TAG_LSB;
    localparam WORD_START = 2;
    localparam WORD_STOP = WORD_START+LG_WORDS_PER_CL;
@@ -2412,7 +2417,7 @@ endfunction
 			       * ACTIVE; a store fired this cycle would be dropped). */
 			      t_got_miss = 1'b1;
 			      t_mark_invalid = 1'b1;
-			      n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
 			      n_mem_req_opcode = MEM_WB;
 			      n_mem_req_store_data = t_data;
 			      n_mem_req_cacheable = 1'b1;
@@ -2467,7 +2472,7 @@ endfunction
 			      n_state = UNCACHE_WB;
 			      if(r_dirty_out)
 				begin
-				   n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS], r_cache_idx, {`LG_L1D_CL_LEN{1'b0}}};
+				   n_mem_req_addr = {r_tag_out, r_cache_idx[IDX_PA_BITS-1:0], {`LG_L1D_CL_LEN{1'b0}}};
 				   n_mem_req_cacheable = 1'b1;
 				   n_mem_req_opcode = MEM_SW;
 				   n_mem_req_store_data = t_data;
@@ -2541,7 +2546,7 @@ endfunction
 			 if(r_hit_busy_addr && r_is_retry || !r_hit_busy_addr)
 			   begin
 			      n_reload_issue = 1'b1;
-			      n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_opcode = MEM_SW;
 			      n_mem_req_store_data = t_data;
@@ -2591,7 +2596,7 @@ endfunction
 			    
 			    if((rr_cache_idx == r_cache_idx) && rr_last_wr)
 			      begin
-				 n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+				 n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
 			    n_lock_cache = 1'b1;
 			    n_mem_req_opcode = MEM_SW;
 			    n_state = WAIT_INJECT_RELOAD;
@@ -2866,7 +2871,7 @@ endfunction
 		     * carried data straight to DRAM on an L2 miss) so the line actually
 		     * reaches memory instead of going dirty into L2 (the DMA-descriptor
 		     * coherence bug). */
-		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_store_data = t_data;
@@ -2959,7 +2964,7 @@ endfunction
 		 begin
 		    t_got_miss = 1'b1;
 		    t_mark_invalid = 1'b1;
-		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_store_data = t_data;
 		    n_mem_req_cacheable = 1'b1;
@@ -3006,7 +3011,7 @@ endfunction
 		 end
 	       else
 		 begin
-		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
 	       n_mem_req_opcode = MEM_SW;
 	       n_mem_req_store_data = t_data;
 	       n_state = (r_cache_idx == (L1D_NUM_SETS-1)) ? FLUSH_CACHE_LAST_WAIT : FLUSH_CACHE_WAIT;
