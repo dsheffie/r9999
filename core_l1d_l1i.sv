@@ -245,6 +245,7 @@ module core_l1d_l1i(clk,
 					  w_in_user_mode;
    wire					  w_in_64b_kernel_mode, w_in_64b_supervisor_mode,
 					  w_in_64b_user_mode;
+   wire 				  w_backinv_stall;
    wire 				  flush_req_l1i, flush_req_l1d;
    logic 				  flush_cl_req;
    logic [`M_WIDTH-1:0] 		  flush_cl_addr;
@@ -544,6 +545,12 @@ module core_l1d_l1i(clk,
    wire [127:0] w_l1_mem_load_data;
 
    
+   /* inclusive-L2 back-invalidate nets: L2 -> L1D/L1I, dirty data returns on the ack */
+   wire [`PA_WIDTH-1:0] w_backinv_addr;
+   wire 		w_backinv_d_req, w_backinv_d_ack, w_backinv_d_dirty;
+   wire [127:0] 	w_backinv_d_data;
+   wire 		w_backinv_i_req, w_backinv_i_ack;
+
    l2 l2cache (
 	       .clk(clk),
 	       .reset(reset),
@@ -563,6 +570,15 @@ module core_l1d_l1i(clk,
 	       /* inclusion: tell the L2 which primary cache this fill is for, so it can
 		* record the copy and later back-invalidate only that L1 (task #73) */
 	       .l1_mem_req_from_l1i(r_state == GNT_L1I),
+	       /* inclusive-L2 back-invalidate channel (design C) */
+	       .backinv_addr(w_backinv_addr),
+	       .backinv_stall(w_backinv_stall),
+	       .backinv_d_req(w_backinv_d_req),
+	       .backinv_d_ack(w_backinv_d_ack),
+	       .backinv_d_dirty(w_backinv_d_dirty),
+	       .backinv_d_data(w_backinv_d_data),
+	       .backinv_i_req(w_backinv_i_req),
+	       .backinv_i_ack(w_backinv_i_ack),
 	       .l1_mem_req_mask(t_l2_req_mask),
 	       .l1_mem_req_store_data(l1d_mem_req_store_data),
 	       .l1_mem_req_opcode(t_l2_req_opcode),
@@ -582,7 +598,7 @@ module core_l1d_l1i(clk,
 	       .mem_rsp_load_data(mem_rsp_load_data),
 	       .cache_accesses(l2_cache_accesses),
 	       .cache_hits(l2_cache_hits),
-		       .snoop_req_valid(1'b0)  /* task #51 DMA->L2 snoop tied off on main until the henry snoop FIFO is wired */,
+		       .snoop_req_valid(snoop_req_valid)  /* DMA->L2 snoop now driven by henry_soc's snoop FIFO */,
 		       .snoop_req_addr(snoop_req_addr),
 		       .snoop_req_ack(snoop_req_ack)
 
@@ -641,11 +657,12 @@ module core_l1d_l1i(clk,
 	       .flush_cl_addr(flush_cl_addr),
 	       .flush_cl_inval(flush_cl_inval),
 	       /* inclusive-L2 back-invalidate: tied off until the L2 drives it (#73) */
-	       .binval_req(1'b0),
-	       .binval_addr('d0),
-	       .binval_ack(),
-	       .binval_dirty(),
-	       .binval_data(),
+	       .backinv_stall(w_backinv_stall),
+	       .backinv_req(w_backinv_d_req),
+	       .backinv_addr(w_backinv_addr),
+	       .backinv_ack(w_backinv_d_ack),
+	       .backinv_dirty(w_backinv_d_dirty),
+	       .backinv_data(w_backinv_d_data),
 	       .flush_complete(l1d_flush_complete),
 	       .core_mem_req_valid(core_mem_req_valid),
 	       .core_mem_req(core_mem_req),
@@ -689,9 +706,9 @@ module core_l1d_l1i(clk,
 	      .flush_complete(l1i_flush_complete),
 	      /* inclusive-L2 back-invalidate: tied off until the L2 drives it (task #73);
 	       * the port exists now so l1i can be built and tested standalone. */
-	      .inval_req(1'b0),
-	      .inval_addr('d0),
-	      .inval_ack(),
+	      .inval_req(w_backinv_i_req),
+	      .inval_addr(w_backinv_addr),
+	      .inval_ack(w_backinv_i_ack),
 	      .restart_pc(restart_pc),
 	      .restart_src_pc(restart_src_pc),
 	      .restart_src_is_indirect(restart_src_is_indirect),

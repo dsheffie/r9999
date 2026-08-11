@@ -1,4 +1,7 @@
 `include "machine.vh"
+`ifndef INCL_PERIOD
+ `define INCL_PERIOD 20000000
+`endif
 
 module l2(clk,
 	  reset,
@@ -45,7 +48,16 @@ module l2(clk,
 	  // DMA-coherence snoop (from henry's snoop FIFO): invalidate one L2 line per request.
 	  snoop_req_valid,
 	  snoop_req_addr,
-	  snoop_req_ack
+	  snoop_req_ack,
+	  // INCLUSIVE-L2 back-invalidate to the L1s (design C: dirty data rides the ack)
+	  backinv_addr,
+	  backinv_stall,
+	  backinv_d_req,
+	  backinv_d_ack,
+	  backinv_d_dirty,
+	  backinv_d_data,
+	  backinv_i_req,
+	  backinv_i_ack
 	  );
 
    input logic clk;
@@ -105,10 +117,30 @@ module l2(clk,
    input logic 	       snoop_req_valid;
    input logic [`PA_WIDTH-1:0] snoop_req_addr;
    output logic        snoop_req_ack;
+   /* Back-invalidate the primary caches so the L2 is INCLUSIVE: a snoop that hits
+    * here must also drop any L1 copy, otherwise the 17.5% of stale reads that are
+    * L1D-resident (measured) survive.  The L1s return dirty data ON THE ACK and
+    * issue no request, so no loop can form with this pending eviction. */
+   output logic [`PA_WIDTH-1:0] backinv_addr;
+   output logic        backinv_stall;    /* bq near full: hold off new core requests */
+   output logic        backinv_d_req;
+   input logic 	       backinv_d_ack;
+   input logic 	       backinv_d_dirty;
+   input logic [127:0] backinv_d_data;
+   output logic        backinv_i_req;
+   input logic 	       backinv_i_ack;
    logic 	       r_snoop_ack, n_snoop_ack;
+   logic 	       t_snoop_backinv;   /* snoop wants a back-invalidate enqueued */
+   logic 	       r_backinv_d, n_backinv_d, r_backinv_i, n_backinv_i;
+   logic [`PA_WIDTH-1:0] r_backinv_addr, n_backinv_addr;
+   logic [63:0]        r_backinv_clobber, n_backinv_clobber;
+   assign backinv_d_req = r_backinv_d;
+   assign backinv_i_req = r_backinv_i;
+   assign backinv_addr = r_backinv_addr;
    assign snoop_req_ack = r_snoop_ack;
 `ifdef VERILATOR
    logic [63:0]        r_snoop_hit, n_snoop_hit, r_snoop_dirty, n_snoop_dirty;
+   logic [63:0]        r_snoop_vld, n_snoop_vld;
 `endif
    
    
@@ -163,7 +195,9 @@ module l2(clk,
    flush_state_t n_flush_state, r_flush_state;
    
    
-   typedef enum 	logic [3:0] {
+   /* widened 4->5 bits: BACKINV_WAIT='d16 does not fit in 4 bits (it silently
+    * aliased INITIALIZE='d0, which verilator caught as an overlapping enum). */
+   typedef enum 	logic [4:0] {
 				     INITIALIZE = 'd0,
 				     IDLE = 'd1,
 				     WAIT_FOR_RAM = 'd2,
@@ -179,7 +213,9 @@ module l2(clk,
 				     UNCACHE_STORE = 'd12,
 				     UNCACHE_LOAD = 'd13,
 				     UNCACHE_WB_TURNAROUND = 'd14,   /* was GAMEOVER (dead): mem_req gap after WB drain */
-				     UNCACHE_WB_DRAIN = 'd15
+				     UNCACHE_WB_DRAIN = 'd15,
+				     BACKINV_WAIT = 'd16,
+				     BACKINV_WB = 'd17
 				     } state_t;
 
    state_t n_state, r_state;
@@ -250,6 +286,15 @@ module l2(clk,
     * back-invalidate, never a missed one -- which is why L1 evictions are deliberately
     * NOT reported back to the L2. */
    logic 		t_wr_l1d_pres, t_wr_l1i_pres;
+   /* Measured OUTSIDE the state machine: an in-case probe previously split the
+    * else chain and made the writeback unconditional, so the thing being measured
+    * stopped happening.  restart_wb << restart => the merged line's dirty bit did
+    * not survive the restart and the recovered data was dropped. */
+   wire 		w_restart_seen = (r_state == CHECK_VALID_AND_TAG) & r_bi_done;
+   wire 		w_restart_wb = w_restart_seen & w_need_wb;
+   integer 		r_n_restart, r_n_restart_wb;
+   logic 		t_pres_clr;      /* drop both presence bits at back-invalidate completion */
+   logic 		r_bi_done, n_bi_done;   /* loop guard: this victim already back-invalidated */
    logic 		t_l1d_pres_val, t_l1i_pres_val;
    wire 		w_l1d_pres, w_l1i_pres;
 
@@ -266,11 +311,169 @@ module l2(clk,
 
    always_comb
      begin
-	t_wr_l1d_pres  = (w_l1_copy_made & ~r_from_l1i) | w_line_dropped;
+	t_wr_l1d_pres  = (w_l1_copy_made & ~r_from_l1i) | w_line_dropped | t_pres_clr;
 	t_l1d_pres_val = (w_l1_copy_made & ~r_from_l1i);
-	t_wr_l1i_pres  = (w_l1_copy_made &  r_from_l1i) | w_line_dropped;
+	t_wr_l1i_pres  = (w_l1_copy_made &  r_from_l1i) | w_line_dropped | t_pres_clr;
 	t_l1i_pres_val = (w_l1_copy_made &  r_from_l1i);
      end // always_comb
+
+`ifdef ENABLE_L2_INCLUSION
+   /* ---- back-invalidate queue -------------------------------------------------
+    * The snoop path could issue directly, because IDLE can simply refuse a new
+    * snoop while one is outstanding.  An EVICTION cannot: it happens on the fill
+    * path that the L1D is itself waiting on, so stalling the L2 until the L1D
+    * acks deadlocks (the L1D cannot reach a state where it would ack while its
+    * fill is blocked).  Queue instead, and drain independently of the main FSM.
+    *
+    * Overflow would DROP an invalidate, which is precisely the corruption this
+    * exists to prevent, so it is counted and reported loudly rather than
+    * silently tolerated.  If it never trips, the depth is adequate; if it does,
+    * the L1s need a dedicated snoop port on their tag arrays. */
+   localparam LG_BQ = 3;                       /* 8 entries */
+   reg [`PA_WIDTH-1:0] r_bq_addr [(1<<LG_BQ)-1:0];
+   reg [(1<<LG_BQ)-1:0] r_bq_d, r_bq_i;
+   reg [(1<<LG_BQ)-1:0] r_bq_ev;   /* 1 = eviction: a dirty L1D line is the ONLY copy */
+   reg [LG_BQ:0]       r_bq_head, n_bq_head, r_bq_tail, n_bq_tail;
+   wire                w_bq_empty = (r_bq_head == r_bq_tail);
+   wire                w_bq_full  = (r_bq_head[LG_BQ-1:0] == r_bq_tail[LG_BQ-1:0]) &
+                                    (r_bq_head[LG_BQ] != r_bq_tail[LG_BQ]);
+   /* An eviction/invalidate of a line an L1 still holds.  The victim's address is
+    * rebuilt from the RAM's own tag output and the index being written -- NOT from
+    * r_saveaddr, which names the INCOMING line on a fill, not the one leaving. */
+   /* The whole-cache flush walk drops every line in turn -- thousands of enqueues
+    * at ~1/cycle against a drain of 1 per L1D ack, which is what produced
+    * bq_ovf=10488 and (dropped invalidates -> stale data) an init SIGSEGV.
+    * Suppressed rather than absorbed, and that is CORRECT, not a heuristic: the
+    * L2 flush is only ever driven by flush_req_l1i/flush_req_l1d, i.e. the core's
+    * CACHE_FLUSH, which empties the L1s in the same operation -- so every
+    * back-invalidate the walk would enqueue is redundant by construction. */
+   wire                w_in_flush_walk = (r_state == FLUSH_WAIT) | (r_state == FLUSH_STORE) |
+                                         (r_state == FLUSH_TRIAGE);
+   /* Eviction back-invalidate is OFF by default: proven (bisect, 2026-08) to
+    * corrupt memory -> IRIX "init died" SIGSEGV, because the L1D's recovered
+    * dirty line goes out-of-band to DRAM while the L2 -- the coherence point --
+    * has already dropped its copy, leaving a window where a reader misses both
+    * caches and gets stale DRAM.  Correct ordering (back-invalidate -> merge into
+    * the L2 line -> normal L2 writeback) needs the eviction to BLOCK on the ack,
+    * which needs the L1D snoop port.  Enable together with that. */
+   /* Evictions are back-invalidated INLINE and synchronously in the miss path
+    * (BACKINV_WAIT below), so they never enter the queue.  The queue serves
+    * snoops only. */
+   wire                w_evict_backinv = 1'b0;
+   wire [`PA_WIDTH-1:0] w_evict_addr = {w_tag, t_idx, 4'd0};
+   /* High-water backpressure to the CORE side (not the L1->L2 port: an L1 holding
+    * a request sits in a wait state and can never ack, so stalling there
+    * deadlocks).  Draining then depends only on already-accepted transactions,
+    * which nothing blocks.  Headroom of 2 covers the at-most-one L1D and one L1I
+    * fill that can still evict while the stall takes effect. */
+   assign backinv_stall = ((r_bq_tail - r_bq_head) >= ((1<<LG_BQ) - 3)) | r_wb_pend;
+   /* A dirty line returned by an EVICTION back-invalidate is the only up-to-date
+    * copy in the machine -- discarding it (which is right for a snoop, where DRAM
+    * already holds newer DMA data) silently loses the write.  Latch it and push it
+    * to DRAM from IDLE. */
+   logic               r_backinv_ev, n_backinv_ev;
+   logic               r_wb_pend, n_wb_pend;
+   logic [`PA_WIDTH-1:0] r_wb_addr, n_wb_addr;
+   logic [127:0]       r_wb_data, n_wb_data;
+   integer             r_n_wb;
+   logic               t_bq_push;
+   logic [`PA_WIDTH-1:0] t_bq_addr;
+   logic               t_bq_d, t_bq_i, t_bq_ev;
+   integer             r_n_bq_ovf, r_n_evict_bi;
+   integer             r_n_inline_bi, r_n_merge;   /* inline eviction back-invalidates, and dirty merges */
+
+   always_comb
+     begin
+	/* the snoop path enqueues from CHECK_VALID_AND_TAG via t_snoop_backinv */
+	t_bq_push = w_evict_backinv | t_snoop_backinv;
+	t_bq_addr = t_snoop_backinv ? {r_saveaddr[`PA_WIDTH-1:4], 4'd0} : w_evict_addr;
+	t_bq_d    = t_snoop_backinv ? w_l1d_pres : w_l1d_pres;
+	t_bq_i    = t_snoop_backinv ? w_l1i_pres : w_l1i_pres;
+	t_bq_ev   = 1'b0;   /* queue holds snoops only; r_wb_pend/BACKINV_WB now dead */
+	n_bq_tail = r_bq_tail + ((t_bq_push & ~w_bq_full) ? 1 : 0);
+	/* pop only when the request register is free */
+	n_bq_head = r_bq_head + ((~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend) ? 1 : 0);
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_bi_done <= 1'b0;
+	     r_bq_head <= 'd0;
+	     r_bq_tail <= 'd0;
+	     r_n_bq_ovf <= 0;
+	     r_n_inline_bi <= 0;
+	     r_n_restart <= 0;
+	     r_n_restart_wb <= 0;
+	     r_n_merge <= 0;
+	     r_n_evict_bi <= 0;
+	  end
+	else
+	  begin
+	     r_bi_done <= n_bi_done;
+	     r_bq_head <= n_bq_head;
+	     r_bq_tail <= n_bq_tail;
+	     r_n_bq_ovf <= r_n_bq_ovf + ((t_bq_push & w_bq_full) ? 1 : 0);
+	     /* zero here would be indistinguishable from "path not reached" -- the exact
+	      * blindness that cost most of a day earlier. */
+	     r_n_inline_bi <= r_n_inline_bi + (((n_state == BACKINV_WAIT) & (r_state != BACKINV_WAIT)) ? 1 : 0);
+	     r_n_restart <= r_n_restart + (w_restart_seen ? 1 : 0);
+	     r_n_restart_wb <= r_n_restart_wb + (w_restart_wb ? 1 : 0);
+	     r_n_merge <= r_n_merge + (((r_state == BACKINV_WAIT) & backinv_d_ack & backinv_d_dirty) ? 1 : 0);
+	     r_n_evict_bi <= r_n_evict_bi + ((w_evict_backinv & ~w_bq_full) ? 1 : 0);
+	  end
+     end // always_ff
+
+   always_ff@(posedge clk)
+     begin
+	if(t_bq_push & ~w_bq_full)
+	  begin
+	     r_bq_addr[r_bq_tail[LG_BQ-1:0]] <= t_bq_addr;
+	     r_bq_d[r_bq_tail[LG_BQ-1:0]] <= t_bq_d;
+	     r_bq_i[r_bq_tail[LG_BQ-1:0]] <= t_bq_i;
+	     r_bq_ev[r_bq_tail[LG_BQ-1:0]] <= t_bq_ev;
+	  end
+     end // always_ff
+`endif
+
+`ifdef VERILATOR
+   /* Is the inclusion path actually REACHED?  Counts, not guesses: presence-bit sets,
+    * snoop hits, and back-invalidate entries.  A zero here says the mechanism never
+    * runs, which is indistinguishable from "it runs and does nothing" in the counters. */
+   integer r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_n_pres_d <= 0;
+	     r_n_pres_i <= 0;
+	     r_n_backinv <= 0;
+	     r_n_snoop_req <= 0;
+	  end
+	else
+	  begin
+	     r_n_pres_d <= r_n_pres_d + ((t_wr_l1d_pres & t_l1d_pres_val) ? 1 : 0);
+	     r_n_pres_i <= r_n_pres_i + ((t_wr_l1i_pres & t_l1i_pres_val) ? 1 : 0);
+	     r_n_backinv <= r_n_backinv + (((n_backinv_d | n_backinv_i) & ~(r_backinv_d | r_backinv_i)) ? 1 : 0);
+	     /* snoops actually ACCEPTED by the L2.  Zero here means the FIFO in henry_soc
+	      * never pushed (w_dma_store never true) -- i.e. the problem is upstream of
+	      * the L2 entirely, not the snoop address. */
+	     r_n_snoop_req <= r_n_snoop_req + (n_snoop_ack ? 1 : 0);
+	     /* every 20M: DMA does not start until ~120M cycles, so a 100M-period
+	      * readout samples the machine before any snoop can possibly have fired. */
+	     if((r_cycle % `INCL_PERIOD) == (`INCL_PERIOD-1))
+	       begin
+		  /* snoop_hit distinguishes "the snoop never finds the line" (address-form
+		   * mismatch between the DMA master's view and the L2's) from "it finds it
+		   * but no L1 holds a copy".  backinv_entries=0 with hits>0 means the
+		   * presence test is wrong; hits=0 means the snoop address is wrong. */
+		  $display("[incl] cyc=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
+			   r_cycle, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
+	       end
+	  end
+     end // always_ff
+`endif
 
    wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
    wire 		w_need_wb = w_valid ? w_dirty : 1'b0;
@@ -295,9 +498,19 @@ module l2(clk,
 	     r_reload <= 1'b0;
 	     r_req_ack <= 1'b0;
 	     r_snoop_ack <= 1'b0;
+	     r_backinv_d <= 1'b0;
+	     r_backinv_i <= 1'b0;
+	     r_backinv_addr <= 'd0;
+	     r_backinv_ev <= 1'b0;
+	     r_wb_pend <= 1'b0;
+	     r_wb_addr <= 'd0;
+	     r_wb_data <= 'd0;
+	     r_n_wb <= 0;
+	     r_backinv_clobber <= 64'd0;
 `ifdef VERILATOR
 	     r_snoop_hit <= 64'd0;
 	     r_snoop_dirty <= 64'd0;
+	     r_snoop_vld <= 64'd0;
 `endif
 	     r_store_data <= 'd0;
 	     r_store_mask <= 'd0;	     
@@ -323,6 +536,19 @@ module l2(clk,
 	     r_from_l1i <= n_from_l1i;
 	     r_addr <= n_addr;
 	     r_saveaddr <= n_saveaddr;
+	     /* back-invalidate request flops.  These were assigned ONLY in the reset
+	      * branch, so backinv_d_req/backinv_i_req sat at 0 forever: the L1s never
+	      * saw a request, BACKINV_WAIT's "everything acked" test was vacuously
+	      * true so it never stalled, and the entry counter still incremented --
+	      * the machinery reported success while doing nothing. */
+	     r_backinv_d <= n_backinv_d;
+	     r_backinv_i <= n_backinv_i;
+	     r_backinv_addr <= n_backinv_addr;
+	     r_backinv_ev <= n_backinv_ev;
+	     r_wb_pend <= n_wb_pend;
+	     r_wb_addr <= n_wb_addr;
+	     r_wb_data <= n_wb_data;
+	     r_n_wb <= r_n_wb + ((n_wb_pend & ~r_wb_pend) ? 1 : 0);
 	     r_mem_req <= n_mem_req;
 	     r_mem_opcode <= n_mem_opcode;
 	     r_rsp_data <= n_rsp_data;
@@ -333,6 +559,7 @@ module l2(clk,
 `ifdef VERILATOR
 	     r_snoop_hit <= n_snoop_hit;
 	     r_snoop_dirty <= n_snoop_dirty;
+	     r_snoop_vld <= n_snoop_vld;
 	     if((r_cycle[23:0] == 24'd0) & ((r_snoop_hit != 64'd0) | (r_snoop_dirty != 64'd0)))
 	       $display("[snoopstat] cyc=%0d snoop_hits=%0d dirty=%0d", r_cycle, r_snoop_hit, r_snoop_dirty);
 `endif
@@ -427,6 +654,10 @@ module l2(clk,
 					    input int mask);
    // decision log at CHECK_VALID_AND_TAG for the descriptor line: shows whether the
    // op hit, whether the held line is dirty, and its current content w_d0.
+   /* every snoop lookup, with its verdict -- lets the C++ side answer "was this
+    * stale line ever snooped, and did the lookup hit?" by table lookup instead
+    * of inference from aggregate counters. */
+   import "DPI-C" function void snoop_log(input longint unsigned pa, input int hit);
    import "DPI-C" function void l2_chk_log(input longint unsigned pa,
 					   input int whit, input int wvalid, input int wdirty,
 					   input int op,
@@ -503,9 +734,61 @@ module l2(clk,
 	
 	n_req_ack = 1'b0;
 	n_snoop_ack = 1'b0;
+	t_snoop_backinv = 1'b0;
+	t_pres_clr = 1'b0;
+	n_bi_done = r_bi_done;
+	n_backinv_d = r_backinv_d;
+	n_backinv_i = r_backinv_i;
+	n_backinv_addr = r_backinv_addr;
+	n_backinv_ev = r_backinv_ev;
+	n_wb_pend = r_wb_pend;
+	n_wb_addr = r_wb_addr;
+	n_wb_data = r_wb_data;
+`ifdef ENABLE_L2_INCLUSION
+	/* An ack can arrive in ANY state now that the request is fire-and-forget,
+	 * so clear it here rather than inside a wait state.  Placed BEFORE the case
+	 * so a snoop issuing a new request this cycle overrides it. */
+	/* drain: load the next queued back-invalidate whenever the request
+	 * registers are free.  Independent of the main FSM, so a queued eviction
+	 * still reaches the L1s while the L2 is busy serving the fill that caused
+	 * it. */
+	if(~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend)
+	  begin
+	     n_backinv_addr = r_bq_addr[r_bq_head[LG_BQ-1:0]];
+	     n_backinv_d = r_bq_d[r_bq_head[LG_BQ-1:0]];
+	     n_backinv_i = r_bq_i[r_bq_head[LG_BQ-1:0]];
+	     n_backinv_ev = r_bq_ev[r_bq_head[LG_BQ-1:0]];
+	  end
+	if(backinv_d_ack)
+	  begin
+	     n_backinv_d = 1'b0;
+	     /* DRAM already holds the fresh DMA data, so a dirty L1D line here is a
+	      * genuine CPU-store-vs-DMA-write race, NOT something to merge back
+	      * (that would clobber the DMA data).  Count it. */
+	     if(backinv_d_dirty)
+	       begin
+		  if(r_backinv_ev)
+		    begin
+		       n_wb_pend = 1'b1;
+		       n_wb_addr = r_backinv_addr;
+		       n_wb_data = backinv_d_data;
+		    end
+		  else
+		    begin
+		       n_backinv_clobber = r_backinv_clobber + 64'd1;
+		    end
+	       end
+	  end
+	if(backinv_i_ack)
+	  begin
+	     n_backinv_i = 1'b0;
+	  end
+`endif
+	n_backinv_clobber = r_backinv_clobber;
 `ifdef VERILATOR
 	n_snoop_hit = r_snoop_hit;
 	n_snoop_dirty = r_snoop_dirty;
+	n_snoop_vld = r_snoop_vld;
 `endif
 	n_mem_req = r_mem_req;
 	n_mem_opcode = r_mem_opcode;
@@ -581,7 +864,23 @@ module l2(clk,
 		    n_store_mask = 16'hffff;
 		    //$display("GOT FLUSH REQUEST at cycle %d", r_cycle);
 		 end
+`ifdef ENABLE_L2_INCLUSION
+`ifdef ENABLE_L2_INCLUSION
+	       else if(r_wb_pend)
+		 begin
+		    /* push the recovered dirty line to DRAM.  Ordered AFTER the L2's own
+		     * writeback of the line it evicted, so the L1D's newer data wins. */
+		    n_mem_req = 1'b1;
+		    n_addr = r_wb_addr;
+		    n_mem_opcode = 5'd7;
+		    n_mem_req_store_data = r_wb_data;
+		    n_state = BACKINV_WB;
+		 end
+`endif
+	       else if(snoop_req_valid & ~w_bq_full)
+`else
 	       else if(snoop_req_valid)
+`endif
 		 begin
 		    /* DMA-coherence snoop: the SCSI DMA engine wrote this line to DRAM
 		     * behind the CPU caches, and IRIX can't invalidate r9999's (hidden)
@@ -727,7 +1026,35 @@ module l2(clk,
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
 		      end
+		    n_state = IDLE;
+`ifdef ENABLE_L2_INCLUSION
+		    /* INCLUSION: dropping the L2 copy is not enough -- an L1 can hold this
+		     * line too, and 17.5% of the measured stale reads were exactly that
+		     * (an L1D hit with no preceding stale fill).  Back-invalidate the L1s
+		     * the presence bits name.
+		     *
+		     * FIRE-AND-FORGET: raise the request and go straight back to IDLE
+		     * rather than blocking until the L1s ack.  Blocking deadlocks: the
+		     * L1D can have a request already outstanding at THIS L2 (e.g. an
+		     * uncached MMIO poll), so it cannot reach a state where it would ack
+		     * while we refuse to serve it.  Not waiting is safe because the L2
+		     * has ALREADY dropped its own copy above -- any refill of this line
+		     * now comes from DRAM and is fresh, so a back-invalidate that lands
+		     * late costs one refetch and nothing else.  Ordering against a NEW
+		     * snoop is kept by the accept gate in IDLE, which refuses to start
+		     * another snoop while a request is still outstanding. */
+		    if(w_hit & (w_l1d_pres | w_l1i_pres))
+		      begin
+			 t_snoop_backinv = 1'b1;
+		      end
+`endif
 `ifdef VERILATOR
+		    /* w_valid without w_hit = line present but tag mismatch (index/tag
+		     * bug).  w_valid low = the line simply is not in the L2, which is
+		     * the expected common case since IRIX's own dma_cache_inv forwards
+		     * MEM_INVL to the L2 before most DMA. */
+		    n_snoop_vld = r_snoop_vld + (w_valid ? 64'd1 : 64'd0);
+		    snoop_log({{(64-`PA_WIDTH){1'b0}}, r_saveaddr}, w_hit ? 32'd1 : 32'd0);
 		    if(w_hit)
 		      begin
 			 n_snoop_hit  = r_snoop_hit  + 64'd1;
@@ -737,7 +1064,6 @@ module l2(clk,
 				    r_cycle, r_saveaddr, w_tag, t_idx, w_d0[31:0]);
 		      end
 `endif
-		    n_state = IDLE;
 		 end
 	       else if(r_opcode == MEM_WB)
 		 begin
@@ -785,6 +1111,32 @@ module l2(clk,
 		     * unlike MEM_INVL) -> a stale copy clobbered the SCSI-DMA descriptor
 		     * in DRAM (armed {08398f80,0x40} regressed to {883e4800,0}) -> IRIX
 		     * XFS panic. The CLEAN_RELOAD fill site already defends the same leak. */
+`ifdef ENABLE_L2_EVICT_BACKINV
+		    /* PARKED 2026-08-10: derails IRIX to PC 0 @127M cycles, BEFORE any
+		     * DMA, so it is not a coherence issue -- back-invalidating on
+		     * eviction alone corrupts.  Disproven so far: out-of-band DRAM write
+		     * (fixed by merge, still fails), store mask (RAM has no byte enable),
+		     * write-ordering vs in-flight ops (quiescence gate -> bit-identical
+		     * failure).  UNCHECKED: whether the merged line's dirty bit survives
+		     * the restart -- if not, the eviction skips the writeback and drops
+		     * the recovered data.  Also pathological here: ~1 back-invalidate per
+		     * 55 cycles because the L1D index bits are a strict subset of a
+		     * direct-mapped L2's, so nearly every L2 miss evicts a line an L1
+		     * holds.  Revisit with a larger/set-associative L2. */
+		    if(w_valid & (w_l1d_pres | w_l1i_pres) & ~r_bi_done)
+		      begin
+			 /* INCLUSION: an L1 still holds the line we are about to evict.
+			  * Recover it BEFORE the eviction rather than after, so a dirty
+			  * L1D copy is merged into the L2 -- the coherence point -- and
+			  * leaves on the normal writeback below.  Blocking here is safe
+			  * now that the L1D snoop engine can ack from any state. */
+			 n_backinv_addr = {w_tag, t_idx, 4'd0};
+			 n_backinv_d = w_l1d_pres;
+			 n_backinv_i = w_l1i_pres;
+			 n_state = BACKINV_WAIT;
+		      end
+		    else
+`endif
 		    if(w_need_wb)
 		      begin
 			 n_mem_req_store_data = w_d0;
@@ -810,7 +1162,43 @@ module l2(clk,
 			 n_got_mem_rsp_valid = 1'b0;			 
 		      end
 		 end
+	       if(n_state != BACKINV_WAIT)
+		 begin
+		    n_bi_done = 1'b0;
+		 end
 	    end // case: CHECK_VALID_AND_TAG
+`ifdef ENABLE_L2_INCLUSION
+	  BACKINV_WAIT:
+	    begin
+	       if(backinv_d_ack)
+		 begin
+		    n_backinv_d = 1'b0;
+		    if(backinv_d_dirty)
+		      begin
+			 /* MERGE: the L1D held the only up-to-date copy.  Write it into
+			  * the L2 line and mark it dirty so the eviction writeback below
+			  * carries it.  The previous design pushed this straight to DRAM
+			  * while the L2 had already dropped the line, which opened a
+			  * window where a reader missed both caches, read stale DRAM, and
+			  * later wrote it back -- losing the update (IRIX "init died"). */
+			 t_d0 = backinv_d_data;
+			 t_wr_d0 = 1'b1;
+			 t_wr_dirty = 1'b1;
+			 t_dirty = 1'b1;
+		      end
+		 end
+	       if(backinv_i_ack)
+		 begin
+		    n_backinv_i = 1'b0;
+		 end
+	       if((~r_backinv_d | backinv_d_ack) & (~r_backinv_i | backinv_i_ack))
+		 begin
+		    t_pres_clr = 1'b1;    /* no L1 holds it now */
+		    n_bi_done = 1'b1;     /* and do not do this again for this victim */
+		    n_state = WAIT_FOR_RAM;
+		 end
+	    end // case: BACKINV_WAIT
+`endif
 	  DIRTY_STORE:
 	    begin
 	       if(mem_req_ack)
@@ -924,6 +1312,21 @@ module l2(clk,
 		      end		    
 		 end
 	    end // case: FLUSH_STORE
+`ifdef ENABLE_L2_INCLUSION
+	  BACKINV_WB:
+	    begin
+	       if(mem_req_ack)
+		 begin
+		    n_mem_req = 1'b0;
+		 end
+	       if(mem_rsp_valid)
+		 begin
+		    n_mem_req = 1'b0;
+		    n_wb_pend = 1'b0;
+		    n_state = IDLE;
+		 end
+	    end // case: BACKINV_WB
+`endif
 	  UNCACHE_STORE:
 	    begin
 	       if(mem_req_ack)
@@ -951,6 +1354,7 @@ module l2(clk,
 		    n_mem_req = 1'b0;
 		 end
 	    end
+
 	  UNCACHE_WB_DRAIN:
 	    begin
 	       if(mem_req_ack)

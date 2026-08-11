@@ -86,11 +86,12 @@ module l1d(clk,
 	   flush_cl_req,
 	   flush_cl_addr,
 	   flush_cl_inval,
-	   binval_req,
-	   binval_addr,
-	   binval_ack,
-	   binval_dirty,
-	   binval_data,
+	   backinv_stall,
+	   backinv_req,
+	   backinv_addr,
+	   backinv_ack,
+	   backinv_dirty,
+	   backinv_data,
 	   //inputs from core
 	   core_mem_req_valid,
 	   core_mem_req,
@@ -155,18 +156,19 @@ module l1d(clk,
    input logic [`M_WIDTH-1:0] flush_cl_addr;
    input logic 		      flush_cl_inval;
    /* INCLUSIVE-L2 back-invalidate (design C: DATA-CARRYING ack).  The L2 drives
-    * binval_req when it evicts / snoop-invalidates a line the presence bits say we
+    * backinv_req when it evicts / snoop-invalidates a line the presence bits say we
     * hold.  We tag-check, drop the line, and return it on the ack if it was dirty --
     * the L2 merges it into the line it is already writing to DRAM.
     * WHY NOT flush_cl_*: that path issues MEM_INVL (hit-inval) or MEM_WB (dirty)
     * back INTO the L2, which is mid-eviction waiting for this very ack -> deadlock.
     * Returning the data on the ack means this path issues NO request at all, so the
     * loop cannot exist by construction. */
-   input logic 		      binval_req;
-   input logic [`PA_WIDTH-1:0] binval_addr;
-   output logic 	      binval_ack;
-   output logic 	      binval_dirty;
-   output logic [127:0]        binval_data;
+   input logic 		      backinv_stall;   /* L2 bq near full: stop feeding it evictions */
+   input logic 		      backinv_req;
+   input logic [`PA_WIDTH-1:0] backinv_addr;
+   output logic 	      backinv_ack;
+   output logic 	      backinv_dirty;
+   output logic [127:0]        backinv_data;
    input logic 		      flush_req;
    output logic 	      flush_complete;
 
@@ -342,6 +344,25 @@ endfunction
    
    //2nd read port
    logic [`LG_L1D_NUM_SETS-1:0] 	  t_cache_idx2, r_cache_idx2;
+   /* Port-2 ownership.  t_p2_core marks the cycle a CORE request claims read port
+    * 2; when it is low the snoop engine may borrow the port.  r_cache_idx2_val is
+    * the registered qualifier: it says whether r_cache_idx2 holds a core-request
+    * index, and the store-hazard compares below are gated on it so a borrowed
+    * cycle can never make them mis-fire.  This is what makes borrowing provably
+    * safe instead of an argument about what is in flight. */
+   logic 				  t_p2_core;
+   logic 				  r_cache_idx2_val, n_cache_idx2_val;
+   localparam SNP_IDLE = 2'd0, SNP_RD = 2'd1, SNP_ACT = 2'd2;
+   logic [1:0] 			  r_snp_state, n_snp_state;
+   logic [`PA_WIDTH-1:0] 		  r_snp_addr, n_snp_addr;
+   logic 				  r_snp_pend, n_snp_pend;
+   logic 				  t_snp_want_p2, t_snp_clear, t_snp_won;
+   logic 				  r_snp_inval_done, n_snp_inval_done;
+   logic [`PA_WIDTH-1:0] 		  r_snp_inval_addr, n_snp_inval_addr;
+   wire [`LG_L1D_NUM_SETS-1:0] 	  w_snp_idx = r_snp_addr[IDX_STOP-1:IDX_START];
+   /* final port-2 address: the core always wins, the snoop takes what is left */
+   wire [`LG_L1D_NUM_SETS-1:0] 	  w_p2_addr = t_p2_core ? t_cache_idx2 :
+					  (t_snp_want_p2 ? w_snp_idx : t_cache_idx2);
    logic [N_TAG_BITS-1:0] 		  t_cache_tag2, r_cache_tag2, r_tag_out2;
    logic 				  r_valid_out2, r_dirty_out2;
    logic [L1D_CL_LEN_BITS-1:0] 		  r_array_out2;
@@ -359,11 +380,9 @@ endfunction
 
    logic 				  r_flush_req, n_flush_req;
    logic 				  r_flush_cl_req, n_flush_cl_req;
-   logic 				  r_binval_pend, n_binval_pend;
-   logic [`PA_WIDTH-1:0] 		  r_binval_addr, n_binval_addr;
-   logic 				  r_binval_ack, n_binval_ack;
-   logic 				  r_binval_dirty, n_binval_dirty;
-   logic [127:0] 			  r_binval_data, n_binval_data;
+   logic 				  r_backinv_ack, n_backinv_ack;
+   logic 				  r_backinv_dirty, n_backinv_dirty;
+   logic [127:0] 			  r_backinv_data, n_backinv_data;
    logic 				  r_flush_complete, n_flush_complete;
    
 
@@ -469,7 +488,7 @@ endfunction
 			     FLUSH_CL_BEAT2_RD = 'd16,
 			     /* inclusive-L2 back-invalidate: ACTIVE drives the index, this
 			      * state sees the registered tag/dirty/data and acts. */
-			     BINVAL = 'd17
+			     BACKINV = 'd17
                              } state_t;
 
    
@@ -506,9 +525,9 @@ endfunction
    
    logic [31:0] 			 r_cycle;
    assign flush_complete = r_flush_complete;
-   assign binval_ack = r_binval_ack;
-   assign binval_dirty = r_binval_dirty;
-   assign binval_data = r_binval_data;
+   assign backinv_ack = r_backinv_ack;
+   assign backinv_dirty = r_backinv_dirty;
+   assign backinv_data = r_backinv_data;
    assign mem_req_addr = r_mem_req_addr;
    assign mem_req_store_data = r_mem_req_store_data;
    assign mem_req_opcode = r_mem_req_opcode;
@@ -879,6 +898,15 @@ endfunction
 	     /* CACHE-op (Index/Hit) invalidate/writeback on this line (funnel path). */
 	     l1d_cacheop({32'd0, r_cycle}, 64'd0, flush_cl_addr, flush_cl_inval ? 32'd1 : 32'd0);
 	  end
+	if(r_snp_inval_done)
+	  begin
+	     /* Inclusive-L2 back-invalidate drops the line just as a CACHE-op invalidate
+	      * does, so the testbench MUST be told -- otherwise its DMA stale-read
+	      * detector keeps the line in its suspect set forever and every later touch
+	      * is reported as staleness that no longer exists (measured: enabling the
+	      * snoop appeared to make every counter WORSE purely from this omission). */
+	     l1d_cacheop({32'd0, r_cycle}, r_snp_inval_addr, r_snp_inval_addr, 32'd1);
+	  end
 	/* mem-pipe CACHE ops (Hit-Invalidate 0x11 -> CHINV etc.) — these carry the op's pc. */
 	if(r_got_req & w_is_chop_r)
 	  begin
@@ -1090,11 +1118,9 @@ endfunction
 	     r_flush_complete <= n_flush_complete;
 	     r_flush_req <= n_flush_req;
 	     r_flush_cl_req <= n_flush_cl_req;
-	     r_binval_pend <= n_binval_pend;
-	     r_binval_addr <= n_binval_addr;
-	     r_binval_ack <= n_binval_ack;
-	     r_binval_dirty <= n_binval_dirty;
-	     r_binval_data <= n_binval_data;
+	     r_backinv_ack <= n_backinv_ack;
+	     r_backinv_dirty <= n_backinv_dirty;
+	     r_backinv_data <= n_backinv_data;
 	     r_chop_wait <= n_chop_wait;
 	     r_chop_beat <= n_chop_beat;
 	     r_flush_cl_beat <= n_flush_cl_beat;
@@ -1192,11 +1218,180 @@ endfunction
      end
 `endif
 
+   /* ------------------------------------------------------------------------
+    * L1D snoop engine.  Services a back-invalidate off read port 2 plus the
+    * arbitrated write port, touching NO main-FSM state (r_state, r_cache_idx, or
+    * the miss path's held writeback address).  That independence is the point:
+    * the main FSM is parked in a wait state on the very fill whose eviction
+    * raised the back-invalidate, so anything needing the main FSM to move
+    * deadlocks.  Because this cannot, the L2 is free to BLOCK on the ack and keep
+    * the correct ordering (back-invalidate -> merge dirty into the L2 line ->
+    * normal L2 writeback) instead of the out-of-band DRAM write that corrupted
+    * memory.
+    * ---------------------------------------------------------------------- */
+   always_comb
+     begin
+	n_snp_state = r_snp_state;
+	n_snp_addr = r_snp_addr;
+	n_snp_pend = r_snp_pend | backinv_req;
+	n_backinv_ack = 1'b0;
+	n_backinv_dirty = r_backinv_dirty;
+	n_backinv_data = r_backinv_data;
+	n_snp_inval_done = 1'b0;
+	n_snp_inval_addr = r_snp_inval_addr;
+	t_snp_want_p2 = 1'b0;
+	t_snp_clear = 1'b0;
+	t_snp_won = 1'b0;
+	if(backinv_req & ~r_snp_pend)
+	  begin
+	     n_snp_addr = backinv_addr;
+	  end
+	case(r_snp_state)
+	  SNP_IDLE:
+	    begin
+	       if(r_snp_pend)
+		 begin
+		    /* shadow arrays are addressed by w_snp_idx continuously, so the
+		     * result is simply valid next cycle -- nothing to arbitrate. */
+		    n_snp_state = SNP_RD;
+		 end
+	    end
+	  SNP_RD:
+	    begin
+	       if(w_snp_valid && (w_snp_tag == r_snp_addr[`PA_WIDTH-1:TAG_LSB]))
+		 begin
+		    t_snp_clear = t_snp_won;
+		    /* Only retire the invalidate on a cycle with NO request in flight.
+		     * The engine may READ any time, but clearing a valid bit under a
+		     * store that hit and is about to write its data loses that store --
+		     * silent corruption needing no DMA at all, which is what derailed the
+		     * kernel to PC 0.  This is the quiescence the old BACKINV entry guard
+		     * provided; dropping it entirely went too far.  Costs nothing in
+		     * progress: r_got_req is low while the main FSM waits on a fill, which
+		     * is exactly when the L2 is blocked on our ack. */
+		    /* A store's array write lands a CYCLE AFTER its request (via the
+		     * r_last_wr/rr_last_wr path), so gating on r_got_req alone was one
+		     * cycle too narrow: the engine could sample the line, invalidate it,
+		     * and then have the in-flight store write into a line that no longer
+		     * exists.  Retire-trace proof: `sd ra,0(sp)` dirties the stack line,
+		     * the back-invalidate loses it, and the matching `ld ra,0(sp)` /
+		     * `jr ra` in kmem_heapzone_index_get jumps to PC 0. */
+		    t_snp_won = ~(t_mark_invalid | w_cacheable_mem_rsp_valid | r_got_req |
+				  t_wr_array | r_last_wr | rr_last_wr);
+		    if(t_snp_won)
+		      begin
+			 n_backinv_dirty = w_snp_dirty;
+			 n_backinv_data = w_snp_data;
+			 n_backinv_ack = 1'b1;
+			 n_snp_inval_done = 1'b1;
+			 n_snp_inval_addr = r_snp_addr;
+			 n_snp_pend = backinv_req;
+			 n_snp_state = SNP_IDLE;
+		      end
+		 end
+	       else
+		 begin
+		    n_backinv_dirty = 1'b0;    /* not held here: ack, nothing to write back */
+		    n_backinv_ack = 1'b1;
+		    n_snp_pend = backinv_req;
+		    n_snp_state = SNP_IDLE;
+		 end
+	    end
+	  default:
+	    begin
+	       n_snp_state = SNP_IDLE;
+	    end
+	endcase // case (r_snp_state)
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_snp_state <= SNP_IDLE;
+	     r_snp_addr <= 'd0;
+	     r_snp_pend <= 1'b0;
+	     r_snp_inval_done <= 1'b0;
+	     r_snp_inval_addr <= 'd0;
+	     r_cache_idx2_val <= 1'b0;
+	  end
+	else
+	  begin
+	     r_snp_state <= n_snp_state;
+	     r_snp_addr <= n_snp_addr;
+	     r_snp_pend <= n_snp_pend;
+	     r_snp_inval_done <= n_snp_inval_done;
+	     r_snp_inval_addr <= n_snp_inval_addr;
+	     r_cache_idx2_val <= t_p2_core;
+	  end
+     end // always_ff
+
+   /* ---- snoop shadow arrays (option B: full duplication) --------------------
+    * Mirror images of dc_tag/dc_valid/dc_dirty/dc_data, written from the SAME
+    * write signals so they track cycle-for-cycle, and read at the snoop engine's
+    * own index.  This gives the engine a completely independent read path: no
+    * port borrowing, no contention with the core, no dependence on the main FSM.
+    * NOTE what this does NOT solve: the engine must still clear the valid bit in
+    * the REAL array, so write-side ordering against in-flight operations is
+    * unchanged by duplication.  Cost ~32Kb BRAM for the data mirror.
+    * ------------------------------------------------------------------------ */
+   wire [N_TAG_BITS-1:0]     w_snp_tag;
+   wire 		     w_snp_valid, w_snp_dirty;
+   wire [L1D_CL_LEN_BITS-1:0] w_snp_data;
+
+   ram2r1w #(.WIDTH(N_TAG_BITS), .LG_DEPTH(`LG_L1D_NUM_SETS)) snp_tag
+     (
+      .clk(clk),
+      .rd_addr0(w_snp_idx),
+      .rd_addr1(w_snp_idx),
+      .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
+      .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
+      .wr_en(w_cacheable_mem_rsp_valid),
+      .rd_data0(w_snp_tag),
+      .rd_data1()
+      );
+
+   ram2r1w #(.WIDTH(L1D_CL_LEN_BITS), .LG_DEPTH(`LG_L1D_NUM_SETS)) snp_data
+     (
+      .clk(clk),
+      .rd_addr0(w_snp_idx),
+      .rd_addr1(w_snp_idx),
+      .wr_addr(t_array_wr_addr),
+      .wr_data(t_array_wr_data),
+      .wr_en(t_array_wr_en),
+      .rd_data0(w_snp_data),
+      .rd_data1()
+      );
+
+   ram2r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1D_NUM_SETS)) snp_dirty
+     (
+      .clk(clk),
+      .rd_addr0(w_snp_idx),
+      .rd_addr1(w_snp_idx),
+      .wr_addr(t_dirty_wr_addr),
+      .wr_data(t_dirty_value),
+      .wr_en(t_write_dirty_en),
+      .rd_data0(w_snp_dirty),
+      .rd_data1()
+      );
+
+   ram2r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1D_NUM_SETS)) snp_valid
+     (
+      .clk(clk),
+      .rd_addr0(w_snp_idx),
+      .rd_addr1(w_snp_idx),
+      .wr_addr(t_valid_wr_addr),
+      .wr_data(t_valid_value),
+      .wr_en(t_write_valid_en),
+      .rd_data0(w_snp_valid),
+      .rd_data1()
+      );
+
  ram2r1w #(.WIDTH(N_TAG_BITS), .LG_DEPTH(`LG_L1D_NUM_SETS)) dc_tag
      (
       .clk(clk),
       .rd_addr0(t_cache_idx),
-      .rd_addr1(t_cache_idx2),
+      .rd_addr1(w_p2_addr),
       .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
       .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
       .wr_en(w_cacheable_mem_rsp_valid),
@@ -1209,7 +1404,7 @@ endfunction
      (
       .clk(clk),
       .rd_addr0(t_cache_idx),
-      .rd_addr1(t_cache_idx2),
+      .rd_addr1(w_p2_addr),
       .wr_addr(t_array_wr_addr),
       .wr_data(t_array_wr_data),
       .wr_en(t_array_wr_en),
@@ -1246,7 +1441,7 @@ endfunction
      (
       .clk(clk),
       .rd_addr0(t_cache_idx),
-      .rd_addr1(t_cache_idx2),
+      .rd_addr1(w_p2_addr),
       .wr_addr(t_dirty_wr_addr),
       .wr_data(t_dirty_value),
       .wr_en(t_write_dirty_en),
@@ -1274,13 +1469,21 @@ endfunction
 	     t_valid_value = !r_inhibit_write;
 	     t_write_valid_en = 1'b1;
 	  end
+	else if(t_snp_clear)
+	  begin
+	     /* lowest priority -- the snoop engine simply retries next cycle if the
+	      * fill or the main pipeline wanted the single write port. */
+	     t_valid_wr_addr = w_snp_idx;
+	     t_valid_value = 1'b0;
+	     t_write_valid_en = 1'b1;
+	  end
      end // always_comb
       
    ram2r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1D_NUM_SETS)) dc_valid
      (
       .clk(clk),
       .rd_addr0(t_cache_idx),
-      .rd_addr1(t_cache_idx2),
+      .rd_addr1(w_p2_addr),
       .wr_addr(t_valid_wr_addr),
       .wr_data(t_valid_value),
       .wr_en(t_write_valid_en),
@@ -1901,6 +2104,7 @@ endfunction
 	t_cache_tag = 'd0;
 	
 	t_cache_idx2 = 'd0;
+	t_p2_core = 1'b0;
 	t_cache_tag2 = 'd0;	
 
 	n_tlb_addr = r_tlb_addr;
@@ -1955,11 +2159,6 @@ endfunction
 	n_flush_cl_req = r_flush_cl_req | flush_cl_req;
 	/* latch, never sample a pulse: single-cycle requests have been LOST on this
 	 * interface before (hence the sticky latches in core_l1d_l1i). */
-	n_binval_pend = r_binval_pend | binval_req;
-	n_binval_addr = binval_req & ~r_binval_pend ? binval_addr : r_binval_addr;
-	n_binval_ack = 1'b0;
-	n_binval_dirty = r_binval_dirty;
-	n_binval_data = r_binval_data;
 	n_flush_complete = 1'b0;
 	t_addr = 'd0;
 	
@@ -2510,16 +2709,22 @@ endfunction
 		  !t_got_miss && 
 		  !(mem_q_almost_full||mem_q_full) && 
 		  !t_got_rd_retry &&
-		  !(r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) && 
+		  !(r_cache_idx2_val && r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) && 
 		  !t_cm_block_stall &&
 		  w_uncachable_req &&
 		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) && 
 		  /*(r_graduated[core_mem_req.rob_ptr] == 2'b00) && */
-		  (!r_rob_inflight[core_mem_req.rob_ptr])
+		  (!r_rob_inflight[core_mem_req.rob_ptr]) &&
+		  /* back-invalidate queue near full: refuse NEW core requests so no
+		   * further evictions are produced.  Draining then needs only the
+		   * already-accepted fill to finish, after which this cache returns to
+		   * ACTIVE and can ack -- so this can throttle but never deadlock. */
+		  (!backinv_stall)
 		  )
 	       begin
 		  //use 2nd read port
 		  t_cache_idx2 = core_mem_req.addr[IDX_STOP-1:IDX_START];
+		  t_p2_core = 1'b1;
 		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:TAG_LSB];
 		  n_tlb_addr = core_mem_req.addr;
 		  n_req2 = core_mem_req;
@@ -2566,15 +2771,6 @@ endfunction
 		    //$display("flush addr %x, maps to cl %d at cycle", flush_cl_addr, t_cache_idx, r_cycle);
 		    n_flush_cl_req = 1'b0;
 		    n_state = FLUSH_CL;
-		 end
-	       else if(r_binval_pend && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
-		 begin
-		    /* inclusive-L2 back-invalidate: drive the RAM index now, examine the
-		     * registered tag/dirty/data next cycle in BINVAL.  Entered only when
-		     * the cache is quiescent, so this can never displace a refill the L2
-		     * might itself be waiting on. */
-		    t_cache_idx = r_binval_addr[IDX_STOP-1:IDX_START];
-		    n_state = BINVAL;
 		 end
 	    end // case: ACTIVE
 	  WAIT_INJECT_RELOAD:
@@ -2642,26 +2838,6 @@ endfunction
 	       n_did_reload = 1'b1;
 	       n_state = ACTIVE;
 	    end
-	  BINVAL:
-	    begin
-	       /* Tag-checked so we never drop a different line that merely aliases this
-		* index.  On a hit the line goes away and, if it was dirty, rides back to
-		* the L2 on the ack -- we issue NO memory request here (see the port
-		* comment: a request would deadlock against the L2's pending eviction). */
-	       if(r_valid_out && (r_tag_out == r_binval_addr[`PA_WIDTH-1:TAG_LSB]))
-		 begin
-		    t_mark_invalid = 1'b1;
-		    n_binval_dirty = r_dirty_out;
-		    n_binval_data = t_data;
-		 end
-	       else
-		 begin
-		    n_binval_dirty = 1'b0;   /* miss: nothing held, ack immediately */
-		 end
-	       n_binval_pend = 1'b0;
-	       n_binval_ack = 1'b1;
-	       n_state = ACTIVE;
-	    end // case: BINVAL
 	  FLUSH_CL:
 	    begin
 	       if(flush_cl_inval)
@@ -2898,7 +3074,7 @@ endfunction
 		  //$display("retried load prevents ack at cycle %d", r_cycle);
 		  t_stall_reason = 'd4;
 	       end
-	     else if(r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) 
+	     else if(r_cache_idx2_val && r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) 
 	       begin
 		  //$display("previous write to the same set prevents ack at cycle %d", r_cycle);
 		  t_stall_reason = 'd5;
