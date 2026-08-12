@@ -53,7 +53,7 @@
 `ifdef FORMAL
  `define LG_PHT_SZ 2
 `else
- `define LG_PHT_SZ 16
+ `define LG_PHT_SZ 14
 `endif
 
 `define GBL_HIST_LEN 64
