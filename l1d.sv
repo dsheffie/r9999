@@ -2870,5 +2870,83 @@ endfunction
 		  r_mem_req_store_data[63:0], r_mem_req_store_data[127:64]);
 `endif
 
+`ifdef L1D_STATE_PROFILE
+   /* WHERE DO THE CYCLES GO -- per-state occupancy of the L1D FSM.
+    *
+    * membw showed cyc/elem = 48.5 + 2.49*mem_latency: ~2.5 SERIALIZED memory round
+    * trips per element plus ~48 cycles of latency-INDEPENDENT overhead.  Occupancy
+    * counters localise both without per-load tagging, which r9999 can do because it
+    * is blocking -- exactly one miss is ever in flight.
+    *
+    * INJECT_RELOAD is split by r_reload_issue: a DIRTY miss issues MEM_SW and waits
+    * here for the writeback, THEN re-enters to wait for the fill.  Two sequential
+    * trips through one state is the serialization we are trying to price, so lumping
+    * them would hide the very thing being measured. */
+   integer r_p_active, r_p_inject_wb, r_p_inject_fill, r_p_wait_inject;
+   integer r_p_handle, r_p_uncache, r_p_flush, r_p_other, r_p_total;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_p_active <= 0; r_p_inject_wb <= 0; r_p_inject_fill <= 0;
+	     r_p_wait_inject <= 0; r_p_handle <= 0; r_p_uncache <= 0;
+	     r_p_flush <= 0; r_p_other <= 0; r_p_total <= 0;
+	  end
+	else
+	  begin
+	     r_p_total <= r_p_total + 1;
+	     case(r_state)
+	       ACTIVE:
+		 begin
+		    r_p_active <= r_p_active + 1;
+		 end
+	       INJECT_RELOAD:
+		 begin
+		    /* r_reload_issue set => HANDLE_RELOAD follows, i.e. a line is being
+		     * INSTALLED: this wait is the FILL leg.  Clear => the response
+		     * completes a writeback-only trip and we return straight to ACTIVE.
+		     * (Named the other way round on first cut -- the transition
+		     * `n_state = r_reload_issue ? HANDLE_RELOAD : ACTIVE` is what settles
+		     * it.) */
+		    if(r_reload_issue)
+		      begin
+			 r_p_inject_fill <= r_p_inject_fill + 1;
+		      end
+		    else
+		      begin
+			 r_p_inject_wb <= r_p_inject_wb + 1;
+		      end
+		 end
+	       WAIT_INJECT_RELOAD:
+		 begin
+		    r_p_wait_inject <= r_p_wait_inject + 1;
+		 end
+	       HANDLE_RELOAD:
+		 begin
+		    r_p_handle <= r_p_handle + 1;
+		 end
+	       INJECT_UNCACHE_STORE, INJECT_UNCACHE_LOAD, UNCACHE_WB:
+		 begin
+		    r_p_uncache <= r_p_uncache + 1;
+		 end
+	       FLUSH_CACHE, FLUSH_CACHE_WAIT, FLUSH_CACHE_LAST_WAIT, FLUSH_CL, FLUSH_CL_WAIT:
+		 begin
+		    r_p_flush <= r_p_flush + 1;
+		 end
+	       default:
+		 begin
+		    r_p_other <= r_p_other + 1;
+		 end
+	     endcase // case (r_state)
+	     if((r_p_total % `L1D_PROFILE_PERIOD) == (`L1D_PROFILE_PERIOD-1))
+	       begin
+		  $display("[l1dprof] total=%0d active=%0d inject_wb=%0d inject_fill=%0d wait_inject=%0d handle=%0d uncache=%0d flush=%0d other=%0d",
+			   r_p_total, r_p_active, r_p_inject_wb, r_p_inject_fill,
+			   r_p_wait_inject, r_p_handle, r_p_uncache, r_p_flush, r_p_other);
+	       end
+	  end
+     end // always_ff
+`endif
+
 endmodule // l1d
 

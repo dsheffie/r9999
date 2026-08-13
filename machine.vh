@@ -113,6 +113,13 @@
 
 
 // cacheline length (in bytes)
+/* L1D_STATE_PROFILE: per-state cycle occupancy of the L1D FSM, dumped every
+ * L1D_PROFILE_PERIOD cycles.  Off by default -- pure instrumentation. */
+//`define L1D_STATE_PROFILE 1   /* uncomment to dump L1D FSM occupancy */
+`ifndef L1D_PROFILE_PERIOD
+ `define L1D_PROFILE_PERIOD 100000000
+`endif
+
 `define LG_L1D_CL_LEN 4
 
 //number of sets in direct mapped cache
