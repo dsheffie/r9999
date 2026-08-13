@@ -317,6 +317,16 @@ module l2(clk,
 	t_l1i_pres_val = (w_l1_copy_made &  r_from_l1i);
      end // always_comb
 
+/* Declared OUTSIDE the inclusion ifdef on purpose: the reset/update arms of the main
+ * always_ff and the n_* defaults reference these UNCONDITIONALLY, so keeping the
+ * declarations inside `ifdef ENABLE_L2_INCLUSION made a no-inclusion build fail to
+ * compile.  Unused when inclusion is off. */
+   logic               r_backinv_ev, n_backinv_ev;
+   logic               r_wb_pend, n_wb_pend;
+   logic [`PA_WIDTH-1:0] r_wb_addr, n_wb_addr;
+   logic [127:0]       r_wb_data, n_wb_data;
+   integer             r_n_wb;
+
 `ifdef ENABLE_L2_INCLUSION
    /* ---- back-invalidate queue -------------------------------------------------
     * The snoop path could issue directly, because IDLE can simply refuse a new
@@ -371,11 +381,6 @@ module l2(clk,
     * copy in the machine -- discarding it (which is right for a snoop, where DRAM
     * already holds newer DMA data) silently loses the write.  Latch it and push it
     * to DRAM from IDLE. */
-   logic               r_backinv_ev, n_backinv_ev;
-   logic               r_wb_pend, n_wb_pend;
-   logic [`PA_WIDTH-1:0] r_wb_addr, n_wb_addr;
-   logic [127:0]       r_wb_data, n_wb_data;
-   integer             r_n_wb;
    logic               t_bq_push;
    logic [`PA_WIDTH-1:0] t_bq_addr;
    logic               t_bq_d, t_bq_i, t_bq_ev;
@@ -438,6 +443,10 @@ module l2(clk,
 `endif
 
 `ifdef VERILATOR
+`ifdef ENABLE_L2_INCLUSION
+   /* Nested under BOTH defines: every counter printed below is declared inside the
+    * ENABLE_L2_INCLUSION block, so a plain `+define+VERILATOR` build (no inclusion)
+    * failed to compile -- 14 "Can't find definition of variable" errors. */
    /* Is the inclusion path actually REACHED?  Counts, not guesses: presence-bit sets,
     * snoop hits, and back-invalidate entries.  A zero here says the mechanism never
     * runs, which is indistinguishable from "it runs and does nothing" in the counters. */
@@ -506,6 +515,7 @@ module l2(clk,
 	       end
 	  end
      end // always_ff
+`endif
 `endif
 
    wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
