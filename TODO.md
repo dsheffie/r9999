@@ -52,20 +52,55 @@ shelved; that conclusion is workload-specific and does not hold for dependent ch
 pchase L2-resident: r9999 12.002, rv64core 9.008. Three cycles unexplained; worth one
 look at the L2 lookup path before assuming it is inherent.
 
-### 1.4 Larger L2 lines
+### 1.4 Associativity — everything is direct-mapped
+L1I, L1D **and** L2 are all direct-mapped today. This is the other lever that reduces
+the miss COUNT (as opposed to §1.1, which reduces miss COST) and it is independent of
+the MSHR work.
+
+**Evidence.** 3C decomposition of the retired PC stream for dhrystone at 4KB L1I:
+
+| configuration | I-misses |
+|---|---|
+| 4KB direct-mapped | 5,024 |
+| 4KB **2-way** | **56** |
+| 4KB fully-associative | 56 |
+| 16KB direct-mapped | 56 |
+
+896-BYTE instruction footprint, **zero capacity misses, 4,968 conflict misses = 98.9%
+of all I-misses** — `Proc_1` and `strcmp` landing exactly 0x2000 apart. Two-way takes
+it to the compulsory floor, i.e. it recovers the *entire* 9% that otherwise needed a 4x
+larger cache. The membw arrays show the same failure on the D side: the three 96KB
+arrays are an exact multiple of 4KB apart, so `a[j]/b[j]/c[j]` share a set and the
+measured transaction slope is 2.49 instead of the ideal 2.0.
+
+**The 2-way L1I is already built and validated** — `scratchpad/l1i_2way.sv.r9999`
+(1024 sets x2, index/VIPT unchanged, per-way hit + select mux + 1-bit/set pseudo-LRU,
+read-only so no writeback). randgen co-sim 600/600 and a directed 24KB-body conflict
+test 320142/320142, both clean. It was shelved as "ZERO Dhrystone gain" — measured on
+the `-mxgot` binary, whose layout happens not to collide. That conclusion is a layout
+artifact and does not survive: on the current payload 2-way removes 98.9% of I-misses.
+rv64core has `l2_2way.sv` as the reference for the L2 side.
+
+**Why associativity beats simply growing the cache here.** 2-way at the same capacity
+keeps `IDX_STOP` fixed, so no new index bits get translated and **no VIPT aliasing is
+introduced** — whereas doubling capacity moves the index above the page offset and
+drags in the whole PIdx question. Associativity is the alias-free way to buy conflict
+relief.
+
+### 1.5 Larger L2 lines
 Both caches are 16B. R4000 secondary lines are 4/8/16/32 words (up to 128B). Line size
 divides the transaction count directly, so this helps even a fully blocking machine —
 the only item here that does not depend on §1.1.
 **Blocker for the L1 side:** 32B primary lines need an L1I fetch-group rewrite (fetch
 is hardwired to 4 words/line). The L2 side has no such constraint.
 
-### 1.5 No-write-allocate / write-combining on full-line stores
+### 1.6 No-write-allocate / write-combining on full-line stores
 A streaming store fetches the line it is about to overwrite entirely: ~25% of triad's
 memory traffic is a discarded write-allocate read. Helps in the bandwidth-bound regime
 where there is no idle window to hide anything (dsheffie: "when you have to evict every
 load, there's not going to be a window to hide a writeback").
 
-### 1.6 NOT worth doing on current evidence
+### 1.7 NOT worth doing on current evidence
 - **Eviction buffer / fill-before-writeback reordering.** With one outstanding request,
   reordering two serialized round trips changes nothing; the R4000's win comes from the
   victim draining *concurrently*, which needs §1.1 first. rv64core's `CLEAR_DIRTY` is
