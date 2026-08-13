@@ -73,13 +73,23 @@ larger cache. The membw arrays show the same failure on the D side: the three 96
 arrays are an exact multiple of 4KB apart, so `a[j]/b[j]/c[j]` share a set and the
 measured transaction slope is 2.49 instead of the ideal 2.0.
 
-**The 2-way L1I is already built and validated** — `scratchpad/l1i_2way.sv.r9999`
-(1024 sets x2, index/VIPT unchanged, per-way hit + select mux + 1-bit/set pseudo-LRU,
-read-only so no writeback). randgen co-sim 600/600 and a directed 24KB-body conflict
-test 320142/320142, both clean. It was shelved as "ZERO Dhrystone gain" — measured on
-the `-mxgot` binary, whose layout happens not to collide. That conclusion is a layout
-artifact and does not survive: on the current payload 2-way removes 98.9% of I-misses.
-rv64core has `l2_2way.sv` as the reference for the L2 side.
+**It has been done once, but the artifact is GONE — this is a re-implementation, not
+a resurrection.** A 2-way L1I was built and validated for r9999 (1024 sets x2,
+index/VIPT unchanged, per-way hit + select mux + 1-bit/set pseudo-LRU, read-only so no
+writeback; randgen co-sim 600/600 and a directed 24KB-body conflict test 320142/320142,
+both clean). It was shelved as "ZERO Dhrystone gain" — measured on the `-mxgot` binary
+whose layout happens not to collide, so that conclusion is a layout artifact and does
+not survive: on the current payload 2-way removes 98.9% of I-misses.
+**BUT** the saved copy (`scratchpad/l1i_2way.sv.r9999`) no longer exists — that was a
+session-temp path, since cleaned; there is no `scratchpad/` in this tree. And it forked
+from `l1i.sv` BEFORE `9789594`, so it would in any case have needed the predicted-taken
+PHT work merged into it.
+
+**Port from rv64core instead.** `~/code/rv64core/l1i_2way.sv` is live, and it already
+contains the predicted-taken fetch-group logic (`t_tcb0` et al) — it is the file
+`9789594` was ported from. So porting 2-way from there picks up both changes together
+rather than re-applying the BPU work to a stale snapshot. `l2_2way.sv` in the same tree
+is the reference for the L2 side.
 
 **Why associativity beats simply growing the cache here.** 2-way at the same capacity
 keeps `IDX_STOP` fixed, so no new index bits get translated and **no VIPT aliasing is
