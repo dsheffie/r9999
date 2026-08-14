@@ -223,7 +223,11 @@ module l2(clk,
 				     UNCACHE_WB_TURNAROUND = 'd14,   /* was GAMEOVER (dead): mem_req gap after WB drain */
 				     UNCACHE_WB_DRAIN = 'd15,
 				     BACKINV_WAIT = 'd16,
-				     BACKINV_WB = 'd17
+				     BACKINV_WB = 'd17,
+				     /* victim went dirty AFTER the clean-vs-dirty decision was
+				      * taken (a snoop merge landing in the 2-cycle metadata
+				      * window).  Write it back, THEN commit the held fill. */
+				     RELOAD_WB = 'd18
 				     } state_t;
 
    state_t n_state, r_state;
@@ -401,6 +405,10 @@ module l2(clk,
  * declarations inside `ifdef ENABLE_L2_INCLUSION made a no-inclusion build fail to
  * compile.  Unused when inclusion is off. */
    logic               r_backinv_ev, n_backinv_ev;
+   /* The fill data is combinational off mem_rsp_load_data, so detouring to a
+    * writeback would lose it.  Latch it for the duration of the detour. */
+   logic [127:0]       r_fill_hold, n_fill_hold;
+   logic               r_fill_held, n_fill_held;
    logic               r_wb_pend, n_wb_pend;
    logic [`PA_WIDTH-1:0] r_wb_addr, n_wb_addr;
    logic [127:0]       r_wb_data, n_wb_data;
@@ -614,6 +622,32 @@ module l2(clk,
     * runs, which is indistinguishable from "it runs and does nothing" in the counters. */
    integer r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req;
    integer r_n_wb_mismatch;   /* recovered line was NOT the one this snoop awaited */
+   /* Merge accounting.  SNOOP_WAIT_BI can leave WITHOUT merging -- the grant defers
+    * to any main-FSM array write (t_wr_d0 included), and under a fill-heavy
+    * workload that grant may simply never arrive.  Nothing counted that, so a
+    * recovered dirty line could be silently dropped on the floor with every
+    * existing counter reading healthy. */
+   /* Per-line "the newest content in this line came from a snoop merge" marker, so
+    * the fate of merged data can be followed all the way out of the L2.  The merge
+    * is now PROVEN to run on every recovered line (merge_gnt == wb) and yet the
+    * value still disappears, so the loss has to be downstream: a merged line that
+    * gets dropped without its writeback, or whose dirty bit is cleared behind it,
+    * dies with every existing counter reading healthy. */
+   logic 	  r_merged [(1<<LG_L2_LINES)-1:0];
+   /* THE smoking gun, if it fires: CLEAN_RELOAD writing over a line whose dirty bit
+    * is set.  A conflict eviction of a dirty line must write it back FIRST; filling
+    * straight over it destroys the data with no writeback and no counter noticing.
+    * The main FSM decides clean-vs-dirty from metadata read 2 cycles earlier, so a
+    * merge landing in that window is invisible to the decision already taken. */
+   integer r_n_reload_over_dirty;
+   integer r_n_merged_wb;       /* merged line handed to DRAM (the good ending) */
+   integer r_n_merged_dropclean;/* merged line invalidated while NOT dirty == DATA LOSS */
+   integer r_n_merged_dirtyclr; /* dirty cleared on a merged line by something else */
+   integer r_n_merged_overwr;   /* merged line overwritten by a normal fill (fine) */
+   integer r_n_merge_gnt;      /* merges that actually wrote the L2 line */
+   integer r_n_merge_stall;    /* cycles a merge was wanted but not granted */
+   integer r_n_waitbi_escape;  /* left WAIT_BI via the acked-clean path, no merge */
+   integer r_n_wbpend_drop;    /* r_wb_pend cleared by something OTHER than a merge */
    integer r_n_pres_d_clr;   /* presence CLEARS: distinguishes never-set from set-then-dropped */
    always_ff@(posedge clk)
      begin
@@ -625,6 +659,15 @@ module l2(clk,
 	     r_n_backinv <= 0;
 	     r_n_snoop_req <= 0;
 	     r_n_wb_mismatch <= 0;
+	     r_n_reload_over_dirty <= 0;
+	     r_n_merged_wb <= 0;
+	     r_n_merged_dropclean <= 0;
+	     r_n_merged_dirtyclr <= 0;
+	     r_n_merged_overwr <= 0;
+	     r_n_merge_gnt <= 0;
+	     r_n_merge_stall <= 0;
+	     r_n_waitbi_escape <= 0;
+	     r_n_wbpend_drop <= 0;
 	  end
 	else
 	  begin
@@ -636,6 +679,38 @@ module l2(clk,
 	      * never pushed (w_dma_store never true) -- i.e. the problem is upstream of
 	      * the L2 entirely, not the snoop address. */
 	     r_n_snoop_req <= r_n_snoop_req + (n_snoop_ack ? 1 : 0);
+	     /* mark on merge; the marker follows the DATA, so a later ordinary write to
+	      * the same line clears it (that content is no longer the merged content) */
+	     if(t_snoop_merge_done)
+	       begin
+		  r_merged[w_snoop_ridx] <= 1'b1;
+	       end
+	     else if(t_wr_d0)
+	       begin
+		  r_merged[w_d0_wr_addr] <= 1'b0;
+		  r_n_merged_overwr <= r_n_merged_overwr + (r_merged[w_d0_wr_addr] ? 1 : 0);
+	       end
+	     /* dirty cleared on a merged line: after this the L2 will evict it silently */
+	     r_n_merged_dirtyclr <= r_n_merged_dirtyclr +
+		((t_wr_dirty & ~t_dirty & r_merged[t_idx]) ? 1 : 0);
+	     /* invalidated while clean -- no writeback will follow, so the merged data
+	      * is gone.  THIS is the loss, if it is happening. */
+	     r_n_merged_dropclean <= r_n_merged_dropclean +
+		((t_wr_valid & ~t_valid & r_merged[t_idx] & ~w_dirty) ? 1 : 0);
+	     /* the good ending: the eviction writeback actually leaves for DRAM */
+	     r_n_reload_over_dirty <= r_n_reload_over_dirty +
+		(((r_state == CLEAN_RELOAD) & t_wr_d0 & w_dirty) ? 1 : 0);
+	     r_n_merged_wb <= r_n_merged_wb +
+		(((r_state == DIRTY_STORE) & mem_req_ack & r_merged[r_idx]) ? 1 : 0);
+	     r_n_merge_gnt   <= r_n_merge_gnt   + (t_snoop_merge_done ? 1 : 0);
+	     r_n_merge_stall <= r_n_merge_stall + ((t_snoop_merge & ~t_snoop_merge_done) ? 1 : 0);
+	     r_n_waitbi_escape <= r_n_waitbi_escape +
+		(((r_snoop_state == SNOOP_WAIT_BI) & (n_snoop_state == SNOOP_IDLE) &
+		  ~t_snoop_merge_done) ? 1 : 0);
+	     /* the leak: the recovered line was latched, then the flag went away and no
+	      * merge consumed it -- whatever was in r_wb_data is gone */
+	     r_n_wbpend_drop <= r_n_wbpend_drop +
+		((r_wb_pend & ~n_wb_pend & ~t_snoop_merge_done) ? 1 : 0);
 	     r_n_wb_mismatch <= r_n_wb_mismatch +
 		(((r_snoop_state == SNOOP_WAIT_BI) & r_wb_pend & ~w_wb_idx_match) ? 1 : 0);
 `ifdef INCL_ADDR_LOG
@@ -664,8 +739,11 @@ module l2(clk,
 	       end
 	     if(backinv_d_ack)
 	       begin
-		  $display("[bi-ack] cyc=%0d addr=%x dirty=%b", r_cycle,
-			   r_backinv_addr, backinv_d_dirty);
+		  /* data too: "dirty" alone cannot show WHAT was handed over, and the
+		   * whole question is whether the L1D returned a pre-store copy that
+		   * the L2 then merged over good data. */
+		  $display("[bi-ack] cyc=%0d addr=%x dirty=%b data=%x", r_cycle,
+			   r_backinv_addr, backinv_d_dirty, backinv_d_data);
 	       end
 `endif
 	     /* every 20M: DMA does not start until ~120M cycles, so a 100M-period
@@ -676,8 +754,11 @@ module l2(clk,
 		   * mismatch between the DMA master's view and the L2's) from "it finds it
 		   * but no L1 holds a copy".  backinv_entries=0 with hits>0 means the
 		   * presence test is wrong; hits=0 means the snoop address is wrong. */
-		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d wb_mismatch=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
-			   r_cycle, r_n_pres_d_clr, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_wb_mismatch, r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
+		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d wb_mismatch=%0d merge_gnt=%0d merge_stall=%0d waitbi_esc=%0d wbpend_drop=%0d reload_over_dirty=%0d m_wb=%0d m_dropclean=%0d m_dirtyclr=%0d m_overwr=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
+			   r_cycle, r_n_pres_d_clr, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_wb_mismatch, r_n_merge_gnt, r_n_merge_stall,
+			   r_n_waitbi_escape, r_n_wbpend_drop,
+			   r_n_reload_over_dirty, r_n_merged_wb, r_n_merged_dropclean, r_n_merged_dirtyclr, r_n_merged_overwr,
+			   r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
 	       end
 	  end
      end // always_ff
@@ -711,6 +792,8 @@ module l2(clk,
 	     r_backinv_i <= 1'b0;
 	     r_backinv_addr <= 'd0;
 	     r_backinv_ev <= 1'b0;
+	     r_fill_hold <= 'd0;
+	     r_fill_held <= 1'b0;
 	     r_wb_pend <= 1'b0;
 	     r_wb_addr <= 'd0;
 	     r_wb_data <= 'd0;
@@ -754,6 +837,8 @@ module l2(clk,
 	     r_backinv_i <= n_backinv_i;
 	     r_backinv_addr <= n_backinv_addr;
 	     r_backinv_ev <= n_backinv_ev;
+	     r_fill_hold <= n_fill_hold;
+	     r_fill_held <= n_fill_held;
 	     r_wb_pend <= n_wb_pend;
 	     r_wb_addr <= n_wb_addr;
 	     r_wb_data <= n_wb_data;
@@ -953,6 +1038,8 @@ module l2(clk,
 	 * overwrote the increment every cycle, so the counter that exists to report
 	 * "a snoop threw away dirty L1D data" could never report anything. */
 	n_backinv_clobber = r_backinv_clobber;
+	n_fill_hold = r_fill_hold;
+	n_fill_held = r_fill_held;
 	n_wb_pend = r_wb_pend;
 	n_wb_addr = r_wb_addr;
 	n_wb_data = r_wb_data;
@@ -1008,7 +1095,7 @@ module l2(clk,
 	t_valid = 1'b0;
 	t_dirty = 1'b0;
 
-	t_d0 = mem_rsp_load_data[127:0];
+	t_d0 = r_fill_held ? r_fill_hold : mem_rsp_load_data[127:0];
 
 	n_rsp_data = r_rsp_data;
 	n_rsp_valid = 1'b0;
@@ -1368,19 +1455,64 @@ module l2(clk,
 	       if(mem_rsp_valid)
 		 begin
 		    n_mem_req = 1'b0;
+		    /* The clean-vs-dirty choice was made back in CHECK_VALID_AND_TAG from
+		     * metadata read two cycles earlier.  A snoop merge landing inside that
+		     * window makes the victim dirty AFTER the decision, and filling over it
+		     * destroys data that exists nowhere else -- the L1D already dropped its
+		     * copy.  Measured at 435754 of 443834 merges (reload_over_dirty).
+		     * Re-check here, where the answer is current, and write the victim back
+		     * first.  The fill data is held meanwhile. */
+		    if(w_dirty & ~r_fill_held)
+		      begin
+			 n_fill_hold = mem_rsp_load_data[127:0];
+			 n_fill_held = 1'b1;
+			 n_mem_req = 1'b1;
+			 /* the VICTIM's address: stored tag + the index being filled.  Not
+			  * w_evict_addr -- that wire lives inside the inclusion ifdef, and
+			  * this path must exist in every build. */
+			 n_addr = {w_tag, t_idx, 4'd0};
+			 n_mem_opcode = 5'd7;
+			 n_mem_req_store_data = w_d0;
+			 n_state = RELOAD_WB;
+		      end
+		    else
+		      begin
+			 t_valid = 1'b1;
+			 t_wr_valid = 1'b1;
+			 /* a clean DRAM fill MUST be marked NOT-dirty: otherwise a stale
+			  * dirty bit (left over from a prior invalidate/eviction that
+			  * cleared valid but not dirty) rides into the reloaded line and
+			  * later writes back garbage over a DMA'd buffer (the SCSI
+			  * INQUIRY clobber). */
+			 t_dirty = 1'b0;
+			 t_wr_dirty = 1'b1;
+			 t_wr_tag = 1'b1;
+			 t_wr_d0 = 1'b1;
+			 n_fill_held = 1'b0;
+			 n_state = WAIT_CLEAN_RELOAD;
+		      end
+		 end
+	    end // case: CLEAN_RELOAD
+	  RELOAD_WB:
+	    begin
+	       /* victim writeback in flight; commit the held fill once DRAM has it */
+	       if(mem_req_ack)
+		 begin
+		    n_mem_req = 1'b0;
+		 end
+	       if(mem_rsp_valid)
+		 begin
+		    n_mem_req = 1'b0;
 		    t_valid = 1'b1;
 		    t_wr_valid = 1'b1;
-		    /* a clean DRAM fill MUST be marked NOT-dirty: otherwise a stale
-		     * dirty bit (left over from a prior invalidate/eviction that cleared
-		     * valid but not dirty) rides into the reloaded line and later writes
-		     * back garbage over a DMA'd buffer (the SCSI INQUIRY clobber). */
 		    t_dirty = 1'b0;
 		    t_wr_dirty = 1'b1;
 		    t_wr_tag = 1'b1;
-		    t_wr_d0 = 1'b1;
+		    t_wr_d0 = 1'b1;          /* t_d0 muxes to r_fill_hold while held */
+		    n_fill_held = 1'b0;
 		    n_state = WAIT_CLEAN_RELOAD;
 		 end
-	    end // case: CLEAN_RELOAD
+	    end // case: RELOAD_WB
 	  WAIT_CLEAN_RELOAD: /* need a cycle to turn around */
 	    begin
 	       n_state = WAIT_FOR_RAM;
