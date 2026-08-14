@@ -385,6 +385,23 @@ endfunction
 
    logic 				  r_flush_req, n_flush_req;
    logic 				  r_flush_cl_req, n_flush_cl_req;
+   /* The L2 holds backinv_req asserted until it SEES our ack, and its deassert is
+    * registered -- so the request is STILL HIGH on the cycle we ack it.  Latching
+    * the level re-arms the engine on the SAME request: the second pass finds the
+    * line already invalidated (we just cleared it), falls into the tag-miss path,
+    * and acks again with dirty=0.  The L2 consuming that second ack sees a clean
+    * line, takes the discard branch instead of recovery, and the store is silently
+    * dropped -- no stale data anywhere, just a lost dirty bit.
+    *
+    * Observed as exactly 2 acks per issue in the back-invalidate log (1,076,166
+    * acks / 538,083 issues), and as tests/dma/rmw_snoop.S losing one increment:
+    *   [bi-ack] cyc=10681689 addr=008300000 dirty=1 data=...01000000
+    *   [bi-ack] cyc=10681691 addr=008300000 dirty=0 data=...01000000
+    * Accept on the RISING EDGE only.  Safe because the L2 pops its queue into the
+    * request register only when ~r_backinv_d & ~r_backinv_i, so req always returns
+    * low between distinct requests. */
+   logic 				  r_backinv_req_d;
+   wire 				  w_backinv_req_edge = backinv_req & ~r_backinv_req_d;
    logic 				  r_backinv_ack, n_backinv_ack;
    logic 				  r_backinv_dirty, n_backinv_dirty;
    logic [127:0] 			  r_backinv_data, n_backinv_data;
@@ -930,6 +947,31 @@ endfunction
 	  begin
 	     rd_log(r_req2.pc, w_mapped_addr, t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
 	  end
+`ifdef VERBOSE_L1D
+	/* SUCCESS side of the trace.  VERBOSE_L1D otherwise only reports what goes
+	 * WRONG -- accepts, invalid misses, reloads, replays -- so a run shows one
+	 * architectural load being accepted twenty times with no record of which
+	 * attempt actually completed or what value it returned.  Pair each
+	 * "accepting new op" with a COMPLETE here to read the sequence. */
+	if(r_got_req2 & ~r_req2.is_store)
+	  begin
+	     $display("cycle %d : COMPLETE p2 %s addr %x data %x uuid %d rob ptr %d pc %x",
+		      r_cycle, t_hit_cache2 ? "HIT " : "miss", w_mapped_addr, t_rsp_data2,
+		      r_req2.uuid, r_req2.rob_ptr, r_req2.pc);
+	  end
+	if(r_got_req & ~r_req.is_store)
+	  begin
+	     $display("cycle %d : COMPLETE p1 %s addr %x data %x uuid %d rob ptr %d pc %x",
+		      r_cycle, t_hit_cache ? "HIT " : "miss", r_req.addr, t_rsp_data,
+		      r_req.uuid, r_req.rob_ptr, r_req.pc);
+	  end
+	/* and the store side: which store actually reached the array */
+	if(r_got_req & r_req.is_store & t_hit_cache)
+	  begin
+	     $display("cycle %d : COMPLETE st addr %x data %x uuid %d rob ptr %d pc %x",
+		      r_cycle, r_req.addr, r_req.data, r_req.uuid, r_req.rob_ptr, r_req.pc);
+	  end
+`endif
 `ifdef ENABLE_DMA_STALE_CHK
 	/* DMA stale-read detector: EVERY committed L1D read, BOTH ports.  The two
 	 * rd_log sites above are gated to a couple of leftover debug PC windows, so
@@ -1238,7 +1280,7 @@ endfunction
      begin
 	n_snp_state = r_snp_state;
 	n_snp_addr = r_snp_addr;
-	n_snp_pend = r_snp_pend | backinv_req;
+	n_snp_pend = r_snp_pend | w_backinv_req_edge;
 	n_backinv_ack = 1'b0;
 	n_backinv_dirty = r_backinv_dirty;
 	n_backinv_data = r_backinv_data;
@@ -1247,7 +1289,7 @@ endfunction
 	t_snp_want_p2 = 1'b0;
 	t_snp_clear = 1'b0;
 	t_snp_won = 1'b0;
-	if(backinv_req & ~r_snp_pend)
+	if(w_backinv_req_edge & ~r_snp_pend)
 	  begin
 	     n_snp_addr = backinv_addr;
 	  end
@@ -1294,16 +1336,42 @@ endfunction
 			 n_backinv_ack = 1'b1;
 			 n_snp_inval_done = 1'b1;
 			 n_snp_inval_addr = r_snp_addr;
-			 n_snp_pend = backinv_req;
+			 n_snp_pend = w_backinv_req_edge;
 			 n_snp_state = SNP_IDLE;
+`ifdef VERBOSE_L1D
+			 /* The invalidate ACTUALLY HAPPENING is the one event that was
+			  * never logged -- and de6ec6e on this branch was precisely
+			  * "snoop engine acked back-invalidates it never performed", so
+			  * inferring it from a later probe's behaviour is not good enough. */
+			 $display("cycle %d : SNP-CLEAR addr %x idx %d dirty %b data %x -> line dropped",
+				  r_cycle, r_snp_addr, w_snp_idx, w_snp_dirty, w_snp_data);
+`endif
 		      end
+`ifdef VERBOSE_L1D
+		    else
+		      begin
+			 /* tag+valid matched but the engine could not take the line this
+			  * cycle: acks nothing, stays in SNP_RD and retries. */
+			 $display("cycle %d : SNP-BLOCKED addr %x idx %d (mark_inval %b memrsp %b got_req %b wr_array %b last_wr %b rr_last_wr %b)",
+				  r_cycle, r_snp_addr, w_snp_idx, t_mark_invalid,
+				  w_cacheable_mem_rsp_valid, r_got_req, t_wr_array,
+				  r_last_wr, rr_last_wr);
+		      end
+`endif
 		 end
 	       else
 		 begin
 		    n_backinv_dirty = 1'b0;    /* not held here: ack, nothing to write back */
 		    n_backinv_ack = 1'b1;
-		    n_snp_pend = backinv_req;
+		    n_snp_pend = w_backinv_req_edge;
 		    n_snp_state = SNP_IDLE;
+`ifdef VERBOSE_L1D
+		    /* no tag/valid match: we do NOT hold this line, so acking is correct
+		     * and there is nothing to invalidate.  Distinguishes "already gone"
+		     * from "cleared it just now". */
+		    $display("cycle %d : SNP-NOTHELD addr %x idx %d (snp_valid %b snp_tag %x)",
+			     r_cycle, r_snp_addr, w_snp_idx, w_snp_valid, w_snp_tag);
+`endif
 		 end
 	    end
 	  default:
@@ -1317,6 +1385,7 @@ endfunction
      begin
 	if(reset)
 	  begin
+	     r_backinv_req_d <= 1'b0;
 	     r_snp_state <= SNP_IDLE;
 	     r_snp_addr <= 'd0;
 	     r_snp_pend <= 1'b0;
@@ -1326,6 +1395,7 @@ endfunction
 	  end
 	else
 	  begin
+	     r_backinv_req_d <= backinv_req;
 	     r_snp_state <= n_snp_state;
 	     r_snp_addr <= n_snp_addr;
 	     r_snp_pend <= n_snp_pend;
