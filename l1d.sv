@@ -1335,6 +1335,47 @@ endfunction
 	  end
      end // always_ff
 
+`ifdef VERILATOR
+   /* ---- SNP-STALE detector (sim only) ----------------------------------------
+    * The snoop reads its shadow through a REGISTERED port, so w_snp_data reflects
+    * the array as of an earlier cycle, while the quiescence guard
+    * (t_wr_array | r_last_wr | rr_last_wr) assumes a particular alignment between
+    * that lag and a store's write.  Rather than argue about cycle alignment, keep
+    * a golden mirror written from the same signals but read combinationally, and
+    * shout the moment the engine hands the L2 data that is not what the array
+    * actually holds.  A hit here IS the lost store: the L2 merges this value over
+    * a good line, which is how a read-modify-write (bset) loses a single bit. */
+   logic [L1D_CL_LEN_BITS-1:0] r_gold_data[(1<<`LG_L1D_NUM_SETS)-1:0];
+   integer 		       r_n_snp_stale;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_n_snp_stale <= 0;
+	  end
+	else
+	  begin
+	     if(t_snp_won & w_snp_dirty & (w_snp_data !== r_gold_data[w_snp_idx]))
+	       begin
+		  r_n_snp_stale <= r_n_snp_stale + 1;
+		  if(r_n_snp_stale < 20)
+		    begin
+		       $display("[SNP-STALE] cyc=%0d idx=%0d handed=%x actual=%x",
+				r_cycle, w_snp_idx, w_snp_data, r_gold_data[w_snp_idx]);
+		    end
+	       end
+	     if(t_array_wr_en)
+	       begin
+		  r_gold_data[t_array_wr_addr] <= t_array_wr_data;
+	       end
+	     if((r_cycle % 64'd10000000) == 64'd9999999)
+	       begin
+		  $display("[snpstale] cyc=%0d stale_handoffs=%0d", r_cycle, r_n_snp_stale);
+	       end
+	  end
+     end // always_ff
+`endif
+
    /* ---- snoop shadow arrays (option B: full duplication) --------------------
     * Mirror images of dc_tag/dc_valid/dc_dirty/dc_data, written from the SAME
     * write signals so they track cycle-for-cycle, and read at the snoop engine's
