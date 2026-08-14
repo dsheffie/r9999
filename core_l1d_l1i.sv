@@ -78,6 +78,7 @@ module core_l1d_l1i(clk,
 		    l2_flush_done,
 		    snoop_req_valid,
 		    snoop_req_addr,
+		    snoop_req_ev,
 		    snoop_req_ack,
 		    took_irq,
 		    cp0_count,
@@ -218,6 +219,9 @@ module core_l1d_l1i(clk,
    output logic			 l2_flush_done;
    input logic 		 snoop_req_valid;
    input logic [`PA_WIDTH-1:0] snoop_req_addr;
+   /* 1 = the L1D's dirty copy is the only good data (recover it to DRAM);
+    * 0 = DMA-sourced, DRAM is authoritative and a dirty L1D line is discarded. */
+   input logic 		 snoop_req_ev;
    output logic		 snoop_req_ack;
    output logic			 took_irq;
    output logic [31:0]		 cp0_count;
@@ -600,6 +604,7 @@ module core_l1d_l1i(clk,
 	       .cache_hits(l2_cache_hits),
 		       .snoop_req_valid(snoop_req_valid)  /* DMA->L2 snoop now driven by henry_soc's snoop FIFO */,
 		       .snoop_req_addr(snoop_req_addr),
+		       .snoop_req_ev(snoop_req_ev),
 		       .snoop_req_ack(snoop_req_ack)
 
 	       );

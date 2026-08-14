@@ -48,6 +48,7 @@ module l2(clk,
 	  // DMA-coherence snoop (from henry's snoop FIFO): invalidate one L2 line per request.
 	  snoop_req_valid,
 	  snoop_req_addr,
+	  snoop_req_ev,
 	  snoop_req_ack,
 	  // INCLUSIVE-L2 back-invalidate to the L1s (design C: dirty data rides the ack)
 	  backinv_addr,
@@ -116,6 +117,13 @@ module l2(clk,
    output logic [63:0] cache_accesses;
    input logic 	       snoop_req_valid;
    input logic [`PA_WIDTH-1:0] snoop_req_addr;
+   /* 0 = DMA-sourced: DRAM already holds fresher data, so a dirty L1D line is a
+    *     genuine CPU-store-vs-DMA race and is DISCARDED (merging would clobber
+    *     the DMA payload).
+    * 1 = the L1D's dirty copy is the only up-to-date data and must be recovered
+    *     to DRAM.  This is the same contract an EVICTION back-invalidate needs,
+    *     which is why w_evict_backinv is still hardwired off. */
+   input logic 	       snoop_req_ev;
    output logic        snoop_req_ack;
    /* Back-invalidate the primary caches so the L2 is INCLUSIVE: a snoop that hits
     * here must also drop any L1 copy, otherwise the 17.5% of stale reads that are
@@ -258,23 +266,92 @@ module l2(clk,
    
      
    logic [127:0] 	t_d0;
-      
+
+   /* ---- snoop engine: port-1 reads and the arbitrated write port ------------- */
+   wire [LG_L2_LINES-1:0] w_snoop_ridx;      /* port-1 read index */
+   wire [TAG_BITS-1:0] 	  w_s_tag;
+   wire 		  w_s_valid, w_s_dirty, w_s_l1d_pres, w_s_l1i_pres;
+   wire [127:0] 	  w_s_d0;
+   logic 		  t_snoop_merge;            /* write the recovered line into the L2 */
+   logic 		  t_snoop_merge_done;       /* ... and retire r_wb_pend with it */
+   /* Key on the GRANT, not the request.  Keying on t_snoop_merge alone handed the
+    * data port to the snoop even on a cycle the main FSM was writing a fill, so the
+    * fill's line landed at the SNOOP's index -- two lines corrupted at once, which
+    * is what produced IRIX's "PANIC: pagedequeue: pf_use" at ~92M cycles.  Every
+    * other array already keyed off w_snoop_wr_gnt; this one did not. */
+   wire 		  w_snoop_merge_gnt = w_snoop_wr_gnt & t_snoop_merge;
+   wire [LG_L2_LINES-1:0] w_d0_wr_addr = w_snoop_merge_gnt ? w_snoop_ridx : t_idx;
+   wire [127:0] 	  w_d0_wr_data = w_snoop_merge_gnt ? r_wb_data : t_d0;
+   wire 		  w_d0_wr_en   = w_snoop_merge_gnt | t_wr_d0;
+   /* The snoop's invalidate needs the (singular) write port.  It may take it ONLY
+    * when the main FSM is writing no metadata at all this cycle, so the snoop's
+    * valid-clear and both presence-clears always land together -- a partial write
+    * would leave a line invalid but still marked present, or vice versa.  The main
+    * FSM always wins, so this cannot delay the CPU path; the snoop just retries.
+    * Bounded, not livelock-prone: the only sustained metadata writer is the flush
+    * walk, which is L2_LINES cycles long and terminates. */
+   /* t_wr_d0 belongs here: the data array shares the arbitrated write port too, so
+    * a merge must defer to a main-FSM data write exactly as it defers to metadata. */
+   wire 		  w_main_meta_wr = t_wr_valid | t_wr_tag | t_wr_dirty |
+					   t_wr_l1d_pres | t_wr_l1i_pres | t_wr_d0;
+   logic 		  t_snoop_wr;               /* snoop wants to clear this line */
+   wire 		  w_snoop_wr_gnt = (t_snoop_wr | t_snoop_merge) & ~w_main_meta_wr;
+
+   wire [LG_L2_LINES-1:0] w_valid_wr_addr = w_snoop_wr_gnt ? w_snoop_ridx : t_idx;
+   /* a MERGE keeps the line valid (the L2 stays the coherence point and now holds
+    * the newest data); a plain snoop invalidate drops it */
+   wire 		  w_valid_wr_data = w_snoop_wr_gnt ? t_snoop_merge : t_valid;
+   wire 		  w_valid_wr_en   = w_snoop_wr_gnt | t_wr_valid;
+   wire [LG_L2_LINES-1:0] w_dirty_wr_addr = (w_snoop_wr_gnt & t_snoop_merge) ? w_snoop_ridx : t_idx;
+   wire 		  w_dirty_wr_data = (w_snoop_wr_gnt & t_snoop_merge) ? 1'b1 : t_dirty;
+   wire 		  w_dirty_wr_en   = (w_snoop_wr_gnt & t_snoop_merge) | t_wr_dirty;
+   wire [LG_L2_LINES-1:0] w_presd_wr_addr = w_snoop_wr_gnt ? w_snoop_ridx : t_idx;
+   wire 		  w_presd_wr_data = w_snoop_wr_gnt ? 1'b0 : t_l1d_pres_val;
+   wire 		  w_presd_wr_en   = w_snoop_wr_gnt | t_wr_l1d_pres;
+   wire [LG_L2_LINES-1:0] w_presi_wr_addr = w_snoop_wr_gnt ? w_snoop_ridx : t_idx;
+   wire 		  w_presi_wr_data = w_snoop_wr_gnt ? 1'b0 : t_l1i_pres_val;
+   wire 		  w_presi_wr_en   = w_snoop_wr_gnt | t_wr_l1i_pres;
+
    wire [127:0] 	w_d0;
    wire [TAG_BITS-1:0] 	w_tag;
    wire 		w_valid, w_dirty;
 
    
-   reg_ram1rw #(.WIDTH(128), .LG_DEPTH(LG_L2_LINES)) data_ram0
-     (.clk(clk), .addr(t_idx), .wr_data(t_d0), .wr_en(t_wr_d0), .rd_data(w_d0));
+   /* Converted for its independent WRITE address only: an ev-snoop merges the
+    * L1D's recovered dirty line into the L2 at the snoop's index while the main
+    * FSM is elsewhere.  Port 1's read is wired but unused by the merge (the L1D
+    * hands back a whole 128b line, so there is nothing partial to combine). */
+   ram2r1w_fwd #(.WIDTH(128), .LG_DEPTH(LG_L2_LINES)) data_ram0
+     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_d0_wr_addr),
+      .wr_data(w_d0_wr_data), .wr_en(w_d0_wr_en), .rd_data0(w_d0), .rd_data1(w_s_d0));
       
-   reg_ram1rw #(.WIDTH(TAG_BITS), .LG_DEPTH(LG_L2_LINES)) tag_ram
-     (.clk(clk), .addr(t_idx), .wr_data(r_tag), .wr_en(t_wr_tag), .rd_data(w_tag));   
-   
-   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) valid_ram
-     (.clk(clk), .addr(t_idx), .wr_data(t_valid), .wr_en(t_wr_valid), .rd_data(w_valid));   
+   /* ---- dual-ported metadata -------------------------------------------------
+    * Port 0 is driven exactly as the old reg_ram1rw was (rd_addr0 and wr_addr both
+    * from t_idx), and ram2r1w_fwd's port 0 is bit-identical to reg_ram1rw, so the
+    * main FSM's timing is unchanged by construction -- verified against the real
+    * reg_ram1rw over 20k random cycles including 861 read/write collisions.
+    *
+    * Port 1 belongs to the snoop engine, which is why the snoop no longer has to
+    * wait for IDLE: it was never the FSM being busy, it was the FSM owning the
+    * only address port.  The write port is still singular and is arbitrated below
+    * (w_snoop_wr_gnt): the main FSM always wins.
+    *
+    * dirty_ram and data_ram0 stay single-ported -- a snoop discards without a
+    * writeback (DRAM already holds the fresh DMA data) so it reads neither. */
+   ram2r1w_fwd #(.WIDTH(TAG_BITS), .LG_DEPTH(LG_L2_LINES)) tag_ram
+     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(t_idx),
+      .wr_data(r_tag), .wr_en(t_wr_tag), .rd_data0(w_tag), .rd_data1(w_s_tag));
 
-   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) dirty_ram
-     (.clk(clk), .addr(t_idx), .wr_data(t_dirty), .wr_en(t_wr_dirty), .rd_data(w_dirty));   
+   ram2r1w_fwd #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) valid_ram
+     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_valid_wr_addr),
+      .wr_data(w_valid_wr_data), .wr_en(w_valid_wr_en), .rd_data0(w_valid), .rd_data1(w_s_valid));
+
+   /* dual-ported only so the snoop engine keeps its dirty accounting (the
+    * [snoopdirty] counters that characterised the stale-read population); the
+    * snoop never acts on dirty -- it discards without writeback. */
+   ram2r1w_fwd #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) dirty_ram
+     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_dirty_wr_addr),
+      .wr_data(w_dirty_wr_data), .wr_en(w_dirty_wr_en), .rd_data0(w_dirty), .rd_data1(w_s_dirty));
 
    /* ---- INCLUSION: per-line record of which L1 holds a copy ----------------------
     * Set when the L2 DELIVERS a cacheable line to an L1 (a hit forwarded to an L1
@@ -298,11 +375,13 @@ module l2(clk,
    logic 		t_l1d_pres_val, t_l1i_pres_val;
    wire 		w_l1d_pres, w_l1i_pres;
 
-   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1d_pres_ram
-     (.clk(clk), .addr(t_idx), .wr_data(t_l1d_pres_val), .wr_en(t_wr_l1d_pres), .rd_data(w_l1d_pres));
+   ram2r1w_fwd #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1d_pres_ram
+     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_presd_wr_addr),
+      .wr_data(w_presd_wr_data), .wr_en(w_presd_wr_en), .rd_data0(w_l1d_pres), .rd_data1(w_s_l1d_pres));
 
-   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1i_pres_ram
-     (.clk(clk), .addr(t_idx), .wr_data(t_l1i_pres_val), .wr_en(t_wr_l1i_pres), .rd_data(w_l1i_pres));
+   ram2r1w_fwd #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1i_pres_ram
+     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_presi_wr_addr),
+      .wr_data(w_presi_wr_data), .wr_en(w_presi_wr_en), .rd_data0(w_l1i_pres), .rd_data1(w_s_l1i_pres));
 
    /* a cacheable READ response (opcode 4) is exactly the event that hands a line to an
     * L1; an invalidate/evict is t_wr_valid with t_valid low. */
@@ -326,6 +405,76 @@ module l2(clk,
    logic [`PA_WIDTH-1:0] r_wb_addr, n_wb_addr;
    logic [127:0]       r_wb_data, n_wb_data;
    integer             r_n_wb;
+
+   /* ---- snoop engine ----------------------------------------------------------
+    * A DMA snoop is only three cycles of work (present index, wait for the RAM,
+    * check and drop).  It used to be admitted only from IDLE, so those three
+    * cycles could not start until the main FSM finished a fill -- 40+ cycles of
+    * DRAM latency during which a stale L1 copy stayed live.  That wait, not the
+    * work, was the DMA-coherence ordering bug.
+    *
+    * It now runs on metadata port 1, concurrently with the main FSM, and shares
+    * only the write port.  Mirrors the old IDLE -> WAIT_FOR_RAM -> CHECK path
+    * exactly, including the WAIT state: ram2r1w_fwd is a two-stage pipeline, so
+    * skipping it reads the PREVIOUS index and invalidates the wrong line. */
+   typedef enum logic [1:0] {
+			     SNOOP_IDLE = 2'd0,
+			     SNOOP_WAIT_RAM = 2'd1,
+			     SNOOP_CHECK = 2'd2,
+			     SNOOP_WAIT_BI = 2'd3   /* ev: hold the set until the L1D acks */
+			     } snoop_state_t;
+   snoop_state_t r_snoop_state, n_snoop_state;
+   /* The set interlock.  While an ev-snoop is waiting for the L1D's dirty line the
+    * L2 line is STALE (the L1D holds newer data), so the main FSM must not serve
+    * that set or a reader gets the stale copy -- the exact "out-of-band to DRAM"
+    * race the eviction comment warned about.  Safe against deadlock only because
+    * the L1D's back-invalidate port is DEDICATED (design C): it can ack while its
+    * own fill is still outstanding, so refusing its fill cannot stall the ack. */
+   /* ---- set interlock, BOTH directions ---------------------------------------
+    * The two engines share the line state, so a set may only ever be owned by one
+    * of them.  Getting only one direction was worth ~an order of magnitude in
+    * time-to-failure and no more: the snoop still started on a set the main FSM
+    * was already mid-transaction on.
+    *
+    * The snoop owns its set from ACCEPT, not just while waiting for the L1D --
+    * it is reading the line in WAIT_RAM/CHECK and about to invalidate it.
+    *
+    * No deadlock in either direction.  A snoop waiting for the main FSM waits on
+    * a transaction that depends on nothing of ours.  The main FSM waiting for a
+    * snoop waits on the L1D's back-invalidate ack, which design C gives a
+    * DEDICATED port precisely so the L1D can ack while its own fill is still
+    * outstanding -- refusing that fill therefore cannot stall the ack. */
+   wire 		   w_snoop_holds_set = (r_snoop_state != SNOOP_IDLE);
+   wire 		   w_wb_idx_match = (r_wb_addr[LG_L2_LINES+3:4] == r_snoop_idx);
+   wire 		   w_snoop_set_conflict = w_snoop_holds_set &
+			   (l1_mem_req_addr[LG_L2_LINES+3:4] == r_snoop_idx);
+   /* the main FSM owns r_idx for the whole of any non-IDLE transaction; the flush
+    * walk sweeps EVERY set, so nothing may start under it */
+   wire 		   w_main_owns_set = (r_state != IDLE) & (r_state != INITIALIZE);
+`ifdef ENABLE_L2_INCLUSION
+   wire 		   w_snoop_start_block = w_in_flush_walk |
+			   (w_main_owns_set & (snoop_req_addr[LG_L2_LINES+3:4] == r_idx));
+`else
+   wire 		   w_snoop_start_block = w_main_owns_set &
+			   (snoop_req_addr[LG_L2_LINES+3:4] == r_idx);
+`endif
+   logic [LG_L2_LINES-1:0] r_snoop_idx, n_snoop_idx;
+   logic [TAG_BITS-1:0]    r_snoop_tag, n_snoop_tag;
+   logic [`PA_WIDTH-1:0]   r_snoop_addr, n_snoop_addr;
+   logic 		   r_snoop_ev, n_snoop_ev;
+   logic 		   t_snoop_accept;
+   wire 		   w_s_hit = w_s_valid & (w_s_tag == r_snoop_tag);
+`ifdef ENABLE_L2_INCLUSION
+   wire 		   w_s_need_bi = w_s_l1d_pres | w_s_l1i_pres;
+`else
+   /* No inclusion: there is no back-invalidate queue and the L1s are not tracked,
+    * so a snoop only drops the L2 copy.  Gating on the presence bits here would
+    * wedge the engine waiting for a queue that does not exist. */
+   wire 		   w_s_need_bi = 1'b0;
+`endif
+   /* present the new index the cycle it is accepted (as IDLE did with t_idx),
+    * then hold it steady from the register while the read drains */
+   assign w_snoop_ridx = t_snoop_accept ? snoop_req_addr[LG_L2_LINES+3:4] : r_snoop_idx;
 
 `ifdef ENABLE_L2_INCLUSION
    /* ---- back-invalidate queue -------------------------------------------------
@@ -389,12 +538,25 @@ module l2(clk,
 
    always_comb
      begin
-	/* the snoop path enqueues from CHECK_VALID_AND_TAG via t_snoop_backinv */
+	/* the snoop path enqueues from the snoop engine's SNOOP_CHECK.  Address and
+	 * presence bits come from PORT 1 (r_snoop_addr / w_s_*), not the main FSM's
+	 * r_saveaddr / w_l1*_pres -- those now name an unrelated, concurrent CPU
+	 * transaction, and using them would back-invalidate the wrong line. */
 	t_bq_push = w_evict_backinv | t_snoop_backinv;
-	t_bq_addr = t_snoop_backinv ? {r_saveaddr[`PA_WIDTH-1:4], 4'd0} : w_evict_addr;
-	t_bq_d    = t_snoop_backinv ? w_l1d_pres : w_l1d_pres;
-	t_bq_i    = t_snoop_backinv ? w_l1i_pres : w_l1i_pres;
-	t_bq_ev   = 1'b0;   /* queue holds snoops only; r_wb_pend/BACKINV_WB now dead */
+	t_bq_addr = t_snoop_backinv ? {r_snoop_addr[`PA_WIDTH-1:4], 4'd0} : w_evict_addr;
+`ifdef SNOOP_BI_I_ONLY
+	/* BISECT: probe the L1I but never the L1D.  Data-safe here for the same
+	 * reason the no-backinv run was: the L1D keeps a valid unmodified copy and
+	 * DRAM was never written.  Splits the simple per-line L1I invalidate (#71)
+	 * from the design-C data-carrying L1D ack (#74). */
+	t_bq_d    = 1'b0;
+`else
+	t_bq_d    = t_snoop_backinv ? w_s_l1d_pres : w_l1d_pres;
+`endif
+	t_bq_i    = t_snoop_backinv ? w_s_l1i_pres : w_l1i_pres;
+	/* Revived: a snoop whose source says the L1D holds the only good copy takes
+	 * the recover-to-DRAM path (r_wb_pend -> BACKINV_WB) instead of discarding. */
+	t_bq_ev   = t_snoop_backinv ? r_snoop_ev : 1'b0;
 	n_bq_tail = r_bq_tail + ((t_bq_push & ~w_bq_full) ? 1 : 0);
 	/* pop only when the request register is free */
 	n_bq_head = r_bq_head + ((~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend) ? 1 : 0);
@@ -451,6 +613,7 @@ module l2(clk,
     * snoop hits, and back-invalidate entries.  A zero here says the mechanism never
     * runs, which is indistinguishable from "it runs and does nothing" in the counters. */
    integer r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req;
+   integer r_n_wb_mismatch;   /* recovered line was NOT the one this snoop awaited */
    integer r_n_pres_d_clr;   /* presence CLEARS: distinguishes never-set from set-then-dropped */
    always_ff@(posedge clk)
      begin
@@ -461,6 +624,7 @@ module l2(clk,
 	     r_n_pres_i <= 0;
 	     r_n_backinv <= 0;
 	     r_n_snoop_req <= 0;
+	     r_n_wb_mismatch <= 0;
 	  end
 	else
 	  begin
@@ -472,6 +636,8 @@ module l2(clk,
 	      * never pushed (w_dma_store never true) -- i.e. the problem is upstream of
 	      * the L2 entirely, not the snoop address. */
 	     r_n_snoop_req <= r_n_snoop_req + (n_snoop_ack ? 1 : 0);
+	     r_n_wb_mismatch <= r_n_wb_mismatch +
+		(((r_snoop_state == SNOOP_WAIT_BI) & r_wb_pend & ~w_wb_idx_match) ? 1 : 0);
 `ifdef INCL_ADDR_LOG
 	     /* Which L2 LINES get a presence bit, versus which lines the snoop asks
 	      * about.  Counts alone cannot distinguish "presence set on a different
@@ -482,10 +648,10 @@ module l2(clk,
 	       begin
 		  $display("[pset] cyc=%0d idx=%0d", r_cycle, t_idx);
 	       end
-	     if((r_state == CHECK_VALID_AND_TAG) & (r_opcode == MEM_SNOOP_INVL))
+	     if(r_snoop_state == SNOOP_CHECK)
 	       begin
 		  $display("[snp] cyc=%0d idx=%0d addr=%x hit=%b presd=%b presi=%b bqpush=%b bqfull=%b",
-			   r_cycle, t_idx, r_saveaddr, w_hit, w_l1d_pres, w_l1i_pres,
+			   r_cycle, r_snoop_idx, r_snoop_addr, w_s_hit, w_s_l1d_pres, w_s_l1i_pres,
 			   t_bq_push, w_bq_full);
 	       end
 	     /* the request actually leaving for the L1s, and the L1D's answer.  The
@@ -510,8 +676,8 @@ module l2(clk,
 		   * mismatch between the DMA master's view and the L2's) from "it finds it
 		   * but no L1 holds a copy".  backinv_entries=0 with hits>0 means the
 		   * presence test is wrong; hits=0 means the snoop address is wrong. */
-		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
-			   r_cycle, r_n_pres_d_clr, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
+		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d wb_mismatch=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
+			   r_cycle, r_n_pres_d_clr, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_wb_mismatch, r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
 	       end
 	  end
      end // always_ff
@@ -776,17 +942,26 @@ module l2(clk,
 	n_saveaddr = r_saveaddr;
 	
 	n_req_ack = 1'b0;
-	n_snoop_ack = 1'b0;
-	t_snoop_backinv = 1'b0;
 	t_pres_clr = 1'b0;
 	n_bi_done = r_bi_done;
 	n_backinv_d = r_backinv_d;
 	n_backinv_i = r_backinv_i;
 	n_backinv_addr = r_backinv_addr;
 	n_backinv_ev = r_backinv_ev;
+	/* MUST be defaulted HERE, before the ack logic below increments it.  It used
+	 * to be assigned after, which -- blocking assignment in an always_comb --
+	 * overwrote the increment every cycle, so the counter that exists to report
+	 * "a snoop threw away dirty L1D data" could never report anything. */
+	n_backinv_clobber = r_backinv_clobber;
 	n_wb_pend = r_wb_pend;
 	n_wb_addr = r_wb_addr;
 	n_wb_data = r_wb_data;
+	/* the merge absorbed the recovered line into the L2, so there is nothing left
+	 * for IDLE's BACKINV_WB to push out-of-band to DRAM */
+	if(t_snoop_merge_done)
+	  begin
+	     n_wb_pend = 1'b0;
+	  end
 `ifdef ENABLE_L2_INCLUSION
 	/* An ack can arrive in ANY state now that the request is fire-and-forget,
 	 * so clear it here rather than inside a wait state.  Placed BEFORE the case
@@ -826,12 +1001,6 @@ module l2(clk,
 	  begin
 	     n_backinv_i = 1'b0;
 	  end
-`endif
-	n_backinv_clobber = r_backinv_clobber;
-`ifdef VERILATOR
-	n_snoop_hit = r_snoop_hit;
-	n_snoop_dirty = r_snoop_dirty;
-	n_snoop_vld = r_snoop_vld;
 `endif
 	n_mem_req = r_mem_req;
 	n_mem_opcode = r_mem_opcode;
@@ -920,30 +1089,8 @@ module l2(clk,
 		    n_state = BACKINV_WB;
 		 end
 `endif
-	       else if(snoop_req_valid & ~w_bq_full)
-`else
-	       else if(snoop_req_valid)
 `endif
-		 begin
-		    /* DMA-coherence snoop: the SCSI DMA engine wrote this line to DRAM
-		     * behind the CPU caches, and IRIX can't invalidate r9999's (hidden)
-		     * L2.  Synthesize a MEM_INVL so CHECK_VALID_AND_TAG drops the now-
-		     * stale L2 copy (a subsequent L1 miss then refetches fresh DRAM).
-		     * Priority above the L1 request; the L1 holds its req one more cycle. */
-		    t_idx = snoop_req_addr[LG_L2_LINES+3:4];
-		    n_tag = snoop_req_addr[`PA_WIDTH-1:LG_L2_LINES+4];
-		    n_addr = {snoop_req_addr[`PA_WIDTH-1:4], 4'd0};
-		    n_saveaddr = {snoop_req_addr[`PA_WIDTH-1:4], 4'd0};
-		    n_opcode = MEM_SNOOP_INVL;
-		    n_snoop_ack = 1'b1;
-		    /* IDLE presents t_idx to the SYNCHRONOUS tag/valid/dirty RAMs; their
-		     * output is valid only NEXT cycle.  Go through WAIT_FOR_RAM (as the
-		     * CPU path does) so CHECK_VALID_AND_TAG sees w_hit/w_dirty for THIS
-		     * line -- skipping it reads the prior index and invalidates the wrong
-		     * line (the boot wedge). */
-		    n_state = WAIT_FOR_RAM;
-		 end
-	       else if(l1_mem_req_valid)
+	       else if(l1_mem_req_valid & ~w_snoop_set_conflict)
 		 begin
 		    if(w_l2_cacheable == 1'b0)
 		      begin
@@ -1055,58 +1202,6 @@ module l2(clk,
 			 n_state = IDLE;
 			 n_rsp_valid = 1'b1;
 		      end
-		 end
-	       else if(r_opcode == MEM_SNOOP_INVL)
-		 begin
-		    /* DMA-coherence snoop discard: the SCSI DMA overwrote DRAM for this
-		     * line behind the caches, and IRIX (in-order R4x00 model) never issues
-		     * a CACHE op for a buffer it didn't touch -- so a speculatively-cached
-		     * stale L2 copy would survive.  Drop it WITHOUT a writeback: DRAM now
-		     * holds the fresh DMA data, so writing a stale L2 copy back (as MEM_INVL
-		     * does) would clobber it.  A dirty stale copy is a recycled prior-owner
-		     * page, never live data.  No L1 response (FIFO acked in IDLE). */
-		    if(w_hit)
-		      begin
-			 t_wr_valid = 1'b1; t_valid = 1'b0;
-		      end
-		    n_state = IDLE;
-`ifdef ENABLE_L2_INCLUSION
-		    /* INCLUSION: dropping the L2 copy is not enough -- an L1 can hold this
-		     * line too, and 17.5% of the measured stale reads were exactly that
-		     * (an L1D hit with no preceding stale fill).  Back-invalidate the L1s
-		     * the presence bits name.
-		     *
-		     * FIRE-AND-FORGET: raise the request and go straight back to IDLE
-		     * rather than blocking until the L1s ack.  Blocking deadlocks: the
-		     * L1D can have a request already outstanding at THIS L2 (e.g. an
-		     * uncached MMIO poll), so it cannot reach a state where it would ack
-		     * while we refuse to serve it.  Not waiting is safe because the L2
-		     * has ALREADY dropped its own copy above -- any refill of this line
-		     * now comes from DRAM and is fresh, so a back-invalidate that lands
-		     * late costs one refetch and nothing else.  Ordering against a NEW
-		     * snoop is kept by the accept gate in IDLE, which refuses to start
-		     * another snoop while a request is still outstanding. */
-		    if(w_hit & (w_l1d_pres | w_l1i_pres))
-		      begin
-			 t_snoop_backinv = 1'b1;
-		      end
-`endif
-`ifdef VERILATOR
-		    /* w_valid without w_hit = line present but tag mismatch (index/tag
-		     * bug).  w_valid low = the line simply is not in the L2, which is
-		     * the expected common case since IRIX's own dma_cache_inv forwards
-		     * MEM_INVL to the L2 before most DMA. */
-		    n_snoop_vld = r_snoop_vld + (w_valid ? 64'd1 : 64'd0);
-		    snoop_log({{(64-`PA_WIDTH){1'b0}}, r_saveaddr}, w_hit ? 32'd1 : 32'd0);
-		    if(w_hit)
-		      begin
-			 n_snoop_hit  = r_snoop_hit  + 64'd1;
-			 n_snoop_dirty = r_snoop_dirty + (w_dirty ? 64'd1 : 64'd0);
-			 if(w_dirty & (r_snoop_dirty < 64'd40))
-			   $display("[snoopdirty] cyc=%0d snoop_pa=%x tag=%x idx=%x d0=%x",
-				    r_cycle, r_saveaddr, w_tag, t_idx, w_d0[31:0]);
-		      end
-`endif
 		 end
 	       else if(r_opcode == MEM_WB)
 		 begin
@@ -1452,4 +1547,201 @@ module l2(clk,
                  mem_req_addr, mem_req_store_data[31:0]);
    end
 `endif
+`ifdef ENABLE_L2_INCLUSION
+   wire 		   w_snoop_bq_full = w_bq_full;
+`else
+   wire 		   w_snoop_bq_full = 1'b0;
+`endif
+
+   /* ---- snoop engine: next state ------------------------------------------- */
+   always_comb
+     begin
+	n_snoop_state   = r_snoop_state;
+	n_snoop_idx     = r_snoop_idx;
+	n_snoop_tag     = r_snoop_tag;
+	n_snoop_addr    = r_snoop_addr;
+	n_snoop_ev      = r_snoop_ev;
+	t_snoop_accept  = 1'b0;
+	t_snoop_wr      = 1'b0;
+	t_snoop_merge   = 1'b0;
+	t_snoop_merge_done = 1'b0;
+	n_snoop_ack     = 1'b0;
+	t_snoop_backinv = 1'b0;
+	n_snoop_hit     = r_snoop_hit;
+	n_snoop_dirty   = r_snoop_dirty;
+	n_snoop_vld     = r_snoop_vld;
+	case(r_snoop_state)
+	  SNOOP_IDLE:
+	    begin
+	       /* bq space is checked at accept, as the old IDLE gate did, and again
+		* before completing -- the queue can fill in the two cycles between. */
+	       if(snoop_req_valid & ~w_snoop_bq_full & ~w_snoop_start_block)
+		 begin
+		    t_snoop_accept = 1'b1;
+		    n_snoop_idx    = snoop_req_addr[LG_L2_LINES+3:4];
+		    n_snoop_tag    = snoop_req_addr[`PA_WIDTH-1:LG_L2_LINES+4];
+		    n_snoop_addr   = {snoop_req_addr[`PA_WIDTH-1:4], 4'd0};
+		    n_snoop_ev     = snoop_req_ev;
+		    n_snoop_ack    = 1'b1;
+		    n_snoop_state  = SNOOP_WAIT_RAM;
+		 end
+	    end // case: SNOOP_IDLE
+	  SNOOP_WAIT_RAM:
+	    begin
+	       /* ram2r1w_fwd is two-stage; port 1's answer is not valid until now */
+	       n_snoop_state = SNOOP_CHECK;
+	    end // case: SNOOP_WAIT_RAM
+	  SNOOP_CHECK:
+	    begin
+	       if(w_s_hit)
+		 begin
+`ifdef SNOOP_NO_BACKINV
+		    /* BISECT: drop the L2 copy but leave the L1s alone.  Breaks inclusion
+		     * deliberately, yet is DATA-SAFE for this injector -- the L1 keeps a
+		     * valid unmodified copy, and a later refill comes from DRAM which was
+		     * never written.  Isolates "L2 invalidate" from "L1 back-invalidate":
+		     * if the panic survives this, the L1 probe path is not the cause. */
+		    /* keep the L2-dirty skip: without it this bisect just re-runs the
+		     * discard-a-dirty-line data loss that was already diagnosed and
+		     * fixed, and dies at ~1.1M cycles for a reason that has nothing to
+		     * do with the question being asked. */
+		    t_snoop_wr = ~(r_snoop_ev & w_s_dirty);
+		    if(w_snoop_wr_gnt | (r_snoop_ev & w_s_dirty))
+		      begin
+			 n_snoop_state = SNOOP_IDLE;
+		      end
+		 end
+	       else if(1'b0)
+		 begin
+`endif
+		    /* Drop the L2 copy WITHOUT a writeback: DRAM already holds the
+		     * fresh DMA data, so writing a stale line back would clobber it.
+		     * Ask for the write port; the main FSM outranks us, so retry in
+		     * this state until it is free. */
+		    /* ev + the L2 copy is DIRTY: the L2 holds the only up-to-date data
+		     * and discarding it destroys a write.  Correct for a real DMA snoop
+		     * (DRAM is fresher there) but not for this source.  Skip -- leaving
+		     * the line alone is always architecturally safe.
+		     *
+		     * This is the same mistake as the L1D-dirty case one level up, and
+		     * it is what the bisect found: disabling the MERGE entirely left the
+		     * divergence untouched, so the corruption was never in dirty
+		     * recovery -- it was the plain invalidate throwing away a dirty L2
+		     * line ~100 times per run. */
+		    /* ev + the L1D holds it: do NOT drop the L2 copy.  Probe, wait,
+		     * merge -- the L2 never stops being the coherence point. */
+		    if(r_snoop_ev & w_s_dirty)
+		      begin
+			 n_snoop_state = SNOOP_IDLE;
+		      end
+		    else
+`ifdef SNOOP_NO_MERGE
+		    /* BISECT ONLY: abort instead of merging.  Leaves the L2 and both
+		     * L1 copies untouched, so this path cannot corrupt anything.  If
+		     * the divergence survives this, the bug is NOT in the merge. */
+		    if(r_snoop_ev & w_s_l1d_pres)
+		      begin
+			 n_snoop_state = SNOOP_IDLE;
+		      end
+`else
+`ifdef SNOOP_BI_I_ONLY
+		    if(1'b0)
+`else
+		    if(r_snoop_ev & w_s_l1d_pres & ~w_snoop_bq_full)
+`endif
+		      begin
+			 t_snoop_backinv = 1'b1;
+			 n_snoop_state = SNOOP_WAIT_BI;
+		      end
+`endif
+		    else
+		      begin
+		    t_snoop_wr = (~w_s_need_bi) | (~w_snoop_bq_full);
+		    if(w_snoop_wr_gnt)
+		      begin
+			 t_snoop_backinv = w_s_need_bi;
+			 n_snoop_state = SNOOP_IDLE;
+`ifdef VERILATOR
+			 n_snoop_vld   = r_snoop_vld + 64'd1;
+			 n_snoop_hit   = r_snoop_hit + 64'd1;
+			 n_snoop_dirty = r_snoop_dirty + (w_s_dirty ? 64'd1 : 64'd0);
+			 snoop_log({{(64-`PA_WIDTH){1'b0}}, r_snoop_addr}, 32'd1);
+`endif
+		      end
+		      end
+		 end
+	       else
+		 begin
+		    /* not in the L2 -- the common case, since IRIX's own
+		     * dma_cache_inv forwards MEM_INVL ahead of most DMA */
+		    n_snoop_state = SNOOP_IDLE;
+`ifdef VERILATOR
+		    n_snoop_vld = r_snoop_vld + (w_s_valid ? 64'd1 : 64'd0);
+		    snoop_log({{(64-`PA_WIDTH){1'b0}}, r_snoop_addr}, 32'd0);
+`endif
+		 end
+	    end // case: SNOOP_CHECK
+	  SNOOP_WAIT_BI:
+	    begin
+	       /* r_wb_pend rises when the ack handler latches the recovered dirty
+		* line.  Merge it in and keep the line valid+dirty; the ordinary L2
+		* writeback path takes it from there.  A clean ack (no dirty data)
+		* just clears the presence bits -- nothing to recover. */
+	       /* r_wb_data is latched by the ack handler from WHICHEVER back-invalidate
+		* acked -- it is not inherently this snoop's line.  Merging it at
+		* r_snoop_idx without checking writes another line's data into ours,
+		* which would corrupt part of a line while leaving the rest intact --
+		* exactly the shape of the observed r9 divergence (low 24 bits correct,
+		* top byte wrong). */
+	       if(r_wb_pend & w_wb_idx_match)
+		 begin
+		    t_snoop_merge = 1'b1;
+		    if(w_snoop_wr_gnt)
+		      begin
+			 t_snoop_merge_done = 1'b1;
+			 n_snoop_state = SNOOP_IDLE;
+		      end
+		 end
+`ifdef ENABLE_L2_INCLUSION
+	       else if(~r_backinv_d & ~r_backinv_i & w_bq_empty)
+		 begin
+		    n_snoop_state = SNOOP_IDLE;   /* acked clean */
+		 end
+`else
+	       else
+		 begin
+		    /* no inclusion: no back-invalidate exists, so this state is
+		     * unreachable -- fall straight back rather than wedge if it is
+		     * ever entered by a future change. */
+		    n_snoop_state = SNOOP_IDLE;
+		 end
+`endif
+	    end // case: SNOOP_WAIT_BI
+	  default:
+	    begin
+	       n_snoop_state = SNOOP_IDLE;
+	    end
+	endcase // case (r_snoop_state)
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_snoop_state <= SNOOP_IDLE;
+	     r_snoop_idx   <= 'd0;
+	     r_snoop_tag   <= 'd0;
+	     r_snoop_addr  <= 'd0;
+	     r_snoop_ev    <= 1'b0;
+	  end
+	else
+	  begin
+	     r_snoop_state <= n_snoop_state;
+	     r_snoop_idx   <= n_snoop_idx;
+	     r_snoop_tag   <= n_snoop_tag;
+	     r_snoop_addr  <= n_snoop_addr;
+	     r_snoop_ev    <= n_snoop_ev;
+	  end
+     end // always_ff
+
 endmodule
