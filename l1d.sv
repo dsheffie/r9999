@@ -91,6 +91,7 @@ module l1d(clk,
 	   backinv_addr,
 	   backinv_ack,
 	   backinv_dirty,
+	   backinv_held,
 	   backinv_data,
 	   //inputs from core
 	   core_mem_req_valid,
@@ -168,6 +169,13 @@ module l1d(clk,
    input logic [`PA_WIDTH-1:0] backinv_addr;
    output logic 	      backinv_ack;
    output logic 	      backinv_dirty;
+   /* "I actually held this line and have now dropped it."  Without it the L2 cannot
+    * tell a genuine clean-line ack from a probe that found nothing -- SNP-CLEAR on a
+    * clean line and SNP-NOTHELD return identical wires (ack, dirty=0, data).  That
+    * ambiguity is why the L2 never dared clear l1d_present, so presence stayed set
+    * forever and the same line was probed three or four more times, right on top of
+    * the merge trying to complete. */
+   output logic 	      backinv_held;
    output logic [127:0]        backinv_data;
    input logic 		      flush_req;
    output logic 	      flush_complete;
@@ -404,6 +412,7 @@ endfunction
    wire 				  w_backinv_req_edge = backinv_req & ~r_backinv_req_d;
    logic 				  r_backinv_ack, n_backinv_ack;
    logic 				  r_backinv_dirty, n_backinv_dirty;
+   logic 				  r_backinv_held, n_backinv_held;
    logic [127:0] 			  r_backinv_data, n_backinv_data;
    logic 				  r_flush_complete, n_flush_complete;
    
@@ -549,6 +558,7 @@ endfunction
    assign flush_complete = r_flush_complete;
    assign backinv_ack = r_backinv_ack;
    assign backinv_dirty = r_backinv_dirty;
+   assign backinv_held = r_backinv_held;
    assign backinv_data = r_backinv_data;
    assign mem_req_addr = r_mem_req_addr;
    assign mem_req_store_data = r_mem_req_store_data;
@@ -965,11 +975,28 @@ endfunction
 		      r_cycle, t_hit_cache ? "HIT " : "miss", r_req.addr, t_rsp_data,
 		      r_req.uuid, r_req.rob_ptr, r_req.pc);
 	  end
-	/* and the store side: which store actually reached the array */
-	if(r_got_req & r_req.is_store & t_hit_cache)
+	/* and the store side: which store actually reached the array.
+	 *
+	 * CACHE ops must be split out.  MEM_CHWB/CHWBINV/CHINV ride the store
+	 * GRADUATION path (decode_mips sets is_mem, not is_store, and defers the side
+	 * effect to post-retirement), so r_req.is_store is set for them and they
+	 * printed as "COMPLETE st" with r_req.data -- an uninitialised field for an
+	 * instruction that has no data and no destination register.  A cache op read
+	 * as a phantom store of zero cost a wrong conclusion about a line being
+	 * clobbered; IRIX issues these constantly via dma_cache_inv, so this is not
+	 * micro-only. */
+	if(r_got_req & r_req.is_store & t_hit_cache & ~w_is_chop_r)
 	  begin
 	     $display("cycle %d : COMPLETE st addr %x data %x uuid %d rob ptr %d pc %x",
 		      r_cycle, r_req.addr, r_req.data, r_req.uuid, r_req.rob_ptr, r_req.pc);
+	  end
+	if(r_got_req & w_is_chop_r)
+	  begin
+	     $display("cycle %d : COMPLETE cop %s addr %x uuid %d rob ptr %d pc %x",
+		      r_cycle,
+		      (r_req.op == MEM_CHINV) ? "hit-inval  " :
+		      (r_req.op == MEM_CHWBINV) ? "hit-wb-inval" : "hit-wb     ",
+		      r_req.addr, r_req.uuid, r_req.rob_ptr, r_req.pc);
 	  end
 `endif
 `ifdef ENABLE_DMA_STALE_CHK
@@ -1167,6 +1194,7 @@ endfunction
 	     r_flush_cl_req <= n_flush_cl_req;
 	     r_backinv_ack <= n_backinv_ack;
 	     r_backinv_dirty <= n_backinv_dirty;
+	     r_backinv_held <= n_backinv_held;
 	     r_backinv_data <= n_backinv_data;
 	     r_chop_wait <= n_chop_wait;
 	     r_chop_beat <= n_chop_beat;
@@ -1283,6 +1311,7 @@ endfunction
 	n_snp_pend = r_snp_pend | w_backinv_req_edge;
 	n_backinv_ack = 1'b0;
 	n_backinv_dirty = r_backinv_dirty;
+	n_backinv_held = 1'b0;
 	n_backinv_data = r_backinv_data;
 	n_snp_inval_done = 1'b0;
 	n_snp_inval_addr = r_snp_inval_addr;
@@ -1333,6 +1362,7 @@ endfunction
 		      begin
 			 n_backinv_dirty = w_snp_dirty;
 			 n_backinv_data = w_snp_data;
+			 n_backinv_held = 1'b1;   /* we had it; it is gone now */
 			 n_backinv_ack = 1'b1;
 			 n_snp_inval_done = 1'b1;
 			 n_snp_inval_addr = r_snp_addr;

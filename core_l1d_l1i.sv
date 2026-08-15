@@ -551,7 +551,7 @@ module core_l1d_l1i(clk,
    
    /* inclusive-L2 back-invalidate nets: L2 -> L1D/L1I, dirty data returns on the ack */
    wire [`PA_WIDTH-1:0] w_backinv_addr;
-   wire 		w_backinv_d_req, w_backinv_d_ack, w_backinv_d_dirty;
+   wire 		w_backinv_d_req, w_backinv_d_ack, w_backinv_d_dirty, w_backinv_d_held;
    wire [127:0] 	w_backinv_d_data;
    wire 		w_backinv_i_req, w_backinv_i_ack;
 
@@ -580,6 +580,7 @@ module core_l1d_l1i(clk,
 	       .backinv_d_req(w_backinv_d_req),
 	       .backinv_d_ack(w_backinv_d_ack),
 	       .backinv_d_dirty(w_backinv_d_dirty),
+	       .backinv_d_held(w_backinv_d_held),
 	       .backinv_d_data(w_backinv_d_data),
 	       .backinv_i_req(w_backinv_i_req),
 	       .backinv_i_ack(w_backinv_i_ack),
@@ -667,6 +668,7 @@ module core_l1d_l1i(clk,
 	       .backinv_addr(w_backinv_addr),
 	       .backinv_ack(w_backinv_d_ack),
 	       .backinv_dirty(w_backinv_d_dirty),
+	       .backinv_held(w_backinv_d_held),
 	       .backinv_data(w_backinv_d_data),
 	       .flush_complete(l1d_flush_complete),
 	       .core_mem_req_valid(core_mem_req_valid),
