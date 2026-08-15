@@ -887,6 +887,38 @@ module l2(clk,
 	     r_n_waitbi_escape <= r_n_waitbi_escape +
 		(((r_snoop_state == SNOOP_WAIT_BI) & (n_snoop_state == SNOOP_IDLE) &
 		  ~t_snoop_merge_done) ? 1 : 0);
+	`ifdef L1D_WATCH_PA
+     /* What the ack handler ACTUALLY did, sampled where the n_* values have settled.
+      * The ACK record prints ev=1 and dirty=1, which should latch the line into the
+      * holding slot -- yet one cycle later wb_pend and credit_held are both 0, the
+      * signature of the ev==0 discard branch.  Print the branch inputs and outputs
+      * together so the contradiction resolves itself instead of being argued about. */
+     if(backinv_d_ack & (r_backinv_addr[27:4] == (`L1D_WATCH_PA >> 4)))
+       begin
+	  $display("[ACKDBG] cyc=%0d ev=%b dirty=%b held_in=%b credheld=%b state=%0d nstate=%0d mrsp=%b | n_wb_pend=%b n_held=%b n_credits=%0d clobber=%0d",
+		   r_cycle, r_backinv_ev, backinv_d_dirty, backinv_d_held, r_wb_credit_held,
+		   r_state, n_state, mem_rsp_valid,
+		   n_wb_pend, n_wb_credit_held, n_wb_credits, n_backinv_clobber);
+       end
+`endif
+`ifdef L2_ESC_LOG
+	     /* Print the escape, from HERE.  The same test written inside the
+	      * SNOOP_WAIT_BI case (where [LEAK] lives) can never be true: n_snoop_state
+	      * defaults to r_snoop_state and is only assigned SNOOP_IDLE FURTHER DOWN the
+	      * always_comb, so a reader placed above those assignments sees WAIT_BI every
+	      * time -- exactly the blocking-assignment ordering trap already documented
+	      * for t_snp_won in l1d.sv.  [LEAK] reporting 0 for entire runs was therefore
+	      * meaningless, while this counter (in an always_ff, sampling the settled
+	      * value) correctly counted 424563. */
+	     if((r_snoop_state == SNOOP_WAIT_BI) & (n_snoop_state == SNOOP_IDLE) &
+		~t_snoop_merge_done)
+	       begin
+		  $display("[ESC] cyc=%0d addr=%x idx=%0d wb_pend=%b idx_match=%b held=%b bi_d=%b bi_i=%b bq_empty=%b merge=%b gnt=%b",
+			   r_cycle, r_snoop_addr, r_snoop_idx, r_wb_pend, w_wb_idx_match,
+			   r_wb_credit_held, r_backinv_d, r_backinv_i, w_bq_empty,
+			   t_snoop_merge, w_snoop_wr_gnt);
+	       end
+`endif
 	     /* the leak: the recovered line was latched, then the flag went away and no
 	      * merge consumed it -- whatever was in r_wb_data is gone */
 	     r_n_wbpend_drop <= r_n_wbpend_drop +
@@ -1266,11 +1298,23 @@ module l2(clk,
 	 * registers are free.  Independent of the main FSM, so a queued eviction
 	 * still reaches the L1s while the L2 is busy serving the fill that caused
 	 * it. */
-	/* a probe may only go out if a slot exists to catch what it returns */
-	if(~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend & (r_wb_credits != 4'd0))
+	/* A probe may only go out if a slot exists to catch what it returns -- but ONLY a
+	 * D-probe can return anything.  The credit reserves the single holding slot for
+	 * recovered dirty L1D data, and every path that returns a credit hangs off
+	 * backinv_d_ack.  An I-ONLY entry (l1i_present, no l1d_present) used to take a
+	 * credit at this gate that nothing could ever hand back: backinv_i_ack only
+	 * clears n_backinv_i.  The first such entry stranded the credit permanently and
+	 * livelocked the drain (credits 0, credit_stall climbing, merge_gnt frozen,
+	 * coincident with pres_set_i stepping).  So gate on -- and charge for -- the D
+	 * component only. */
+	if(~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend &
+	   (r_bq_d[r_bq_head[LG_BQ-1:0]] ? (r_wb_credits != 4'd0) : 1'b1))
 	  begin
-	     n_wb_credits = r_wb_credits - 4'd1;
-	     n_wb_credit_held = 1'b1;
+	     if(r_bq_d[r_bq_head[LG_BQ-1:0]])
+	       begin
+		  n_wb_credits = r_wb_credits - 4'd1;
+		  n_wb_credit_held = 1'b1;
+	       end
 	     n_backinv_addr = r_bq_addr[r_bq_head[LG_BQ-1:0]];
 	     n_backinv_d = r_bq_d[r_bq_head[LG_BQ-1:0]];
 	     n_backinv_i = r_bq_i[r_bq_head[LG_BQ-1:0]];
@@ -1291,6 +1335,19 @@ module l2(clk,
 		  n_wb_credits = n_wb_credits + 4'd1;
 		  n_wb_credit_held = 1'b0;
 	       end
+`ifdef VERILATOR
+	     /* The slot is ONE register.  If a dirty ack lands while it is already
+	      * full, the previous transaction's recovered line is overwritten and that
+	      * store dies.  The credit was meant to make this impossible -- if it fires,
+	      * the credit accounting has a hole; if it never fires, the loss is
+	      * elsewhere and the WAIT_BI escape is exonerated. */
+	     if(backinv_d_ack & backinv_d_dirty & r_backinv_ev & r_wb_pend)
+	       begin
+		  $display("[SLOT-OVERWRITE] cyc=%0d addr=%x  old=%x (addr %x) <- new=%x",
+			   r_cycle, r_backinv_addr, r_wb_data[31:0], r_wb_addr,
+			   backinv_d_data[31:0]);
+	       end
+`endif
 	     if(backinv_d_dirty)
 	       begin
 		  if(r_backinv_ev)
@@ -1302,6 +1359,15 @@ module l2(clk,
 		  else
 		    begin
 		       n_backinv_clobber = r_backinv_clobber + 64'd1;
+		       /* DISCARDED: the slot was never taken, so nothing downstream will
+			* ever release this credit -- hand it back here or it is stranded
+			* forever.  Guarded on n_ rather than r_ so a return already made
+			* this cycle cannot be made a second time. */
+		       if(n_wb_credit_held)
+			 begin
+			    n_wb_credits = n_wb_credits + 4'd1;
+			    n_wb_credit_held = 1'b0;
+			 end
 		    end
 	       end
 	  end
@@ -1813,7 +1879,34 @@ module l2(clk,
 	       if(mem_rsp_valid)
 		 begin
 		    n_mem_req = 1'b0;
-		    n_wb_pend = 1'b0;
+		    /* THE DROPPED STORE.  The back-invalidate ack handler runs EARLIER in this
+		     * same always_comb and latches a freshly recovered dirty line into the
+		     * holding slot (n_wb_pend/n_wb_addr/n_wb_data).  Blocking assignments run
+		     * in order, so clearing the slot unconditionally HERE destroys that line --
+		     * silently: no counter, no assertion, and the writeback we just finished
+		     * was for the PREVIOUS occupant, not this one.  Measured directly: an ack
+		     * with ev=1 dirty=1 landing while state==BACKINV_WB and mem_rsp_valid came
+		     * out with n_wb_pend=0, against n_wb_pend=1 for the identical ack in any
+		     * other state.  1542 of them in 20M cycles; the L1D and the ack path are
+		     * blameless, the store dies right here.
+		     *
+		     * So release the slot only if the ack has NOT just refilled it.  When it
+		     * has, the credit must not be returned either: the old occupant freed it
+		     * and the new one immediately takes it, so it simply stays held. */
+		    if(~(backinv_d_ack & backinv_d_dirty & r_backinv_ev))
+		      begin
+			 n_wb_pend = 1'b0;
+			 /* returning the credit here is what stops it being stranded: a line
+			  * pushed to DRAM instead of merged is the SECOND way the slot empties,
+			  * and it used to release the slot without paying the credit back --
+			  * one such line wedged the drain permanently (credit_stall 6.5M,
+			  * merge_gnt 230 against ~1.3M merges). */
+			 if(n_wb_credit_held)
+			   begin
+			      n_wb_credits = n_wb_credits + 4'd1;
+			      n_wb_credit_held = 1'b0;
+			   end
+		      end
 		    n_state = IDLE;
 		 end
 	    end // case: BACKINV_WB
@@ -2050,6 +2143,21 @@ module l2(clk,
 	    end // case: SNOOP_CHECK
 	  SNOOP_WAIT_BI:
 	    begin
+`ifdef VERILATOR
+	       /* The leak, named where it happens.  A transaction holding the recovered
+		* -dirty slot must leave WAIT_BI by exactly one of: merge (data
+		* consumed) or a clean ack (nothing to consume).  Any OTHER exit strands
+		* the credit and the data with it -- print the full condition set so the
+		* path identifies itself rather than being guessed at. */
+`ifdef ENABLE_L2_INCLUSION
+	       if((n_snoop_state == SNOOP_IDLE) & ~t_snoop_merge_done & r_wb_credit_held)
+		 begin
+		    $display("[LEAK] cyc=%0d addr=%x idx=%0d wb_pend=%b idx_match=%b bi_d=%b bi_i=%b bq_empty=%b wb_data=%x",
+			     r_cycle, r_snoop_addr, r_snoop_idx, r_wb_pend, w_wb_idx_match,
+			     r_backinv_d, r_backinv_i, w_bq_empty, r_wb_data[31:0]);
+		 end
+`endif
+`endif
 	       /* r_wb_pend rises when the ack handler latches the recovered dirty
 		* line.  Merge it in and keep the line valid+dirty; the ordinary L2
 		* writeback path takes it from there.  A clean ack (no dirty data)
@@ -2110,5 +2218,54 @@ module l2(clk,
 	     r_snoop_ev    <= n_snoop_ev;
 	  end
      end // always_ff
+
+`ifdef FORMAL
+   /* ---- credit conservation, proved by BMC + k-induction -------------------
+    * Properties live HERE, inside the module, and NOT in the formal wrapper: yosys's
+    * Verilog frontend does not resolve cross-module hierarchical references, so a
+    * wrapper saying `dut.r_wb_credits` silently creates a floating wire literally
+    * named "dut.r_wb_credits" which `setundef -anyseq` then hands to the solver as a
+    * free input.  The assertions would constrain nothing and still report PASS.
+    * (formal_top.v sidesteps this by routing signals out as real ports.)
+    *
+    * The credit is a permit to occupy the ONE holding slot (r_wb_pend).  It is taken
+    * at the probe-issue gate and must be returned on every way a probe can resolve.
+    * Missing ONE of those paths -- the BACKINV_WB writeback -- stranded the only
+    * credit permanently and stopped dirty L1D data being recovered at all.  These
+    * assertions exist so a future release path added without a matching return fails
+    * here instead of 90M cycles later as a kernel panic.
+    *
+    * Immediate assertions in a clocked block, per formal_top.v -- concurrent SVA is
+    * the corner yosys supports least well and buys nothing here. */
+   always @(posedge clk)
+     begin
+	if(!reset)
+	  begin
+	     /* a credit handed back twice */
+	     assert(r_wb_credits <= N_WB_CREDITS[3:0]);
+	     /* two registers encoding one fact; disagreement IS the leak */
+	     assert(r_wb_credit_held == (r_wb_credits != N_WB_CREDITS[3:0]));
+	     /* THE BUG THIS FILE EXISTS FOR.  A back-invalidate ack carrying dirty data
+	      * from a line the L1D held MUST end up in the holding slot.  BACKINV_WB used
+	      * to clear n_wb_pend unconditionally LOWER DOWN the same always_comb than the
+	      * ack handler set it, so a writeback completing on the ack's cycle destroyed
+	      * the recovered line -- silently, and only visible as a wrong value tens of
+	      * millions of cycles later.  Stated as an assertion, it is a two-line proof. */
+	     if(backinv_d_ack & backinv_d_dirty & r_backinv_ev)
+	       begin
+		  assert(n_wb_pend);
+	       end
+	     /* the recovered line must never be clobbered while the slot is occupied */
+	     if(r_wb_pend & n_wb_pend & (n_wb_data != r_wb_data))
+	       begin
+		  assert(t_snoop_merge_done);
+	       end
+	     /* vacuity guards: a PASS is worthless if these are unreachable */
+	     cover(r_wb_pend);
+	     cover(r_wb_credits == 4'd0);
+	     cover(backinv_d_ack & backinv_d_dirty);
+	  end
+     end // always @ (posedge clk)
+`endif
 
 endmodule

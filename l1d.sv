@@ -1272,6 +1272,33 @@ endfunction
 	t_array_wr_en = w_cacheable_mem_rsp_valid || t_wr_array;
      end
 
+`ifdef L1D_WATCH_PA
+   /* Single-line end-to-end trace.  rmw_snoop.S now stores SELF-DESCRIBING data
+    * (value = (line_PA | version) ^ MAGIC), so the version of every copy is readable
+    * straight out of the data -- which turns "a store went missing somewhere in the
+    * memory system" into a question about WHICH stage last held the new version.
+    * VERBOSE_L1D logs the same events unfiltered and produces ~184 MB in 10M cycles;
+    * this watches ONE line so the whole life of a failing address is greppable.
+    *
+    * Compared on bits [27:4] so the same constant matches whether the address in
+    * hand is the kseg0 VA (0x883...) or the PA (0x083...). */
+   always_ff@(negedge clk)
+     begin
+	if(t_wr_array & (r_req.addr[27:4] == (`L1D_WATCH_PA >> 4)))
+	  begin
+	     $display("[l1dwr]   cyc=%0d pa=%x data=%x op=%0d", r_cycle, r_req.addr, t_array_data, r_req.op);
+	  end
+	if(w_cacheable_mem_rsp_valid & (r_mem_req_addr[27:4] == (`L1D_WATCH_PA >> 4)))
+	  begin
+	     $display("[l1dfill] cyc=%0d pa=%x data=%x", r_cycle, r_mem_req_addr, mem_rsp_load_data);
+	  end
+	if(t_snp_won & (r_snp_addr[27:4] == (`L1D_WATCH_PA >> 4)))
+	  begin
+	     $display("[l1dsnp]  cyc=%0d pa=%x dirty=%b data=%x", r_cycle, r_snp_addr, w_snp_dirty, w_snp_data);
+	  end
+     end // always_ff@ (negedge clk)
+`endif
+
 `ifdef VERBOSE_L1D
    always_ff@(negedge clk)
      begin
