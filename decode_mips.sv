@@ -969,7 +969,24 @@ module decode_mips(
 		 end
 	       6'd16: /* coproc0 */
 		 begin	
-		    if(in_kernel_mode)
+		    /* COP0 is kernel-only, with ONE deliberate exception: a user-mode MFC0 of
+		     * the two custom performance counters (CP0 $23 = r_cycle, $24 =
+		     * r_retired_insns).  These are hacks of ours living in CP0 space the R4x00
+		     * marks Reserved (R4400 UM Table 1-19: 21-25 "--"), and reading them from
+		     * userspace is the entire point -- without this the instruction matches no
+		     * clause below, uop.op stays II, and it retires as RI, which IRIX reports
+		     * as SIGILL.
+		     *
+		     * Deliberately narrow: MFC0 only (rs==0), reads only, and only those two
+		     * register numbers.  Opening the whole block to user mode would let
+		     * userspace MTC0 scribble on Status/EntryHi.
+		     *
+		     * NOTE this diverges from MIPS twice over: architecturally any COP0 access
+		     * without Status.CU0 raises CpU (cause 11), and we raise RI (cause 10)
+		     * instead -- same SIGILL to userspace, different Cause. */
+		    if(in_kernel_mode |
+		       ((insn[25:21] == 5'd0) & (insn[10:0] == 'd0) &
+			((insn[15:11] == 5'd23) | (insn[15:11] == 5'd24))))
 		    begin
 		    if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd1))
 		      begin
