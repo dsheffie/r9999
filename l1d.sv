@@ -1463,6 +1463,40 @@ endfunction
      end // always_ff
 
 `ifdef VERILATOR
+   /* Snoop-engine stall watchdog.  Counts while the L2 is ASKING (backinv_req), NOT
+    * while our engine is busy: the wedge was this engine sitting IDLE with req held
+    * high, so a counter gated on the engine being busy prints nothing at exactly the
+    * moment of interest.  req/req_d/edge/pend together separate "never saw the
+    * request" from "saw it and dropped it". */
+   logic [31:0] r_snp_stall_cnt;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_snp_stall_cnt <= 32'd0;
+	  end
+	else if(~backinv_req)
+	  begin
+	     r_snp_stall_cnt <= 32'd0;
+	  end
+	else
+	  begin
+	     r_snp_stall_cnt <= r_snp_stall_cnt + 32'd1;
+	     if(r_snp_stall_cnt == 32'd10000)
+	       begin
+		  $display("[snp-stall] cyc=%0d state=%0d addr=%x req=%b req_d=%b edge=%b pend=%b snp_vld=%b tagmatch=%b mark_inval=%b memrsp=%b got_req=%b wr_array=%b last_wr=%b rr_last_wr=%b",
+			   r_cycle, r_snp_state, r_snp_addr, backinv_req,
+			   r_backinv_req_d, w_backinv_req_edge, r_snp_pend,
+			   w_snp_valid,
+			   (w_snp_tag == r_snp_addr[`PA_WIDTH-1:TAG_LSB]),
+			   t_mark_invalid, w_cacheable_mem_rsp_valid, r_got_req,
+			   t_wr_array, r_last_wr, rr_last_wr);
+	       end
+	  end
+     end // always_ff
+`endif
+
+`ifdef VERILATOR
    /* ---- SNP-STALE detector (sim only) ----------------------------------------
     * The snoop reads its shadow through a REGISTERED port, so w_snp_data reflects
     * the array as of an earlier cycle, while the quiescence guard

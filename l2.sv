@@ -1642,10 +1642,37 @@ module l2(clk,
 			  * L1D copy is merged into the L2 -- the coherence point -- and
 			  * leaves on the normal writeback below.  Blocking here is safe
 			  * now that the L1D snoop engine can ack from any state. */
-			 n_backinv_addr = {w_tag, t_idx, 4'd0};
-			 n_backinv_d = w_l1d_pres;
-			 n_backinv_i = w_l1i_pres;
-			 n_state = BACKINV_WAIT;
+			 /* Only issue when the request register is FREE.  These assignments
+			  * sit LATER in this same always_comb than the ack handler's
+			  * `if(backinv_d_ack) n_backinv_d = 1'b0`, so blocking-assignment
+			  * order let an eviction issued on an ack cycle overwrite the
+			  * clear: backinv_d_req (a LEVEL, = r_backinv_d) never returned
+			  * low while n_backinv_addr changed underneath it, and the L1D --
+			  * which accepts on the RISING edge (l1d.sv:412) -- never saw a
+			  * second request.  Both engines then waited on each other for
+			  * ever: the L2 in BACKINV_WAIT, the snoop FSM in WAIT_BI (whose
+			  * bq cannot pop without ~r_backinv_d).
+			  *
+			  * Measured wedge, deterministic to the cycle: snoop ack for
+			  * 0083acee0 at cyc 1972993 with NO following 1->0 transition,
+			  * L1D idle at req=1/req_d=1/edge=0/pend=0, no-retire watchdog at
+			  * cyc 2021849 after 190706 retired.  With this guard the same run
+			  * reaches the 30M-cycle cap, 1007481 retired, both stall
+			  * watchdogs silent.
+			  *
+			  * r_backinv_d is still set on the ack cycle, so this also rules
+			  * out clobbering a back-invalidate still IN FLIGHT -- the
+			  * condition above never checked it at all.  Nested rather than
+			  * folded into that condition so a busy cycle HOLDS here (n_state
+			  * defaults to r_state) instead of falling through to the
+			  * writeback and evicting without recovering the L1 copy. */
+			 if(~r_backinv_d & ~r_backinv_i)
+			   begin
+			      n_backinv_addr = {w_tag, t_idx, 4'd0};
+			      n_backinv_d = w_l1d_pres;
+			      n_backinv_i = w_l1i_pres;
+			      n_state = BACKINV_WAIT;
+			   end
 		      end
 		    else
 `endif
@@ -2049,8 +2076,10 @@ module l2(clk,
 	    end // case: SNOOP_WAIT_RAM
 	  SNOOP_CHECK:
 	    begin
-`ifdef VERILATOR
-	       /* Record the DECISION where it is made.  Sampling r_snoop_state at the
+`ifdef SNPDEC_DBG
+	       /* Opt-in: this sits in an always_comb, so it prints TWICE per decision,
+		* and produced a 5.1GB log over a 200M-cycle boot under SYNTH_SNOOP.
+		* Record the DECISION where it is made.  Sampling r_snoop_state at the
 		* ack instead would be reading a different transaction's state: the ack
 		* handler is in the main always_comb and fires for ANY back-invalidate,
 		* while this engine may already have moved on.  A branch record is a
@@ -2228,6 +2257,69 @@ module l2(clk,
 	     r_snoop_ev    <= n_snoop_ev;
 	  end
      end // always_ff
+
+`ifdef VERILATOR
+   /* WAIT_BI stall watchdog.  The state has exactly two exits -- merge (needs
+    * w_wb_idx_match) and acked-clean (needs the bq drained) -- so when it stops
+    * making progress, print the whole condition set rather than leaving the wedge to
+    * be inferred from a no-retire watchdog 48k cycles later.  This is what showed
+    * wb_pend=0 with bi_d=1: waiting on an ack for a probe the L1D never accepted,
+    * which refuted the stranded-writeback theory and pointed at the handshake. */
+   logic [31:0] r_waitbi_cnt;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_waitbi_cnt <= 32'd0;
+	  end
+	else if(r_snoop_state != SNOOP_WAIT_BI)
+	  begin
+	     r_waitbi_cnt <= 32'd0;
+	  end
+	else
+	  begin
+	     r_waitbi_cnt <= r_waitbi_cnt + 32'd1;
+	     if(r_waitbi_cnt == 32'd10000)
+	       begin
+		  $display("[waitbi-stall] cyc=%0d addr=%x wb_pend=%b idx_match=%b bq_empty=%b bi_d=%b bi_i=%b credits=%0d wr_gnt=%b",
+			   r_cycle, r_snoop_addr, r_wb_pend, w_wb_idx_match,
+			   w_bq_empty, r_backinv_d, r_backinv_i, r_wb_credits,
+			   w_snoop_wr_gnt);
+	       end
+	  end
+     end // always_ff
+`endif
+
+`ifdef BIDBG
+   /* Back-invalidate handshake trace, windowed to the cycles around a known wedge.
+    * The L1D accepts on a RISING EDGE while the L2 drives a LEVEL, and l1d.sv:396
+    * justifies that with "req always returns low between distinct requests".  This
+    * logs every req transition, ack and queue push so that invariant can be CHECKED
+    * instead of argued about -- it is what showed an ack with no following 1->0. */
+   logic r_bid_prev;
+   always_ff@(posedge clk)
+     begin
+	r_bid_prev <= r_backinv_d;
+	if((r_cycle > 32'd1950000) & (r_cycle < 32'd2000000))
+	  begin
+	     if(r_backinv_d != r_bid_prev)
+	       begin
+		  $display("[bi] cyc=%0d req %b->%b addr=%x", r_cycle, r_bid_prev,
+			   r_backinv_d, r_backinv_addr);
+	       end
+	     if(backinv_d_ack)
+	       begin
+		  $display("[bi] cyc=%0d ACK dirty=%b held=%b addr=%x", r_cycle,
+			   backinv_d_dirty, backinv_d_held, r_backinv_addr);
+	       end
+	     if(t_bq_push)
+	       begin
+		  $display("[bi] cyc=%0d BQPUSH addr=%x d=%b i=%b", r_cycle,
+			   t_bq_addr, t_bq_d, t_bq_i);
+	       end
+	  end
+     end // always_ff
+`endif
 
 `ifdef FORMAL
    /* ---- credit conservation, proved by BMC + k-induction -------------------
