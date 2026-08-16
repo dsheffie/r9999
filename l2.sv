@@ -1749,7 +1749,17 @@ module l2(clk,
 		     * copy.  Measured at 435754 of 443834 merges (reload_over_dirty).
 		     * Re-check here, where the answer is current, and write the victim back
 		     * first.  The fill data is held meanwhile. */
-		    if(w_dirty & ~r_fill_held)
+		    /* w_need_wb (valid AND dirty), NOT a bare w_dirty.  MEM_WB clears valid
+		     * but not dirty (unlike MEM_INVL), so a bare test fires on a line that is
+		     * invalid-but-dirty and writes it back to {w_tag, t_idx} -- with w_tag a
+		     * STALE tag from a line that is not resident.  That lands garbage at an
+		     * arbitrary DRAM address.  The eviction site (w_need_wb, above) was fixed
+		     * for exactly this and its comment claims "the CLEAN_RELOAD fill site
+		     * already defends the same leak" -- it did not, because THIS writeback was
+		     * added afterwards with the bare test.  Bisected: r9999 baf1e6e is the
+		     * first commit where IRIX dies in xfs_iunlink; 737175a before it boots
+		     * clean (72437914 insns, bit-identical to main). */
+		    if(w_need_wb & ~r_fill_held)
 		      begin
 			 n_fill_hold = mem_rsp_load_data[127:0];
 			 n_fill_held = 1'b1;
