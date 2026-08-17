@@ -427,6 +427,7 @@ module core_l1d_l1i(clk,
    logic 				  l1d_mem_req_ack;
    logic 				  l1d_mem_req_valid;
    logic [(`PA_WIDTH-1):0] 		  l1d_mem_req_addr;
+   logic [`PIDX_W-1:0] 			  l1d_mem_req_pidx;
    logic [L1D_CL_LEN_BITS-1:0] 		  l1d_mem_req_store_data;
    logic [4:0] 				  l1d_mem_req_opcode;
    logic				  l1d_mem_req_cacheable;
@@ -436,6 +437,7 @@ module core_l1d_l1i(clk,
    logic 				  l1i_mem_req_valid;
    logic				  l1i_mem_req_cacheable;
    logic [(`PA_WIDTH-1):0]		  l1i_mem_req_addr;
+   logic [`PIDX_W-1:0] 			  l1i_mem_req_pidx;
    logic [15:0]				  l1i_mem_req_mask;
    
    logic [L1D_CL_LEN_BITS-1:0] 		  l1i_mem_req_store_data;
@@ -454,6 +456,7 @@ module core_l1d_l1i(clk,
 
 
    logic [`PA_WIDTH-1:0]			  t_l2_req_addr;
+   logic [`PIDX_W-1:0] 			  t_l2_req_pidx;
    logic [4:0] 				  t_l2_req_opcode;
    logic				  t_l2_req_cacheable;
    logic [15:0]				  t_l2_req_mask;
@@ -475,6 +478,7 @@ module core_l1d_l1i(clk,
 	
 	//mem_req_valid = n_req;	
 	t_l2_req_addr = (r_state == GNT_L1I) ? l1i_mem_req_addr: l1d_mem_req_addr;
+	t_l2_req_pidx = (r_state == GNT_L1I) ? l1i_mem_req_pidx : l1d_mem_req_pidx;
 	//mem_req_store_data = l1d_mem_req_store_data;
 	t_l2_req_opcode = (r_state == GNT_L1I) ? l1i_mem_req_opcode : l1d_mem_req_opcode;
 	t_l2_req_cacheable = (r_state == GNT_L1I) ? l1i_mem_req_cacheable : 
@@ -554,6 +558,7 @@ module core_l1d_l1i(clk,
    wire 		w_backinv_d_req, w_backinv_d_ack, w_backinv_d_dirty, w_backinv_d_held;
    wire [127:0] 	w_backinv_d_data;
    wire 		w_backinv_i_req, w_backinv_i_ack;
+   wire [`PIDX_W-1:0] 	w_backinv_d_pidx, w_backinv_i_pidx;
 
    l2 l2cache (
 	       .clk(clk),
@@ -574,8 +579,11 @@ module core_l1d_l1i(clk,
 	       /* inclusion: tell the L2 which primary cache this fill is for, so it can
 		* record the copy and later back-invalidate only that L1 (task #73) */
 	       .l1_mem_req_from_l1i(r_state == GNT_L1I),
+	       .l1_mem_req_pidx(t_l2_req_pidx),
 	       /* inclusive-L2 back-invalidate channel (design C) */
 	       .backinv_addr(w_backinv_addr),
+	       .backinv_d_pidx(w_backinv_d_pidx),
+	       .backinv_i_pidx(w_backinv_i_pidx),
 	       .backinv_stall(w_backinv_stall),
 	       .backinv_d_req(w_backinv_d_req),
 	       .backinv_d_ack(w_backinv_d_ack),
@@ -666,6 +674,7 @@ module core_l1d_l1i(clk,
 	       .backinv_stall(w_backinv_stall),
 	       .backinv_req(w_backinv_d_req),
 	       .backinv_addr(w_backinv_addr),
+	       .backinv_pidx(w_backinv_d_pidx),
 	       .backinv_ack(w_backinv_d_ack),
 	       .backinv_dirty(w_backinv_d_dirty),
 	       .backinv_held(w_backinv_d_held),
@@ -685,6 +694,7 @@ module core_l1d_l1i(clk,
 	       .mem_req_ack(l1d_mem_req_ack),
 	       .mem_req_valid(l1d_mem_req_valid),
 	       .mem_req_addr(l1d_mem_req_addr),
+	       .mem_req_pidx(l1d_mem_req_pidx),
 	       .mem_req_store_data(l1d_mem_req_store_data),
 	       .mem_req_opcode(l1d_mem_req_opcode),
 	       .mem_req_cacheable(l1d_mem_req_cacheable),
@@ -715,6 +725,7 @@ module core_l1d_l1i(clk,
 	       * the port exists now so l1i can be built and tested standalone. */
 	      .inval_req(w_backinv_i_req),
 	      .inval_addr(w_backinv_addr),
+	      .inval_pidx(w_backinv_i_pidx),
 	      .inval_ack(w_backinv_i_ack),
 	      .restart_pc(restart_pc),
 	      .restart_src_pc(restart_src_pc),
@@ -743,6 +754,7 @@ module core_l1d_l1i(clk,
 	      .mem_req_cacheable(l1i_mem_req_cacheable),
 	      .mem_req_mask(l1i_mem_req_mask),
 	      .mem_req_addr(l1i_mem_req_addr),
+	      .mem_req_pidx(l1i_mem_req_pidx),
 	      .mem_req_opcode(l1i_mem_req_opcode),
 	      .mem_rsp_valid(l1i_mem_rsp_valid),
 	      .mem_rsp_load_data(w_l1_mem_load_data),

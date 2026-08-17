@@ -89,6 +89,7 @@ module l1d(clk,
 	   backinv_stall,
 	   backinv_req,
 	   backinv_addr,
+	   backinv_pidx,
 	   backinv_ack,
 	   backinv_dirty,
 	   backinv_held,
@@ -108,6 +109,7 @@ module l1d(clk,
 	   mem_req_ack,
 	   mem_req_valid, 
 	   mem_req_addr, 
+	   mem_req_pidx,
 	   mem_req_store_data, 
 	   mem_req_opcode,
 	   mem_req_cacheable,
@@ -167,6 +169,10 @@ module l1d(clk,
    input logic 		      backinv_stall;   /* L2 bq near full: stop feeding it evictions */
    input logic 		      backinv_req;
    input logic [`PA_WIDTH-1:0] backinv_addr;
+   /* Which set the L2 recorded this line in.  Equal to the physical alias bits
+    * while the replay forces PA indexing, so adopting it now is a no-op that
+    * puts the mechanism in place before it is load-bearing. */
+   input logic [`PIDX_W-1:0] backinv_pidx;
    output logic 	      backinv_ack;
    output logic 	      backinv_dirty;
    /* "I actually held this line and have now dropped it."  Without it the L2 cannot
@@ -195,6 +201,12 @@ module l1d(clk,
    
    output logic mem_req_valid;
    output logic [(`PA_WIDTH-1):0] mem_req_addr;
+   /* PIdx: which of OUR sets this fill will land in.  Derived from the same index
+    * the fill writes at, so it tracks the indexing policy automatically -- while
+    * the PA replay is in place this equals the physical alias bits and the field
+    * is redundant; once the cache indexes by VA it is the only way the L2 can
+    * name the set again. */
+   output logic [`PIDX_W-1:0] 	  mem_req_pidx;
    output logic [L1D_CL_LEN_BITS-1:0] mem_req_store_data;
    output logic [4:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
@@ -240,6 +252,38 @@ module l1d(clk,
    localparam DWORD_STOP = DWORD_START + LG_DWORDS_PER_CL;
   
    localparam N_MQ_ENTRIES = (1<<`LG_MRQ_ENTRIES);
+
+   /* ---- THE cache index -------------------------------------------------------
+    * Every L1D index derivation must go through here.  An index is virtual above
+    * the page offset EVERYWHERE or physical everywhere: a single site left in the
+    * other form writes a line to one set and looks it up in another.  That is not
+    * hypothetical -- converting only the replay and fill paths and leaving
+    * w_beat2_idx, the mq match key and the in-flight hazard compare physical wedged
+    * IRIX at 19656 instructions, deterministically, while the directed synonym test
+    * still passed.
+    *
+    * Physical below LG_PG_SZ (untranslated, so it is the same in both views) and
+    * virtual above it.  The tag stays fully physical, so a synonym is still detected
+    * as a tag miss on the wrong set. */
+   function automatic [`LG_L1D_NUM_SETS-1:0] l1d_idx(input [`PA_WIDTH-1:0] a,
+						     input [`PIDX_W-1:0] va);
+      begin
+`ifdef L1D_VA_INDEX
+	 l1d_idx = (`L1D_ALIAS_BITS > 0)
+		   ? {va[(`L1D_ALIAS_BITS > 0 ? `L1D_ALIAS_BITS : 1)-1:0],
+		      a[`LG_PG_SZ-1:IDX_START]}
+		   : a[IDX_STOP-1:IDX_START];
+`else
+	 l1d_idx = a[IDX_STOP-1:IDX_START];
+`endif
+      end
+   endfunction
+
+   function automatic [`LG_L1D_NUM_SETS-1:0] mq_idx(input mem_req_t r);
+      begin
+	 mq_idx = l1d_idx(r.addr, r.va_alias);
+      end
+   endfunction
 
    function logic [15:0] make_mask(mem_req_t r);
       logic [15:0]		  t_m, m;
@@ -372,7 +416,23 @@ endfunction
    logic 				  t_snp_want_p2, t_snp_clear, t_snp_won;
    logic 				  r_snp_inval_done, n_snp_inval_done;
    logic [`PA_WIDTH-1:0] 		  r_snp_inval_addr, n_snp_inval_addr;
-   wire [`LG_L1D_NUM_SETS-1:0] 	  w_snp_idx = r_snp_addr[IDX_STOP-1:IDX_START];
+   /* Probe the set the L2 NAMES, not the one the physical address implies.  Once
+    * lines index by VA those differ, and a PA-derived probe reads the wrong set,
+    * finds nothing, and acks clean while a dirty line survives -- a silent lost
+    * invalidate.  Generate-guarded: at <= page size there are no alias bits and
+    * the concatenation below would be an illegal zero-width part-select. */
+   wire [`LG_L1D_NUM_SETS-1:0] 	  w_snp_idx;
+   generate
+      if(`L1D_ALIAS_BITS > 0)
+	begin : snp_idx_pidx
+	   assign w_snp_idx = {backinv_pidx[`L1D_ALIAS_BITS-1:0],
+			       r_snp_addr[`LG_PG_SZ-1:IDX_START]};
+	end
+      else
+	begin : snp_idx_pa
+	   assign w_snp_idx = r_snp_addr[IDX_STOP-1:IDX_START];
+	end
+   endgenerate
    /* final port-2 address: the core always wins, the snoop takes what is left */
    wire [`LG_L1D_NUM_SETS-1:0] 	  w_p2_addr = t_p2_core ? t_cache_idx2 :
 					  (t_snp_want_p2 ? w_snp_idx : t_cache_idx2);
@@ -540,6 +600,16 @@ endfunction
    
    logic	r_mem_req_valid, n_mem_req_valid;
    logic [(`PA_WIDTH-1):0] r_mem_req_addr, n_mem_req_addr;
+   /* VA alias bits of the OUTSTANDING miss.  r_mem_req_addr is physical (it is
+    * the L2 request), so the set the fill must land in cannot be recovered from
+    * it once the cache exceeds a page. */
+   /* MUST be updated at EVERY n_mem_req_addr assignment.  w_fill_idx derives the
+    * fill's set from this register, so a stale value writes the line into the WRONG
+    * SET -- and it needs no alias to do it: a leftover va_alias from any earlier
+    * request with a different VA[12] is enough.  The writeback paths set addr from
+    * {tag, r_cache_idx} without touching this, which wedged IRIX at 19656
+    * instructions with ZERO aliasing accesses in the trace. */
+   logic [`PIDX_W-1:0] r_mem_req_va_alias, n_mem_req_va_alias;
    logic [L1D_CL_LEN_BITS-1:0] r_mem_req_store_data, n_mem_req_store_data;
    
    logic [4:0] 		       r_mem_req_opcode, n_mem_req_opcode;
@@ -561,6 +631,23 @@ endfunction
    assign backinv_held = r_backinv_held;
    assign backinv_data = r_backinv_data;
    assign mem_req_addr = r_mem_req_addr;
+   generate
+      if(`L1D_ALIAS_BITS > 0)
+	begin : req_pidx_gen
+	   /* From the VIRTUAL alias bits of the miss, NOT from r_mem_req_addr.  That
+	    * register is PHYSICAL, and two synonyms share a PA by definition -- so a
+	    * PA-derived PIdx is IDENTICAL for both, w_l1d_pidx == r_req_pidx always
+	    * holds, the L2 never sees a conflict, and the back-invalidate never fires.
+	    * This was correct while the fill index was PA-derived and silently became
+	    * wrong when the index went virtual; tests/cache/test_l1_synonym.S step 3
+	    * caught it (FAIL with enforcement nominally ON). */
+	   assign mem_req_pidx = r_mem_req_va_alias;
+	end
+      else
+	begin : req_pidx_tie
+	   assign mem_req_pidx = 'd0;
+	end
+   endgenerate
    assign mem_req_store_data = r_mem_req_store_data;
    assign mem_req_opcode = r_mem_req_opcode;
    assign mem_req_valid = r_mem_req_valid;
@@ -621,8 +708,15 @@ endfunction
     * is 32B-aligned, so addr[LG_L1D_CL_LEN]=0 and +16 just increments the index).
     * From r_req.addr (stable) -- NOT r_cache_idx, which the FLUSH_CL_WAIT default
     * t_cache_idx='d0 clobbers to 0 during the mem-rsp wait. */
-   wire [`LG_L1D_NUM_SETS-1:0] w_beat2_idx = r_req.addr[IDX_STOP-1:IDX_START] + 1'b1;
-   /* D-Index (FLUSH_CL funnel) second-beat set: flush_cl_addr's set + 1. */
+   /* second beat of a double-pumped 32B cache op: must be the NEXT SET of the
+    * same line, so it derives from the same index function as everything else. */
+   wire [`LG_L1D_NUM_SETS-1:0] w_beat2_idx = mq_idx(r_req) + 1'b1;
+   /* D-Index (FLUSH_CL funnel) second-beat set: flush_cl_addr's set + 1.
+    * NOTE: flush_cl_addr is PHYSICAL (core.sv masks it with 0x1fffffff), so with
+    * VA indexing a hit-type CACHE op cannot know which alias set holds the line
+    * and probes only the PA-derived one.  Left as-is deliberately: correct at
+    * <=page-size, and above it needs either a probe of all 2^ALIAS_BITS sets or
+    * a virtual CACHE-op address.  Untested either way. */
    wire [`LG_L1D_NUM_SETS-1:0] w_flush_cl_idx1 = flush_cl_addr[IDX_STOP-1:IDX_START] + 1'b1;
    logic r_chop_wait, n_chop_wait;
    logic r_chop_beat, n_chop_beat;
@@ -851,6 +945,80 @@ endfunction
 	  end
      end
 
+`ifdef VERILATOR
+   /* Alias-replay rate.  Above a page the VA-indexed port-2 lookup CANNOT hit when
+    * the VA and PA alias bits differ -- the tag runs down to LG_PG_SZ and so carries
+    * the physical bits -- and the access replays through the miss queue re-indexed
+    * by PA.  That replay is the entire cost PIdx exists to remove, so measure it
+    * directly instead of inferring it from an IPC delta.  Generate-guarded: at
+    * <=page-size LG_ALIAS_BITS is 0 and the part-select below would be illegal. */
+   generate
+      if(IDX_STOP > `LG_PG_SZ)
+	begin : alias_stats
+	   integer r_n_p2_mapped, r_n_p2_alias;
+	   always_ff@(posedge clk)
+	     begin
+		if(reset)
+		  begin
+		     r_n_p2_mapped <= 0;
+		     r_n_p2_alias <= 0;
+		  end
+		else
+		  begin
+		     if(r_got_req2 & r_req2.mapped)
+		       begin
+			  r_n_p2_mapped <= r_n_p2_mapped + 1;
+			  if(r_req2.addr[IDX_STOP-1:`LG_PG_SZ] !=
+			     w_mapped_addr[IDX_STOP-1:`LG_PG_SZ])
+			    begin
+			       r_n_p2_alias <= r_n_p2_alias + 1;
+			    end
+		       end
+		     if((r_cycle % 32'd10000000) == 32'd9999999)
+		       begin
+			  $display("[alias] cyc=%0d p2_mapped=%0d p2_alias=%0d",
+				   r_cycle, r_n_p2_mapped, r_n_p2_alias);
+		       end
+		  end
+	     end // always_ff
+	end // block: alias_stats
+   endgenerate
+`endif
+
+   /* The VA's alias bits (zero when the cache is <= a page, where the index is
+    * entirely physical and no synonym exists).  Generate-guarded because the
+    * part-select is illegal at L1D_ALIAS_BITS == 0. */
+   wire [`PIDX_W-1:0] w_va_alias_bits;
+   generate
+      if(`L1D_ALIAS_BITS > 0)
+	begin : va_alias_gen
+	   assign w_va_alias_bits = {{(`PIDX_W-`L1D_ALIAS_BITS){1'b0}},
+				     r_req2.addr[IDX_STOP-1:`LG_PG_SZ]};
+	end
+      else
+	begin : va_alias_tie
+	   assign w_va_alias_bits = 'd0;
+	end
+   endgenerate
+
+
+   /* Index the FILL lands at.  Must agree with mq_idx() or a line is written to one
+    * set and looked up in another. */
+   wire [`LG_L1D_NUM_SETS-1:0] w_fill_idx;
+   generate
+`ifdef L1D_VA_INDEX
+      if(`L1D_ALIAS_BITS > 0)
+	begin : fill_idx_va
+	   assign w_fill_idx = {r_mem_req_va_alias[(`L1D_ALIAS_BITS > 0 ? `L1D_ALIAS_BITS : 1)-1:0],
+				r_mem_req_addr[`LG_PG_SZ-1:IDX_START]};
+	end
+      else
+`endif
+	begin : fill_idx_pa
+	   assign w_fill_idx = r_mem_req_addr[IDX_STOP-1:IDX_START];
+	end
+   endgenerate
+
    mem_req_t t_remapped_req2;
    always_comb
      begin
@@ -871,6 +1039,23 @@ endfunction
 	 * mark it unmapped so the replay refills from / re-tags with the PA and
 	 * does NOT translate it a second time. */
 	t_remapped_req2.mapped = 1'b0;
+	/* ...but the INDEX must stay virtual above the page offset.  Overwriting addr
+	 * with the PA is what made this cache PIPT-by-replay: the replay re-indexed by
+	 * PA, so a synonym could never form and every aliasing access paid a replay.
+	 * Keep the VA's alias bits here so the fill lands in the set the VA selects,
+	 * while addr stays physical for the L2 request and the tag. */
+	t_remapped_req2.va_alias = w_va_alias_bits;
+`ifdef ALIASWATCH
+	/* Print only accesses where the VA and PA index bits actually DIFFER -- i.e. a
+	 * real synonym.  If the wedge is preceded by none of these, the index value is
+	 * identical to the old expression and cannot be the cause. */
+	if(r_got_req2 & (w_va_alias_bits != w_mapped_addr[IDX_STOP-1:`LG_PG_SZ]))
+	  begin
+	     $display("[aliasacc] cyc=%0d va=%x pa=%x va_alias=%x pa_alias=%x st=%b mapped=%b",
+		      r_cycle, r_req2.addr, w_mapped_addr, w_va_alias_bits,
+		      w_mapped_addr[IDX_STOP-1:`LG_PG_SZ], r_req2.is_store, r_req2.mapped);
+	  end
+`endif
      end
 
 `ifdef SCSI_CLOBBER_TRACE
@@ -1040,7 +1225,9 @@ endfunction
 	else if(t_push_miss)
 	  begin
 	     r_mem_q[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0] ] <= t_remapped_req2;
-	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_remapped_req2.addr[IDX_STOP-1:IDX_START];
+	     /* the mq match key must be in the SAME index space as the lookups it is
+	      * compared against, or a pending miss to a set goes undetected. */
+	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= mq_idx(t_remapped_req2);
 	     /* only stores carry a mask; loads store 0 (mirror nu_l1d:924) */
 	     r_mq_mask[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_mq_mask & {16{r_req2.is_store}};
 	  end
@@ -1170,6 +1357,7 @@ endfunction
 	     r_mem_req_mask <= 'd0;
 	     
 	     r_mem_req_addr <= 'd0;
+	     r_mem_req_va_alias <= 'd0;
 	     r_mem_req_store_data <= 'd0;
 	     r_mem_req_opcode <= 'd0;
 	     r_core_mem_rsp_valid <= 1'b0;
@@ -1229,6 +1417,7 @@ endfunction
 	     r_mem_req_cacheable <= n_mem_req_cacheable;
 	     r_mem_req_mask <= n_mem_req_mask;
 	     r_mem_req_addr <= n_mem_req_addr;
+	     r_mem_req_va_alias <= n_mem_req_va_alias;
 	     r_mem_req_store_data <= n_mem_req_store_data;
 	     r_mem_req_opcode <= n_mem_req_opcode;
 	     r_core_mem_rsp_valid <= n_core_mem_rsp_valid;
@@ -1267,7 +1456,7 @@ endfunction
 
    always_comb
      begin
-	t_array_wr_addr = mem_rsp_valid ? r_mem_req_addr[IDX_STOP-1:IDX_START] : r_cache_idx;
+	t_array_wr_addr = mem_rsp_valid ? w_fill_idx : r_cache_idx;
 	t_array_wr_data = mem_rsp_valid ? mem_rsp_load_data : t_array_data;
 	t_array_wr_en = w_cacheable_mem_rsp_valid || t_wr_array;
      end
@@ -1463,11 +1652,13 @@ endfunction
      end // always_ff
 
 `ifdef VERILATOR
-   /* Snoop-engine stall watchdog.  Counts while the L2 is ASKING (backinv_req), NOT
-    * while our engine is busy: the wedge was this engine sitting IDLE with req held
-    * high, so a counter gated on the engine being busy prints nothing at exactly the
-    * moment of interest.  req/req_d/edge/pend together separate "never saw the
-    * request" from "saw it and dropped it". */
+   /* Snoop-engine stall watchdog.  SNP_RD retires the invalidate only on a
+    * quiescent cycle (t_snp_won), and the comment on that guard ASSERTS the wait
+    * is always short because "r_got_req is low while the main FSM waits on a
+    * fill, which is exactly when the L2 is blocked on our ack".  If that claim is
+    * false the L1D never acks, the L2 sits in WAIT_BI forever, and the machine
+    * wedges with no indication of which term held it.  Print the terms
+    * individually instead of trusting the claim. */
    logic [31:0] r_snp_stall_cnt;
    always_ff@(posedge clk)
      begin
@@ -1481,6 +1672,12 @@ endfunction
 	  end
 	else
 	  begin
+	     /* Count while the L2 is ASKING, not while our engine is busy: the first
+	      * version reset on SNP_IDLE and therefore printed nothing at the wedge,
+	      * which already tells us the engine is idle while the L2 waits.  What
+	      * matters now is whether we ever registered the request -- r_snp_pend and
+	      * the edge detector against a req the L2 holds asserted until it sees an
+	      * ack. */
 	     r_snp_stall_cnt <= r_snp_stall_cnt + 32'd1;
 	     if(r_snp_stall_cnt == 32'd10000)
 	       begin
@@ -1555,7 +1752,7 @@ endfunction
       .clk(clk),
       .rd_addr0(w_snp_idx),
       .rd_addr1(w_snp_idx),
-      .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
+      .wr_addr(w_fill_idx),
       .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
       .wr_en(w_cacheable_mem_rsp_valid),
       .rd_data0(w_snp_tag),
@@ -1603,7 +1800,7 @@ endfunction
       .clk(clk),
       .rd_addr0(t_cache_idx),
       .rd_addr1(w_p2_addr),
-      .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
+      .wr_addr(w_fill_idx),
       .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
       .wr_en(w_cacheable_mem_rsp_valid),
       .rd_data0(r_tag_out),
@@ -1638,7 +1835,7 @@ endfunction
 	  end
 	else if(w_cacheable_mem_rsp_valid)
 	  begin
-	     t_dirty_wr_addr = r_mem_req_addr[IDX_STOP-1:IDX_START];
+	     t_dirty_wr_addr = w_fill_idx;
 	     t_write_dirty_en = 1'b1;
 	  end
 	else if(t_wr_array)
@@ -1676,7 +1873,7 @@ endfunction
 	  end
 	else if(w_cacheable_mem_rsp_valid)
 	  begin
-	     t_valid_wr_addr = r_mem_req_addr[IDX_STOP-1:IDX_START];
+	     t_valid_wr_addr = w_fill_idx;
 	     t_valid_value = !r_inhibit_write;
 	     t_write_valid_en = 1'b1;
 	  end
@@ -2342,6 +2539,7 @@ endfunction
 	n_mem_req_cacheable = r_mem_req_cacheable;
 	n_mem_req_mask = r_mem_req_mask;
 	n_mem_req_addr = r_mem_req_addr;
+	n_mem_req_va_alias = r_mem_req_va_alias;
 	n_mem_req_store_data = r_mem_req_store_data;
 	n_mem_req_opcode = r_mem_req_opcode;
 	t_pop_mq = 1'b0;
@@ -2394,7 +2592,7 @@ endfunction
 	n_lock_cache = r_lock_cache;
 	
 	t_mh_block = r_got_req && r_last_wr && 
-		     (r_cache_idx == t_mem_head.addr[IDX_STOP-1:IDX_START] );
+		     (r_cache_idx == mq_idx(t_mem_head));
 	
 	/* store->load forward match is INDEX-ONLY (matches rv64core nu_l1d). The
 	 * incoming load's PHYSICAL tag is not available here: the dtlb pa output is
@@ -2620,6 +2818,7 @@ endfunction
 			      t_got_miss = 1'b1;
 			      t_mark_invalid = 1'b1;
 			      n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_va_alias = (`L1D_ALIAS_BITS > 0) ? r_cache_idx[`LG_L1D_NUM_SETS-1:IDX_PA_BITS] : 'd0;
 			      n_mem_req_opcode = MEM_WB;
 			      n_mem_req_store_data = t_data;
 			      n_mem_req_cacheable = 1'b1;
@@ -2638,6 +2837,7 @@ endfunction
 			      if(r_valid_out && (r_tag_out == r_cache_tag))
 				t_mark_invalid = 1'b1;
 			      n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_va_alias = r_req.va_alias;
 			      n_mem_req_opcode = MEM_INVL;
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_mask = 16'hffff;
@@ -2675,6 +2875,7 @@ endfunction
 			      if(r_dirty_out)
 				begin
 				   n_mem_req_addr = {r_tag_out, r_cache_idx[IDX_PA_BITS-1:0], {`LG_L1D_CL_LEN{1'b0}}};
+				   n_mem_req_va_alias = (`L1D_ALIAS_BITS > 0) ? r_cache_idx[`LG_L1D_NUM_SETS-1:IDX_PA_BITS] : 'd0;
 				   n_mem_req_cacheable = 1'b1;
 				   n_mem_req_opcode = MEM_SW;
 				   n_mem_req_store_data = t_data;
@@ -2711,6 +2912,7 @@ endfunction
 			 n_mem_req_valid = 1'b1;
 			 n_mem_req_opcode = r_req.is_store ? MEM_SW : MEM_LW;
 			 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+			 n_mem_req_va_alias = r_req.va_alias;
 			 n_mem_req_store_data = t_array_data;
 			 t_got_miss = 1'b1;
 			 if(r_req.is_store)
@@ -2749,6 +2951,7 @@ endfunction
 			   begin
 			      n_reload_issue = 1'b1;
 			      n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_va_alias = (`L1D_ALIAS_BITS > 0) ? r_cache_idx[`LG_L1D_NUM_SETS-1:IDX_PA_BITS] : 'd0;
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_opcode = MEM_SW;
 			      n_mem_req_store_data = t_data;
@@ -2799,6 +3002,7 @@ endfunction
 			    if((rr_cache_idx == r_cache_idx) && rr_last_wr)
 			      begin
 				 n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
+				 n_mem_req_va_alias = (`L1D_ALIAS_BITS > 0) ? r_cache_idx[`LG_L1D_NUM_SETS-1:IDX_PA_BITS] : 'd0;
 			    n_lock_cache = 1'b1;
 			    n_mem_req_opcode = MEM_SW;
 			    n_state = WAIT_INJECT_RELOAD;
@@ -2808,6 +3012,7 @@ endfunction
 			      begin
 				 n_lock_cache = 1'b0;
 				 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+			 n_mem_req_va_alias = r_req.va_alias;
 				 n_mem_req_opcode = MEM_LW;				 
 				 n_state = INJECT_RELOAD;
 				 n_mem_req_valid = 1'b1;
@@ -2834,7 +3039,7 @@ endfunction
 			      begin
 				 t_pop_mq = 1'b1;
 				 n_req = t_mem_head;
-				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+				 t_cache_idx = mq_idx(t_mem_head);
 				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
@@ -2860,7 +3065,7 @@ endfunction
 				 core_store_data_ack = 1'b1;
 				 n_req = t_mem_head;
 				 n_req.data = core_store_data.data;
-				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+				 t_cache_idx = mq_idx(t_mem_head);
 				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
@@ -2886,7 +3091,7 @@ endfunction
 				 n_req = t_mem_head;
 				 n_req.data = core_store_data.data;
 				 core_store_data_ack = 1'b1;
-				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+				 t_cache_idx = mq_idx(t_mem_head);
 				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 				 t_addr = t_mem_head.addr;
 				 t_got_req = 1'b1;
@@ -2899,7 +3104,7 @@ endfunction
 			 begin
 			    t_pop_mq = 1'b1;
 			    n_req = t_mem_head;
-			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+			    t_cache_idx = mq_idx(t_mem_head);
 			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 			    t_addr = t_mem_head.addr;
 			    t_got_req = 1'b1;
@@ -3031,7 +3236,7 @@ endfunction
 		    n_inhibit_write = 1'b0;
 		    n_uncache_wb_dirty = 1'b0;
 		    t_got_req = 1'b1;
-		    t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
+		    t_cache_idx = mq_idx(r_req);
 		    t_cache_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
 		    t_addr = r_req.addr;
 		    n_state = ACTIVE;
@@ -3039,7 +3244,7 @@ endfunction
 	    end
 	  HANDLE_RELOAD:
 	    begin
-	       t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
+	       t_cache_idx = mq_idx(r_req);
 	       t_cache_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
 	       n_last_wr = n_req.is_store;
 	       t_got_req = 1'b1;
@@ -3060,6 +3265,7 @@ endfunction
 		    if(r_valid_out && (r_tag_out == flush_cl_addr[`PA_WIDTH-1:TAG_LSB]))
 		      t_mark_invalid = 1'b1;
 		    n_mem_req_addr = {flush_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_va_alias = (`L1D_ALIAS_BITS > 0) ? flush_cl_addr[IDX_STOP-1:`LG_PG_SZ] : 'd0;
 		    n_mem_req_opcode = MEM_INVL;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_mask = 16'hffff;
@@ -3074,6 +3280,7 @@ endfunction
 		     * reaches memory instead of going dirty into L2 (the DMA-descriptor
 		     * coherence bug). */
 		    n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_va_alias = (`L1D_ALIAS_BITS > 0) ? r_cache_idx[`LG_L1D_NUM_SETS-1:IDX_PA_BITS] : 'd0;
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_store_data = t_data;
@@ -3167,6 +3374,7 @@ endfunction
 		    t_got_miss = 1'b1;
 		    t_mark_invalid = 1'b1;
 		    n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_va_alias = (`L1D_ALIAS_BITS > 0) ? r_cache_idx[`LG_L1D_NUM_SETS-1:IDX_PA_BITS] : 'd0;
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_store_data = t_data;
 		    n_mem_req_cacheable = 1'b1;
@@ -3214,6 +3422,7 @@ endfunction
 	       else
 		 begin
 		    n_mem_req_addr = {r_tag_out,r_cache_idx[IDX_PA_BITS-1:0],{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_va_alias = (`L1D_ALIAS_BITS > 0) ? r_cache_idx[`LG_L1D_NUM_SETS-1:IDX_PA_BITS] : 'd0;
 	       n_mem_req_opcode = MEM_SW;
 	       n_mem_req_store_data = t_data;
 	       n_state = (r_cache_idx == (L1D_NUM_SETS-1)) ? FLUSH_CACHE_LAST_WAIT : FLUSH_CACHE_WAIT;

@@ -42,6 +42,7 @@ module l1i(clk,
 	   flush_complete,
 	   inval_req,
 	   inval_addr,
+	   inval_pidx,
 	   inval_ack,
 	   restart_pc,
 	   restart_src_pc,
@@ -72,6 +73,7 @@ module l1i(clk,
 	   mem_req_ack,
 	   mem_req_valid,
 	   mem_req_addr,
+	   mem_req_pidx,
 	   mem_req_opcode,
 	   mem_req_cacheable,
 	   mem_req_mask,
@@ -108,6 +110,7 @@ module l1i(clk,
     * avoids adding a tag read port.  No writeback path is needed -- the L1I is clean. */
    input logic 	      inval_req;
    input logic [`PA_WIDTH-1:0] inval_addr;
+   input logic [`PIDX_W-1:0] inval_pidx;
    output logic       inval_ack;
    //restart signals
    input logic [`M_WIDTH-1:0] restart_pc;
@@ -169,6 +172,10 @@ module l1i(clk,
    localparam BTB_ENTRIES = 1 << `LG_BTB_SZ;
 
    output logic [(`PA_WIDTH-1):0] mem_req_addr;
+   /* PIdx: which of our sets the fill lands in.  Taken from r_miss_pc -- the
+    * VIRTUAL pc the refill indexes with -- NOT from the physical request address,
+    * because those differ above a page and the set is what the L2 must record. */
+   output logic [`PIDX_W-1:0] 	  mem_req_pidx;
    output logic [4:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
    output logic [15:0]			  mem_req_mask;
@@ -1178,6 +1185,7 @@ endfunction
    logic 			r_inval_pend, n_inval_pend;
    logic [`LG_L1I_NUM_SETS-1:0] r_inval_idx, n_inval_idx;
    logic 			r_inval_ack, n_inval_ack;
+   wire [`LG_L1I_NUM_SETS-1:0] w_inval_idx;
    wire 			w_do_inval = r_inval_pend & ~mem_rsp_valid &
 					     (r_state != FLUSH_CACHE);
 
@@ -1205,7 +1213,10 @@ endfunction
 	if(inval_req & ~r_inval_pend)
 	  begin
 	     n_inval_pend = 1'b1;
-	     n_inval_idx = inval_addr[IDX_STOP-1:IDX_START];
+	     /* The refill indexes with r_miss_pc (VIRTUAL), so above a page the line
+	      * does NOT live at the physical address's index and this capture was
+	      * already invalidating the wrong set.  Use the set the L2 recorded. */
+	     n_inval_idx = w_inval_idx;
 	  end
 	else if(w_do_inval)
 	  begin
@@ -1213,6 +1224,29 @@ endfunction
 	     n_inval_ack = 1'b1;    /* one-cycle ack, the cycle the valid bit is cleared */
 	  end
      end // always_comb
+
+   generate
+      if(`L1I_ALIAS_BITS > 0)
+	begin : inval_idx_pidx
+	   assign w_inval_idx = {inval_pidx[`L1I_ALIAS_BITS-1:0],
+				 inval_addr[`LG_PG_SZ-1:IDX_START]};
+	end
+      else
+	begin : inval_idx_pa
+	   assign w_inval_idx = inval_addr[IDX_STOP-1:IDX_START];
+	end
+   endgenerate
+   generate
+      if(`L1I_ALIAS_BITS > 0)
+	begin : req_pidx_gen
+	   assign mem_req_pidx = {{(`PIDX_W-`L1I_ALIAS_BITS){1'b0}},
+				  r_miss_pc[IDX_STOP-1:`LG_PG_SZ]};
+	end
+      else
+	begin : req_pidx_tie
+	   assign mem_req_pidx = 'd0;
+	end
+   endgenerate
 
    assign inval_ack = r_inval_ack;
 

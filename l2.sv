@@ -21,6 +21,7 @@ module l2(clk,
 	  l1_mem_req_addr,
 	  l1_mem_req_cacheable,
 	  l1_mem_req_from_l1i,
+	  l1_mem_req_pidx,
 	  l1_mem_req_mask,
 	  l1_mem_req_store_data,
 	  l1_mem_req_opcode,
@@ -52,6 +53,8 @@ module l2(clk,
 	  snoop_req_ack,
 	  // INCLUSIVE-L2 back-invalidate to the L1s (design C: dirty data rides the ack)
 	  backinv_addr,
+	  backinv_d_pidx,
+	  backinv_i_pidx,
 	  backinv_stall,
 	  backinv_d_req,
 	  backinv_d_ack,
@@ -82,6 +85,11 @@ module l2(clk,
     * the R10000 SCTag PIdx field ("locate subset lines in the primary caches"), except
     * our 4KB direct-mapped L1s need no index bits -- only the D-vs-I selector. */
    input logic 	l1_mem_req_from_l1i;
+   /* PIdx: WHICH set of the requesting primary cache this line will land in -- the
+    * index bits above the page offset, which are VIRTUAL and so cannot be recovered
+    * from the physical address the L2 holds.  Zero-width is illegal, so at <= page
+    * size the field is present, always 0, and every compare matches (inert). */
+   input logic [`PIDX_W-1:0] l1_mem_req_pidx;
    input logic	      l1_mem_req_cacheable;
 `ifdef ENABLE_L2_NOCACHE
    /* EXPERIMENT: entirely disable the L2 as a cache.  Route cacheable DATA ops
@@ -131,6 +139,12 @@ module l2(clk,
     * L1D-resident (measured) survive.  The L1s return dirty data ON THE ACK and
     * issue no request, so no loop can form with this pending eviction. */
    output logic [`PA_WIDTH-1:0] backinv_addr;
+   /* Which primary-cache SET to probe.  The L1 cannot derive this from backinv_addr
+    * once it indexes by VA: the physical alias bits name a different set than the
+    * one the line actually occupies, so a PA-derived probe reads the wrong set,
+    * finds nothing, and acks clean while a dirty line survives. */
+   output logic [`PIDX_W-1:0] backinv_d_pidx;
+   output logic [`PIDX_W-1:0] backinv_i_pidx;
    output logic        backinv_stall;    /* bq near full: hold off new core requests */
    output logic        backinv_d_req;
    input logic 	       backinv_d_ack;
@@ -144,10 +158,15 @@ module l2(clk,
    input logic 	       backinv_i_ack;
    logic 	       r_snoop_ack, n_snoop_ack;
    logic 	       t_snoop_backinv;   /* snoop wants a back-invalidate enqueued */
+   logic [`PIDX_W-1:0] t_bq_pidx_d, t_bq_pidx_i;
+   logic [`PIDX_W-1:0] r_backinv_pidx_d, n_backinv_pidx_d;
+   logic [`PIDX_W-1:0] r_backinv_pidx_i, n_backinv_pidx_i;
    logic 	       r_backinv_d, n_backinv_d, r_backinv_i, n_backinv_i;
    logic [`PA_WIDTH-1:0] r_backinv_addr, n_backinv_addr;
    logic [63:0]        r_backinv_clobber, n_backinv_clobber;
    assign backinv_d_req = r_backinv_d;
+   assign backinv_d_pidx = r_backinv_pidx_d;
+   assign backinv_i_pidx = r_backinv_pidx_i;
    assign backinv_i_req = r_backinv_i;
    assign backinv_addr = r_backinv_addr;
    assign snoop_req_ack = r_snoop_ack;
@@ -173,6 +192,9 @@ module l2(clk,
    
    logic [4:0] 		   n_opcode, r_opcode;
    logic 		   n_from_l1i, r_from_l1i;
+   /* the requesting L1's alias bits, registered in lockstep with r_from_l1i so
+    * they are still valid when the fill response finally writes the PIdx ram. */
+   logic [`PIDX_W-1:0] 	   n_req_pidx, r_req_pidx;
 
    logic 		   r_mem_req, n_mem_req;
    logic [4:0] 		   r_mem_opcode, n_mem_opcode;
@@ -232,7 +254,10 @@ module l2(clk,
 				     /* victim went dirty AFTER the clean-vs-dirty decision was
 				      * taken (a snoop merge landing in the 2-cycle metadata
 				      * window).  Write it back, THEN commit the held fill. */
-				     RELOAD_WB = 'd18
+				     RELOAD_WB = 'd18,
+				     /* one settle cycle after a back-invalidate MERGE, so the
+				      * re-read sees it -- see BACKINV_SETTLE below */
+				     BACKINV_SETTLE = 'd19
 				     } state_t;
 
    state_t n_state, r_state;
@@ -280,6 +305,7 @@ module l2(clk,
    wire [LG_L2_LINES-1:0] w_snoop_ridx;      /* port-1 read index */
    wire [TAG_BITS-1:0] 	  w_s_tag;
    wire 		  w_s_valid, w_s_dirty, w_s_l1d_pres, w_s_l1i_pres;
+   wire [`PIDX_W-1:0] 	  w_l1d_pidx, w_l1i_pidx, w_s_l1d_pidx, w_s_l1i_pidx;
    wire [127:0] 	  w_s_d0;
    logic 		  t_snoop_merge;            /* write the recovered line into the L2 */
    logic 		  t_snoop_merge_done;       /* ... and retire r_wb_pend with it */
@@ -402,6 +428,22 @@ module l2(clk,
    ram2r1w_fwd #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1d_pres_ram
      (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_presd_wr_addr),
       .wr_data(w_presd_wr_data), .wr_en(w_presd_wr_en), .rd_data0(w_l1d_pres), .rd_data1(w_s_l1d_pres));
+
+   /* PIdx storage, one entry per L2 line, alongside the presence bit it qualifies:
+    * "the L1D holds this line" (l1d_pres_ram) and "in THIS set" (here).  Written on
+    * exactly the event that hands a copy to an L1 -- w_l1_copy_made -- with the
+    * requesting L1's alias bits.  Same ram2r1w_fwd shape as the presence bits so the
+    * read ports line up: port 0 on t_idx for the main FSM, port 1 on w_snoop_ridx
+    * for the snoop engine. */
+   ram2r1w_fwd #(.WIDTH(`PIDX_W), .LG_DEPTH(LG_L2_LINES)) l1d_pidx_ram
+     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(t_idx),
+      .wr_data(r_req_pidx), .wr_en(w_l1_copy_made & ~r_from_l1i),
+      .rd_data0(w_l1d_pidx), .rd_data1(w_s_l1d_pidx));
+
+   ram2r1w_fwd #(.WIDTH(`PIDX_W), .LG_DEPTH(LG_L2_LINES)) l1i_pidx_ram
+     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(t_idx),
+      .wr_data(r_req_pidx), .wr_en(w_l1_copy_made & r_from_l1i),
+      .rd_data0(w_l1i_pidx), .rd_data1(w_s_l1i_pidx));
 
    ram2r1w_fwd #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1i_pres_ram
      (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_presi_wr_addr),
@@ -534,6 +576,10 @@ module l2(clk,
    reg [`PA_WIDTH-1:0] r_bq_addr [(1<<LG_BQ)-1:0];
    reg [(1<<LG_BQ)-1:0] r_bq_d, r_bq_i;
    reg [(1<<LG_BQ)-1:0] r_bq_ev;   /* 1 = eviction: a dirty L1D line is the ONLY copy */
+   /* PIdx per CHANNEL: one line can sit in the L1D and the L1I at different sets
+    * (code read as data), so a single field would probe one of them wrongly. */
+   reg [`PIDX_W-1:0]   r_bq_pidx_d [(1<<LG_BQ)-1:0];
+   reg [`PIDX_W-1:0]   r_bq_pidx_i [(1<<LG_BQ)-1:0];
    reg [LG_BQ:0]       r_bq_head, n_bq_head, r_bq_tail, n_bq_tail;
    wire                w_bq_empty = (r_bq_head == r_bq_tail);
    wire                w_bq_full  = (r_bq_head[LG_BQ-1:0] == r_bq_tail[LG_BQ-1:0]) &
@@ -577,6 +623,10 @@ module l2(clk,
    logic               t_bq_d, t_bq_i, t_bq_ev;
    integer             r_n_bq_ovf, r_n_evict_bi;
    integer             r_n_inline_bi, r_n_merge;   /* inline eviction back-invalidates, and dirty merges */
+   /* Synonym recoveries.  Reported so a clean aliasing run can be told apart from
+    * one where the mechanism never fired -- a zero here with a passing test means
+    * the workload produced no synonym, NOT that synonyms are handled. */
+   integer             r_n_alias_bi;
 
    always_comb
      begin
@@ -586,6 +636,11 @@ module l2(clk,
 	 * transaction, and using them would back-invalidate the wrong line. */
 	t_bq_push = w_evict_backinv | t_snoop_backinv;
 	t_bq_addr = t_snoop_backinv ? {r_snoop_addr[`PA_WIDTH-1:4], 4'd0} : w_evict_addr;
+	/* PIdx follows the SAME port as the presence bits below: port 1 (w_s_*) for a
+	 * snoop-sourced entry, port 0 for an eviction.  Reading the other port would
+	 * name a concurrent unrelated transaction's line. */
+	t_bq_pidx_d = t_snoop_backinv ? w_s_l1d_pidx : w_l1d_pidx;
+	t_bq_pidx_i = t_snoop_backinv ? w_s_l1i_pidx : w_l1i_pidx;
 `ifdef SNOOP_BI_I_ONLY
 	/* BISECT: probe the L1I but never the L1D.  Data-safe here for the same
 	 * reason the no-backinv run was: the L1D keeps a valid unmodified copy and
@@ -598,7 +653,10 @@ module l2(clk,
 	t_bq_i    = t_snoop_backinv ? w_s_l1i_pres : w_l1i_pres;
 	/* Revived: a snoop whose source says the L1D holds the only good copy takes
 	 * the recover-to-DRAM path (r_wb_pend -> BACKINV_WB) instead of discarding. */
-	t_bq_ev   = t_snoop_backinv ? r_snoop_ev : 1'b0;
+	/* a QUEUED eviction needs recovery too -- the non-snoop bq source is
+	 * w_evict_backinv.  Hardcoding 0 discarded the recovered dirty line exactly
+	 * as the direct path did. */
+	t_bq_ev   = t_snoop_backinv ? r_snoop_ev : 1'b1;
 	n_bq_tail = r_bq_tail + ((t_bq_push & ~w_bq_full) ? 1 : 0);
 	/* pop only when the request register is free */
 	n_bq_head = r_bq_head + ((~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend) ? 1 : 0);
@@ -613,6 +671,7 @@ module l2(clk,
 	     r_bq_tail <= 'd0;
 	     r_n_bq_ovf <= 0;
 	     r_n_inline_bi <= 0;
+	     r_n_alias_bi <= 0;
 	     r_n_restart <= 0;
 	     r_n_restart_wb <= 0;
 	     r_n_merge <= 0;
@@ -627,6 +686,9 @@ module l2(clk,
 	     /* zero here would be indistinguishable from "path not reached" -- the exact
 	      * blindness that cost most of a day earlier. */
 	     r_n_inline_bi <= r_n_inline_bi + (((n_state == BACKINV_WAIT) & (r_state != BACKINV_WAIT)) ? 1 : 0);
+	     r_n_alias_bi <= r_n_alias_bi +
+			     (((n_state == BACKINV_WAIT) & (r_state != BACKINV_WAIT) &
+			       w_alias_conflict) ? 1 : 0);
 	     r_n_restart <= r_n_restart + (w_restart_seen ? 1 : 0);
 	     r_n_restart_wb <= r_n_restart_wb + (w_restart_wb ? 1 : 0);
 	     r_n_merge <= r_n_merge + (((r_state == BACKINV_WAIT) & backinv_d_ack & backinv_d_dirty) ? 1 : 0);
@@ -642,6 +704,8 @@ module l2(clk,
 	     r_bq_d[r_bq_tail[LG_BQ-1:0]] <= t_bq_d;
 	     r_bq_i[r_bq_tail[LG_BQ-1:0]] <= t_bq_i;
 	     r_bq_ev[r_bq_tail[LG_BQ-1:0]] <= t_bq_ev;
+	     r_bq_pidx_d[r_bq_tail[LG_BQ-1:0]] <= t_bq_pidx_d;
+	     r_bq_pidx_i[r_bq_tail[LG_BQ-1:0]] <= t_bq_pidx_i;
 	  end
      end // always_ff
 `endif
@@ -966,13 +1030,13 @@ module l2(clk,
 		   * mismatch between the DMA master's view and the L2's) from "it finds it
 		   * but no L1 holds a copy".  backinv_entries=0 with hits>0 means the
 		   * presence test is wrong; hits=0 means the snoop address is wrong. */
-		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d wb_mismatch=%0d merge_gnt=%0d merge_stall=%0d waitbi_esc=%0d waitbi_esc_dirty=%0d wbpend_drop=%0d mergechk=%0d mergebad=%0d tagwr=%0d ev_d_wb=%0d ev_d_nowb=%0d credits=%0d credit_stall=%0d credit_bug=%0d bi_pres_clr=%0d bi_held0=%0d reload_over_dirty=%0d m_wb=%0d m_dropclean=%0d m_dirtyclr=%0d m_overwr=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
+		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d wb_mismatch=%0d merge_gnt=%0d merge_stall=%0d waitbi_esc=%0d waitbi_esc_dirty=%0d wbpend_drop=%0d mergechk=%0d mergebad=%0d tagwr=%0d ev_d_wb=%0d ev_d_nowb=%0d credits=%0d credit_stall=%0d credit_bug=%0d bi_pres_clr=%0d bi_held0=%0d reload_over_dirty=%0d m_wb=%0d m_dropclean=%0d m_dirtyclr=%0d m_overwr=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d alias_bi=%0d",
 			   r_cycle, r_n_pres_d_clr, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_wb_mismatch, r_n_merge_gnt, r_n_merge_stall,
 			   r_n_waitbi_escape, r_n_waitbi_esc_dirty, r_n_wbpend_drop,
 			   r_n_mergechk, r_n_mergebad, r_n_tagwr, r_n_evict_dirty_wb, r_n_evict_dirty_nowb,
 			   r_wb_credits, r_n_credit_stall, r_n_credit_bug,
 			   r_n_bi_pres_clr, r_n_bi_held0, r_n_reload_over_dirty, r_n_merged_wb, r_n_merged_dropclean, r_n_merged_dirtyclr, r_n_merged_overwr,
-			   r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
+			   r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb, r_n_alias_bi);
 	       end
 	  end
      end // always_ff
@@ -980,6 +1044,31 @@ module l2(clk,
 `endif
 
    wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
+
+   /* SYNONYM: the requester wants this line in a DIFFERENT set of its own cache
+    * than the one it already holds it in.  Only ever a conflict WITHIN one cache
+    * -- the L1D holding a line the L1I is fetching is two legitimate copies in
+    * two different caches, not an alias.
+    *
+    * w_hit IS LOAD-BEARING and was missing: the presence bit and PIdx are indexed by
+    * L2 INDEX, so on a MISS they describe the line being EVICTED, not the one being
+    * served.  Two different lines sitting in two different sets of one L1 is normal
+    * operation, not a synonym.  Formal caught this -- the counterexample was an L1I
+    * fill with w_hit=0, w_l1i_pres=1, w_l1i_pidx=2, r_req_pidx=3, all referring to a
+    * dead line.  Without this term cover(w_alias_*) is reachable on miss paths and
+    * the vacuity check that is supposed to validate this proof would itself lie.
+    * (Declared here rather than beside the presence wires because w_hit is.) */
+   /* CHECK_VALID_AND_TAG is as load-bearing as w_hit, and for the same reason.  In
+    * IDLE, r_opcode/r_req_pidx/r_tag still hold the PREVIOUS transaction while t_idx
+    * already indexes the INCOMING request, so these terms would compare three
+    * different transactions' signals and mean nothing.  Formal found exactly that:
+    * a store's response in IDLE coinciding with a stale r_opcode==4.  The use site
+    * is inside this state anyway, so naming it here costs nothing and makes every
+    * downstream use -- especially the vacuity covers -- honest. */
+   wire 		   w_alias_ok = (r_state == CHECK_VALID_AND_TAG) & w_hit;
+   wire 		   w_alias_d = w_alias_ok & ~r_from_l1i & w_l1d_pres & (w_l1d_pidx != r_req_pidx);
+   wire 		   w_alias_i = w_alias_ok &  r_from_l1i & w_l1i_pres & (w_l1i_pidx != r_req_pidx);
+   wire 		   w_alias_conflict = w_alias_d | w_alias_i;
    wire 		w_need_wb = w_valid ? w_dirty : 1'b0;
       
    always_ff@(posedge clk)
@@ -993,6 +1082,7 @@ module l2(clk,
 	     r_tag <= 'd0;
 	     r_opcode <= 5'd0;
 	     r_from_l1i <= 1'b0;
+	     r_req_pidx <= 'd0;
 	     r_addr <= 'd0;
 	     r_saveaddr <= 'd0;
 	     r_mem_req <= 1'b0;
@@ -1006,6 +1096,8 @@ module l2(clk,
 	     r_backinv_i <= 1'b0;
 	     r_backinv_addr <= 'd0;
 	     r_backinv_ev <= 1'b0;
+	     r_backinv_pidx_d <= 'd0;
+	     r_backinv_pidx_i <= 'd0;
 	     r_wb_credits <= N_WB_CREDITS[3:0];
 	     r_wb_credit_held <= 1'b0;
 	     r_n_credit_stall <= 0;
@@ -1044,6 +1136,7 @@ module l2(clk,
 	     r_tag <= n_tag;
 	     r_opcode <= n_opcode;
 	     r_from_l1i <= n_from_l1i;
+	     r_req_pidx <= n_req_pidx;
 	     r_addr <= n_addr;
 	     r_saveaddr <= n_saveaddr;
 	     /* back-invalidate request flops.  These were assigned ONLY in the reset
@@ -1055,6 +1148,8 @@ module l2(clk,
 	     r_backinv_i <= n_backinv_i;
 	     r_backinv_addr <= n_backinv_addr;
 	     r_backinv_ev <= n_backinv_ev;
+	     r_backinv_pidx_d <= n_backinv_pidx_d;
+	     r_backinv_pidx_i <= n_backinv_pidx_i;
 	     r_wb_credits <= n_wb_credits;
 	     r_wb_credit_held <= n_wb_credit_held;
 	     /* stalled for want of a credit: expected occasionally, but a credit LEAK
@@ -1257,6 +1352,7 @@ module l2(clk,
 	n_tag = r_tag;
 	n_opcode = r_opcode;
 	n_from_l1i = r_from_l1i;
+	n_req_pidx = r_req_pidx;
 	n_addr = r_addr;
 	n_saveaddr = r_saveaddr;
 	
@@ -1267,6 +1363,8 @@ module l2(clk,
 	n_backinv_i = r_backinv_i;
 	n_backinv_addr = r_backinv_addr;
 	n_backinv_ev = r_backinv_ev;
+	n_backinv_pidx_d = r_backinv_pidx_d;
+	n_backinv_pidx_i = r_backinv_pidx_i;
 	/* MUST be defaulted HERE, before the ack logic below increments it.  It used
 	 * to be assigned after, which -- blocking assignment in an always_comb --
 	 * overwrote the increment every cycle, so the counter that exists to report
@@ -1319,6 +1417,8 @@ module l2(clk,
 	     n_backinv_d = r_bq_d[r_bq_head[LG_BQ-1:0]];
 	     n_backinv_i = r_bq_i[r_bq_head[LG_BQ-1:0]];
 	     n_backinv_ev = r_bq_ev[r_bq_head[LG_BQ-1:0]];
+	     n_backinv_pidx_d = r_bq_pidx_d[r_bq_head[LG_BQ-1:0]];
+	     n_backinv_pidx_i = r_bq_pidx_i[r_bq_head[LG_BQ-1:0]];
 	  end
 	if(backinv_d_ack)
 	  begin
@@ -1425,6 +1525,7 @@ module l2(clk,
 	       n_addr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_saveaddr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_from_l1i = l1_mem_req_from_l1i;
+	       n_req_pidx = l1_mem_req_pidx;
 	       n_opcode = l1_mem_req_opcode;
 	       n_store_data = l1_mem_req_store_data;
 	       n_store_mask = 16'h0;
@@ -1599,10 +1700,47 @@ module l2(clk,
 		    n_reload = 1'b0;
 		    if(r_opcode == 5'd4)
 		      begin
+`ifdef ENABLE_L2_PIDX
+			 /* Recover the OLD copy before handing out a second one.  Two
+			  * copies of one line in one cache, one of them possibly dirty,
+			  * is exactly the corruption VIPT synonyms cause.  Reuses the
+			  * eviction path's shape: probe, wait, then re-run this state --
+			  * BACKINV_WAIT clears the presence bits on its way out, so the
+			  * second pass sees no conflict and serves normally, re-recording
+			  * PIdx at the requester's set. */
+			 if(w_alias_conflict & ~r_bi_done)
+			   begin
+			      n_backinv_addr = {w_tag, t_idx, 4'd0};
+			      n_backinv_d = w_alias_d;
+			      n_backinv_i = w_alias_i;
+			      n_backinv_pidx_d = w_l1d_pidx;
+			      n_backinv_pidx_i = w_l1i_pidx;
+			      /* ev=1: RECOVER, do not discard.  ev separates a DMA-sourced snoop
+			       * (DRAM already fresher, so a dirty L1D line is a CPU-vs-DMA race and
+			       * is dropped) from the case where the L1D's dirty copy is the ONLY
+			       * up-to-date data.  A synonym is the latter -- the CPU just stored to
+			       * it.  Leaving ev at its inherited value sent the ack handler down the
+			       * discard branch (ACKDBG: ev=0 dirty=1 clobber=1) and threw the store
+			       * away; test_l1_synonym.S step 3 then read the pre-store value. */
+			      n_backinv_ev = 1'b1;
+			      n_state = BACKINV_WAIT;
+			   end
+			 else
+			   begin
+`ifdef ALIASDBG
+			      $display("[serve] cyc=%0d idx=%0d data=%x bi_done=%b alias=%b",
+				       r_cycle, t_idx, w_d0[31:0], r_bi_done, w_alias_conflict);
+`endif
+			      n_rsp_data =  w_d0;
+			      n_state = IDLE;
+			      n_rsp_valid = 1'b1;
+			   end
+`else
 			 n_rsp_data =  w_d0;
 			 n_state = IDLE;
 			 n_rsp_valid = 1'b1;
 			 //n_cache_hits = r_cache_hits + 64'd1;			 
+`endif
 		      end
 		    else if(r_opcode == 5'd7)
 		      begin
@@ -1643,34 +1781,38 @@ module l2(clk,
 			  * leaves on the normal writeback below.  Blocking here is safe
 			  * now that the L1D snoop engine can ack from any state. */
 			 /* Only issue when the request register is FREE.  These assignments
-			  * sit LATER in this same always_comb than the ack handler's
+			  * sit later in this same always_comb than the ack handler's
 			  * `if(backinv_d_ack) n_backinv_d = 1'b0`, so blocking-assignment
-			  * order let an eviction issued on an ack cycle overwrite the
-			  * clear: backinv_d_req (a LEVEL, = r_backinv_d) never returned
-			  * low while n_backinv_addr changed underneath it, and the L1D --
-			  * which accepts on the RISING edge (l1d.sv:412) -- never saw a
-			  * second request.  Both engines then waited on each other for
-			  * ever: the L2 in BACKINV_WAIT, the snoop FSM in WAIT_BI (whose
-			  * bq cannot pop without ~r_backinv_d).
-			  *
-			  * Measured wedge, deterministic to the cycle: snoop ack for
-			  * 0083acee0 at cyc 1972993 with NO following 1->0 transition,
-			  * L1D idle at req=1/req_d=1/edge=0/pend=0, no-retire watchdog at
-			  * cyc 2021849 after 190706 retired.  With this guard the same run
-			  * reaches the 30M-cycle cap, 1007481 retired, both stall
-			  * watchdogs silent.
-			  *
-			  * r_backinv_d is still set on the ack cycle, so this also rules
-			  * out clobbering a back-invalidate still IN FLIGHT -- the
-			  * condition above never checked it at all.  Nested rather than
-			  * folded into that condition so a busy cycle HOLDS here (n_state
-			  * defaults to r_state) instead of falling through to the
-			  * writeback and evicting without recovering the L1 copy. */
+			  * order let an eviction issued on an ack cycle overwrite the clear:
+			  * req never returned low, the address changed underneath it, and
+			  * the L1D -- which accepts on the RISING edge (l1d.sv:412) -- never
+			  * saw a new request.  Measured wedge: snoop ack for 0083acee0 at
+			  * cyc 1972993 with no following 1->0, L1D idle at req=1/req_d=1/
+			  * edge=0/pend=0, both engines waiting on each other forever.
+			  * r_backinv_d is still set on the ack cycle, so this also rules out
+			  * clobbering a back-invalidate that is still in flight.  The guard
+			  * is nested rather than folded into the condition above so a busy
+			  * cycle HOLDS here (n_state defaults to r_state) instead of falling
+			  * through to the writeback and evicting without recovering the
+			  * L1 copy. */
 			 if(~r_backinv_d & ~r_backinv_i)
 			   begin
 			      n_backinv_addr = {w_tag, t_idx, 4'd0};
 			      n_backinv_d = w_l1d_pres;
 			      n_backinv_i = w_l1i_pres;
+			      /* This path bypasses the bq, which is where n_backinv_pidx_*
+			       * is otherwise loaded -- without these the probe ships the
+			       * PIdx of whatever the last queue pop left behind and lands
+			       * in an unrelated set. */
+			      n_backinv_pidx_d = w_l1d_pidx;
+			      n_backinv_pidx_i = w_l1i_pidx;
+			      /* ev=1 for the same reason as the alias path: an eviction RECOVERS
+			       * the L1's dirty copy, it does not race a DMA.  This path never set
+			       * ev, so it inherited the last bq pop's value -- normally 0 -- and the
+			       * recovered line was DISCARDED.  A lost store on every eviction of a
+			       * dirty L1-held line, and the most likely cause of the
+			       * "back-invalidating on eviction alone corrupts" park note above. */
+			      n_backinv_ev = 1'b1;
 			      n_state = BACKINV_WAIT;
 			   end
 		      end
@@ -1724,6 +1866,11 @@ module l2(clk,
 			 t_wr_d0 = 1'b1;
 			 t_wr_dirty = 1'b1;
 			 t_dirty = 1'b1;
+`ifdef ALIASDBG
+			 $display("[merge] cyc=%0d idx=%0d addr=%x data=%x wr_en=%b snoop_gnt=%b",
+				  r_cycle, t_idx, r_backinv_addr, backinv_d_data[31:0],
+				  t_wr_d0, w_snoop_merge_gnt);
+`endif
 		      end
 		 end
 	       if(backinv_i_ack)
@@ -1734,10 +1881,26 @@ module l2(clk,
 		 begin
 		    t_pres_clr = 1'b1;    /* no L1 holds it now */
 		    n_bi_done = 1'b1;     /* and do not do this again for this victim */
-		    n_state = WAIT_FOR_RAM;
+		    /* SETTLE first.  ram2r1w_fwd port 0 is two-stage and deliberately does
+		     * NOT forward: a read colliding with a write returns the PRE-write
+		     * value (its header says port 0 must match reg_ram1rw exactly).  The
+		     * merge above writes on this very cycle while rd_addr0 already points
+		     * at the same line, so the read feeding CHECK_VALID_AND_TAG two cycles
+		     * later was issued INTO that collision.  Going straight to
+		     * WAIT_FOR_RAM served the stale line -- measured: merge wrote adde0000
+		     * to idx 65536 at cyc 131626, the serve at 131628 read 11111111, and
+		     * the presence bit was equally stale so w_alias_conflict was STILL 1
+		     * at the response.  One extra cycle re-issues both reads clean. */
+		    n_state = BACKINV_SETTLE;
 		 end
 	    end // case: BACKINV_WAIT
 `endif
+	  BACKINV_SETTLE:
+	    begin
+	       /* Burn one cycle so the merge write has committed to the array before
+	        * WAIT_FOR_RAM issues the read that CHECK_VALID_AND_TAG will consume. */
+	       n_state = WAIT_FOR_RAM;
+	    end // case: BACKINV_SETTLE
 	  DIRTY_STORE:
 	    begin
 	       if(mem_req_ack)
@@ -2077,7 +2240,7 @@ module l2(clk,
 	  SNOOP_CHECK:
 	    begin
 `ifdef SNPDEC_DBG
-	       /* Opt-in: this sits in an always_comb, so it prints TWICE per decision,
+	       /* Opt-in: this sits in an always_comb, so it prints twice per decision
 		* and produced a 5.1GB log over a 200M-cycle boot under SYNTH_SNOOP.
 		* Record the DECISION where it is made.  Sampling r_snoop_state at the
 		* ack instead would be reading a different transaction's state: the ack
@@ -2258,13 +2421,54 @@ module l2(clk,
 	  end
      end // always_ff
 
+`ifdef BIDBG
+`ifndef BIDBG_LO
+ `define BIDBG_LO 1950000
+`endif
+`ifndef BIDBG_HI
+ `define BIDBG_HI 2000000
+`endif
+   /* Back-invalidate handshake trace, windowed to the cycles around the known
+    * wedge.  The L1D accepts on a RISING EDGE of req while the L2 drives a level,
+    * and l1d.sv:396 justifies that with "req always returns low between distinct
+    * requests".  The wedge shows req=1/req_d=1/pend=0, i.e. that invariant broken
+    * -- so record every req transition, every ack, and every queue push and read
+    * the actual sequence instead of arguing about which path produced it. */
+   logic r_bid_prev;
+   always_ff@(posedge clk)
+     begin
+	r_bid_prev <= r_backinv_d;
+	/* Window is a knob, not a constant: it was hardcoded around one known wedge at
+	 * ~2M cycles, which made it silently useless for a 130k-cycle directed test. */
+	if((r_cycle > 32'd`BIDBG_LO) & (r_cycle < 32'd`BIDBG_HI))
+	  begin
+	     if(r_backinv_d != r_bid_prev)
+	       begin
+		  $display("[bi] cyc=%0d req %b->%b addr=%x", r_cycle, r_bid_prev,
+			   r_backinv_d, r_backinv_addr);
+	       end
+	     if(backinv_d_ack)
+	       begin
+		  $display("[bi] cyc=%0d ACK dirty=%b held=%b addr=%x", r_cycle,
+			   backinv_d_dirty, backinv_d_held, r_backinv_addr);
+	       end
+	     if(t_bq_push)
+	       begin
+		  $display("[bi] cyc=%0d BQPUSH addr=%x d=%b i=%b", r_cycle,
+			   t_bq_addr, t_bq_d, t_bq_i);
+	       end
+	  end
+     end // always_ff
+`endif
+
 `ifdef VERILATOR
    /* WAIT_BI stall watchdog.  The state has exactly two exits -- merge (needs
-    * w_wb_idx_match) and acked-clean (needs the bq drained) -- so when it stops
-    * making progress, print the whole condition set rather than leaving the wedge to
-    * be inferred from a no-retire watchdog 48k cycles later.  This is what showed
-    * wb_pend=0 with bi_d=1: waiting on an ack for a probe the L1D never accepted,
-    * which refuted the stranded-writeback theory and pointed at the handshake. */
+    * w_wb_idx_match) and acked-clean (needs the bq drained) -- and a r_wb_pend
+    * belonging to ANOTHER line blocks BOTH at once: the bq head is held while
+    * r_wb_pend is set, so w_bq_empty never comes true, while the merge never
+    * fires because the pending data is not ours.  Print the whole condition set
+    * when the state stops making progress, so the wedge names itself instead of
+    * being inferred from a no-retire watchdog 48k cycles later. */
    logic [31:0] r_waitbi_cnt;
    always_ff@(posedge clk)
      begin
@@ -2290,38 +2494,228 @@ module l2(clk,
      end // always_ff
 `endif
 
-`ifdef BIDBG
-   /* Back-invalidate handshake trace, windowed to the cycles around a known wedge.
-    * The L1D accepts on a RISING EDGE while the L2 drives a LEVEL, and l1d.sv:396
-    * justifies that with "req always returns low between distinct requests".  This
-    * logs every req transition, ack and queue push so that invariant can be CHECKED
-    * instead of argued about -- it is what showed an ack with no following 1->0. */
-   logic r_bid_prev;
-   always_ff@(posedge clk)
+`ifdef FORMAL
+`ifdef ENABLE_L2_PIDX
+`ifdef L1SYN_ABSTRACT_L1D
+   /* ---- ABSTRACT L1D, living INSIDE the L2 -----------------------------------
+    * It belongs here, not in the formal wrapper, for the reason every property in
+    * this file does: yosys does not resolve cross-module hierarchical references, so
+    * a wrapper naming dut.w_l1_copy_made gets a floating wire that setundef hands the
+    * solver as a free input.
+    *
+    * But there is a SECOND, sharper reason.  The first version modelled the L1D from
+    * the wrapper and latched the request at l1_mem_req_ack -- a REGISTERED output --
+    * while the L2 samples l1_mem_req_* at its own accept point a cycle earlier.  With
+    * a free environment those differ, so the model installed a line on a response the
+    * L2 never treated as a copy grant.  The witness was unambiguous: w_rsp_valid=1
+    * with w_l1_copy_made=0 and t_wr_l1d_pres=0, i.e. the L2 correctly granted nothing
+    * and correctly did not probe, while the model recorded a second copy.  Driving
+    * the model from the L2's OWN event removes the whole class of error.
+    *
+    * a_held = which alias sets of the L1D hold the watched line.  NALIAS bits, no tag
+    * array: proving at-most-one for a solver-chosen line proves it for every line. */
+   localparam L1SYN_NALIAS = 1 << `L1D_ALIAS_BITS;
+   (* anyconst *) reg [`PA_WIDTH-1:0] f_syn_watch;
+   wire f_syn_cur  = (r_addr[`PA_WIDTH-1:4] == f_syn_watch[`PA_WIDTH-1:4]);
+   wire f_syn_bi   = (r_backinv_addr[`PA_WIDTH-1:4] == f_syn_watch[`PA_WIDTH-1:4]);
+
+   reg [L1SYN_NALIAS-1:0] a_held;
+   always @(posedge clk)
      begin
-	r_bid_prev <= r_backinv_d;
-	if((r_cycle > 32'd1950000) & (r_cycle < 32'd2000000))
+	if(reset)
 	  begin
-	     if(r_backinv_d != r_bid_prev)
+	     a_held <= {L1SYN_NALIAS{1'b0}};
+	  end
+	else
+	  begin
+	     /* the L2's own copy-grant event, with the L2's own registered PIdx */
+	     if(w_l1_copy_made & ~r_from_l1i & f_syn_cur)
 	       begin
-		  $display("[bi] cyc=%0d req %b->%b addr=%x", r_cycle, r_bid_prev,
-			   r_backinv_d, r_backinv_addr);
+		  a_held[r_req_pidx] <= 1'b1;
 	       end
-	     if(backinv_d_ack)
+	     /* an acked probe removes the copy from the set the probe NAMED -- the
+	      * premise discharged separately against the real l1d.sv */
+	     if(backinv_d_ack & r_backinv_d & f_syn_bi)
 	       begin
-		  $display("[bi] cyc=%0d ACK dirty=%b held=%b addr=%x", r_cycle,
-			   backinv_d_dirty, backinv_d_held, r_backinv_addr);
-	       end
-	     if(t_bq_push)
-	       begin
-		  $display("[bi] cyc=%0d BQPUSH addr=%x d=%b i=%b", r_cycle,
-			   t_bq_addr, t_bq_d, t_bq_i);
+		  a_held[r_backinv_pidx_d] <= 1'b0;
 	       end
 	  end
-     end // always_ff
+     end // always @ (posedge clk)
+
+   always @(posedge clk)
+     begin
+	if(!reset)
+	  begin
+`ifdef L1SYN_COVER_ONLY
+	     /* HUNT: reach two copies.  The assert must be OFF -- as a constraint it
+	      * excludes exactly the state being hunted. */
+	     cover((a_held & (a_held - 1)) != {L1SYN_NALIAS{1'b0}});
+`else
+	     assert((a_held & (a_held - 1)) == {L1SYN_NALIAS{1'b0}});
+`endif
+	  end
+     end // always @ (posedge clk)
+
+   /* vacuity: the line must be reachable at BOTH extreme sets, or at-most-one is
+    * trivially true and says nothing about aliasing */
+   always @(posedge clk)
+     begin
+	if(!reset)
+	  begin
+	     cover(a_held[0]);
+	     cover(a_held[L1SYN_NALIAS-1]);
+	  end
+     end // always @ (posedge clk)
 `endif
 
-`ifdef FORMAL
+`ifdef L2_PIDX_PROBE_PROP
+   /* ---- PROBE-NAMES-THE-RECORDED-SET (the honest L2-local property) ------------
+    * WHAT THIS DOES AND DOES NOT CLAIM.  It does NOT claim single-copy.  It cannot:
+    * the presence bit is an OVER-APPROXIMATION by design (see the w_bi_pres_clr
+    * comment above -- "a stale set bit costs a redundant probe, never a missed
+    * one"), so "presence set => the L1 really holds it there" is not a theorem about
+    * this design and no assertion phrased that way is provable.  Proving true
+    * single-copy needs the L1D's own tag/valid arrays, i.e. a combined L1D+L2 model.
+    *
+    * What it DOES claim is the piece the L2 is solely responsible for: when the L2
+    * sends a probe for a line, the PIdx on that probe is the one it recorded for
+    * that line.  A probe carrying the wrong PIdx lands in the wrong set, finds
+    * nothing, and acks clean while the real copy survives -- a silent lost
+    * invalidate.  That bug class is REAL and was already found once by reading: the
+    * eviction path sets n_backinv_* directly, bypassing the bq where
+    * n_backinv_pidx_* is otherwise loaded, so it shipped whatever the last queue pop
+    * left behind.
+    *
+    * WATCHED LINE.  f_watch_addr is an arbitrary but fixed address chosen by the
+    * solver, so proving the property for it proves it for every line -- one register
+    * instead of a shadow copy of the whole cache. */
+   (* anyconst *) reg [`PA_WIDTH-1:0] f_watch_addr;
+   wire f_watch_hit = (r_addr[`PA_WIDTH-1:4] == f_watch_addr[`PA_WIDTH-1:4]);
+
+   reg 		f_rec_d, f_rec_i;              /* the L2 has recorded a copy for it */
+   reg [`PIDX_W-1:0] f_pidx_d, f_pidx_i;        /* ... at THIS set */
+   always @(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     f_rec_d <= 1'b0;
+	     f_rec_i <= 1'b0;
+	     f_pidx_d <= 'd0;
+	     f_pidx_i <= 'd0;
+	  end
+	else
+	  begin
+	     /* w_l1_copy_made is exactly the event that writes the PIdx rams, so this
+	      * shadow tracks the ram by construction rather than by re-deriving it. */
+	     if(w_l1_copy_made & f_watch_hit & ~r_from_l1i)
+	       begin
+		  f_rec_d <= 1'b1;
+		  f_pidx_d <= r_req_pidx;
+	       end
+	     if(w_l1_copy_made & f_watch_hit & r_from_l1i)
+	       begin
+		  f_rec_i <= 1'b1;
+		  f_pidx_i <= r_req_pidx;
+	       end
+	  end
+     end // always @ (posedge clk)
+
+   always @(posedge clk)
+     begin
+	if(!reset)
+	  begin
+	     /* a probe for the watched line must name the set we recorded for it */
+	     if(backinv_d_req & f_rec_d &
+		(backinv_addr[`PA_WIDTH-1:4] == f_watch_addr[`PA_WIDTH-1:4]))
+	       begin
+		  assert(backinv_d_pidx == f_pidx_d);
+	       end
+	     if(backinv_i_req & f_rec_i &
+		(backinv_addr[`PA_WIDTH-1:4] == f_watch_addr[`PA_WIDTH-1:4]))
+	       begin
+		  assert(backinv_i_pidx == f_pidx_i);
+	       end
+	  end
+     end // always @ (posedge clk)
+
+   /* VACUITY for THIS property: the watched line must actually get recorded and
+    * actually get probed, or the assertions above are never evaluated. */
+   always @(posedge clk)
+     begin
+	if(!reset)
+	  begin
+	     cover(f_rec_d);
+	     cover(f_rec_d & backinv_d_req &
+		   (backinv_addr[`PA_WIDTH-1:4] == f_watch_addr[`PA_WIDTH-1:4]));
+	  end
+     end // always @ (posedge clk)
+
+`endif
+
+`ifdef L2_PIDX_STRONG_PROP
+   /* PARKED, and NOT because it is hard -- because it is UNPROVABLE as stated.
+    * It asserts "presence set => the L1 holds it at this PIdx", which contradicts the
+    * design's own rule that presence is an over-approximation.  A stale set bit is
+    * legal here, so the solver can always construct one and the property fails on a
+    * machine that is behaving correctly.  Three counterexamples were burned learning
+    * this; the first two were additionally mis-scoped (see w_alias_ok).  Stating
+    * single-copy properly requires the L1D's tag/valid arrays -- a combined L1D+L2
+    * model -- which is the next step, not this one.  Kept, gated, so the reasoning
+    * survives with the code rather than in a commit message. */
+   /* ---- SINGLE COPY: the PIdx contract, proved by PDR ------------------------
+    * The L2 must never hand a primary cache a copy of a line that cache ALREADY
+    * holds in a different set.  Two copies of one line in one cache, one of them
+    * possibly dirty, is exactly the corruption a VIPT synonym causes, and it shows
+    * up in simulation only as a wrong value far downstream -- the directed test
+    * tests/cache/test_l1_synonym.S samples ONE interleaving, this quantifies over
+    * all of them.
+    *
+    * Stated at the cycle the response goes out, which is where the decision is
+    * made.  Deliberately NOT restricted to the hit path that implements the check:
+    * if any OTHER response path can hand out a copy while presence is set with a
+    * different PIdx -- a fill whose stale presence bit was never cleared on
+    * eviction, say -- that is a real bug and this should catch it.
+    *
+    * REQUIRES a geometry where the L1 exceeds a page (run_l2_pidx_formal.sh shrinks
+    * LG_PG_SZ alongside the caches).  At `PIDX_W==1 with zero alias bits every PIdx
+    * is 0, the compare is trivially true, and this passes vacuously -- which is what
+    * the cover points below exist to detect. */
+   always @(posedge clk)
+     begin
+	/* w_alias_ok (= CHECK_VALID_AND_TAG & w_hit) for the same reason the wires
+	 * need it: outside that state, or on a miss, the presence/PIdx at this index
+	 * belong to a different transaction or to the EVICTED line, and comparing
+	 * them to this request's PIdx compares unrelated things. */
+	if(!reset & n_rsp_valid & (r_opcode == 5'd4) & w_alias_ok)
+	  begin
+	     if(~r_from_l1i)
+	       begin
+		  assert(~w_l1d_pres | (w_l1d_pidx == r_req_pidx));
+	       end
+	     else
+	       begin
+		  assert(~w_l1i_pres | (w_l1i_pidx == r_req_pidx));
+	       end
+	  end
+     end // always @ (posedge clk)
+
+   /* VACUITY.  A proof that no synonym is ever mishandled is worthless if no synonym
+    * is ever REACHABLE.  These must all be hit or the assertion above proves nothing:
+    * the state space has to contain a line held at one PIdx and requested at
+    * another, and the conflict path has to actually fire. */
+   always @(posedge clk)
+     begin
+	if(!reset)
+	  begin
+	     cover(w_alias_d);
+	     cover(w_alias_i);
+	     cover(w_alias_conflict & (n_state == BACKINV_WAIT));
+	     cover(n_rsp_valid & (r_opcode == 5'd4) & ~r_from_l1i & w_l1d_pres);
+	  end
+     end // always @ (posedge clk)
+`endif
+`endif
+
    /* ---- credit conservation, proved by BMC + k-induction -------------------
     * Properties live HERE, inside the module, and NOT in the formal wrapper: yosys's
     * Verilog frontend does not resolve cross-module hierarchical references, so a
