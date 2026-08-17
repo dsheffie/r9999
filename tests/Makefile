@@ -49,6 +49,7 @@ TESTS := hello/hello.elf \
          cache/test_flush_l2_full.elf \
          cache/test_l2_evict.elf \
          cache/test_uc_wb_alias.elf \
+         cache/test_l1_synonym.elf \
          devregs/test_devregs.elf \
          addr64/test_badvaddr.elf
 
@@ -214,6 +215,13 @@ cache/test_l2_evict.elf: cache/test_l2_evict.S $(STARTUP) $(COMMON)/sim.h $(COMM
 cache/test_uc_wb_alias.elf: cache/test_uc_wb_alias.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_uc_wb_alias.S -o cache/test_uc_wb_alias.o
 	$(LD) $(LDFLAGS) $(STARTUP) cache/test_uc_wb_alias.o -o $@
+
+# VIPT synonym single-copy.  Only MEANINGFUL at LG_L1D_NUM_SETS > 8: at <=4KB both
+# VAs pick the same set and it passes trivially.  See the header for the three
+# configurations it is meant to distinguish.
+cache/test_l1_synonym.elf: cache/test_l1_synonym.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l1_synonym.S -o cache/test_l1_synonym.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_l1_synonym.o -o $@
 
 # Code-coherence tests run under the co-sim checker (RTL must match the
 # coherent interpreter). inval_nowb is RTL-only (-c 0): the coherent interp
