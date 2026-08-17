@@ -59,7 +59,15 @@
 `define GBL_HIST_LEN 64
 
 //page size
-`define LG_PG_SZ 12
+/* Overridable like every other geometry knob.  The formal aliasing config shrinks
+ * the PAGE alongside the caches: what creates a VIPT synonym is the cache being
+ * LARGER than a page, so scaling both down preserves that relationship while
+ * keeping the state space small enough for PDR.  At the default 4KB page a formal
+ * L1D small enough to model has zero alias bits and any synonym property would
+ * pass vacuously. */
+`ifndef LG_PG_SZ
+ `define LG_PG_SZ 12
+`endif
 
 `define LG_PRF_ENTRIES 7
 
@@ -169,6 +177,30 @@
 `endif
 
 
+
+/* ---- VIPT alias (synonym) bits -------------------------------------------------
+ * A primary cache indexed with the VIRTUAL address but tagged with the PHYSICAL one
+ * aliases as soon as it exceeds a page: index bits above LG_PG_SZ are virtual, so
+ * the same line can sit in any of 2^ALIAS_BITS sets depending on which VA reached
+ * it.  These are the bits the L2 must remember to name WHICH primary set holds a
+ * line -- R10000 calls the field PIdx ("locate subset lines in the primary
+ * caches"), and l2.sv's l1_mem_req_from_l1i comment already anticipated needing
+ * them once the L1s grew past 4KB.
+ *
+ * Zero at <= page size, where the index is entirely physical and no synonym exists.
+ * Shared here rather than recomputed per module so l1d/l1i/l2/core_l1d_l1i cannot
+ * disagree about the width of a signal they pass between them. */
+`define L1D_ALIAS_BITS ((`LG_L1D_CL_LEN + `LG_L1D_NUM_SETS) > `LG_PG_SZ ? \
+                        (`LG_L1D_CL_LEN + `LG_L1D_NUM_SETS) - `LG_PG_SZ : 0)
+`define L1I_ALIAS_BITS ((`LG_L1D_CL_LEN + `LG_L1I_NUM_SETS) > `LG_PG_SZ ? \
+                        (`LG_L1D_CL_LEN + `LG_L1I_NUM_SETS) - `LG_PG_SZ : 0)
+/* Width of the PIdx carried on the L1<->L2 request and back-invalidate channels.
+ * The wider of the two caches wins, and the narrower zero-extends into it.  Floored
+ * at 1 because a zero-width signal is illegal -- at <= page size the field is
+ * present but always 0, so every compare matches and the mechanism is inert, which
+ * is exactly right when no synonym can exist. */
+`define PIDX_W ((`L1D_ALIAS_BITS > `L1I_ALIAS_BITS ? `L1D_ALIAS_BITS : `L1I_ALIAS_BITS) > 0 ? \
+                (`L1D_ALIAS_BITS > `L1I_ALIAS_BITS ? `L1D_ALIAS_BITS : `L1I_ALIAS_BITS) : 1)
 
 `define M_WIDTH (1 << `LG_M_WIDTH)
 

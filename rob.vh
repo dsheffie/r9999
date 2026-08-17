@@ -89,6 +89,11 @@ typedef struct packed {
 
 typedef struct packed {
    logic [(`M_WIDTH-1):0] addr;
+   /* VIPT alias (synonym) bits of the VIRTUAL address, carried separately because
+    * `addr` is REMAPPED to the physical address for the L2/DRAM request and so loses
+    * them.  A cache larger than a page indexes with these; the tag stays physical.
+    * Zero-width is illegal, so at <= page size the field is present and always 0. */
+   logic [`PIDX_W-1:0] va_alias;
    logic 	is_store;
    logic	is_atomic;
    mem_op_t op;
