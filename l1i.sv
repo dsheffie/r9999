@@ -1382,6 +1382,77 @@ endfunction
       .rd_data1(r_pht_update_out)
       );
          
+`ifdef L1I_ALIAS_CHECK
+   /* L1I ALIAS-INVALIDATE DETECTOR (sim only) -- task #84.
+    *
+    * The L1I is VIPT exactly like the L1D: it FILLS at r_miss_pc (virtual) and is
+    * INVALIDATED at {inval_pidx, addr}, where inval_pidx is whatever the L2 recorded
+    * when the line was fetched.  If those ever disagree the probe clears the wrong set
+    * and a STALE INSTRUCTION LINE survives -- which would let the CPU execute old code
+    * with no data-side symptom at all, and is invisible to the L1D single-copy check.
+    *
+    * This is the motivating suspicion: IRIX builds its TLB-refill handler at runtime,
+    * copies it to 0x80000000 and flushes the I-cache, and the failing run was observed
+    * executing at 0x8000021c (the refill vector) doing an anomalous store into the
+    * page table.
+    *
+    * Same shape as L1D_SINGLE_COPY_CHECK: shadow the tag/valid writes, and on each
+    * invalidate ask whether the line is resident in a set OTHER than the one probed. */
+   localparam L1IC_SETS = 1 << `LG_L1I_NUM_SETS;
+   logic [N_TAG_BITS-1:0] r_l1ic_tag [L1IC_SETS-1:0];
+   logic [L1IC_SETS-1:0]  r_l1ic_val;
+   logic [31:0] 	  r_l1ic_inv, r_l1ic_missed;
+   wire [N_TAG_BITS-1:0]  w_l1ic_itag = inval_addr[`PA_WIDTH-1:TAG_LSB];
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_l1ic_val <= {L1IC_SETS{1'b0}};
+	     r_l1ic_inv <= 32'd0;
+	     r_l1ic_missed <= 32'd0;
+	  end
+	else
+	  begin
+	     if(w_do_inval & (`L1I_ALIAS_BITS > 0))
+	       begin
+		  r_l1ic_inv <= r_l1ic_inv + 32'd1;
+		  for(int a = 0; a < (1 << `L1I_ALIAS_BITS); a = a + 1)
+		    begin
+		       automatic logic [`LG_L1I_NUM_SETS-1:0] cand =
+			 {a[`L1I_ALIAS_BITS-1:0], r_inval_idx[`LG_PG_SZ-IDX_START-1:0]};
+		       if((cand != r_inval_idx) && r_l1ic_val[cand] && (r_l1ic_tag[cand] == w_l1ic_itag) &&
+			  !(r_l1ic_val[r_inval_idx] && (r_l1ic_tag[r_inval_idx] == w_l1ic_itag)))
+			 begin
+			    r_l1ic_missed <= r_l1ic_missed + 32'd1;
+			    if(r_l1ic_missed < 32'd20)
+			      begin
+				 $display("[l1imiss] cyc=%0d pa=%x probed_set=%0d resident_set=%0d tag=%x",
+					  r_cycle, inval_addr, r_inval_idx, cand, w_l1ic_itag);
+			      end
+			 end
+		    end // for
+	       end
+	     /* shadow update AFTER the check */
+	     if(mem_rsp_valid)
+	       begin
+		  r_l1ic_tag[r_miss_pc[IDX_STOP-1:IDX_START]] <= r_mem_req_addr[`PA_WIDTH-1:TAG_LSB];
+	       end
+	     if(t_wr_valid_ram_en)
+	       begin
+		  r_l1ic_val[t_valid_ram_idx] <= t_valid_ram_value;
+	       end
+	  end // else: !if(reset)
+     end // always_ff
+
+   always_ff@(negedge clk)
+     begin
+	if((r_cycle % 20000000) == 20000000-1)
+	  begin
+	     $display("[l1ic] cyc=%0d invalidates=%0d alias_missed=%0d", r_cycle, r_l1ic_inv, r_l1ic_missed);
+	  end
+     end // always_ff
+`endif
+
    ram1r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1I_NUM_SETS))
    valid_array (
 	   .clk(clk),

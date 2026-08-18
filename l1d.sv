@@ -31,6 +31,13 @@ import "DPI-C" function void wr_log(input longint pc, input int rob_ptr,
 				    input longint unsigned data, int is_atomic);
 // L1D->L2 writeback watch: report each dirty-line writeback so henry_tb can tell whether
 // the L1D hands L2 a clean or already-corrupted cache line (vs the L2->DRAM store DESCWATCH sees).
+/* Lost-writeback detector (henry_tb, env LOSTWB): same event as l1d_wb_log but it
+ * also carries the OPCODE, because only the data-carrying requests (MEM_SW/SD/WB)
+ * may update the shadow -- MEM_INVL has no line data and would poison it. */
+import "DPI-C" function void l1d_wb_track(input longint unsigned pa,
+					  input longint unsigned lo,
+					  input longint unsigned hi,
+					  input int op);
 import "DPI-C" function void l1d_wb_log(input longint unsigned pa,
 					input longint unsigned data_lo,
 					input longint unsigned data_hi);
@@ -422,6 +429,14 @@ endfunction
     * invalidate.  Generate-guarded: at <= page size there are no alias bits and
     * the concatenation below would be an illegal zero-width part-select. */
    wire [`LG_L1D_NUM_SETS-1:0] 	  w_snp_idx;
+`ifdef ENABLE_L2_PIDX
+   /* The PIdx form is only correct when the L2 actually MAINTAINS the PIdx rams.  The
+    * selection used to be on `L1D_ALIAS_BITS > 0` alone, so with PIdx DISABLED but the
+    * cache larger than a page, the probe still indexed with backinv_pidx -- a field the
+    * L2 never writes in that build.  Lines then sit at the PA-derived alias set (the
+    * replay converges there) while the probe reads set {0, offset}, so every probe whose
+    * PA alias bits are nonzero silently missed: measured 3786 wrong-set probes in a
+    * 64KB PA-replay IRIX soak, i.e. lost invalidates in the DEFAULT configuration. */
    generate
       if(`L1D_ALIAS_BITS > 0)
 	begin : snp_idx_pidx
@@ -433,6 +448,10 @@ endfunction
 	   assign w_snp_idx = r_snp_addr[IDX_STOP-1:IDX_START];
 	end
    endgenerate
+`else
+   /* No PIdx tracking: lines are physically indexed, so the PA names the set. */
+   assign w_snp_idx = r_snp_addr[IDX_STOP-1:IDX_START];
+`endif
    /* final port-2 address: the core always wins, the snoop takes what is left */
    wire [`LG_L1D_NUM_SETS-1:0] 	  w_p2_addr = t_p2_core ? t_cache_idx2 :
 					  (t_snp_want_p2 ? w_snp_idx : t_cache_idx2);
@@ -662,6 +681,41 @@ endfunction
 
    wire					 w_cacheable_mem_rsp_valid = (r_state == INJECT_RELOAD) & 
 					 mem_rsp_valid;
+`ifdef WBDBG
+   /* Is the response the L1D consumes as its FILL actually the WRITEBACK's ack?
+    * opcode 5'd7 is the full-line writeback (l2.sv DIRTY_STORE), and l2.sv:1606
+    * answers opcode 7 in the SAME cycle it accepts it.  If the L1D issues the
+    * victim writeback and reaches INJECT_RELOAD before that ack returns, the ack is
+    * indistinguishable from the fill it is waiting for.  Print state, the request
+    * opcode and the response together to see the ordering. */
+   always_ff@(posedge clk)
+     begin
+	if(!reset & (mem_req_valid | mem_rsp_valid))
+	  begin
+	     $display("[wb] cyc=%0d state=%0d req=%b op=%0d rsp=%b req_pa=%x stdata=%x rspdata=%x idx=%0d",
+		      r_cycle, r_state, mem_req_valid, mem_req_opcode, mem_rsp_valid,
+		      r_mem_req_addr, mem_req_store_data[31:0], mem_rsp_load_data[31:0],
+		      r_cache_idx);
+	  end
+     end // always_ff
+`endif
+`ifdef RSPDBG
+   /* THE COINCIDENCE UNDER TEST: a response arriving while this L1D has a fill
+    * outstanding (r_state == INJECT_RELOAD).  The L2's store fast path
+    * (l2.sv:1606) answers a store in the SAME cycle it is accepted, and
+    * mem_rsp_valid does not say WHICH request it answers -- so if that lands
+    * here, the fill consumes mem_rsp_load_data belonging to someone else.
+    * Printed in BOTH configs: if it never happens with the replay in place,
+    * VA indexing CREATES the overlap rather than exposing a pre-existing one. */
+   always_ff@(posedge clk)
+     begin
+	if(!reset & mem_rsp_valid & (r_state == INJECT_RELOAD))
+	  begin
+	     $display("[rsp] cyc=%0d INJECT_RELOAD + mem_rsp_valid  req_pa=%x data=%x",
+		      r_cycle, r_mem_req_addr, mem_rsp_load_data[31:0]);
+	  end
+     end // always_ff
+`endif
    
    always_ff@(posedge clk)
      begin
@@ -1019,6 +1073,23 @@ endfunction
 	end
    endgenerate
 
+`ifdef L1DBG
+   /* Port-2 completion for the watched page, using ONLY same-generation signals:
+    * r_req2 (the request), r_cache_idx2 (ITS index), t_hit_cache2 (ITS hit), and
+    * t_rsp_data2 (the data returned to the core).  An earlier version of this probe
+    * mixed r_req2 with core_mem_req's index and the outstanding miss's fill index --
+    * three different transactions on one line, which supports no conclusion. */
+   always_ff@(posedge clk)
+     begin
+	if(r_got_req2 & (w_mapped_addr[27:12] == 16'h0300))
+	  begin
+	     $display("[p2] cyc=%0d va=%x pa=%x st=%b set=%0d %s data=%x",
+		      r_cycle, r_req2.addr[31:0], w_mapped_addr, r_req2.is_store,
+		      r_cache_idx2, t_hit_cache2 ? "HIT " : "MISS", t_rsp_data2[31:0]);
+	  end
+     end // always_ff
+`endif
+
    mem_req_t t_remapped_req2;
    always_comb
      begin
@@ -1045,6 +1116,76 @@ endfunction
 	 * Keep the VA's alias bits here so the fill lands in the set the VA selects,
 	 * while addr stays physical for the L2 request and the tag. */
 	t_remapped_req2.va_alias = w_va_alias_bits;
+`ifdef TIGHTWATCH
+`ifndef TIGHT_LO
+ `define TIGHT_LO 270495100
+`endif
+`ifndef TIGHT_HI
+ `define TIGHT_HI 270495600
+`endif
+	/* Every L1D access in a tight window.  A TLB entry can remain cached and valid
+	 * long after the PTE behind it was corrupted -- the panic only fires when that
+	 * entry is evicted and refilled -- so the goal here is not to catch the
+	 * corrupting store but to learn WHICH ADDRESS the refill handler reads for the
+	 * failing translation.  That address is the PTE, and it is what L1D_WATCH_PA
+	 * should then follow for the whole run. */
+	if(r_got_req2 & (r_cycle > 32'd`TIGHT_LO) & (r_cycle < 32'd`TIGHT_HI))
+	  begin
+	     $display("[tight] cyc=%0d va=%x pa=%x st=%b data=%x",
+		      r_cycle, r_req2.addr[31:0], w_mapped_addr, r_req2.is_store,
+		      r_req2.data[31:0]);
+	  end
+`endif
+`ifdef KSEG2WATCH
+`ifndef KSEG2WATCH_LO
+ `define KSEG2WATCH_LO 255000000
+`endif
+`ifndef KSEG2WATCH_HI
+ `define KSEG2WATCH_HI 280000000
+`endif
+	/* kseg2 (0xc0000000..) is where IRIX keeps the kernel page table, and the panic
+	 * is `tlbmiss: invalid kptbl entry` at badv 0xffffffffc004a000.  Print the VA->PA
+	 * mapping and the store data for accesses in that region, windowed to the cycles
+	 * around the panic so the log stays finite.  The PA is what L1D_WATCH_PA needs,
+	 * and it cannot be derived from the VA without the TLB. */
+	if(r_got_req2 & (r_req2.addr[31:28] == 4'hc) &
+	   (r_cycle > 32'd`KSEG2WATCH_LO) & (r_cycle < 32'd`KSEG2WATCH_HI))
+	  begin
+	     $display("[kseg2] cyc=%0d va=%x pa=%x st=%b data=%x va_alias=%x",
+		      r_cycle, r_req2.addr[31:0], w_mapped_addr, r_req2.is_store,
+		      r_req2.data[31:0], w_va_alias_bits);
+	  end
+`endif
+`ifdef KPTBLWATCH
+	/* The panic is "invalid kptbl entry" and the kptbl page is PA 0x0838e000, which
+	 * the trace shows IRIX reaching through EIGHTEEN different kseg2 VAs with
+	 * differing alias bits -- the most aliased page in the boot.  Compare the LOAD
+	 * RESULT at that page between the replay and VA-indexed configs: same PA, same
+	 * access, different value localises the corruption exactly.
+	 *
+	 * Prints t_rsp_data2 (the load result), NOT r_req2.data -- that field is STORE
+	 * data and is zero for every load, which made an earlier kseg2 trace look like it
+	 * was reading zeros when it was simply printing the wrong field. */
+`ifndef KPTBLWATCH_LO
+ `define KPTBLWATCH_LO 250000000
+`endif
+`ifndef KPTBLWATCH_HI
+ `define KPTBLWATCH_HI 400000000
+`endif
+	/* WINDOWED.  Without this the print cap is consumed during early boot, when
+	 * this page is zeroed through an UNMAPPED VA at cyc ~1M, and the panic window
+	 * at ~272M is never reached -- the log looked full while containing nothing
+	 * relevant to the failure. */
+	if(r_got_req2 & (w_mapped_addr[35:12] == 24'h0838e) &
+	   (r_kptbl_prints < 32'd20000) &
+	   (r_cycle > 32'd`KPTBLWATCH_LO) & (r_cycle < 32'd`KPTBLWATCH_HI))
+	  begin
+	     $display("[kptbl] cyc=%0d va=%x pa=%x st=%b set=%0d %s ld=%x sd=%x",
+		      r_cycle, r_req2.addr[31:0], w_mapped_addr, r_req2.is_store,
+		      r_cache_idx2, t_hit_cache2 ? "HIT " : "MISS",
+		      t_rsp_data2[31:0], r_req2.data[31:0]);
+	  end
+`endif
 `ifdef ALIASWATCH
 	/* Print only accesses where the VA and PA index bits actually DIFFER -- i.e. a
 	 * real synonym.  If the wedge is preceded by none of these, the index value is
@@ -1258,6 +1399,39 @@ endfunction
    
    wire [N_MQ_ENTRIES-1:0] w_hit_busy_addrs2;
    wire [N_MQ_ENTRIES-1:0] w_addr_intersect;
+`ifdef L1D_VA_INDEX
+   /* SYNONYM ORDERING AT ACCEPT.  Under VA indexing two synonyms occupy DIFFERENT
+    * sets, so the full-index conflict check below cannot see them as one line, and
+    * the fall-through at the port-2 hit decision gives the younger access its OWN
+    * miss-queue entry.  Two entries for one physical line at two sets can never both
+    * be satisfied under single-copy: each fill back-invalidates the other's set and
+    * they thrash (measured -- forcing a miss here wedged the directed test outright).
+    *
+    * So the younger access must be REFUSED at accept, before a second entry exists.
+    * The PA is not translated yet at accept, but it does not need to be: index bits
+    * [IDX_PA_BITS-1:0] sit BELOW the page boundary and are therefore identical in the
+    * VA and the PA, so every synonym of an outstanding miss matches on them.  The
+    * compare is deliberately NOT qualified by the byte mask (w_addr_intersect): two
+    * synonyms touching disjoint bytes of one line have no DATA hazard but still have
+    * a PLACEMENT hazard, and letting them through re-opens the two-copy window.
+    *
+    * Cost is a conservative stall when an unrelated line shares those bits with a
+    * live entry -- IDX_PA_BITS bits per entry, so well under 1% in practice, and only
+    * in this configuration.  The refused access is simply retried by the core, which
+    * is how every other throttle on this accept condition already behaves. */
+   wire [N_MQ_ENTRIES-1:0] w_syn_busy_addrs2;
+   generate
+      for(genvar i = 0; i < N_MQ_ENTRIES; i=i+1)
+	begin
+	   assign w_syn_busy_addrs2[i] = r_mq_addr_valid[i] &
+					 (r_mq_addr[i][IDX_PA_BITS-1:0] ==
+					  core_mem_req.addr[IDX_START+IDX_PA_BITS-1:IDX_START]);
+	end
+   endgenerate
+   wire w_syn_stall = |w_syn_busy_addrs2;
+`else
+   wire w_syn_stall = 1'b0;
+`endif
    logic [N_MQ_ENTRIES-1:0] r_hit_busy_addrs2;
    logic 		   r_hit_busy_addr2;
 
@@ -1457,6 +1631,14 @@ endfunction
    always_comb
      begin
 	t_array_wr_addr = mem_rsp_valid ? w_fill_idx : r_cache_idx;
+`ifdef L1DBG
+	if(mem_rsp_valid & (r_mem_req_addr[27:12] == 16'h0300))
+	  begin
+	     $display("[l1fillwr] cyc=%0d pa=%x -> set %0d (va_alias=%x) data=%x",
+		      r_cycle, r_mem_req_addr, w_fill_idx, r_mem_req_va_alias,
+		      t_array_wr_data[31:0]);
+	  end
+`endif
 	t_array_wr_data = mem_rsp_valid ? mem_rsp_load_data : t_array_data;
 	t_array_wr_en = w_cacheable_mem_rsp_valid || t_wr_array;
      end
@@ -1898,6 +2080,233 @@ endfunction
       .rd_data0(r_valid_out),
       .rd_data1(r_valid_out2)
       );
+
+`ifdef KPTBLWATCH
+   logic [31:0] r_kptbl_prints;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_kptbl_prints <= 32'd0;
+	  end
+	else if(r_got_req2 & (w_mapped_addr[35:12] == 24'h0838e) &
+		(r_cycle > 32'd`KPTBLWATCH_LO) & (r_cycle < 32'd`KPTBLWATCH_HI))
+	  begin
+	     r_kptbl_prints <= r_kptbl_prints + 32'd1;
+	  end
+     end // always_ff
+`endif
+`ifdef L1D_SINGLE_COPY_CHECK
+   /* SINGLE-COPY INVARIANT CHECKER (sim only).
+    *
+    * The whole point of the R10000 PIdx is that ONE physical line is resident in at
+    * most ONE set of this cache.  Chasing that through symptoms (a stale value, an
+    * "invalid kptbl entry" panic 50M instructions later) is guesswork; this states the
+    * invariant directly and reports the exact cycle, PA and pair of sets that break it.
+    *
+    * Shadow, not a probe of the real arrays: dc_tag/dc_valid are RAMs, so an arbitrary
+    * set cannot be read combinationally.  The shadow tracks the same writes (tag at
+    * w_fill_idx on w_cacheable_mem_rsp_valid, valid at t_valid_wr_addr on
+    * t_write_valid_en) and is therefore only as good as those two hooks -- if a future
+    * path writes the arrays by another route the shadow silently drifts.
+    *
+    * The check runs on a FILL and reads the shadow BEFORE this cycle's update, i.e.
+    * "did a copy of this line already live in another alias set at the moment I
+    * installed one here".  Synonyms share the untranslated index bits, so the only
+    * candidates are the same low bits with a different alias field.
+    *
+    * MUST be positive-controlled: in the VA-indexed, PIdx-OFF configuration the
+    * directed test creates two copies by construction, so this HAS to fire there.  A
+    * silent checker is indistinguishable from a passing design. */
+   localparam SCC_SETS = 1 << `LG_L1D_NUM_SETS;
+   logic [N_TAG_BITS-1:0] r_scc_tag [SCC_SETS-1:0];
+   logic [SCC_SETS-1:0]   r_scc_val;
+   logic [31:0] 	  r_scc_viol;
+   wire [N_TAG_BITS-1:0]  w_scc_fill_tag = r_mem_req_addr[`PA_WIDTH-1:TAG_LSB];
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_scc_val <= {SCC_SETS{1'b0}};
+	     r_scc_viol <= 32'd0;
+	  end
+	else
+	  begin
+	     if(`L1D_ALIAS_BITS > 0)
+	       begin
+		  if(w_cacheable_mem_rsp_valid)
+		    begin
+		       for(int a = 0; a < (1 << `L1D_ALIAS_BITS); a = a + 1)
+			 begin
+			    /* {alias, low} -- same untranslated bits, different alias field */
+			    automatic logic [`LG_L1D_NUM_SETS-1:0] cand =
+			      {a[`L1D_ALIAS_BITS-1:0], w_fill_idx[IDX_PA_BITS-1:0]};
+			    if((cand != w_fill_idx) && r_scc_val[cand] &&
+			       (r_scc_tag[cand] == w_scc_fill_tag))
+			      begin
+				 r_scc_viol <= r_scc_viol + 32'd1;
+				 if(r_scc_viol < 32'd40)
+				   begin
+				      $display("[scc] VIOLATION cyc=%0d pa=%x fill_set=%0d other_set=%0d tag=%x",
+					       r_cycle, {w_scc_fill_tag, w_fill_idx[IDX_PA_BITS-1:0], {`LG_L1D_CL_LEN{1'b0}}},
+					       w_fill_idx, cand, w_scc_fill_tag);
+				   end
+			      end
+			 end // for
+		    end // if (w_cacheable_mem_rsp_valid)
+	       end // if (`L1D_ALIAS_BITS > 0)
+	     /* shadow update AFTER the check above */
+	     if(w_cacheable_mem_rsp_valid)
+	       begin
+		  r_scc_tag[w_fill_idx] <= w_scc_fill_tag;
+	       end
+	     if(t_write_valid_en)
+	       begin
+		  r_scc_val[t_valid_wr_addr] <= t_valid_value;
+	       end
+	  end // else: !if(reset)
+     end // always_ff
+
+   /* ---- BACK-INVALIDATE PROBE ALIAS-MISS DETECTOR ------------------------------
+    * THE goal mechanism.  A probe indexes w_snp_idx = {backinv_pidx, addr}, where the
+    * pidx is whatever the L2 recorded when the line was fetched.  If the L1D has since
+    * re-filled that physical line through a DIFFERENT VA (a synonym), the recorded
+    * pidx is STALE, the probe reads the wrong set, finds nothing, and reports held=0.
+    * The L2 then believes the L1D dropped the line while the L1D still holds it --
+    * possibly DIRTY.  Inclusion is broken and the store is lost on the next refill.
+    *
+    * This is invisible to every check so far: single-copy still holds (one copy, in a
+    * set nobody probed), and the CACHE-op / L1I detectors cover different paths.  It
+    * also explains bi_held0 = 99.75% of probes, which was assumed to be the documented
+    * presence over-approximation. */
+   logic [31:0] r_bip_total, r_bip_missed;
+   wire [N_TAG_BITS-1:0] w_bip_tag = r_snp_addr[`PA_WIDTH-1:TAG_LSB];
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_bip_total <= 32'd0;
+	     r_bip_missed <= 32'd0;
+	  end
+	else if(r_snp_pend & (`L1D_ALIAS_BITS > 0))
+	  begin
+	     r_bip_total <= r_bip_total + 32'd1;
+	     for(int a = 0; a < (1 << `L1D_ALIAS_BITS); a = a + 1)
+	       begin
+		  automatic logic [`LG_L1D_NUM_SETS-1:0] cand =
+		    {a[`L1D_ALIAS_BITS-1:0], w_snp_idx[IDX_PA_BITS-1:0]};
+		  if((cand != w_snp_idx) && r_scc_val[cand] && (r_scc_tag[cand] == w_bip_tag) &&
+		     !(r_scc_val[w_snp_idx] && (r_scc_tag[w_snp_idx] == w_bip_tag)))
+		    begin
+		       r_bip_missed <= r_bip_missed + 32'd1;
+		       if(r_bip_missed < 32'd20)
+			 begin
+			    $display("[bipmiss] cyc=%0d pa=%x probed_set=%0d resident_set=%0d tag=%x pidx=%x",
+				     r_cycle, r_snp_addr, w_snp_idx, cand, w_bip_tag, backinv_pidx);
+			 end
+		    end
+	       end // for
+	  end
+     end // always_ff
+
+   /* ---- CACHE-OP ALIAS MISS DETECTOR ------------------------------------------
+    * l1d.sv:749 documents the hole: a hit-type CACHE op derives its set from the
+    * PHYSICAL address (core.sv masks flush_cl_addr with 0x1fffffff), so under VA
+    * indexing it probes ONE set while the line may be resident in a different alias
+    * set.  The op then silently does nothing and a stale (possibly dirty) line
+    * survives -- which is invisible to the single-copy check above, because there is
+    * only ever ONE copy; it is just the wrong set.
+    *
+    * IRIX manages its caches with CACHE ops and maps the kernel page table through
+    * the u-area's FIXED VA (0xffffa000), which cannot be page-coloured, so its alias
+    * bits are unrelated to the PA's.  This counts how often an op probes a set that
+    * does not hold the line while another alias set does. */
+   logic [31:0] r_chop_total, r_chop_missed;
+   wire [N_TAG_BITS-1:0] w_chop_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_chop_total <= 32'd0;
+	     r_chop_missed <= 32'd0;
+	  end
+	else if(r_got_req & w_is_chop_r & (`L1D_ALIAS_BITS > 0))
+	  begin
+	     r_chop_total <= r_chop_total + 32'd1;
+	     for(int a = 0; a < (1 << `L1D_ALIAS_BITS); a = a + 1)
+	       begin
+		  automatic logic [`LG_L1D_NUM_SETS-1:0] cand =
+		    {a[`L1D_ALIAS_BITS-1:0], r_cache_idx[IDX_PA_BITS-1:0]};
+		  /* resident in ANOTHER set, and NOT in the one being probed */
+		  if((cand != r_cache_idx) && r_scc_val[cand] && (r_scc_tag[cand] == w_chop_tag) &&
+		     !(r_scc_val[r_cache_idx] && (r_scc_tag[r_cache_idx] == w_chop_tag)))
+		    begin
+		       r_chop_missed <= r_chop_missed + 32'd1;
+		       if(r_chop_missed < 32'd20)
+			 begin
+			    $display("[chopmiss] cyc=%0d pa=%x probed_set=%0d resident_set=%0d tag=%x op=%0d",
+				     r_cycle, r_req.addr[`PA_WIDTH-1:0], r_cache_idx, cand, w_chop_tag, r_req.op);
+			 end
+		    end
+	       end // for
+	  end
+     end // always_ff
+
+   /* The OTHER CACHE-op path, and the one l1d.sv:749 actually warns about: the
+    * FLUSH_CL funnel indexes with t_cache_idx = flush_cl_addr[IDX_STOP-1:IDX_START],
+    * and flush_cl_addr is PHYSICAL (core.sv masks it with 0x1fffffff).  The mem-pipe
+    * chop path above indexes via mq_idx() off r_req and came back clean, so this is
+    * the remaining candidate. */
+   logic [31:0] r_flcl_total, r_flcl_missed;
+   logic 	r_flcl_prev;
+   wire [N_TAG_BITS-1:0] w_flcl_tag = flush_cl_addr[`PA_WIDTH-1:TAG_LSB];
+   wire [`LG_L1D_NUM_SETS-1:0] w_flcl_set = flush_cl_addr[IDX_STOP-1:IDX_START];
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_flcl_total <= 32'd0;
+	     r_flcl_missed <= 32'd0;
+	     r_flcl_prev <= 1'b0;
+	  end
+	else
+	  begin
+	     r_flcl_prev <= (r_state == FLUSH_CL);
+	     /* entry edge only -- FLUSH_CL is held for several cycles */
+	     if((r_state == FLUSH_CL) & ~r_flcl_prev & (`L1D_ALIAS_BITS > 0))
+	       begin
+		  r_flcl_total <= r_flcl_total + 32'd1;
+		  for(int a = 0; a < (1 << `L1D_ALIAS_BITS); a = a + 1)
+		    begin
+		       automatic logic [`LG_L1D_NUM_SETS-1:0] cand =
+			 {a[`L1D_ALIAS_BITS-1:0], w_flcl_set[IDX_PA_BITS-1:0]};
+		       if((cand != w_flcl_set) && r_scc_val[cand] && (r_scc_tag[cand] == w_flcl_tag) &&
+			  !(r_scc_val[w_flcl_set] && (r_scc_tag[w_flcl_set] == w_flcl_tag)))
+			 begin
+			    r_flcl_missed <= r_flcl_missed + 32'd1;
+			    if(r_flcl_missed < 32'd20)
+			      begin
+				 $display("[flclmiss] cyc=%0d pa=%x probed_set=%0d resident_set=%0d tag=%x inval=%b",
+					  r_cycle, flush_cl_addr[`PA_WIDTH-1:0], w_flcl_set, cand,
+					  w_flcl_tag, flush_cl_inval);
+			      end
+			 end
+		    end // for
+	       end
+	  end
+     end // always_ff
+
+   always_ff@(negedge clk)
+     begin
+	if((r_cycle % 20000000) == 20000000-1)
+	  begin
+	     $display("[scc] cyc=%0d single_copy_violations=%0d chop_total=%0d chop_alias_missed=%0d flcl_total=%0d flcl_alias_missed=%0d bip_total=%0d bip_alias_missed=%0d",
+		      r_cycle, r_scc_viol, r_chop_total, r_chop_missed, r_flcl_total, r_flcl_missed,
+		      r_bip_total, r_bip_missed);
+	  end
+     end // always_ff
+`endif
 
    generate
       for(genvar i = 0; i < WORDS_PER_CL; i=i+1)
@@ -3007,6 +3416,25 @@ endfunction
 			    n_mem_req_opcode = MEM_SW;
 			    n_state = WAIT_INJECT_RELOAD;
 			    n_mem_req_valid = 1'b0;
+			    /* This is a victim WRITEBACK, and WAIT_INJECT_RELOAD issues it and then
+			     * drops straight into INJECT_RELOAD -- so the writeback's OWN ack
+			     * satisfies `if(mem_rsp_valid)` there, and w_cacheable_mem_rsp_valid
+			     * (= INJECT_RELOAD & mem_rsp_valid, which types nothing) writes the
+			     * array with mem_rsp_load_data.  A writeback ack carries NO line
+			     * (l2.sv hands data to an L1 only for opcode 4), so that data is
+			     * whatever was last on the bus.  Without inhibit_write,
+			     * t_valid_value = !r_inhibit_write marks that garbage VALID.
+			     *
+			     * The other three MEM_SW writeback sites all set this; this one was
+			     * missed.  INJECT_RELOAD clears it on the response, and r_reload_issue
+			     * then routes to HANDLE_RELOAD to issue the real MEM_LW fill.
+			     *
+			     * Measured (test_l1_synonym_remap.S phase 4): cyc 132226 req op=7 from
+			     * state 3, cyc 132245 rsp op=7 filled 0x300000 with 0x00389940 -- the
+			     * L1I's fetch of 0x101f0.  Latent until VA indexing: with the PA replay
+			     * both synonym VAs share one set, the store HITS, and this
+			     * write-back-first branch is never taken. */
+			    n_inhibit_write = 1'b1;
 			      end                                                             
 			    else
 			      begin
@@ -3125,7 +3553,23 @@ endfunction
 		  !t_got_miss && 
 		  !(mem_q_almost_full||mem_q_full) && 
 		  !t_got_rd_retry &&
+		  /* WRITE-PIPELINE RAW GUARD.  This blocks a load behind an in-flight write to
+		   * the same set.  The compare was on the FULL index, which under VA indexing a
+		   * SYNONYM walks straight past: the store drains to its VA's set while the load
+		   * indexes a different one, so they look unrelated even though they are the same
+		   * physical line.  Same bug class as the miss-queue ordering fixed via
+		   * w_syn_stall, in the one structure that check does not cover.
+		   *
+		   * Compare only bits BELOW the page boundary -- untranslated, hence identical in
+		   * the VA and the PA, so every synonym matches.  Costs a conservative stall when
+		   * an unrelated line shares those bits with the previous access. */
+`ifdef L1D_VA_INDEX
+		  !(r_cache_idx2_val && r_last_wr2 &&
+		    (r_cache_idx2[IDX_PA_BITS-1:0] ==
+		     core_mem_req.addr[IDX_START+IDX_PA_BITS-1:IDX_START]) && !core_mem_req.is_store) && 
+`else
 		  !(r_cache_idx2_val && r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) && 
+`endif
 		  !t_cm_block_stall &&
 		  w_uncachable_req &&
 		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) && 
@@ -3135,7 +3579,8 @@ endfunction
 		   * further evictions are produced.  Draining then needs only the
 		   * already-accepted fill to finish, after which this cache returns to
 		   * ACTIVE and can ack -- so this can throttle but never deadlock. */
-		  (!backinv_stall)
+		  (!backinv_stall) &&
+		  (!w_syn_stall)
 		  )
 	       begin
 		  //use 2nd read port
@@ -3547,8 +3992,13 @@ endfunction
      if(r_mem_req_valid & ~r_wbwatch_prev &          // rising edge of a new L1D->L2 request
 	((r_mem_req_opcode == MEM_WB)  | (r_mem_req_opcode == MEM_INVL) |
 	 (r_mem_req_opcode == MEM_SW)  | (r_mem_req_opcode == MEM_SD)))
-       l1d_wb_log({{(64-`PA_WIDTH){1'b0}}, r_mem_req_addr},
-		  r_mem_req_store_data[63:0], r_mem_req_store_data[127:64]);
+       begin
+	  l1d_wb_log({{(64-`PA_WIDTH){1'b0}}, r_mem_req_addr},
+		     r_mem_req_store_data[63:0], r_mem_req_store_data[127:64]);
+	  l1d_wb_track({{(64-`PA_WIDTH){1'b0}}, r_mem_req_addr},
+		       r_mem_req_store_data[63:0], r_mem_req_store_data[127:64],
+		       {27'd0, r_mem_req_opcode});
+       end
 `endif
 
 endmodule // l1d

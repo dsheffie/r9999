@@ -50,6 +50,7 @@ TESTS := hello/hello.elf \
          cache/test_l2_evict.elf \
          cache/test_uc_wb_alias.elf \
          cache/test_l1_synonym.elf \
+         cache/test_l1_synonym_remap.elf \
          devregs/test_devregs.elf \
          addr64/test_badvaddr.elf
 
@@ -222,6 +223,11 @@ cache/test_uc_wb_alias.elf: cache/test_uc_wb_alias.S $(STARTUP) $(COMMON)/sim.h 
 cache/test_l1_synonym.elf: cache/test_l1_synonym.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l1_synonym.S -o cache/test_l1_synonym.o
 	$(LD) $(LDFLAGS) $(STARTUP) cache/test_l1_synonym.o -o $@
+
+# synonym + remap + eviction -- the pattern IRIX actually exercises
+cache/test_l1_synonym_remap.elf: cache/test_l1_synonym_remap.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l1_synonym_remap.S -o cache/test_l1_synonym_remap.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_l1_synonym_remap.o -o $@
 
 # Code-coherence tests run under the co-sim checker (RTL must match the
 # coherent interpreter). inval_nowb is RTL-only (-c 0): the coherent interp

@@ -443,6 +443,13 @@ module core_l1d_l1i(clk,
    logic [L1D_CL_LEN_BITS-1:0] 		  l1i_mem_req_store_data;
    logic [4:0] 				  l1i_mem_req_opcode;
    logic 				  l1d_mem_rsp_valid, l1i_mem_rsp_valid;
+`ifdef ARBDBG
+   logic [31:0] r_cycle_ctr;
+   always_ff@(posedge clk)
+     begin
+	r_cycle_ctr <= reset ? 32'd0 : (r_cycle_ctr + 32'd1);
+     end
+`endif
    
    state_t r_state, n_state;
    logic 				  r_l1d_req, n_l1d_req;
@@ -487,6 +494,21 @@ module core_l1d_l1i(clk,
 	
 	l1d_mem_rsp_valid = 1'b0;
 	l1i_mem_rsp_valid = 1'b0;
+`ifdef ARBDBG
+	/* Request/response PAIRING at the arbiter.  It is strictly one-outstanding:
+	 * GNT_L1D/GNT_L1I hold until w_l1_mem_rsp_valid, then route by STATE.  So a
+	 * response routed to the wrong requester means either the L2 emitted a second
+	 * response, or two requests were in flight and they came back out of order.
+	 * Print the state, the ack and the response together so the pairing is visible
+	 * rather than inferred -- a fill of PA 0x300000 arrived carrying the data of
+	 * 0x000101f0, i.e. the L1I's instruction fetch landed in the L1D. */
+	if(w_l1_mem_req_ack | w_l1_mem_rsp_valid)
+	  begin
+	     $display("[arb] cyc=%0d state=%0d ack=%b rsp=%b addr=%x from_l1i=%b l1d_rsp=%b l1i_rsp=%b",
+		      r_cycle_ctr, r_state, w_l1_mem_req_ack, w_l1_mem_rsp_valid,
+		      t_l2_req_addr, (r_state == GNT_L1I), l1d_mem_rsp_valid, l1i_mem_rsp_valid);
+	  end
+`endif
 
 	case(r_state)
 	  IDLE:

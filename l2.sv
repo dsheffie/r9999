@@ -318,6 +318,25 @@ module l2(clk,
    wire [LG_L2_LINES-1:0] w_d0_wr_addr = w_snoop_merge_gnt ? w_snoop_ridx : t_idx;
    wire [127:0] 	  w_d0_wr_data = w_snoop_merge_gnt ? r_wb_data : t_d0;
    wire 		  w_d0_wr_en   = w_snoop_merge_gnt | t_wr_d0;
+`ifdef L2DBG
+   /* EVERY write to the L2 data array, with the index and the SOURCE.  The failing
+    * case is a fill of PA 0x300000 that returned another line's contents, so the
+    * question is which writer put foreign data at that index -- a merge landing at
+    * the wrong t_idx, or a fill/store writing the wrong place.  Printing the writer
+    * identity beats inferring it: the same array is written by the fill path, the
+    * store path, the BACKINV_WAIT merge and the snoop merge, and they use two
+    * different address sources (t_idx vs w_snoop_ridx). */
+   always_ff@(posedge clk)
+     begin
+	if(!reset & w_d0_wr_en)
+	  begin
+	     $display("[l2wr] cyc=%0d idx=%0d src=%s data=%x t_idx=%0d snoop_ridx=%0d addr=%x",
+		      r_cycle, w_d0_wr_addr,
+		      w_snoop_merge_gnt ? "SNOOPMERGE" : "t_wr_d0   ",
+		      w_d0_wr_data[31:0], t_idx, w_snoop_ridx, r_addr);
+	  end
+     end // always_ff
+`endif
    /* The snoop's invalidate needs the (singular) write port.  It may take it ONLY
     * when the main FSM is writing no metadata at all this cycle, so the snoop's
     * valid-clear and both presence-clears always land together -- a partial write
@@ -453,6 +472,91 @@ module l2(clk,
     * L1; an invalidate/evict is t_wr_valid with t_valid low. */
    wire 		w_l1_copy_made = n_rsp_valid & (r_opcode == 5'd4);
    wire 		w_line_dropped = t_wr_valid & ~t_valid;
+
+`ifdef DROPDBG
+   /* INCLUSION-BREAK DETECTOR.
+    * w_line_dropped clears BOTH presence bits (see t_wr_l1d_pres above). The eviction
+    * path back-invalidates first, but the uncached-hit and MEM_INVL paths in
+    * CHECK_VALID_AND_TAG just do `t_wr_valid=1; t_valid=0` -- so if an L1 still holds
+    * the line, its copy is ORPHANED: presence says "not held" while it is, which is the
+    * UNDER-approximation the design forbids ("a stale SET bit costs a redundant probe,
+    * never a missed one"). A later synonym request then HITS with pres=0, skips the
+    * alias check, and is granted a second copy -- the exact signature measured at 32KB
+    * (grant cyc=5538737 pa=00838e290 hit=1 pres_d=0 pidx_d=2 req_pidx=6 alias_d=0).
+    * Count drops that orphan a copy, by state. */
+   logic [31:0] r_drop_pres, r_drop_total;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_drop_pres <= 32'd0;
+	     r_drop_total <= 32'd0;
+	  end
+	else if(w_line_dropped)
+	  begin
+	     r_drop_total <= r_drop_total + 32'd1;
+	     /* Trace EVERY drop on the kptbl page, presence or not: the goal is to link the
+	      * drop that cleared presence to the line later double-granted
+	      * (pa=00838e290, granted at cyc 5538737 with pres_d=0 pidx_d=2 req_pidx=6). */
+	     if(r_addr[35:12] == 24'h0838e)
+	       begin
+		  $display("[drop-kptbl] cyc=%0d pa=%x state=%0d pres_d=%b pres_i=%b pidx_d=%x uncache=%b op=%0d",
+			   r_cycle, r_addr, r_state, w_l1d_pres, w_l1i_pres,
+			   w_l1d_pidx, r_is_uncache, r_opcode);
+	       end
+	     if(w_l1d_pres | w_l1i_pres)
+	       begin
+		  r_drop_pres <= r_drop_pres + 32'd1;
+		  if(r_drop_pres < 32'd20)
+		    begin
+		       $display("[drop-orphan] cyc=%0d pa=%x state=%0d pres_d=%b pres_i=%b pidx_d=%x uncache=%b op=%0d",
+				r_cycle, r_addr, r_state, w_l1d_pres, w_l1i_pres,
+				w_l1d_pidx, r_is_uncache, r_opcode);
+		    end
+	       end
+	  end
+     end // always_ff
+   always_ff@(negedge clk)
+     begin
+	if((r_cycle % 20000000) == 20000000-1)
+	  begin
+	     $display("[drop] cyc=%0d line_drops=%0d orphaning_a_copy=%0d", r_cycle, r_drop_total, r_drop_pres);
+	  end
+     end // always_ff
+`endif
+`ifdef GRANTDBG
+   /* Why did the L2 hand out a SECOND copy?  The L1D-side single-copy checker says it
+    * happens (4 times in 25M insns at 32KB, always on the kptbl page, always a pair of
+    * sets differing in the top alias bit) but cannot see the L2's reasoning.
+    *
+    * The conflict check is `w_alias_ok = (r_state==CHECK_VALID_AND_TAG) & w_hit`, so on
+    * an L2 MISS it does not run at all -- on a miss the presence/PIdx bits at that index
+    * describe the VICTIM, not the requested line.  Under inclusion the L1D must not hold
+    * a line the L2 missed on, so print enough at every grant to tell the two cases
+    * apart: a HIT whose conflict was somehow not detected, versus a MISS that granted
+    * blind while the L1D still held the line. */
+   /* Self-reporting: the first version filtered on r_addr and printed NOTHING, which is
+    * indistinguishable from "no grants happened".  Count every grant and print the first
+    * few unfiltered, so an empty filtered set can be told from an inert probe. */
+   logic [31:0] r_grant_n;
+   always_ff@(posedge clk)
+     begin
+	r_grant_n <= reset ? 32'd0 : (r_grant_n + (w_l1_copy_made ? 32'd1 : 32'd0));
+     end
+   always_ff@(negedge clk)
+     begin
+	if(w_l1_copy_made & ((r_addr[35:12] == 24'h0838e) | (r_grant_n < 32'd8)))
+	  begin
+	     $display("[grant] cyc=%0d pa=%x from_i=%b hit=%b state=%0d pres_d=%b pidx_d=%x req_pidx=%x alias_d=%b",
+		      r_cycle, r_addr, r_from_l1i, w_hit, r_state,
+		      w_l1d_pres, w_l1d_pidx, r_req_pidx, w_alias_d);
+	  end
+	if((r_cycle % 20000000) == 20000000-1)
+	  begin
+	     $display("[grant] cyc=%0d total_grants=%0d", r_cycle, r_grant_n);
+	  end
+     end // always_ff
+`endif
 
    always_comb
      begin
@@ -872,8 +976,10 @@ module l2(clk,
 	       begin
 		  r_bi_seq <= r_bi_seq + 32'd1;
 		  r_inflight_txn <= r_bi_seq;
+		  `ifdef BIDBG
 		  $display("[txn %0d] ISSUE   cyc=%0d addr=%x d=%b i=%b",
 			   r_bi_seq, r_cycle, n_backinv_addr, n_backinv_d, n_backinv_i);
+		  `endif
 	       end
 	     if(backinv_d_ack)
 	       begin
@@ -885,10 +991,12 @@ module l2(clk,
 		   * engine is sitting in WAIT_BI when the data arrives.  An ack landing
 		   * in any other state means nobody is waiting for it and the recovered
 		   * line has nowhere to go. */
+		  `ifdef BIDBG
 		  $display("[txn %0d] ACK     cyc=%0d addr=%x dirty=%b held=%b ev=%b snpstate=%0d wbpend=%b data=%x",
 			   r_inflight_txn, r_cycle, r_backinv_addr, backinv_d_dirty,
 			   backinv_d_held, r_backinv_ev, r_snoop_state, r_wb_pend,
 			   backinv_d_data[31:0]);
+		  `endif
 	       end
 	     if(t_snoop_merge_done)
 	       begin
@@ -896,15 +1004,19 @@ module l2(clk,
 		   * prints one, and without it following a value means joining MERGE
 		   * to its transaction's ACK by id -- a self-contained record is
 		   * greppable directly, which is the entire point of the id. */
+		  `ifdef BIDBG
 		  $display("[txn %0d] MERGE   cyc=%0d idx=%0d addr=%x data=%x",
 			   r_inflight_txn, r_cycle, w_snoop_ridx, r_snoop_addr,
 			   r_wb_data[31:0]);
+		  `endif
 	       end
 	     /* the eviction writeback: which transaction's data is actually leaving */
 	     if((r_state == CLEAN_RELOAD) & mem_rsp_valid & w_dirty & ~r_fill_held)
 	       begin
+		  `ifdef BIDBG
 		  $display("[txn %0d] WRITEBK cyc=%0d idx=%0d addr=%x data=%x",
 			   r_line_txn[t_idx], r_cycle, t_idx, {w_tag, t_idx, 4'd0}, w_d0[31:0]);
+		  `endif
 	       end
 `endif
 	     /* the divert in CLEAN_RELOAD is where the victim's writeback is issued;
@@ -944,8 +1056,10 @@ module l2(clk,
 	     if((r_snoop_state == SNOOP_WAIT_BI) & (n_snoop_state == SNOOP_IDLE) &
 		~t_snoop_merge_done & r_wb_pend)
 	       begin
+		  `ifdef BIDBG
 		  $display("[txn %0d] DROP    cyc=%0d addr=%x wb_pend=1 data=%x -- left WAIT_BI abandoning recovered dirty data",
 			   r_inflight_txn, r_cycle, r_snoop_addr, r_wb_data[31:0]);
+		  `endif
 	       end
 `endif
 	     r_n_waitbi_escape <= r_n_waitbi_escape +
@@ -1652,7 +1766,42 @@ module l2(clk,
 		     * DEADLOCKS on silicon (the wirepda class; henry_tb DRAM acks
 		     * instantly so sim missed it).  UNCACHE_WB_TURNAROUND acks when
 		     * r_opcode==MEM_INVL. */
+`ifdef ENABLE_L2_PIDX
+		    /* CACHE-OP ALIAS HOLE (l1d.sv:749).  A hit-type CACHE op derives its
+		     * L1D set from the address SOFTWARE named, so when software invalidates
+		     * a line through a different VA than the one it was filled with, the
+		     * L1D probes the wrong alias set, finds nothing, and its copy SURVIVES
+		     * the invalidate.  Measured on Linux (which does not page-colour):
+		     * chop_alias_missed=1715 with VA indexing, 0 with the PA replay; IRIX
+		     * never hit it because its CACHE ops name kseg0 addresses, where the VA
+		     * and PA alias bits agree.
+		     *
+		     * The L2 can fix what the L1D cannot see: it RECORDED the pidx at grant
+		     * time, so `w_alias_d` -- "an L1 holds this line at a pidx different
+		     * from the one the requester just sent" -- is precisely the missed case.
+		     * Reuse the read path's detour: probe at the RECORDED pidx, then re-run
+		     * this state (BACKINV_WAIT clears presence and sets r_bi_done, so the
+		     * second pass falls through to the ordinary invalidate below).
+		     *
+		     * ev=0 (DISCARD, do not recover): this is an INVALIDATE. Recovering the
+		     * L1D's line would write CPU data back over a DMA-in, which is the
+		     * corruption the "no WB -- DMA-in drop" path in l1d.sv exists to avoid.
+		     * Software asked for the line to be dropped; dropping it is correct even
+		     * though the L1D never found it. */
+		    if(w_alias_conflict & ~r_bi_done)
+		      begin
+			 n_backinv_addr = {w_tag, t_idx, 4'd0};
+			 n_backinv_d = w_alias_d;
+			 n_backinv_i = w_alias_i;
+			 n_backinv_pidx_d = w_l1d_pidx;
+			 n_backinv_pidx_i = w_l1i_pidx;
+			 n_backinv_ev = 1'b0;
+			 n_state = BACKINV_WAIT;
+		      end
+		    else if(w_hit)
+`else
 		    if(w_hit)
+`endif
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
 			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
@@ -1681,9 +1830,31 @@ module l2(clk,
 	       else if(r_opcode == MEM_WB)
 		 begin
 		    /* CACHE writeback-through: r_store_data is the latest (L1D dirty)
-		     * line. Write it straight to DRAM; if L2 also holds the line, drop
-		     * the now-stale L2 copy. Reuse UNCACHE_STORE to wait for the DRAM
-		     * ack, then ack the L1. */
+		     * line. Write it straight to DRAM; if L2 also holds the line, UPDATE
+		     * it in place. Reuse UNCACHE_STORE to wait for the DRAM ack, then ack
+		     * the L1.
+		     *
+		     * This used to DROP the L2 copy (t_wr_valid=1; t_valid=0), which is an
+		     * INCLUSION BREAK: a writeback is not an invalidate, so the L1D keeps
+		     * its copy, but t_valid=0 asserts w_line_dropped, which CLEARS BOTH
+		     * PRESENCE BITS (see t_wr_l1d_pres). The L1D copy is then orphaned --
+		     * presence says "not held" while it is held, the UNDER-approximation
+		     * the design forbids ("a stale SET bit costs a redundant probe, never
+		     * a missed one"). Because the PIdx RAM is only written on a grant, the
+		     * stale pidx survives, so every later synonym request HITS with
+		     * pres=0, skips `w_alias_d` (which is gated on w_l1d_pres), and is
+		     * handed a SECOND copy.
+		     *
+		     * Measured on IRIX at 32KB, line 00838e290:
+		     *   cyc 1051113 grant pidx=6            L1D holds set 1577
+		     *   cyc 3367974 drop  pres_d=1 pidx_d=2 op=26  <- presence cleared here
+		     *   cyc 5538737 grant pres_d=0 pidx_d=2 req_pidx=6 alias_d=0
+		     *   cyc 5538738 SINGLE-COPY VIOLATION fill_set=1577 other_set=553
+		     *
+		     * Keeping the line valid and CLEAN (the data is simultaneously written
+		     * through to DRAM) also removes the valid=0/dirty=1 state that the
+		     * eviction comment below documents as having clobbered a SCSI-DMA
+		     * descriptor -- MEM_WB no longer leaves dirty set without valid. */
 		    n_mem_req_store_data = r_store_data;
 		    n_addr = r_saveaddr;
 		    n_mem_opcode = 5'd7;
@@ -1691,7 +1862,10 @@ module l2(clk,
 		    n_mem_req = 1'b1;
 		    if(w_hit)
 		      begin
-			 t_wr_valid = 1'b1; t_valid = 1'b0;
+			 t_d0 = r_store_data;
+			 t_wr_d0 = 1'b1;
+			 t_wr_valid = 1'b1; t_valid = 1'b1;   /* stays resident: inclusion */
+			 t_wr_dirty = 1'b1; t_dirty = 1'b0;   /* clean: also going to DRAM */
 		      end
 		    n_state = UNCACHE_STORE;
 		 end
@@ -1730,6 +1904,10 @@ module l2(clk,
 `ifdef ALIASDBG
 			      $display("[serve] cyc=%0d idx=%0d data=%x bi_done=%b alias=%b",
 				       r_cycle, t_idx, w_d0[31:0], r_bi_done, w_alias_conflict);
+`endif
+`ifdef L2DBG
+			      $display("[l2rd] cyc=%0d idx=%0d data=%x addr=%x tag=%x hit=%b",
+				       r_cycle, t_idx, w_d0[31:0], r_addr, w_tag, w_hit);
 `endif
 			      n_rsp_data =  w_d0;
 			      n_state = IDLE;
@@ -2444,13 +2622,14 @@ module l2(clk,
 	  begin
 	     if(r_backinv_d != r_bid_prev)
 	       begin
-		  $display("[bi] cyc=%0d req %b->%b addr=%x", r_cycle, r_bid_prev,
-			   r_backinv_d, r_backinv_addr);
+		  $display("[bi] cyc=%0d req %b->%b addr=%x pidx_d=%x (recorded=%x, req=%x)",
+			   r_cycle, r_bid_prev, r_backinv_d, r_backinv_addr,
+			   r_backinv_pidx_d, w_l1d_pidx, r_req_pidx);
 	       end
 	     if(backinv_d_ack)
 	       begin
-		  $display("[bi] cyc=%0d ACK dirty=%b held=%b addr=%x", r_cycle,
-			   backinv_d_dirty, backinv_d_held, r_backinv_addr);
+		  $display("[bi] cyc=%0d ACK dirty=%b held=%b addr=%x pidx_d=%x", r_cycle,
+			   backinv_d_dirty, backinv_d_held, r_backinv_addr, r_backinv_pidx_d);
 	       end
 	     if(t_bq_push)
 	       begin
@@ -2462,6 +2641,11 @@ module l2(clk,
 `endif
 
 `ifdef VERILATOR
+/* ENABLE_L2_INCLUSION too: this watchdog reads w_bq_empty / r_backinv_* /
+ * r_wb_credits, which only EXIST under that define.  Guarded on VERILATOR alone
+ * it broke the DEFAULT (no-define) Verilator build outright -- every run in this
+ * work passed the inclusion defines, so nothing exercised the plain build. */
+`ifdef ENABLE_L2_INCLUSION
    /* WAIT_BI stall watchdog.  The state has exactly two exits -- merge (needs
     * w_wb_idx_match) and acked-clean (needs the bq drained) -- and a r_wb_pend
     * belonging to ANOTHER line blocks BOTH at once: the bq head is held while
@@ -2492,6 +2676,7 @@ module l2(clk,
 	       end
 	  end
      end // always_ff
+`endif
 `endif
 
 `ifdef FORMAL
