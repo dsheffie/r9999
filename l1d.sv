@@ -1428,7 +1428,12 @@ endfunction
 					  core_mem_req.addr[IDX_START+IDX_PA_BITS-1:IDX_START]);
 	end
    endgenerate
+`ifdef NO_SYN_STALL
+   /* bisect knob: defeat the accept-time synonym stall without changing anything else */
+   wire w_syn_stall = 1'b0;
+`else
    wire w_syn_stall = |w_syn_busy_addrs2;
+`endif
 `else
    wire w_syn_stall = 1'b0;
 `endif
@@ -2121,6 +2126,7 @@ endfunction
    localparam SCC_SETS = 1 << `LG_L1D_NUM_SETS;
    logic [N_TAG_BITS-1:0] r_scc_tag [SCC_SETS-1:0];
    logic [SCC_SETS-1:0]   r_scc_val;
+   logic [SCC_SETS-1:0]   r_scc_dty;   /* dirty shadow: a DISCARDED dirty alias is a LOST STORE */
    logic [31:0] 	  r_scc_viol;
    wire [N_TAG_BITS-1:0]  w_scc_fill_tag = r_mem_req_addr[`PA_WIDTH-1:TAG_LSB];
 
@@ -2129,6 +2135,7 @@ endfunction
 	if(reset)
 	  begin
 	     r_scc_val <= {SCC_SETS{1'b0}};
+	     r_scc_dty <= {SCC_SETS{1'b0}};
 	     r_scc_viol <= 32'd0;
 	  end
 	else
@@ -2165,7 +2172,55 @@ endfunction
 	       begin
 		  r_scc_val[t_valid_wr_addr] <= t_valid_value;
 	       end
+	     if(t_write_dirty_en)
+	       begin
+		  r_scc_dty[t_dirty_wr_addr] <= t_dirty_value;
+	       end
 	  end // else: !if(reset)
+     end // always_ff
+
+   /* ---- DID THE INVALIDATE ACTUALLY HAPPEN? ------------------------------------
+    * The `bip` detector above only asks whether a probe INDEXES the set holding the
+    * line. It never asks whether the line was REMOVED. That is the dangerous
+    * direction: if the L1D acks a back-invalidate while still holding the line, the L2
+    * believes it is gone, drops or refills it, and the L1D's copy -- possibly DIRTY --
+    * silently diverges from memory. Nothing else in this design checks it.
+    *
+    * Checked ONE CYCLE AFTER the ack, so the shadow's own update for this
+    * invalidate has committed and cannot race the read. */
+   logic 	  r_bia_chk;
+   logic [`LG_L1D_NUM_SETS-1:0] r_bia_idx;
+   logic [N_TAG_BITS-1:0]       r_bia_tag;
+   logic [`PA_WIDTH-1:0]        r_bia_addr;
+   logic [31:0] 		r_bia_total, r_bia_survived;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_bia_chk <= 1'b0;
+	     r_bia_total <= 32'd0;
+	     r_bia_survived <= 32'd0;
+	  end
+	else
+	  begin
+	     r_bia_chk  <= n_backinv_ack;
+	     r_bia_idx  <= w_snp_idx;
+	     r_bia_tag  <= r_snp_addr[`PA_WIDTH-1:TAG_LSB];
+	     r_bia_addr <= r_snp_addr;
+	     if(r_bia_chk)
+	       begin
+		  r_bia_total <= r_bia_total + 32'd1;
+		  if(r_scc_val[r_bia_idx] && (r_scc_tag[r_bia_idx] == r_bia_tag))
+		    begin
+		       r_bia_survived <= r_bia_survived + 32'd1;
+		       if(r_bia_survived < 32'd20)
+			 begin
+			    $display("[bi-SURVIVED] cyc=%0d pa=%x set=%0d tag=%x -- acked but STILL RESIDENT",
+				     r_cycle, r_bia_addr, r_bia_idx, r_bia_tag);
+			 end
+		    end
+	       end
+	  end
      end // always_ff
 
    /* ---- BACK-INVALIDATE PROBE ALIAS-MISS DETECTOR ------------------------------
@@ -2222,7 +2277,7 @@ endfunction
     * the u-area's FIXED VA (0xffffa000), which cannot be page-coloured, so its alias
     * bits are unrelated to the PA's.  This counts how often an op probes a set that
     * does not hold the line while another alias set does. */
-   logic [31:0] r_chop_total, r_chop_missed;
+   logic [31:0] r_chop_total, r_chop_missed, r_chop_lost;
    wire [N_TAG_BITS-1:0] w_chop_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
    always_ff@(posedge clk)
      begin
@@ -2230,6 +2285,7 @@ endfunction
 	  begin
 	     r_chop_total <= 32'd0;
 	     r_chop_missed <= 32'd0;
+	     r_chop_lost <= 32'd0;
 	  end
 	else if(r_got_req & w_is_chop_r & (`L1D_ALIAS_BITS > 0))
 	  begin
@@ -2243,10 +2299,25 @@ endfunction
 		     !(r_scc_val[r_cache_idx] && (r_scc_tag[r_cache_idx] == w_chop_tag)))
 		    begin
 		       r_chop_missed <= r_chop_missed + 32'd1;
+		       /* THE HARMFUL SUBSET.  A missed alias on a plain invalidate is
+			* recoverable -- the L2's MEM_INVL detour clears the right set
+			* afterwards.  But CHWBINV means write back AND invalidate, and the
+			* L1D forwards plain MEM_INVL (no WB) when it misses locally, so a
+			* DIRTY orphan is DISCARDED: a lost store, and precisely what a
+			* flush-before-DMA-out depends on. Count that case separately. */
+		       if(r_scc_dty[cand] & (r_req.op == MEM_CHWBINV))
+			 begin
+			    r_chop_lost <= r_chop_lost + 32'd1;
+			    if(r_chop_lost < 32'd20)
+			      begin
+				 $display("[chop-LOSTWB] cyc=%0d pa=%x probed_set=%0d resident_set=%0d DIRTY op=%0d",
+					  r_cycle, r_req.addr[`PA_WIDTH-1:0], r_cache_idx, cand, r_req.op);
+			      end
+			 end
 		       if(r_chop_missed < 32'd20)
 			 begin
-			    $display("[chopmiss] cyc=%0d pa=%x probed_set=%0d resident_set=%0d tag=%x op=%0d",
-				     r_cycle, r_req.addr[`PA_WIDTH-1:0], r_cache_idx, cand, w_chop_tag, r_req.op);
+			    $display("[chopmiss] cyc=%0d pa=%x probed_set=%0d resident_set=%0d tag=%x op=%0d dirty=%b",
+				     r_cycle, r_req.addr[`PA_WIDTH-1:0], r_cache_idx, cand, w_chop_tag, r_req.op, r_scc_dty[cand]);
 			 end
 		    end
 	       end // for
@@ -2301,9 +2372,9 @@ endfunction
      begin
 	if((r_cycle % 20000000) == 20000000-1)
 	  begin
-	     $display("[scc] cyc=%0d single_copy_violations=%0d chop_total=%0d chop_alias_missed=%0d flcl_total=%0d flcl_alias_missed=%0d bip_total=%0d bip_alias_missed=%0d",
-		      r_cycle, r_scc_viol, r_chop_total, r_chop_missed, r_flcl_total, r_flcl_missed,
-		      r_bip_total, r_bip_missed);
+	     $display("[scc] cyc=%0d single_copy_violations=%0d chop_total=%0d chop_alias_missed=%0d chop_lost_wb=%0d flcl_total=%0d flcl_alias_missed=%0d bip_total=%0d bip_alias_missed=%0d bi_acked=%0d bi_SURVIVED=%0d",
+		      r_cycle, r_scc_viol, r_chop_total, r_chop_missed, r_chop_lost, r_flcl_total, r_flcl_missed,
+		      r_bip_total, r_bip_missed, r_bia_total, r_bia_survived);
 	  end
      end // always_ff
 `endif
@@ -3563,13 +3634,17 @@ endfunction
 		   * Compare only bits BELOW the page boundary -- untranslated, hence identical in
 		   * the VA and the PA, so every synonym matches.  Costs a conservative stall when
 		   * an unrelated line shares those bits with the previous access. */
-`ifdef L1D_VA_INDEX
-		  !(r_cache_idx2_val && r_last_wr2 &&
-		    (r_cache_idx2[IDX_PA_BITS-1:0] ==
-		     core_mem_req.addr[IDX_START+IDX_PA_BITS-1:IDX_START]) && !core_mem_req.is_store) && 
-`else
+		  /* Full-index compare, deliberately.  A narrowed compare on only the
+		   * untranslated bits was tried here (by analogy to w_syn_stall, so a
+		   * SYNONYM could not walk past this write-pipeline RAW guard) and it
+		   * BROKE 32KB L1 / 256KB L2: IRIX panicked with `tlbmiss: invalid kptbl
+		   * entry` at ~18.7M retired, while the identical build with the narrowing
+		   * removed booted clean.  Bisected against the accept-stall, which was
+		   * exonerated (still panics with it disabled).  The narrowing only ever
+		   * made the guard match MORE, which is why it looked safe -- it was never
+		   * validated, and nothing measured ever required it. */
 		  !(r_cache_idx2_val && r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) && 
-`endif
+		  !(r_cache_idx2_val && r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) && 
 		  !t_cm_block_stall &&
 		  w_uncachable_req &&
 		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) && 

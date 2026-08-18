@@ -498,10 +498,14 @@ module l2(clk,
 	     /* Trace EVERY drop on the kptbl page, presence or not: the goal is to link the
 	      * drop that cleared presence to the line later double-granted
 	      * (pa=00838e290, granted at cyc 5538737 with pres_d=0 pidx_d=2 req_pidx=6). */
-	     if(r_addr[35:12] == 24'h0838e)
+	     /* Filter on the VICTIM's address {w_tag,t_idx}, NOT r_addr.  On an EVICTION
+	      * r_addr holds the INCOMING line, so an r_addr filter is blind to exactly the
+	      * drops that matter -- it reported ZERO drops on the kptbl page in a run that
+	      * was evicting it constantly. */
+	     if(({w_tag, t_idx, 4'd0} >> 12) == 24'h0838e)
 	       begin
-		  $display("[drop-kptbl] cyc=%0d pa=%x state=%0d pres_d=%b pres_i=%b pidx_d=%x uncache=%b op=%0d",
-			   r_cycle, r_addr, r_state, w_l1d_pres, w_l1i_pres,
+		  $display("[drop-kptbl] cyc=%0d victim_pa=%x in_pa=%x state=%0d pres_d=%b pres_i=%b pidx_d=%x uncache=%b op=%0d",
+			   r_cycle, {w_tag, t_idx, 4'd0}, r_addr, r_state, w_l1d_pres, w_l1i_pres,
 			   w_l1d_pidx, r_is_uncache, r_opcode);
 	       end
 	     if(w_l1d_pres | w_l1i_pres)
@@ -2391,9 +2395,19 @@ module l2(clk,
 	t_snoop_merge_done = 1'b0;
 	n_snoop_ack     = 1'b0;
 	t_snoop_backinv = 1'b0;
+`ifdef VERILATOR
+	/* These three are sim-only 64-bit STATISTICS counters, declared under
+	 * `ifdef VERILATOR -- but these always_comb defaults sat OUTSIDE that guard,
+	 * inside `ifdef ENABLE_L2_INCLUSION.  With inclusion ON and VERILATOR OFF (i.e.
+	 * SYNTHESIS) they were used but never declared, and Vivado rejected the netlist:
+	 *   ERROR: [Synth 8-36] 'n_snoop_hit' is not declared
+	 * The whole inclusive-L2 / PIdx feature set had only ever been built under
+	 * Verilator, so nothing caught it.  Same class as the w_bq_empty break in the
+	 * waitbi-stall watchdog. */
 	n_snoop_hit     = r_snoop_hit;
 	n_snoop_dirty   = r_snoop_dirty;
 	n_snoop_vld     = r_snoop_vld;
+`endif
 	case(r_snoop_state)
 	  SNOOP_IDLE:
 	    begin

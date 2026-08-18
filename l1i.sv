@@ -1401,7 +1401,7 @@ endfunction
    localparam L1IC_SETS = 1 << `LG_L1I_NUM_SETS;
    logic [N_TAG_BITS-1:0] r_l1ic_tag [L1IC_SETS-1:0];
    logic [L1IC_SETS-1:0]  r_l1ic_val;
-   logic [31:0] 	  r_l1ic_inv, r_l1ic_missed;
+   logic [31:0] 	  r_l1ic_inv, r_l1ic_missed, r_l1ic_dup;
    wire [N_TAG_BITS-1:0]  w_l1ic_itag = inval_addr[`PA_WIDTH-1:TAG_LSB];
    always_ff@(posedge clk)
      begin
@@ -1410,6 +1410,7 @@ endfunction
 	     r_l1ic_val <= {L1IC_SETS{1'b0}};
 	     r_l1ic_inv <= 32'd0;
 	     r_l1ic_missed <= 32'd0;
+	     r_l1ic_dup <= 32'd0;
 	  end
 	else
 	  begin
@@ -1432,6 +1433,31 @@ endfunction
 			 end
 		    end // for
 	       end
+	     /* L1I SINGLE-COPY.  The L1I is VIPT exactly like the L1D -- it fills at
+	      * r_miss_pc (VIRTUAL) -- so one physical instruction line can land in two
+	      * alias sets. A stale instruction copy needs no data-side symptom to wreck
+	      * the machine, and NOTHING checked this: the detector above only asks whether
+	      * an INVALIDATE probes the right set. Same shape as L1D_SINGLE_COPY_CHECK:
+	      * on a fill, is this line already resident in another alias set? */
+	     if(mem_rsp_valid & (`L1I_ALIAS_BITS > 0))
+	       begin
+		  for(int a = 0; a < (1 << `L1I_ALIAS_BITS); a = a + 1)
+		    begin
+		       automatic logic [`LG_L1I_NUM_SETS-1:0] cand =
+			 {a[`L1I_ALIAS_BITS-1:0], r_miss_pc[`LG_PG_SZ-1:IDX_START]};
+		       if((cand != r_miss_pc[IDX_STOP-1:IDX_START]) && r_l1ic_val[cand] &&
+			  (r_l1ic_tag[cand] == r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]))
+			 begin
+			    r_l1ic_dup <= r_l1ic_dup + 32'd1;
+			    if(r_l1ic_dup < 32'd20)
+			      begin
+				 $display("[l1i-DUP] cyc=%0d pa=%x fill_set=%0d other_set=%0d tag=%x",
+					  r_cycle, r_mem_req_addr, r_miss_pc[IDX_STOP-1:IDX_START],
+					  cand, r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]);
+			      end
+			 end
+		    end // for
+	       end
 	     /* shadow update AFTER the check */
 	     if(mem_rsp_valid)
 	       begin
@@ -1448,7 +1474,7 @@ endfunction
      begin
 	if((r_cycle % 20000000) == 20000000-1)
 	  begin
-	     $display("[l1ic] cyc=%0d invalidates=%0d alias_missed=%0d", r_cycle, r_l1ic_inv, r_l1ic_missed);
+	     $display("[l1ic] cyc=%0d invalidates=%0d alias_missed=%0d DUPLICATE_COPIES=%0d", r_cycle, r_l1ic_inv, r_l1ic_missed, r_l1ic_dup);
 	  end
      end // always_ff
 `endif
