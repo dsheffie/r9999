@@ -21,7 +21,6 @@ module l2(clk,
 	  l1_mem_req_addr,
 	  l1_mem_req_cacheable,
 	  l1_mem_req_from_l1i,
-	  l1_mem_req_pidx,
 	  l1_mem_req_mask,
 	  l1_mem_req_store_data,
 	  l1_mem_req_opcode,
@@ -53,13 +52,10 @@ module l2(clk,
 	  snoop_req_ack,
 	  // INCLUSIVE-L2 back-invalidate to the L1s (design C: dirty data rides the ack)
 	  backinv_addr,
-	  backinv_d_pidx,
-	  backinv_i_pidx,
 	  backinv_stall,
 	  backinv_d_req,
 	  backinv_d_ack,
 	  backinv_d_dirty,
-	  backinv_d_held,
 	  backinv_d_data,
 	  backinv_i_req,
 	  backinv_i_ack
@@ -85,11 +81,6 @@ module l2(clk,
     * the R10000 SCTag PIdx field ("locate subset lines in the primary caches"), except
     * our 4KB direct-mapped L1s need no index bits -- only the D-vs-I selector. */
    input logic 	l1_mem_req_from_l1i;
-   /* PIdx: WHICH set of the requesting primary cache this line will land in -- the
-    * index bits above the page offset, which are VIRTUAL and so cannot be recovered
-    * from the physical address the L2 holds.  Zero-width is illegal, so at <= page
-    * size the field is present, always 0, and every compare matches (inert). */
-   input logic [`PIDX_W-1:0] l1_mem_req_pidx;
    input logic	      l1_mem_req_cacheable;
 `ifdef ENABLE_L2_NOCACHE
    /* EXPERIMENT: entirely disable the L2 as a cache.  Route cacheable DATA ops
@@ -139,34 +130,19 @@ module l2(clk,
     * L1D-resident (measured) survive.  The L1s return dirty data ON THE ACK and
     * issue no request, so no loop can form with this pending eviction. */
    output logic [`PA_WIDTH-1:0] backinv_addr;
-   /* Which primary-cache SET to probe.  The L1 cannot derive this from backinv_addr
-    * once it indexes by VA: the physical alias bits name a different set than the
-    * one the line actually occupies, so a PA-derived probe reads the wrong set,
-    * finds nothing, and acks clean while a dirty line survives. */
-   output logic [`PIDX_W-1:0] backinv_d_pidx;
-   output logic [`PIDX_W-1:0] backinv_i_pidx;
    output logic        backinv_stall;    /* bq near full: hold off new core requests */
    output logic        backinv_d_req;
    input logic 	       backinv_d_ack;
    input logic 	       backinv_d_dirty;
-   /* "the L1D actually held this line and has now dropped it".  Without it a clean
-    * ack is indistinguishable from a probe that found nothing, so presence could
-    * never be cleared safely. */
-   input logic 	       backinv_d_held;
    input logic [127:0] backinv_d_data;
    output logic        backinv_i_req;
    input logic 	       backinv_i_ack;
    logic 	       r_snoop_ack, n_snoop_ack;
    logic 	       t_snoop_backinv;   /* snoop wants a back-invalidate enqueued */
-   logic [`PIDX_W-1:0] t_bq_pidx_d, t_bq_pidx_i;
-   logic [`PIDX_W-1:0] r_backinv_pidx_d, n_backinv_pidx_d;
-   logic [`PIDX_W-1:0] r_backinv_pidx_i, n_backinv_pidx_i;
    logic 	       r_backinv_d, n_backinv_d, r_backinv_i, n_backinv_i;
    logic [`PA_WIDTH-1:0] r_backinv_addr, n_backinv_addr;
    logic [63:0]        r_backinv_clobber, n_backinv_clobber;
    assign backinv_d_req = r_backinv_d;
-   assign backinv_d_pidx = r_backinv_pidx_d;
-   assign backinv_i_pidx = r_backinv_pidx_i;
    assign backinv_i_req = r_backinv_i;
    assign backinv_addr = r_backinv_addr;
    assign snoop_req_ack = r_snoop_ack;
@@ -192,9 +168,6 @@ module l2(clk,
    
    logic [4:0] 		   n_opcode, r_opcode;
    logic 		   n_from_l1i, r_from_l1i;
-   /* the requesting L1's alias bits, registered in lockstep with r_from_l1i so
-    * they are still valid when the fill response finally writes the PIdx ram. */
-   logic [`PIDX_W-1:0] 	   n_req_pidx, r_req_pidx;
 
    logic 		   r_mem_req, n_mem_req;
    logic [4:0] 		   r_mem_opcode, n_mem_opcode;
@@ -250,14 +223,7 @@ module l2(clk,
 				     UNCACHE_WB_TURNAROUND = 'd14,   /* was GAMEOVER (dead): mem_req gap after WB drain */
 				     UNCACHE_WB_DRAIN = 'd15,
 				     BACKINV_WAIT = 'd16,
-				     BACKINV_WB = 'd17,
-				     /* victim went dirty AFTER the clean-vs-dirty decision was
-				      * taken (a snoop merge landing in the 2-cycle metadata
-				      * window).  Write it back, THEN commit the held fill. */
-				     RELOAD_WB = 'd18,
-				     /* one settle cycle after a back-invalidate MERGE, so the
-				      * re-read sees it -- see BACKINV_SETTLE below */
-				     BACKINV_SETTLE = 'd19
+				     BACKINV_WB = 'd17
 				     } state_t;
 
    state_t n_state, r_state;
@@ -289,7 +255,6 @@ module l2(clk,
    assign mem_req_valid = r_mem_req;
    assign mem_req_opcode = r_mem_opcode;
    assign mem_req_store_data = r_mem_req_store_data;
-
    assign mem_req_mask = r_store_mask;
    
    assign l1_mem_rsp_valid = r_rsp_valid;
@@ -306,7 +271,6 @@ module l2(clk,
    wire [LG_L2_LINES-1:0] w_snoop_ridx;      /* port-1 read index */
    wire [TAG_BITS-1:0] 	  w_s_tag;
    wire 		  w_s_valid, w_s_dirty, w_s_l1d_pres, w_s_l1i_pres;
-   wire [`PIDX_W-1:0] 	  w_l1d_pidx, w_l1i_pidx, w_s_l1d_pidx, w_s_l1i_pidx;
    wire [127:0] 	  w_s_d0;
    logic 		  t_snoop_merge;            /* write the recovered line into the L2 */
    logic 		  t_snoop_merge_done;       /* ... and retire r_wb_pend with it */
@@ -319,25 +283,6 @@ module l2(clk,
    wire [LG_L2_LINES-1:0] w_d0_wr_addr = w_snoop_merge_gnt ? w_snoop_ridx : t_idx;
    wire [127:0] 	  w_d0_wr_data = w_snoop_merge_gnt ? r_wb_data : t_d0;
    wire 		  w_d0_wr_en   = w_snoop_merge_gnt | t_wr_d0;
-`ifdef L2DBG
-   /* EVERY write to the L2 data array, with the index and the SOURCE.  The failing
-    * case is a fill of PA 0x300000 that returned another line's contents, so the
-    * question is which writer put foreign data at that index -- a merge landing at
-    * the wrong t_idx, or a fill/store writing the wrong place.  Printing the writer
-    * identity beats inferring it: the same array is written by the fill path, the
-    * store path, the BACKINV_WAIT merge and the snoop merge, and they use two
-    * different address sources (t_idx vs w_snoop_ridx). */
-   always_ff@(posedge clk)
-     begin
-	if(!reset & w_d0_wr_en)
-	  begin
-	     $display("[l2wr] cyc=%0d idx=%0d src=%s data=%x t_idx=%0d snoop_ridx=%0d addr=%x",
-		      r_cycle, w_d0_wr_addr,
-		      w_snoop_merge_gnt ? "SNOOPMERGE" : "t_wr_d0   ",
-		      w_d0_wr_data[31:0], t_idx, w_snoop_ridx, r_addr);
-	  end
-     end // always_ff
-`endif
    /* The snoop's invalidate needs the (singular) write port.  It may take it ONLY
     * when the main FSM is writing no metadata at all this cycle, so the snoop's
     * valid-clear and both presence-clears always land together -- a partial write
@@ -360,24 +305,9 @@ module l2(clk,
    wire [LG_L2_LINES-1:0] w_dirty_wr_addr = (w_snoop_wr_gnt & t_snoop_merge) ? w_snoop_ridx : t_idx;
    wire 		  w_dirty_wr_data = (w_snoop_wr_gnt & t_snoop_merge) ? 1'b1 : t_dirty;
    wire 		  w_dirty_wr_en   = (w_snoop_wr_gnt & t_snoop_merge) | t_wr_dirty;
-   /* Clear l1d_present as soon as the L1D confirms it dropped the line.  Previously
-    * the ONLY t_pres_clr was in BACKINV_WAIT -- the inline eviction path, which is
-    * dead (w_evict_backinv = 1'b0) -- so the snoop path never cleared presence at
-    * all.  The bit stayed set, every later snoop of that line saw presd=1 and queued
-    * another back-invalidate, and those spurious probes landed exactly in the window
-    * where the merge was trying to complete.
-    *
-    * Best-effort: it yields to any main-FSM or snoop presence write rather than
-    * stomping one.  That is safe because presence is an OVER-approximation -- a
-    * stale set bit costs a redundant probe, never a missed one -- so a dropped clear
-    * degrades to today's behaviour instead of breaking coherence. */
-   wire 		  w_bi_pres_clr = backinv_d_ack & backinv_d_held &
-					  ~t_wr_l1d_pres & ~w_snoop_wr_gnt;
-   wire [LG_L2_LINES-1:0] w_bi_pres_idx = r_backinv_addr[LG_L2_LINES+3:4];
-   wire [LG_L2_LINES-1:0] w_presd_wr_addr = w_bi_pres_clr ? w_bi_pres_idx :
-					    (w_snoop_wr_gnt ? w_snoop_ridx : t_idx);
-   wire 		  w_presd_wr_data = (w_bi_pres_clr | w_snoop_wr_gnt) ? 1'b0 : t_l1d_pres_val;
-   wire 		  w_presd_wr_en   = w_bi_pres_clr | w_snoop_wr_gnt | t_wr_l1d_pres;
+   wire [LG_L2_LINES-1:0] w_presd_wr_addr = w_snoop_wr_gnt ? w_snoop_ridx : t_idx;
+   wire 		  w_presd_wr_data = w_snoop_wr_gnt ? 1'b0 : t_l1d_pres_val;
+   wire 		  w_presd_wr_en   = w_snoop_wr_gnt | t_wr_l1d_pres;
    wire [LG_L2_LINES-1:0] w_presi_wr_addr = w_snoop_wr_gnt ? w_snoop_ridx : t_idx;
    wire 		  w_presi_wr_data = w_snoop_wr_gnt ? 1'b0 : t_l1i_pres_val;
    wire 		  w_presi_wr_en   = w_snoop_wr_gnt | t_wr_l1i_pres;
@@ -449,22 +379,6 @@ module l2(clk,
      (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_presd_wr_addr),
       .wr_data(w_presd_wr_data), .wr_en(w_presd_wr_en), .rd_data0(w_l1d_pres), .rd_data1(w_s_l1d_pres));
 
-   /* PIdx storage, one entry per L2 line, alongside the presence bit it qualifies:
-    * "the L1D holds this line" (l1d_pres_ram) and "in THIS set" (here).  Written on
-    * exactly the event that hands a copy to an L1 -- w_l1_copy_made -- with the
-    * requesting L1's alias bits.  Same ram2r1w_fwd shape as the presence bits so the
-    * read ports line up: port 0 on t_idx for the main FSM, port 1 on w_snoop_ridx
-    * for the snoop engine. */
-   ram2r1w_fwd #(.WIDTH(`PIDX_W), .LG_DEPTH(LG_L2_LINES)) l1d_pidx_ram
-     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(t_idx),
-      .wr_data(r_req_pidx), .wr_en(w_l1_copy_made & ~r_from_l1i),
-      .rd_data0(w_l1d_pidx), .rd_data1(w_s_l1d_pidx));
-
-   ram2r1w_fwd #(.WIDTH(`PIDX_W), .LG_DEPTH(LG_L2_LINES)) l1i_pidx_ram
-     (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(t_idx),
-      .wr_data(r_req_pidx), .wr_en(w_l1_copy_made & r_from_l1i),
-      .rd_data0(w_l1i_pidx), .rd_data1(w_s_l1i_pidx));
-
    ram2r1w_fwd #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) l1i_pres_ram
      (.clk(clk), .rd_addr0(t_idx), .rd_addr1(w_snoop_ridx), .wr_addr(w_presi_wr_addr),
       .wr_data(w_presi_wr_data), .wr_en(w_presi_wr_en), .rd_data0(w_l1i_pres), .rd_data1(w_s_l1i_pres));
@@ -473,95 +387,6 @@ module l2(clk,
     * L1; an invalidate/evict is t_wr_valid with t_valid low. */
    wire 		w_l1_copy_made = n_rsp_valid & (r_opcode == 5'd4);
    wire 		w_line_dropped = t_wr_valid & ~t_valid;
-
-`ifdef DROPDBG
-   /* INCLUSION-BREAK DETECTOR.
-    * w_line_dropped clears BOTH presence bits (see t_wr_l1d_pres above). The eviction
-    * path back-invalidates first, but the uncached-hit and MEM_INVL paths in
-    * CHECK_VALID_AND_TAG just do `t_wr_valid=1; t_valid=0` -- so if an L1 still holds
-    * the line, its copy is ORPHANED: presence says "not held" while it is, which is the
-    * UNDER-approximation the design forbids ("a stale SET bit costs a redundant probe,
-    * never a missed one"). A later synonym request then HITS with pres=0, skips the
-    * alias check, and is granted a second copy -- the exact signature measured at 32KB
-    * (grant cyc=5538737 pa=00838e290 hit=1 pres_d=0 pidx_d=2 req_pidx=6 alias_d=0).
-    * Count drops that orphan a copy, by state. */
-   logic [31:0] r_drop_pres, r_drop_total;
-   always_ff@(posedge clk)
-     begin
-	if(reset)
-	  begin
-	     r_drop_pres <= 32'd0;
-	     r_drop_total <= 32'd0;
-	  end
-	else if(w_line_dropped)
-	  begin
-	     r_drop_total <= r_drop_total + 32'd1;
-	     /* Trace EVERY drop on the kptbl page, presence or not: the goal is to link the
-	      * drop that cleared presence to the line later double-granted
-	      * (pa=00838e290, granted at cyc 5538737 with pres_d=0 pidx_d=2 req_pidx=6). */
-	     /* Filter on the VICTIM's address {w_tag,t_idx}, NOT r_addr.  On an EVICTION
-	      * r_addr holds the INCOMING line, so an r_addr filter is blind to exactly the
-	      * drops that matter -- it reported ZERO drops on the kptbl page in a run that
-	      * was evicting it constantly. */
-	     if(({w_tag, t_idx, 4'd0} >> 12) == 24'h0838e)
-	       begin
-		  $display("[drop-kptbl] cyc=%0d victim_pa=%x in_pa=%x state=%0d pres_d=%b pres_i=%b pidx_d=%x uncache=%b op=%0d",
-			   r_cycle, {w_tag, t_idx, 4'd0}, r_addr, r_state, w_l1d_pres, w_l1i_pres,
-			   w_l1d_pidx, r_is_uncache, r_opcode);
-	       end
-	     if(w_l1d_pres | w_l1i_pres)
-	       begin
-		  r_drop_pres <= r_drop_pres + 32'd1;
-		  if(r_drop_pres < 32'd20)
-		    begin
-		       $display("[drop-orphan] cyc=%0d pa=%x state=%0d pres_d=%b pres_i=%b pidx_d=%x uncache=%b op=%0d",
-				r_cycle, r_addr, r_state, w_l1d_pres, w_l1i_pres,
-				w_l1d_pidx, r_is_uncache, r_opcode);
-		    end
-	       end
-	  end
-     end // always_ff
-   always_ff@(negedge clk)
-     begin
-	if((r_cycle % 20000000) == 20000000-1)
-	  begin
-	     $display("[drop] cyc=%0d line_drops=%0d orphaning_a_copy=%0d", r_cycle, r_drop_total, r_drop_pres);
-	  end
-     end // always_ff
-`endif
-`ifdef GRANTDBG
-   /* Why did the L2 hand out a SECOND copy?  The L1D-side single-copy checker says it
-    * happens (4 times in 25M insns at 32KB, always on the kptbl page, always a pair of
-    * sets differing in the top alias bit) but cannot see the L2's reasoning.
-    *
-    * The conflict check is `w_alias_ok = (r_state==CHECK_VALID_AND_TAG) & w_hit`, so on
-    * an L2 MISS it does not run at all -- on a miss the presence/PIdx bits at that index
-    * describe the VICTIM, not the requested line.  Under inclusion the L1D must not hold
-    * a line the L2 missed on, so print enough at every grant to tell the two cases
-    * apart: a HIT whose conflict was somehow not detected, versus a MISS that granted
-    * blind while the L1D still held the line. */
-   /* Self-reporting: the first version filtered on r_addr and printed NOTHING, which is
-    * indistinguishable from "no grants happened".  Count every grant and print the first
-    * few unfiltered, so an empty filtered set can be told from an inert probe. */
-   logic [31:0] r_grant_n;
-   always_ff@(posedge clk)
-     begin
-	r_grant_n <= reset ? 32'd0 : (r_grant_n + (w_l1_copy_made ? 32'd1 : 32'd0));
-     end
-   always_ff@(negedge clk)
-     begin
-	if(w_l1_copy_made & ((r_addr[35:12] == 24'h0838e) | (r_grant_n < 32'd8)))
-	  begin
-	     $display("[grant] cyc=%0d pa=%x from_i=%b hit=%b state=%0d pres_d=%b pidx_d=%x req_pidx=%x alias_d=%b",
-		      r_cycle, r_addr, r_from_l1i, w_hit, r_state,
-		      w_l1d_pres, w_l1d_pidx, r_req_pidx, w_alias_d);
-	  end
-	if((r_cycle % 20000000) == 20000000-1)
-	  begin
-	     $display("[grant] cyc=%0d total_grants=%0d", r_cycle, r_grant_n);
-	  end
-     end // always_ff
-`endif
 
    always_comb
      begin
@@ -576,24 +401,6 @@ module l2(clk,
  * declarations inside `ifdef ENABLE_L2_INCLUSION made a no-inclusion build fail to
  * compile.  Unused when inclusion is off. */
    logic               r_backinv_ev, n_backinv_ev;
-   /* The fill data is combinational off mem_rsp_load_data, so detouring to a
-    * writeback would lose it.  Latch it for the duration of the detour. */
-   logic [127:0]       r_fill_hold, n_fill_hold;
-   logic               r_fill_held, n_fill_held;
-   /* ---- recovered-dirty-data credits ----------------------------------------
-    * r_wb_pend/r_wb_addr/r_wb_data are a SINGLE holding slot shared by every
-    * back-invalidate.  Today the only thing preventing two in flight is the
-    * ~r_wb_pend term in the bq pop gate -- an implicit invariant with no way to
-    * tell whether it holds.  A credit makes it explicit AND makes a violation
-    * LOUD: a probe that can return dirty data must hold a credit, the credit is
-    * returned only when that data is consumed (merged) or declined (clean ack), and
-    * running out simply stops issuing.  If a credit is ever leaked the engine
-    * wedges instead of silently dropping a store -- a deadlock is findable in
-    * minutes, this bug took a day. */
-   localparam N_WB_CREDITS = 1;              /* one holding slot => one credit */
-   logic [3:0] 	       r_wb_credits, n_wb_credits;
-   logic 	       r_wb_credit_held, n_wb_credit_held;
-   integer 	       r_n_credit_stall, r_n_credit_bug;
    logic               r_wb_pend, n_wb_pend;
    logic [`PA_WIDTH-1:0] r_wb_addr, n_wb_addr;
    logic [127:0]       r_wb_data, n_wb_data;
@@ -685,10 +492,6 @@ module l2(clk,
    reg [`PA_WIDTH-1:0] r_bq_addr [(1<<LG_BQ)-1:0];
    reg [(1<<LG_BQ)-1:0] r_bq_d, r_bq_i;
    reg [(1<<LG_BQ)-1:0] r_bq_ev;   /* 1 = eviction: a dirty L1D line is the ONLY copy */
-   /* PIdx per CHANNEL: one line can sit in the L1D and the L1I at different sets
-    * (code read as data), so a single field would probe one of them wrongly. */
-   reg [`PIDX_W-1:0]   r_bq_pidx_d [(1<<LG_BQ)-1:0];
-   reg [`PIDX_W-1:0]   r_bq_pidx_i [(1<<LG_BQ)-1:0];
    reg [LG_BQ:0]       r_bq_head, n_bq_head, r_bq_tail, n_bq_tail;
    wire                w_bq_empty = (r_bq_head == r_bq_tail);
    wire                w_bq_full  = (r_bq_head[LG_BQ-1:0] == r_bq_tail[LG_BQ-1:0]) &
@@ -732,10 +535,6 @@ module l2(clk,
    logic               t_bq_d, t_bq_i, t_bq_ev;
    integer             r_n_bq_ovf, r_n_evict_bi;
    integer             r_n_inline_bi, r_n_merge;   /* inline eviction back-invalidates, and dirty merges */
-   /* Synonym recoveries.  Reported so a clean aliasing run can be told apart from
-    * one where the mechanism never fired -- a zero here with a passing test means
-    * the workload produced no synonym, NOT that synonyms are handled. */
-   integer             r_n_alias_bi;
 
    always_comb
      begin
@@ -745,11 +544,6 @@ module l2(clk,
 	 * transaction, and using them would back-invalidate the wrong line. */
 	t_bq_push = w_evict_backinv | t_snoop_backinv;
 	t_bq_addr = t_snoop_backinv ? {r_snoop_addr[`PA_WIDTH-1:4], 4'd0} : w_evict_addr;
-	/* PIdx follows the SAME port as the presence bits below: port 1 (w_s_*) for a
-	 * snoop-sourced entry, port 0 for an eviction.  Reading the other port would
-	 * name a concurrent unrelated transaction's line. */
-	t_bq_pidx_d = t_snoop_backinv ? w_s_l1d_pidx : w_l1d_pidx;
-	t_bq_pidx_i = t_snoop_backinv ? w_s_l1i_pidx : w_l1i_pidx;
 `ifdef SNOOP_BI_I_ONLY
 	/* BISECT: probe the L1I but never the L1D.  Data-safe here for the same
 	 * reason the no-backinv run was: the L1D keeps a valid unmodified copy and
@@ -762,10 +556,7 @@ module l2(clk,
 	t_bq_i    = t_snoop_backinv ? w_s_l1i_pres : w_l1i_pres;
 	/* Revived: a snoop whose source says the L1D holds the only good copy takes
 	 * the recover-to-DRAM path (r_wb_pend -> BACKINV_WB) instead of discarding. */
-	/* a QUEUED eviction needs recovery too -- the non-snoop bq source is
-	 * w_evict_backinv.  Hardcoding 0 discarded the recovered dirty line exactly
-	 * as the direct path did. */
-	t_bq_ev   = t_snoop_backinv ? r_snoop_ev : 1'b1;
+	t_bq_ev   = t_snoop_backinv ? r_snoop_ev : 1'b0;
 	n_bq_tail = r_bq_tail + ((t_bq_push & ~w_bq_full) ? 1 : 0);
 	/* pop only when the request register is free */
 	n_bq_head = r_bq_head + ((~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend) ? 1 : 0);
@@ -780,7 +571,6 @@ module l2(clk,
 	     r_bq_tail <= 'd0;
 	     r_n_bq_ovf <= 0;
 	     r_n_inline_bi <= 0;
-	     r_n_alias_bi <= 0;
 	     r_n_restart <= 0;
 	     r_n_restart_wb <= 0;
 	     r_n_merge <= 0;
@@ -795,9 +585,6 @@ module l2(clk,
 	     /* zero here would be indistinguishable from "path not reached" -- the exact
 	      * blindness that cost most of a day earlier. */
 	     r_n_inline_bi <= r_n_inline_bi + (((n_state == BACKINV_WAIT) & (r_state != BACKINV_WAIT)) ? 1 : 0);
-	     r_n_alias_bi <= r_n_alias_bi +
-			     (((n_state == BACKINV_WAIT) & (r_state != BACKINV_WAIT) &
-			       w_alias_conflict) ? 1 : 0);
 	     r_n_restart <= r_n_restart + (w_restart_seen ? 1 : 0);
 	     r_n_restart_wb <= r_n_restart_wb + (w_restart_wb ? 1 : 0);
 	     r_n_merge <= r_n_merge + (((r_state == BACKINV_WAIT) & backinv_d_ack & backinv_d_dirty) ? 1 : 0);
@@ -813,8 +600,6 @@ module l2(clk,
 	     r_bq_d[r_bq_tail[LG_BQ-1:0]] <= t_bq_d;
 	     r_bq_i[r_bq_tail[LG_BQ-1:0]] <= t_bq_i;
 	     r_bq_ev[r_bq_tail[LG_BQ-1:0]] <= t_bq_ev;
-	     r_bq_pidx_d[r_bq_tail[LG_BQ-1:0]] <= t_bq_pidx_d;
-	     r_bq_pidx_i[r_bq_tail[LG_BQ-1:0]] <= t_bq_pidx_i;
 	  end
      end // always_ff
 `endif
@@ -847,55 +632,6 @@ module l2(clk,
     * The main FSM decides clean-vs-dirty from metadata read 2 cycles earlier, so a
     * merge landing in that window is invisible to the decision already taken. */
    integer r_n_reload_over_dirty;
-   /* Eviction accounting, WITH its own positive control.  m_wb read 0 earlier and
-    * was never shown capable of reading anything else, so "no merged line is ever
-    * written back" could equally have meant "this counter cannot see writebacks".
-    * r_n_tagwr counts EVERY tag overwrite, so a zero in the interesting columns is
-    * only meaningful when this one is large. */
-   /* Did the merge's DATA write actually land in the array?  merge_gnt counts the
-    * grant, not the result.  Record what each merge put in, then compare against
-    * what the eviction writeback actually sends to DRAM: if they differ, the L2
-    * line never took the merged value and its writeback ships the pre-merge
-    * contents -- which loses the store with no regression, no missing writeback and
-    * nothing stale in memory, i.e. past every check so far. */
-   logic [31:0] r_merge_expect [(1<<LG_L2_LINES)-1:0];
-   logic 	r_merge_mark   [(1<<LG_L2_LINES)-1:0];
-`ifdef VERILATOR
-   /* ---- transaction ids (SIM ONLY) --------------------------------------------
-    * Every back-invalidate gets a monotonically increasing id.  It rides the probe,
-    * comes back on the ack, is stamped onto the L2 line by the merge that consumed
-    * it, and is printed again when that line is written back to DRAM.  One grep on
-    * an id then shows a value's entire life instead of having to correlate three
-    * different cycle counters and an address that is reused every 1 MB.
-    *
-    * This is what made the current bug hard: a store, its probe, its merge and the
-    * writeback that should carry it all had to be matched by eye.
-    *
-    * VERILATOR-ONLY.  r_line_txn is 32 bits x 65536 lines = 2 Mbit of shadow state;
-    * it exists to be greppable in a trace, never to be synthesised. */
-   logic [31:0] r_bi_seq;                                  /* id generator */
-   logic [31:0] r_line_txn [(1<<LG_L2_LINES)-1:0];         /* id whose data this line holds */
-   logic [31:0] r_inflight_txn;                            /* id of the probe in flight */
-`endif
-`ifdef WBCHK
-   integer r_n_wbchk, r_n_wbbad;
-   always_ff@(negedge clk) if((r_cycle % 20000000)==20000000-1) $display("[wbchk] cyc=%0d merged_line_writebacks=%0d MISMATCHED=%0d", r_cycle, r_n_wbchk, r_n_wbbad);
-`endif
-`ifdef SLOTCHK
-   integer r_n_slotovr;
-   always_ff@(negedge clk) if((r_cycle % 20000000)==20000000-1) $display("[slotchk] cyc=%0d holding_slot_overruns=%0d", r_cycle, r_n_slotovr);
-`endif
-`ifdef MIDXCHK
-   integer r_n_midxchk, r_n_midxbad;
-   always_ff@(negedge clk) if((r_cycle % 20000000)==20000000-1) $display("[midx] cyc=%0d dirty_recoveries=%0d WRONG_LINE=%0d", r_cycle, r_n_midxchk, r_n_midxbad);
-`endif
-   integer r_n_mergechk;         /* merged lines reaching a writeback -- the control */
-   integer r_n_mergebad;         /* ... whose writeback data is NOT what was merged */
-   integer r_n_tagwr;            /* every tag overwrite -- the control */
-   integer r_n_evict_dirty_wb;   /* replaced a valid+dirty line, via RELOAD_WB (good) */
-   integer r_n_evict_dirty_nowb; /* replaced a valid+dirty line with NO writeback (loss) */
-   integer r_n_bi_pres_clr;     /* presence cleared because the L1D confirmed the drop */
-   integer r_n_bi_held0;        /* acks where the L1D did NOT hold the line (spurious probe) */
    integer r_n_merged_wb;       /* merged line handed to DRAM (the good ending) */
    integer r_n_merged_dropclean;/* merged line invalidated while NOT dirty == DATA LOSS */
    integer r_n_merged_dirtyclr; /* dirty cleared on a merged line by something else */
@@ -903,11 +639,6 @@ module l2(clk,
    integer r_n_merge_gnt;      /* merges that actually wrote the L2 line */
    integer r_n_merge_stall;    /* cycles a merge was wanted but not granted */
    integer r_n_waitbi_escape;  /* left WAIT_BI via the acked-clean path, no merge */
-   /* Of those escapes, how many abandoned RECOVERED DIRTY DATA?  The escape fires on
-    * ~r_backinv_d & ~r_backinv_i & w_bq_empty -- flags that ANOTHER transaction's ack
-    * can clear while this one's data is still pending.  Dismissing all escapes as
-    * "dirty=0 acks, nothing to merge" was an assumption, never a measurement. */
-   integer r_n_waitbi_esc_dirty;
    integer r_n_wbpend_drop;    /* r_wb_pend cleared by something OTHER than a merge */
    integer r_n_pres_d_clr;   /* presence CLEARS: distinguishes never-set from set-then-dropped */
    always_ff@(posedge clk)
@@ -921,28 +652,6 @@ module l2(clk,
 	     r_n_snoop_req <= 0;
 	     r_n_wb_mismatch <= 0;
 	     r_n_reload_over_dirty <= 0;
-`ifdef VERILATOR
-	     r_bi_seq <= 32'd1;
-	     r_inflight_txn <= 32'd0;
-`endif
-	     r_n_mergechk <= 0;
-`ifdef MIDXCHK
-	     r_n_midxchk <= 0;
-	     r_n_midxbad <= 0;
-`endif
-`ifdef SLOTCHK
-	     r_n_slotovr <= 0;
-`endif
-`ifdef WBCHK
-	     r_n_wbchk <= 0;
-	     r_n_wbbad <= 0;
-`endif
-	     r_n_mergebad <= 0;
-	     r_n_tagwr <= 0;
-	     r_n_evict_dirty_wb <= 0;
-	     r_n_evict_dirty_nowb <= 0;
-	     r_n_bi_pres_clr <= 0;
-	     r_n_bi_held0 <= 0;
 	     r_n_merged_wb <= 0;
 	     r_n_merged_dropclean <= 0;
 	     r_n_merged_dirtyclr <= 0;
@@ -950,7 +659,6 @@ module l2(clk,
 	     r_n_merge_gnt <= 0;
 	     r_n_merge_stall <= 0;
 	     r_n_waitbi_escape <= 0;
-	     r_n_waitbi_esc_dirty <= 0;
 	     r_n_wbpend_drop <= 0;
 	  end
 	else
@@ -982,275 +690,15 @@ module l2(clk,
 	     r_n_merged_dropclean <= r_n_merged_dropclean +
 		((t_wr_valid & ~t_valid & r_merged[t_idx] & ~w_dirty) ? 1 : 0);
 	     /* the good ending: the eviction writeback actually leaves for DRAM */
-	     /* w_valid/w_dirty are the port-0 reads, so at the tag write they still
-	      * describe the OUTGOING line -- exactly what we want to classify. */
-	     if(t_snoop_merge_done)
-	       begin
-		  r_merge_expect[w_snoop_ridx] <= r_wb_data[31:0];
-		  r_merge_mark[w_snoop_ridx] <= 1'b1;
-`ifdef VERILATOR
-		  /* stamp the line with the id whose data it now holds */
-		  r_line_txn[w_snoop_ridx] <= r_inflight_txn;
-`endif
-	       end
-`ifdef VERILATOR
-	     /* a fill replaces the line's contents, so the stamp no longer applies */
-	     if(t_wr_d0 & ~t_snoop_merge_done)
-	       begin
-		  r_line_txn[w_d0_wr_addr] <= 32'd0;
-	       end
-	     /* allocate an id per probe issued, and carry it while in flight */
-	     if((n_backinv_d | n_backinv_i) & ~(r_backinv_d | r_backinv_i))
-	       begin
-		  r_bi_seq <= r_bi_seq + 32'd1;
-		  r_inflight_txn <= r_bi_seq;
-		  `ifdef BIDBG
-		  $display("[txn %0d] ISSUE   cyc=%0d addr=%x d=%b i=%b",
-			   r_bi_seq, r_cycle, n_backinv_addr, n_backinv_d, n_backinv_i);
-		  `endif
-	       end
-	     if(backinv_d_ack)
-	       begin
-		  /* ev is the whole ballgame: a dirty ack with ev=0 takes the DISCARD
-		   * branch and the recovered line is thrown away.  The counter that was
-		   * supposed to report that (n_backinv_clobber) had its default assigned
-		   * AFTER the increment, so it could never fire. */
-		  /* snoop_state at the ack is the point: the merge only happens if the
-		   * engine is sitting in WAIT_BI when the data arrives.  An ack landing
-		   * in any other state means nobody is waiting for it and the recovered
-		   * line has nowhere to go. */
-		  `ifdef BIDBG
-		  $display("[txn %0d] ACK     cyc=%0d addr=%x dirty=%b held=%b ev=%b snpstate=%0d wbpend=%b data=%x",
-			   r_inflight_txn, r_cycle, r_backinv_addr, backinv_d_dirty,
-			   backinv_d_held, r_backinv_ev, r_snoop_state, r_wb_pend,
-			   backinv_d_data[31:0]);
-		  `endif
-	       end
-	     if(t_snoop_merge_done)
-	       begin
-		  /* carry the ADDRESS, not just the set index.  Every other stage
-		   * prints one, and without it following a value means joining MERGE
-		   * to its transaction's ACK by id -- a self-contained record is
-		   * greppable directly, which is the entire point of the id. */
-		  `ifdef BIDBG
-		  $display("[txn %0d] MERGE   cyc=%0d idx=%0d addr=%x data=%x",
-			   r_inflight_txn, r_cycle, w_snoop_ridx, r_snoop_addr,
-			   r_wb_data[31:0]);
-		  `endif
-	       end
-	     /* the eviction writeback: which transaction's data is actually leaving */
-	     if((r_state == CLEAN_RELOAD) & mem_rsp_valid & w_dirty & ~r_fill_held)
-	       begin
-		  `ifdef BIDBG
-		  $display("[txn %0d] WRITEBK cyc=%0d idx=%0d addr=%x data=%x",
-			   r_line_txn[t_idx], r_cycle, t_idx, {w_tag, t_idx, 4'd0}, w_d0[31:0]);
-		  `endif
-	       end
-`endif
-	     /* the divert in CLEAN_RELOAD is where the victim's writeback is issued;
-	      * w_d0 is what will be sent, so compare it with what the merge stored */
-	     if((r_state == CLEAN_RELOAD) & mem_rsp_valid & w_dirty & ~r_fill_held &
-		r_merge_mark[t_idx])
-	       begin
-		  r_n_mergechk <= r_n_mergechk + 1;
-		  if(w_d0[31:0] !== r_merge_expect[t_idx])
-		    begin
-		       r_n_mergebad <= r_n_mergebad + 1;
-		       if(r_n_mergebad < 10)
-			 begin
-			    $display("[MERGE-LOST] cyc=%0d idx=%0d wb_sends=%x merge_put=%x",
-				     r_cycle, t_idx, w_d0[31:0], r_merge_expect[t_idx]);
-			 end
-		    end
-		  r_merge_mark[t_idx] <= 1'b0;
-	       end
-`ifdef WBCHK
-	     /* DOES A VICTIM'S WRITEBACK CARRY THE DIRTY DATA RECOVERED FROM THE L1D?
-	      *
-	      * Never verified in this project. The design's own merge check is gated on
-	      * `r_state == CLEAN_RELOAD & mem_rsp_valid`, which never co-occurs, so
-	      * mergechk has read 0 in every run and wb_mismatch/mergebad are VACUOUS.
-	      *
-	      * Sampled on the COMB SETUP (n_mem_req/n_addr/n_mem_req_store_data), where
-	      * t_idx and w_tag still name the VICTIM.  A previous attempt keyed on r_addr
-	      * and silently measured nothing: on an eviction r_addr is the INCOMING line.
-	      * All five writeback sites use `n_addr = {w_tag,t_idx,0}` with
-	      * `n_mem_req_store_data = w_d0`, so this one point covers them. */
-	     if(n_mem_req & (n_mem_opcode == 5'd7) & r_merge_mark[t_idx])
-	       begin
-		  r_n_wbchk <= r_n_wbchk + 1;
-		  if(n_mem_req_store_data[31:0] !== r_merge_expect[t_idx])
-		    begin
-		       r_n_wbbad <= r_n_wbbad + 1;
-		       if(r_n_wbbad < 20)
-			 begin
-			    $display("[WB-LOST-MERGE] cyc=%0d pa=%x idx=%0d sending=%x merged=%x",
-				     r_cycle, {w_tag, t_idx, 4'd0}, t_idx,
-				     n_mem_req_store_data[31:0], r_merge_expect[t_idx]);
-			 end
-		    end
-	       end
-`endif
-`ifdef SLOTCHK
-	     /* HOLDING-SLOT OVERRUN.  There is exactly ONE slot for dirty data recovered
-	      * from an L1 (r_wb_pend/r_wb_addr/r_wb_data).  If a second recovery lands
-	      * while the first is still pending and is not being consumed this cycle, the
-	      * first is silently destroyed -- a lost store with no counter and no
-	      * assertion.  The guard at BACKINV_WB covers ONE new ack in ONE state; it
-	      * says nothing about back-to-back recoveries.
-	      *
-	      * Needs pressure: at 2MB dirty recoveries are rare enough never to overlap;
-	      * at 256KB there are 68,289 of them. Exactly the profile of the failure
-	      * (Linux SIGSEGVs in init at 256KB, clean at 2MB, evict-BI is the trigger). */
-	     if(backinv_d_ack & backinv_d_dirty & r_backinv_ev & r_wb_pend &
-		~t_snoop_merge_done &
-		(r_wb_addr[`PA_WIDTH-1:4] != r_backinv_addr[`PA_WIDTH-1:4]))
-	       begin
-		  r_n_slotovr <= r_n_slotovr + 1;
-		  if(r_n_slotovr < 20)
-		    begin
-		       $display("[SLOT-OVERRUN] cyc=%0d pending=%x (LOST) overwritten_by=%x",
-				r_cycle, r_wb_addr, r_backinv_addr);
-		    end
-	       end
-`endif
-`ifdef MIDXCHK
-	     /* DOES THE BACKINV_WAIT MERGE LAND ON THE RIGHT L2 LINE?
-	      * It writes `t_d0 = backinv_d_data` at w_d0_wr_addr = t_idx. If t_idx has
-	      * moved on (e.g. to the INCOMING line of the eviction that triggered the
-	      * probe) the recovered dirty data is written to the WRONG line: one line is
-	      * corrupted and the other keeps stale data. That matches the symptom exactly
-	      * -- 207 dirty acks recovered for page 0x008d72, merges counted, yet the line
-	      * still refills with the store missing.
-	      * Compare t_idx against the index of the address that was PROBED. */
-	     if(backinv_d_ack & backinv_d_dirty & r_backinv_ev)
-	       begin
-		  r_n_midxchk <= r_n_midxchk + 1;
-		  if(t_idx != r_backinv_addr[LG_L2_LINES+3:4])
-		    begin
-		       r_n_midxbad <= r_n_midxbad + 1;
-		       if(r_n_midxbad < 20)
-			 begin
-			    $display("[MERGE-WRONG-LINE] cyc=%0d probed_pa=%x probed_idx=%0d but t_idx=%0d",
-				     r_cycle, r_backinv_addr, r_backinv_addr[LG_L2_LINES+3:4], t_idx);
-			 end
-		    end
-	       end
-`endif
-`ifdef RECWATCH
-	     /* RECOVERY PATH for the line whose store was lost.
-	      * Kernel Oops: NULL deref in rb_insert_color; PA 0x08d72458 read 0 where a
-	      * store of 1 (in a jr delay slot, 885e47d0) had dirtied line 0x08d72450.
-	      * The L1D reports dirty=1 at the back-invalidate, so the store WAS captured;
-	      * the value is gone by the refill. Follow it: the ack's data, whether it is
-	      * merged or pushed via BACKINV_WB, and what goes to DRAM. */
-	     if(backinv_d_ack & (r_backinv_addr[35:12] == 24'h008d72))
-	       begin
-		  $display("[rec-ack] cyc=%0d pa=%x dirty=%b ev=%b held=%b wb_pend=%b data=%08x_%08x_%08x_%08x",
-			   r_cycle, r_backinv_addr, backinv_d_dirty, r_backinv_ev, backinv_d_held,
-			   r_wb_pend, backinv_d_data[31:0], backinv_d_data[63:32],
-			   backinv_d_data[95:64], backinv_d_data[127:96]);
-	       end
-	     if(t_snoop_merge_done & (r_snoop_addr[35:12] == 24'h008d72))
-	       begin
-		  $display("[rec-merge] cyc=%0d pa=%x idx=%0d wb_data=%08x_%08x_%08x_%08x",
-			   r_cycle, r_snoop_addr, w_snoop_ridx,
-			   r_wb_data[31:0], r_wb_data[63:32], r_wb_data[95:64], r_wb_data[127:96]);
-	       end
-	     if(n_mem_req & (n_mem_opcode == 5'd7) & (n_addr[35:12] == 24'h008d72))
-	       begin
-		  $display("[rec-dram] cyc=%0d pa=%x state=%0d data=%08x_%08x_%08x_%08x",
-			   r_cycle, n_addr, r_state,
-			   n_mem_req_store_data[31:0], n_mem_req_store_data[63:32],
-			   n_mem_req_store_data[95:64], n_mem_req_store_data[127:96]);
-	       end
-`endif
-`ifdef L2DATAFLOW
-	     /* COMPLETE data flow for the L2 lines of page 0x08d72000. At 256KB the L2
-	      * index is pa[17:4], so that page is indices 0x3200-0x32ff. Log every ARRAY
-	      * WRITE (fill or merge) and every SERVE, to settle BY DATA whether the merge
-	      * wrote the right line with the right value and the serve returned something
-	      * else -- rather than by structural argument. */
-	     if(t_wr_d0 & (w_d0_wr_addr[LG_L2_LINES-1:8] == 6'h32))
-	       begin
-		  /* wr_tag: does this write also update the TAG (a FILL) or is it DATA-ONLY
-		   * (a merge)? That is the difference between a legitimate line replacement
-		   * and another line's data landing under this line's tag. */
-		  $display("[l2wr] cyc=%0d idx=%0x wr_tag=%b tag_in=%x snpmerge=%b data=%08x_%08x_%08x_%08x",
-			   r_cycle, w_d0_wr_addr, t_wr_tag, r_tag, w_snoop_merge_gnt,
-			   w_d0_wr_data[31:0], w_d0_wr_data[63:32],
-			   w_d0_wr_data[95:64], w_d0_wr_data[127:96]);
-	       end
-	     if(n_rsp_valid & (r_opcode == 5'd4) & (t_idx[LG_L2_LINES-1:8] == 6'h32))
-	       begin
-		  /* w_tag is what the ARRAY holds; r_tag is what the REQUEST wants. If they
-		   * match, the serve is for the line the array believes it holds. */
-		  $display("[l2serve] cyc=%0d idx=%0x req_pa=%x arr_tag=%x req_tag=%x hit=%b data=%08x_%08x_%08x_%08x",
-			   r_cycle, t_idx, r_addr, w_tag, r_tag, w_hit,
-			   n_rsp_data[31:0], n_rsp_data[63:32], n_rsp_data[95:64], n_rsp_data[127:96]);
-	       end
-`endif
-	     r_n_tagwr <= r_n_tagwr + (t_wr_tag ? 1 : 0);
-	     r_n_evict_dirty_wb <= r_n_evict_dirty_wb +
-		((t_wr_tag & w_valid & w_dirty & (r_state == RELOAD_WB)) ? 1 : 0);
-	     r_n_evict_dirty_nowb <= r_n_evict_dirty_nowb +
-		((t_wr_tag & w_valid & w_dirty & (r_state != RELOAD_WB)) ? 1 : 0);
-	     r_n_bi_pres_clr <= r_n_bi_pres_clr + (w_bi_pres_clr ? 1 : 0);
-	     r_n_bi_held0 <= r_n_bi_held0 + ((backinv_d_ack & ~backinv_d_held) ? 1 : 0);
 	     r_n_reload_over_dirty <= r_n_reload_over_dirty +
 		(((r_state == CLEAN_RELOAD) & t_wr_d0 & w_dirty) ? 1 : 0);
 	     r_n_merged_wb <= r_n_merged_wb +
 		(((r_state == DIRTY_STORE) & mem_req_ack & r_merged[r_idx]) ? 1 : 0);
 	     r_n_merge_gnt   <= r_n_merge_gnt   + (t_snoop_merge_done ? 1 : 0);
 	     r_n_merge_stall <= r_n_merge_stall + ((t_snoop_merge & ~t_snoop_merge_done) ? 1 : 0);
-	     r_n_waitbi_esc_dirty <= r_n_waitbi_esc_dirty +
-		(((r_snoop_state == SNOOP_WAIT_BI) & (n_snoop_state == SNOOP_IDLE) &
-		  ~t_snoop_merge_done & r_wb_pend) ? 1 : 0);
-`ifdef VERILATOR
-	     if((r_snoop_state == SNOOP_WAIT_BI) & (n_snoop_state == SNOOP_IDLE) &
-		~t_snoop_merge_done & r_wb_pend)
-	       begin
-		  `ifdef BIDBG
-		  $display("[txn %0d] DROP    cyc=%0d addr=%x wb_pend=1 data=%x -- left WAIT_BI abandoning recovered dirty data",
-			   r_inflight_txn, r_cycle, r_snoop_addr, r_wb_data[31:0]);
-		  `endif
-	       end
-`endif
 	     r_n_waitbi_escape <= r_n_waitbi_escape +
 		(((r_snoop_state == SNOOP_WAIT_BI) & (n_snoop_state == SNOOP_IDLE) &
 		  ~t_snoop_merge_done) ? 1 : 0);
-	`ifdef L1D_WATCH_PA
-     /* What the ack handler ACTUALLY did, sampled where the n_* values have settled.
-      * The ACK record prints ev=1 and dirty=1, which should latch the line into the
-      * holding slot -- yet one cycle later wb_pend and credit_held are both 0, the
-      * signature of the ev==0 discard branch.  Print the branch inputs and outputs
-      * together so the contradiction resolves itself instead of being argued about. */
-     if(backinv_d_ack & (r_backinv_addr[27:4] == (`L1D_WATCH_PA >> 4)))
-       begin
-	  $display("[ACKDBG] cyc=%0d ev=%b dirty=%b held_in=%b credheld=%b state=%0d nstate=%0d mrsp=%b | n_wb_pend=%b n_held=%b n_credits=%0d clobber=%0d",
-		   r_cycle, r_backinv_ev, backinv_d_dirty, backinv_d_held, r_wb_credit_held,
-		   r_state, n_state, mem_rsp_valid,
-		   n_wb_pend, n_wb_credit_held, n_wb_credits, n_backinv_clobber);
-       end
-`endif
-`ifdef L2_ESC_LOG
-	     /* Print the escape, from HERE.  The same test written inside the
-	      * SNOOP_WAIT_BI case (where [LEAK] lives) can never be true: n_snoop_state
-	      * defaults to r_snoop_state and is only assigned SNOOP_IDLE FURTHER DOWN the
-	      * always_comb, so a reader placed above those assignments sees WAIT_BI every
-	      * time -- exactly the blocking-assignment ordering trap already documented
-	      * for t_snp_won in l1d.sv.  [LEAK] reporting 0 for entire runs was therefore
-	      * meaningless, while this counter (in an always_ff, sampling the settled
-	      * value) correctly counted 424563. */
-	     if((r_snoop_state == SNOOP_WAIT_BI) & (n_snoop_state == SNOOP_IDLE) &
-		~t_snoop_merge_done)
-	       begin
-		  $display("[ESC] cyc=%0d addr=%x idx=%0d wb_pend=%b idx_match=%b held=%b bi_d=%b bi_i=%b bq_empty=%b merge=%b gnt=%b",
-			   r_cycle, r_snoop_addr, r_snoop_idx, r_wb_pend, w_wb_idx_match,
-			   r_wb_credit_held, r_backinv_d, r_backinv_i, w_bq_empty,
-			   t_snoop_merge, w_snoop_wr_gnt);
-	       end
-`endif
 	     /* the leak: the recovered line was latched, then the flag went away and no
 	      * merge consumed it -- whatever was in r_wb_data is gone */
 	     r_n_wbpend_drop <= r_n_wbpend_drop +
@@ -1298,13 +746,11 @@ module l2(clk,
 		   * mismatch between the DMA master's view and the L2's) from "it finds it
 		   * but no L1 holds a copy".  backinv_entries=0 with hits>0 means the
 		   * presence test is wrong; hits=0 means the snoop address is wrong. */
-		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d wb_mismatch=%0d merge_gnt=%0d merge_stall=%0d waitbi_esc=%0d waitbi_esc_dirty=%0d wbpend_drop=%0d mergechk=%0d mergebad=%0d tagwr=%0d ev_d_wb=%0d ev_d_nowb=%0d credits=%0d credit_stall=%0d credit_bug=%0d bi_pres_clr=%0d bi_held0=%0d reload_over_dirty=%0d m_wb=%0d m_dropclean=%0d m_dirtyclr=%0d m_overwr=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d alias_bi=%0d",
+		  $display("[incl] cyc=%0d pres_clr_d=%0d pres_set_d=%0d pres_set_i=%0d backinv_entries=%0d snoop_req=%0d snoop_hit=%0d snoop_vld=%0d snoop_dirty=%0d wb_mismatch=%0d merge_gnt=%0d merge_stall=%0d waitbi_esc=%0d wbpend_drop=%0d reload_over_dirty=%0d m_wb=%0d m_dropclean=%0d m_dirtyclr=%0d m_overwr=%0d evict_bi=%0d bq_ovf=%0d wb=%0d inline_bi=%0d merges=%0d restart=%0d restart_wb=%0d",
 			   r_cycle, r_n_pres_d_clr, r_n_pres_d, r_n_pres_i, r_n_backinv, r_n_snoop_req, r_snoop_hit, r_snoop_vld, r_snoop_dirty, r_n_wb_mismatch, r_n_merge_gnt, r_n_merge_stall,
-			   r_n_waitbi_escape, r_n_waitbi_esc_dirty, r_n_wbpend_drop,
-			   r_n_mergechk, r_n_mergebad, r_n_tagwr, r_n_evict_dirty_wb, r_n_evict_dirty_nowb,
-			   r_wb_credits, r_n_credit_stall, r_n_credit_bug,
-			   r_n_bi_pres_clr, r_n_bi_held0, r_n_reload_over_dirty, r_n_merged_wb, r_n_merged_dropclean, r_n_merged_dirtyclr, r_n_merged_overwr,
-			   r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb, r_n_alias_bi);
+			   r_n_waitbi_escape, r_n_wbpend_drop,
+			   r_n_reload_over_dirty, r_n_merged_wb, r_n_merged_dropclean, r_n_merged_dirtyclr, r_n_merged_overwr,
+			   r_n_evict_bi, r_n_bq_ovf, r_n_wb, r_n_inline_bi, r_n_merge, r_n_restart, r_n_restart_wb);
 	       end
 	  end
      end // always_ff
@@ -1312,31 +758,6 @@ module l2(clk,
 `endif
 
    wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
-
-   /* SYNONYM: the requester wants this line in a DIFFERENT set of its own cache
-    * than the one it already holds it in.  Only ever a conflict WITHIN one cache
-    * -- the L1D holding a line the L1I is fetching is two legitimate copies in
-    * two different caches, not an alias.
-    *
-    * w_hit IS LOAD-BEARING and was missing: the presence bit and PIdx are indexed by
-    * L2 INDEX, so on a MISS they describe the line being EVICTED, not the one being
-    * served.  Two different lines sitting in two different sets of one L1 is normal
-    * operation, not a synonym.  Formal caught this -- the counterexample was an L1I
-    * fill with w_hit=0, w_l1i_pres=1, w_l1i_pidx=2, r_req_pidx=3, all referring to a
-    * dead line.  Without this term cover(w_alias_*) is reachable on miss paths and
-    * the vacuity check that is supposed to validate this proof would itself lie.
-    * (Declared here rather than beside the presence wires because w_hit is.) */
-   /* CHECK_VALID_AND_TAG is as load-bearing as w_hit, and for the same reason.  In
-    * IDLE, r_opcode/r_req_pidx/r_tag still hold the PREVIOUS transaction while t_idx
-    * already indexes the INCOMING request, so these terms would compare three
-    * different transactions' signals and mean nothing.  Formal found exactly that:
-    * a store's response in IDLE coinciding with a stale r_opcode==4.  The use site
-    * is inside this state anyway, so naming it here costs nothing and makes every
-    * downstream use -- especially the vacuity covers -- honest. */
-   wire 		   w_alias_ok = (r_state == CHECK_VALID_AND_TAG) & w_hit;
-   wire 		   w_alias_d = w_alias_ok & ~r_from_l1i & w_l1d_pres & (w_l1d_pidx != r_req_pidx);
-   wire 		   w_alias_i = w_alias_ok &  r_from_l1i & w_l1i_pres & (w_l1i_pidx != r_req_pidx);
-   wire 		   w_alias_conflict = w_alias_d | w_alias_i;
    wire 		w_need_wb = w_valid ? w_dirty : 1'b0;
       
    always_ff@(posedge clk)
@@ -1350,7 +771,6 @@ module l2(clk,
 	     r_tag <= 'd0;
 	     r_opcode <= 5'd0;
 	     r_from_l1i <= 1'b0;
-	     r_req_pidx <= 'd0;
 	     r_addr <= 'd0;
 	     r_saveaddr <= 'd0;
 	     r_mem_req <= 1'b0;
@@ -1364,14 +784,6 @@ module l2(clk,
 	     r_backinv_i <= 1'b0;
 	     r_backinv_addr <= 'd0;
 	     r_backinv_ev <= 1'b0;
-	     r_backinv_pidx_d <= 'd0;
-	     r_backinv_pidx_i <= 'd0;
-	     r_wb_credits <= N_WB_CREDITS[3:0];
-	     r_wb_credit_held <= 1'b0;
-	     r_n_credit_stall <= 0;
-	     r_n_credit_bug <= 0;
-	     r_fill_hold <= 'd0;
-	     r_fill_held <= 1'b0;
 	     r_wb_pend <= 1'b0;
 	     r_wb_addr <= 'd0;
 	     r_wb_data <= 'd0;
@@ -1404,7 +816,6 @@ module l2(clk,
 	     r_tag <= n_tag;
 	     r_opcode <= n_opcode;
 	     r_from_l1i <= n_from_l1i;
-	     r_req_pidx <= n_req_pidx;
 	     r_addr <= n_addr;
 	     r_saveaddr <= n_saveaddr;
 	     /* back-invalidate request flops.  These were assigned ONLY in the reset
@@ -1416,26 +827,6 @@ module l2(clk,
 	     r_backinv_i <= n_backinv_i;
 	     r_backinv_addr <= n_backinv_addr;
 	     r_backinv_ev <= n_backinv_ev;
-	     r_backinv_pidx_d <= n_backinv_pidx_d;
-	     r_backinv_pidx_i <= n_backinv_pidx_i;
-	     r_wb_credits <= n_wb_credits;
-	     r_wb_credit_held <= n_wb_credit_held;
-	     /* stalled for want of a credit: expected occasionally, but a credit LEAK
-	      * shows up here as a count that grows without bound and then a wedge. */
-`ifdef ENABLE_L2_INCLUSION
-	     r_n_credit_stall <= r_n_credit_stall +
-		((~w_bq_empty & (r_wb_credits == 4'd0)) ? 1 : 0);
-`endif
-	     if(n_wb_credits > N_WB_CREDITS[3:0])
-	       begin
-		  r_n_credit_bug <= r_n_credit_bug + 1;
-`ifdef VERILATOR
-		  $display("[CREDIT-BUG] cyc=%0d credits=%0d > max %0d -- double return",
-			   r_cycle, n_wb_credits, N_WB_CREDITS);
-`endif
-	       end
-	     r_fill_hold <= n_fill_hold;
-	     r_fill_held <= n_fill_held;
 	     r_wb_pend <= n_wb_pend;
 	     r_wb_addr <= n_wb_addr;
 	     r_wb_data <= n_wb_data;
@@ -1620,7 +1011,6 @@ module l2(clk,
 	n_tag = r_tag;
 	n_opcode = r_opcode;
 	n_from_l1i = r_from_l1i;
-	n_req_pidx = r_req_pidx;
 	n_addr = r_addr;
 	n_saveaddr = r_saveaddr;
 	
@@ -1631,22 +1021,11 @@ module l2(clk,
 	n_backinv_i = r_backinv_i;
 	n_backinv_addr = r_backinv_addr;
 	n_backinv_ev = r_backinv_ev;
-	n_backinv_pidx_d = r_backinv_pidx_d;
-	n_backinv_pidx_i = r_backinv_pidx_i;
 	/* MUST be defaulted HERE, before the ack logic below increments it.  It used
 	 * to be assigned after, which -- blocking assignment in an always_comb --
 	 * overwrote the increment every cycle, so the counter that exists to report
 	 * "a snoop threw away dirty L1D data" could never report anything. */
 	n_backinv_clobber = r_backinv_clobber;
-	n_wb_credits = r_wb_credits;
-	n_wb_credit_held = r_wb_credit_held;
-	if(t_snoop_merge_done & r_wb_credit_held)
-	  begin
-	     n_wb_credits = r_wb_credits + 4'd1;
-	     n_wb_credit_held = 1'b0;
-	  end
-	n_fill_hold = r_fill_hold;
-	n_fill_held = r_fill_held;
 	n_wb_pend = r_wb_pend;
 	n_wb_addr = r_wb_addr;
 	n_wb_data = r_wb_data;
@@ -1664,29 +1043,12 @@ module l2(clk,
 	 * registers are free.  Independent of the main FSM, so a queued eviction
 	 * still reaches the L1s while the L2 is busy serving the fill that caused
 	 * it. */
-	/* A probe may only go out if a slot exists to catch what it returns -- but ONLY a
-	 * D-probe can return anything.  The credit reserves the single holding slot for
-	 * recovered dirty L1D data, and every path that returns a credit hangs off
-	 * backinv_d_ack.  An I-ONLY entry (l1i_present, no l1d_present) used to take a
-	 * credit at this gate that nothing could ever hand back: backinv_i_ack only
-	 * clears n_backinv_i.  The first such entry stranded the credit permanently and
-	 * livelocked the drain (credits 0, credit_stall climbing, merge_gnt frozen,
-	 * coincident with pres_set_i stepping).  So gate on -- and charge for -- the D
-	 * component only. */
-	if(~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend &
-	   (r_bq_d[r_bq_head[LG_BQ-1:0]] ? (r_wb_credits != 4'd0) : 1'b1))
+	if(~w_bq_empty & ~r_backinv_d & ~r_backinv_i & ~r_wb_pend)
 	  begin
-	     if(r_bq_d[r_bq_head[LG_BQ-1:0]])
-	       begin
-		  n_wb_credits = r_wb_credits - 4'd1;
-		  n_wb_credit_held = 1'b1;
-	       end
 	     n_backinv_addr = r_bq_addr[r_bq_head[LG_BQ-1:0]];
 	     n_backinv_d = r_bq_d[r_bq_head[LG_BQ-1:0]];
 	     n_backinv_i = r_bq_i[r_bq_head[LG_BQ-1:0]];
 	     n_backinv_ev = r_bq_ev[r_bq_head[LG_BQ-1:0]];
-	     n_backinv_pidx_d = r_bq_pidx_d[r_bq_head[LG_BQ-1:0]];
-	     n_backinv_pidx_i = r_bq_pidx_i[r_bq_head[LG_BQ-1:0]];
 	  end
 	if(backinv_d_ack)
 	  begin
@@ -1694,28 +1056,6 @@ module l2(clk,
 	     /* DRAM already holds the fresh DMA data, so a dirty L1D line here is a
 	      * genuine CPU-store-vs-DMA-write race, NOT something to merge back
 	      * (that would clobber the DMA data).  Count it. */
-	     /* the merge consumed the recovered line: slot free.  Assigned HERE, in the
-	      * block that owns n_wb_credits -- the snoop engine only raises
-	      * t_snoop_merge_done and never touches the credit itself. */
-	     if(~backinv_d_dirty & r_wb_credit_held)
-	       begin
-		  /* nothing recovered: the slot was never used, hand the credit back */
-		  n_wb_credits = n_wb_credits + 4'd1;
-		  n_wb_credit_held = 1'b0;
-	       end
-`ifdef VERILATOR
-	     /* The slot is ONE register.  If a dirty ack lands while it is already
-	      * full, the previous transaction's recovered line is overwritten and that
-	      * store dies.  The credit was meant to make this impossible -- if it fires,
-	      * the credit accounting has a hole; if it never fires, the loss is
-	      * elsewhere and the WAIT_BI escape is exonerated. */
-	     if(backinv_d_ack & backinv_d_dirty & r_backinv_ev & r_wb_pend)
-	       begin
-		  $display("[SLOT-OVERWRITE] cyc=%0d addr=%x  old=%x (addr %x) <- new=%x",
-			   r_cycle, r_backinv_addr, r_wb_data[31:0], r_wb_addr,
-			   backinv_d_data[31:0]);
-	       end
-`endif
 	     if(backinv_d_dirty)
 	       begin
 		  if(r_backinv_ev)
@@ -1727,15 +1067,6 @@ module l2(clk,
 		  else
 		    begin
 		       n_backinv_clobber = r_backinv_clobber + 64'd1;
-		       /* DISCARDED: the slot was never taken, so nothing downstream will
-			* ever release this credit -- hand it back here or it is stranded
-			* forever.  Guarded on n_ rather than r_ so a return already made
-			* this cycle cannot be made a second time. */
-		       if(n_wb_credit_held)
-			 begin
-			    n_wb_credits = n_wb_credits + 4'd1;
-			    n_wb_credit_held = 1'b0;
-			 end
 		    end
 	       end
 	  end
@@ -1750,7 +1081,7 @@ module l2(clk,
 	t_valid = 1'b0;
 	t_dirty = 1'b0;
 
-	t_d0 = r_fill_held ? r_fill_hold : mem_rsp_load_data[127:0];
+	t_d0 = mem_rsp_load_data[127:0];
 
 	n_rsp_data = r_rsp_data;
 	n_rsp_valid = 1'b0;
@@ -1793,7 +1124,6 @@ module l2(clk,
 	       n_addr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_saveaddr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_from_l1i = l1_mem_req_from_l1i;
-	       n_req_pidx = l1_mem_req_pidx;
 	       n_opcode = l1_mem_req_opcode;
 	       n_store_data = l1_mem_req_store_data;
 	       n_store_mask = 16'h0;
@@ -1920,42 +1250,7 @@ module l2(clk,
 		     * DEADLOCKS on silicon (the wirepda class; henry_tb DRAM acks
 		     * instantly so sim missed it).  UNCACHE_WB_TURNAROUND acks when
 		     * r_opcode==MEM_INVL. */
-`ifdef ENABLE_L2_PIDX
-		    /* CACHE-OP ALIAS HOLE (l1d.sv:749).  A hit-type CACHE op derives its
-		     * L1D set from the address SOFTWARE named, so when software invalidates
-		     * a line through a different VA than the one it was filled with, the
-		     * L1D probes the wrong alias set, finds nothing, and its copy SURVIVES
-		     * the invalidate.  Measured on Linux (which does not page-colour):
-		     * chop_alias_missed=1715 with VA indexing, 0 with the PA replay; IRIX
-		     * never hit it because its CACHE ops name kseg0 addresses, where the VA
-		     * and PA alias bits agree.
-		     *
-		     * The L2 can fix what the L1D cannot see: it RECORDED the pidx at grant
-		     * time, so `w_alias_d` -- "an L1 holds this line at a pidx different
-		     * from the one the requester just sent" -- is precisely the missed case.
-		     * Reuse the read path's detour: probe at the RECORDED pidx, then re-run
-		     * this state (BACKINV_WAIT clears presence and sets r_bi_done, so the
-		     * second pass falls through to the ordinary invalidate below).
-		     *
-		     * ev=0 (DISCARD, do not recover): this is an INVALIDATE. Recovering the
-		     * L1D's line would write CPU data back over a DMA-in, which is the
-		     * corruption the "no WB -- DMA-in drop" path in l1d.sv exists to avoid.
-		     * Software asked for the line to be dropped; dropping it is correct even
-		     * though the L1D never found it. */
-		    if(w_alias_conflict & ~r_bi_done)
-		      begin
-			 n_backinv_addr = {w_tag, t_idx, 4'd0};
-			 n_backinv_d = w_alias_d;
-			 n_backinv_i = w_alias_i;
-			 n_backinv_pidx_d = w_l1d_pidx;
-			 n_backinv_pidx_i = w_l1i_pidx;
-			 n_backinv_ev = 1'b0;
-			 n_state = BACKINV_WAIT;
-		      end
-		    else if(w_hit)
-`else
 		    if(w_hit)
-`endif
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
 			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
@@ -1984,31 +1279,9 @@ module l2(clk,
 	       else if(r_opcode == MEM_WB)
 		 begin
 		    /* CACHE writeback-through: r_store_data is the latest (L1D dirty)
-		     * line. Write it straight to DRAM; if L2 also holds the line, UPDATE
-		     * it in place. Reuse UNCACHE_STORE to wait for the DRAM ack, then ack
-		     * the L1.
-		     *
-		     * This used to DROP the L2 copy (t_wr_valid=1; t_valid=0), which is an
-		     * INCLUSION BREAK: a writeback is not an invalidate, so the L1D keeps
-		     * its copy, but t_valid=0 asserts w_line_dropped, which CLEARS BOTH
-		     * PRESENCE BITS (see t_wr_l1d_pres). The L1D copy is then orphaned --
-		     * presence says "not held" while it is held, the UNDER-approximation
-		     * the design forbids ("a stale SET bit costs a redundant probe, never
-		     * a missed one"). Because the PIdx RAM is only written on a grant, the
-		     * stale pidx survives, so every later synonym request HITS with
-		     * pres=0, skips `w_alias_d` (which is gated on w_l1d_pres), and is
-		     * handed a SECOND copy.
-		     *
-		     * Measured on IRIX at 32KB, line 00838e290:
-		     *   cyc 1051113 grant pidx=6            L1D holds set 1577
-		     *   cyc 3367974 drop  pres_d=1 pidx_d=2 op=26  <- presence cleared here
-		     *   cyc 5538737 grant pres_d=0 pidx_d=2 req_pidx=6 alias_d=0
-		     *   cyc 5538738 SINGLE-COPY VIOLATION fill_set=1577 other_set=553
-		     *
-		     * Keeping the line valid and CLEAN (the data is simultaneously written
-		     * through to DRAM) also removes the valid=0/dirty=1 state that the
-		     * eviction comment below documents as having clobbered a SCSI-DMA
-		     * descriptor -- MEM_WB no longer leaves dirty set without valid. */
+		     * line. Write it straight to DRAM; if L2 also holds the line, drop
+		     * the now-stale L2 copy. Reuse UNCACHE_STORE to wait for the DRAM
+		     * ack, then ack the L1. */
 		    n_mem_req_store_data = r_store_data;
 		    n_addr = r_saveaddr;
 		    n_mem_opcode = 5'd7;
@@ -2016,10 +1289,7 @@ module l2(clk,
 		    n_mem_req = 1'b1;
 		    if(w_hit)
 		      begin
-			 t_d0 = r_store_data;
-			 t_wr_d0 = 1'b1;
-			 t_wr_valid = 1'b1; t_valid = 1'b1;   /* stays resident: inclusion */
-			 t_wr_dirty = 1'b1; t_dirty = 1'b0;   /* clean: also going to DRAM */
+			 t_wr_valid = 1'b1; t_valid = 1'b0;
 		      end
 		    n_state = UNCACHE_STORE;
 		 end
@@ -2028,51 +1298,10 @@ module l2(clk,
 		    n_reload = 1'b0;
 		    if(r_opcode == 5'd4)
 		      begin
-`ifdef ENABLE_L2_PIDX
-			 /* Recover the OLD copy before handing out a second one.  Two
-			  * copies of one line in one cache, one of them possibly dirty,
-			  * is exactly the corruption VIPT synonyms cause.  Reuses the
-			  * eviction path's shape: probe, wait, then re-run this state --
-			  * BACKINV_WAIT clears the presence bits on its way out, so the
-			  * second pass sees no conflict and serves normally, re-recording
-			  * PIdx at the requester's set. */
-			 if(w_alias_conflict & ~r_bi_done)
-			   begin
-			      n_backinv_addr = {w_tag, t_idx, 4'd0};
-			      n_backinv_d = w_alias_d;
-			      n_backinv_i = w_alias_i;
-			      n_backinv_pidx_d = w_l1d_pidx;
-			      n_backinv_pidx_i = w_l1i_pidx;
-			      /* ev=1: RECOVER, do not discard.  ev separates a DMA-sourced snoop
-			       * (DRAM already fresher, so a dirty L1D line is a CPU-vs-DMA race and
-			       * is dropped) from the case where the L1D's dirty copy is the ONLY
-			       * up-to-date data.  A synonym is the latter -- the CPU just stored to
-			       * it.  Leaving ev at its inherited value sent the ack handler down the
-			       * discard branch (ACKDBG: ev=0 dirty=1 clobber=1) and threw the store
-			       * away; test_l1_synonym.S step 3 then read the pre-store value. */
-			      n_backinv_ev = 1'b1;
-			      n_state = BACKINV_WAIT;
-			   end
-			 else
-			   begin
-`ifdef ALIASDBG
-			      $display("[serve] cyc=%0d idx=%0d data=%x bi_done=%b alias=%b",
-				       r_cycle, t_idx, w_d0[31:0], r_bi_done, w_alias_conflict);
-`endif
-`ifdef L2DBG
-			      $display("[l2rd] cyc=%0d idx=%0d data=%x addr=%x tag=%x hit=%b",
-				       r_cycle, t_idx, w_d0[31:0], r_addr, w_tag, w_hit);
-`endif
-			      n_rsp_data =  w_d0;
-			      n_state = IDLE;
-			      n_rsp_valid = 1'b1;
-			   end
-`else
 			 n_rsp_data =  w_d0;
 			 n_state = IDLE;
 			 n_rsp_valid = 1'b1;
 			 //n_cache_hits = r_cache_hits + 64'd1;			 
-`endif
 		      end
 		    else if(r_opcode == 5'd7)
 		      begin
@@ -2112,41 +1341,10 @@ module l2(clk,
 			  * L1D copy is merged into the L2 -- the coherence point -- and
 			  * leaves on the normal writeback below.  Blocking here is safe
 			  * now that the L1D snoop engine can ack from any state. */
-			 /* Only issue when the request register is FREE.  These assignments
-			  * sit later in this same always_comb than the ack handler's
-			  * `if(backinv_d_ack) n_backinv_d = 1'b0`, so blocking-assignment
-			  * order let an eviction issued on an ack cycle overwrite the clear:
-			  * req never returned low, the address changed underneath it, and
-			  * the L1D -- which accepts on the RISING edge (l1d.sv:412) -- never
-			  * saw a new request.  Measured wedge: snoop ack for 0083acee0 at
-			  * cyc 1972993 with no following 1->0, L1D idle at req=1/req_d=1/
-			  * edge=0/pend=0, both engines waiting on each other forever.
-			  * r_backinv_d is still set on the ack cycle, so this also rules out
-			  * clobbering a back-invalidate that is still in flight.  The guard
-			  * is nested rather than folded into the condition above so a busy
-			  * cycle HOLDS here (n_state defaults to r_state) instead of falling
-			  * through to the writeback and evicting without recovering the
-			  * L1 copy. */
-			 if(~r_backinv_d & ~r_backinv_i)
-			   begin
-			      n_backinv_addr = {w_tag, t_idx, 4'd0};
-			      n_backinv_d = w_l1d_pres;
-			      n_backinv_i = w_l1i_pres;
-			      /* This path bypasses the bq, which is where n_backinv_pidx_*
-			       * is otherwise loaded -- without these the probe ships the
-			       * PIdx of whatever the last queue pop left behind and lands
-			       * in an unrelated set. */
-			      n_backinv_pidx_d = w_l1d_pidx;
-			      n_backinv_pidx_i = w_l1i_pidx;
-			      /* ev=1 for the same reason as the alias path: an eviction RECOVERS
-			       * the L1's dirty copy, it does not race a DMA.  This path never set
-			       * ev, so it inherited the last bq pop's value -- normally 0 -- and the
-			       * recovered line was DISCARDED.  A lost store on every eviction of a
-			       * dirty L1-held line, and the most likely cause of the
-			       * "back-invalidating on eviction alone corrupts" park note above. */
-			      n_backinv_ev = 1'b1;
-			      n_state = BACKINV_WAIT;
-			   end
+			 n_backinv_addr = {w_tag, t_idx, 4'd0};
+			 n_backinv_d = w_l1d_pres;
+			 n_backinv_i = w_l1i_pres;
+			 n_state = BACKINV_WAIT;
 		      end
 		    else
 `endif
@@ -2198,11 +1396,6 @@ module l2(clk,
 			 t_wr_d0 = 1'b1;
 			 t_wr_dirty = 1'b1;
 			 t_dirty = 1'b1;
-`ifdef ALIASDBG
-			 $display("[merge] cyc=%0d idx=%0d addr=%x data=%x wr_en=%b snoop_gnt=%b",
-				  r_cycle, t_idx, r_backinv_addr, backinv_d_data[31:0],
-				  t_wr_d0, w_snoop_merge_gnt);
-`endif
 		      end
 		 end
 	       if(backinv_i_ack)
@@ -2213,26 +1406,10 @@ module l2(clk,
 		 begin
 		    t_pres_clr = 1'b1;    /* no L1 holds it now */
 		    n_bi_done = 1'b1;     /* and do not do this again for this victim */
-		    /* SETTLE first.  ram2r1w_fwd port 0 is two-stage and deliberately does
-		     * NOT forward: a read colliding with a write returns the PRE-write
-		     * value (its header says port 0 must match reg_ram1rw exactly).  The
-		     * merge above writes on this very cycle while rd_addr0 already points
-		     * at the same line, so the read feeding CHECK_VALID_AND_TAG two cycles
-		     * later was issued INTO that collision.  Going straight to
-		     * WAIT_FOR_RAM served the stale line -- measured: merge wrote adde0000
-		     * to idx 65536 at cyc 131626, the serve at 131628 read 11111111, and
-		     * the presence bit was equally stale so w_alias_conflict was STILL 1
-		     * at the response.  One extra cycle re-issues both reads clean. */
-		    n_state = BACKINV_SETTLE;
+		    n_state = WAIT_FOR_RAM;
 		 end
 	    end // case: BACKINV_WAIT
 `endif
-	  BACKINV_SETTLE:
-	    begin
-	       /* Burn one cycle so the merge write has committed to the array before
-	        * WAIT_FOR_RAM issues the read that CHECK_VALID_AND_TAG will consume. */
-	       n_state = WAIT_FOR_RAM;
-	    end // case: BACKINV_SETTLE
 	  DIRTY_STORE:
 	    begin
 	       if(mem_req_ack)
@@ -2264,74 +1441,19 @@ module l2(clk,
 	       if(mem_rsp_valid)
 		 begin
 		    n_mem_req = 1'b0;
-		    /* The clean-vs-dirty choice was made back in CHECK_VALID_AND_TAG from
-		     * metadata read two cycles earlier.  A snoop merge landing inside that
-		     * window makes the victim dirty AFTER the decision, and filling over it
-		     * destroys data that exists nowhere else -- the L1D already dropped its
-		     * copy.  Measured at 435754 of 443834 merges (reload_over_dirty).
-		     * Re-check here, where the answer is current, and write the victim back
-		     * first.  The fill data is held meanwhile. */
-		    /* w_need_wb (valid AND dirty), NOT a bare w_dirty.  MEM_WB clears valid
-		     * but not dirty (unlike MEM_INVL), so a bare test fires on a line that is
-		     * invalid-but-dirty and writes it back to {w_tag, t_idx} -- with w_tag a
-		     * STALE tag from a line that is not resident.  That lands garbage at an
-		     * arbitrary DRAM address.  The eviction site (w_need_wb, above) was fixed
-		     * for exactly this and its comment claims "the CLEAN_RELOAD fill site
-		     * already defends the same leak" -- it did not, because THIS writeback was
-		     * added afterwards with the bare test.  Bisected: r9999 baf1e6e is the
-		     * first commit where IRIX dies in xfs_iunlink; 737175a before it boots
-		     * clean (72437914 insns, bit-identical to main). */
-		    if(w_need_wb & ~r_fill_held)
-		      begin
-			 n_fill_hold = mem_rsp_load_data[127:0];
-			 n_fill_held = 1'b1;
-			 n_mem_req = 1'b1;
-			 /* the VICTIM's address: stored tag + the index being filled.  Not
-			  * w_evict_addr -- that wire lives inside the inclusion ifdef, and
-			  * this path must exist in every build. */
-			 n_addr = {w_tag, t_idx, 4'd0};
-			 n_mem_opcode = 5'd7;
-			 n_mem_req_store_data = w_d0;
-			 n_state = RELOAD_WB;
-		      end
-		    else
-		      begin
-			 t_valid = 1'b1;
-			 t_wr_valid = 1'b1;
-			 /* a clean DRAM fill MUST be marked NOT-dirty: otherwise a stale
-			  * dirty bit (left over from a prior invalidate/eviction that
-			  * cleared valid but not dirty) rides into the reloaded line and
-			  * later writes back garbage over a DMA'd buffer (the SCSI
-			  * INQUIRY clobber). */
-			 t_dirty = 1'b0;
-			 t_wr_dirty = 1'b1;
-			 t_wr_tag = 1'b1;
-			 t_wr_d0 = 1'b1;
-			 n_fill_held = 1'b0;
-			 n_state = WAIT_CLEAN_RELOAD;
-		      end
-		 end
-	    end // case: CLEAN_RELOAD
-	  RELOAD_WB:
-	    begin
-	       /* victim writeback in flight; commit the held fill once DRAM has it */
-	       if(mem_req_ack)
-		 begin
-		    n_mem_req = 1'b0;
-		 end
-	       if(mem_rsp_valid)
-		 begin
-		    n_mem_req = 1'b0;
 		    t_valid = 1'b1;
 		    t_wr_valid = 1'b1;
+		    /* a clean DRAM fill MUST be marked NOT-dirty: otherwise a stale
+		     * dirty bit (left over from a prior invalidate/eviction that cleared
+		     * valid but not dirty) rides into the reloaded line and later writes
+		     * back garbage over a DMA'd buffer (the SCSI INQUIRY clobber). */
 		    t_dirty = 1'b0;
 		    t_wr_dirty = 1'b1;
 		    t_wr_tag = 1'b1;
-		    t_wr_d0 = 1'b1;          /* t_d0 muxes to r_fill_hold while held */
-		    n_fill_held = 1'b0;
+		    t_wr_d0 = 1'b1;
 		    n_state = WAIT_CLEAN_RELOAD;
 		 end
-	    end // case: RELOAD_WB
+	    end // case: CLEAN_RELOAD
 	  WAIT_CLEAN_RELOAD: /* need a cycle to turn around */
 	    begin
 	       n_state = WAIT_FOR_RAM;
@@ -2411,34 +1533,7 @@ module l2(clk,
 	       if(mem_rsp_valid)
 		 begin
 		    n_mem_req = 1'b0;
-		    /* THE DROPPED STORE.  The back-invalidate ack handler runs EARLIER in this
-		     * same always_comb and latches a freshly recovered dirty line into the
-		     * holding slot (n_wb_pend/n_wb_addr/n_wb_data).  Blocking assignments run
-		     * in order, so clearing the slot unconditionally HERE destroys that line --
-		     * silently: no counter, no assertion, and the writeback we just finished
-		     * was for the PREVIOUS occupant, not this one.  Measured directly: an ack
-		     * with ev=1 dirty=1 landing while state==BACKINV_WB and mem_rsp_valid came
-		     * out with n_wb_pend=0, against n_wb_pend=1 for the identical ack in any
-		     * other state.  1542 of them in 20M cycles; the L1D and the ack path are
-		     * blameless, the store dies right here.
-		     *
-		     * So release the slot only if the ack has NOT just refilled it.  When it
-		     * has, the credit must not be returned either: the old occupant freed it
-		     * and the new one immediately takes it, so it simply stays held. */
-		    if(~(backinv_d_ack & backinv_d_dirty & r_backinv_ev))
-		      begin
-			 n_wb_pend = 1'b0;
-			 /* returning the credit here is what stops it being stranded: a line
-			  * pushed to DRAM instead of merged is the SECOND way the slot empties,
-			  * and it used to release the slot without paying the credit back --
-			  * one such line wedged the drain permanently (credit_stall 6.5M,
-			  * merge_gnt 230 against ~1.3M merges). */
-			 if(n_wb_credit_held)
-			   begin
-			      n_wb_credits = n_wb_credits + 4'd1;
-			      n_wb_credit_held = 1'b0;
-			   end
-		      end
+		    n_wb_pend = 1'b0;
 		    n_state = IDLE;
 		 end
 	    end // case: BACKINV_WB
@@ -2545,19 +1640,9 @@ module l2(clk,
 	t_snoop_merge_done = 1'b0;
 	n_snoop_ack     = 1'b0;
 	t_snoop_backinv = 1'b0;
-`ifdef VERILATOR
-	/* These three are sim-only 64-bit STATISTICS counters, declared under
-	 * `ifdef VERILATOR -- but these always_comb defaults sat OUTSIDE that guard,
-	 * inside `ifdef ENABLE_L2_INCLUSION.  With inclusion ON and VERILATOR OFF (i.e.
-	 * SYNTHESIS) they were used but never declared, and Vivado rejected the netlist:
-	 *   ERROR: [Synth 8-36] 'n_snoop_hit' is not declared
-	 * The whole inclusive-L2 / PIdx feature set had only ever been built under
-	 * Verilator, so nothing caught it.  Same class as the w_bq_empty break in the
-	 * waitbi-stall watchdog. */
 	n_snoop_hit     = r_snoop_hit;
 	n_snoop_dirty   = r_snoop_dirty;
 	n_snoop_vld     = r_snoop_vld;
-`endif
 	case(r_snoop_state)
 	  SNOOP_IDLE:
 	    begin
@@ -2581,22 +1666,6 @@ module l2(clk,
 	    end // case: SNOOP_WAIT_RAM
 	  SNOOP_CHECK:
 	    begin
-`ifdef SNPDEC_DBG
-	       /* Opt-in: this sits in an always_comb, so it prints twice per decision
-		* and produced a 5.1GB log over a 200M-cycle boot under SYNTH_SNOOP.
-		* Record the DECISION where it is made.  Sampling r_snoop_state at the
-		* ack instead would be reading a different transaction's state: the ack
-		* handler is in the main always_comb and fires for ANY back-invalidate,
-		* while this engine may already have moved on.  A branch record is a
-		* fact; a state sample elsewhere is an inference. */
-	       $display("[snpdec] cyc=%0d addr=%x hit=%b s_dirty=%b ev=%b l1d_pres=%b bqfull=%b -> %s",
-			r_cycle, r_snoop_addr, w_s_hit, w_s_dirty, r_snoop_ev,
-			w_s_l1d_pres, w_snoop_bq_full,
-			(~w_s_hit)                                   ? "MISS-noop" :
-			(r_snoop_ev & w_s_dirty)                     ? "SKIP-l2dirty" :
-			(r_snoop_ev & w_s_l1d_pres & ~w_snoop_bq_full) ? "WAIT_BI" :
-								       "PLAIN-inval");
-`endif
 	       if(w_s_hit)
 		 begin
 `ifdef SNOOP_NO_BACKINV
@@ -2687,21 +1756,6 @@ module l2(clk,
 	    end // case: SNOOP_CHECK
 	  SNOOP_WAIT_BI:
 	    begin
-`ifdef VERILATOR
-	       /* The leak, named where it happens.  A transaction holding the recovered
-		* -dirty slot must leave WAIT_BI by exactly one of: merge (data
-		* consumed) or a clean ack (nothing to consume).  Any OTHER exit strands
-		* the credit and the data with it -- print the full condition set so the
-		* path identifies itself rather than being guessed at. */
-`ifdef ENABLE_L2_INCLUSION
-	       if((n_snoop_state == SNOOP_IDLE) & ~t_snoop_merge_done & r_wb_credit_held)
-		 begin
-		    $display("[LEAK] cyc=%0d addr=%x idx=%0d wb_pend=%b idx_match=%b bi_d=%b bi_i=%b bq_empty=%b wb_data=%x",
-			     r_cycle, r_snoop_addr, r_snoop_idx, r_wb_pend, w_wb_idx_match,
-			     r_backinv_d, r_backinv_i, w_bq_empty, r_wb_data[31:0]);
-		 end
-`endif
-`endif
 	       /* r_wb_pend rises when the ack handler latches the recovered dirty
 		* line.  Merge it in and keep the line valid+dirty; the ordinary L2
 		* writeback path takes it from there.  A clean ack (no dirty data)
@@ -2762,355 +1816,5 @@ module l2(clk,
 	     r_snoop_ev    <= n_snoop_ev;
 	  end
      end // always_ff
-
-`ifdef BIDBG
-`ifndef BIDBG_LO
- `define BIDBG_LO 1950000
-`endif
-`ifndef BIDBG_HI
- `define BIDBG_HI 2000000
-`endif
-   /* Back-invalidate handshake trace, windowed to the cycles around the known
-    * wedge.  The L1D accepts on a RISING EDGE of req while the L2 drives a level,
-    * and l1d.sv:396 justifies that with "req always returns low between distinct
-    * requests".  The wedge shows req=1/req_d=1/pend=0, i.e. that invariant broken
-    * -- so record every req transition, every ack, and every queue push and read
-    * the actual sequence instead of arguing about which path produced it. */
-   logic r_bid_prev;
-   always_ff@(posedge clk)
-     begin
-	r_bid_prev <= r_backinv_d;
-	/* Window is a knob, not a constant: it was hardcoded around one known wedge at
-	 * ~2M cycles, which made it silently useless for a 130k-cycle directed test. */
-	if((r_cycle > 32'd`BIDBG_LO) & (r_cycle < 32'd`BIDBG_HI))
-	  begin
-	     if(r_backinv_d != r_bid_prev)
-	       begin
-		  $display("[bi] cyc=%0d req %b->%b addr=%x pidx_d=%x (recorded=%x, req=%x)",
-			   r_cycle, r_bid_prev, r_backinv_d, r_backinv_addr,
-			   r_backinv_pidx_d, w_l1d_pidx, r_req_pidx);
-	       end
-	     if(backinv_d_ack)
-	       begin
-		  $display("[bi] cyc=%0d ACK dirty=%b held=%b addr=%x pidx_d=%x", r_cycle,
-			   backinv_d_dirty, backinv_d_held, r_backinv_addr, r_backinv_pidx_d);
-	       end
-	     if(t_bq_push)
-	       begin
-		  $display("[bi] cyc=%0d BQPUSH addr=%x d=%b i=%b", r_cycle,
-			   t_bq_addr, t_bq_d, t_bq_i);
-	       end
-	  end
-     end // always_ff
-`endif
-
-`ifdef VERILATOR
-/* ENABLE_L2_INCLUSION too: this watchdog reads w_bq_empty / r_backinv_* /
- * r_wb_credits, which only EXIST under that define.  Guarded on VERILATOR alone
- * it broke the DEFAULT (no-define) Verilator build outright -- every run in this
- * work passed the inclusion defines, so nothing exercised the plain build. */
-`ifdef ENABLE_L2_INCLUSION
-   /* WAIT_BI stall watchdog.  The state has exactly two exits -- merge (needs
-    * w_wb_idx_match) and acked-clean (needs the bq drained) -- and a r_wb_pend
-    * belonging to ANOTHER line blocks BOTH at once: the bq head is held while
-    * r_wb_pend is set, so w_bq_empty never comes true, while the merge never
-    * fires because the pending data is not ours.  Print the whole condition set
-    * when the state stops making progress, so the wedge names itself instead of
-    * being inferred from a no-retire watchdog 48k cycles later. */
-   logic [31:0] r_waitbi_cnt;
-   always_ff@(posedge clk)
-     begin
-	if(reset)
-	  begin
-	     r_waitbi_cnt <= 32'd0;
-	  end
-	else if(r_snoop_state != SNOOP_WAIT_BI)
-	  begin
-	     r_waitbi_cnt <= 32'd0;
-	  end
-	else
-	  begin
-	     r_waitbi_cnt <= r_waitbi_cnt + 32'd1;
-	     if(r_waitbi_cnt == 32'd10000)
-	       begin
-		  $display("[waitbi-stall] cyc=%0d addr=%x wb_pend=%b idx_match=%b bq_empty=%b bi_d=%b bi_i=%b credits=%0d wr_gnt=%b",
-			   r_cycle, r_snoop_addr, r_wb_pend, w_wb_idx_match,
-			   w_bq_empty, r_backinv_d, r_backinv_i, r_wb_credits,
-			   w_snoop_wr_gnt);
-	       end
-	  end
-     end // always_ff
-`endif
-`endif
-
-`ifdef FORMAL
-`ifdef ENABLE_L2_PIDX
-`ifdef L1SYN_ABSTRACT_L1D
-   /* ---- ABSTRACT L1D, living INSIDE the L2 -----------------------------------
-    * It belongs here, not in the formal wrapper, for the reason every property in
-    * this file does: yosys does not resolve cross-module hierarchical references, so
-    * a wrapper naming dut.w_l1_copy_made gets a floating wire that setundef hands the
-    * solver as a free input.
-    *
-    * But there is a SECOND, sharper reason.  The first version modelled the L1D from
-    * the wrapper and latched the request at l1_mem_req_ack -- a REGISTERED output --
-    * while the L2 samples l1_mem_req_* at its own accept point a cycle earlier.  With
-    * a free environment those differ, so the model installed a line on a response the
-    * L2 never treated as a copy grant.  The witness was unambiguous: w_rsp_valid=1
-    * with w_l1_copy_made=0 and t_wr_l1d_pres=0, i.e. the L2 correctly granted nothing
-    * and correctly did not probe, while the model recorded a second copy.  Driving
-    * the model from the L2's OWN event removes the whole class of error.
-    *
-    * a_held = which alias sets of the L1D hold the watched line.  NALIAS bits, no tag
-    * array: proving at-most-one for a solver-chosen line proves it for every line. */
-   localparam L1SYN_NALIAS = 1 << `L1D_ALIAS_BITS;
-   (* anyconst *) reg [`PA_WIDTH-1:0] f_syn_watch;
-   wire f_syn_cur  = (r_addr[`PA_WIDTH-1:4] == f_syn_watch[`PA_WIDTH-1:4]);
-   wire f_syn_bi   = (r_backinv_addr[`PA_WIDTH-1:4] == f_syn_watch[`PA_WIDTH-1:4]);
-
-   reg [L1SYN_NALIAS-1:0] a_held;
-   always @(posedge clk)
-     begin
-	if(reset)
-	  begin
-	     a_held <= {L1SYN_NALIAS{1'b0}};
-	  end
-	else
-	  begin
-	     /* the L2's own copy-grant event, with the L2's own registered PIdx */
-	     if(w_l1_copy_made & ~r_from_l1i & f_syn_cur)
-	       begin
-		  a_held[r_req_pidx] <= 1'b1;
-	       end
-	     /* an acked probe removes the copy from the set the probe NAMED -- the
-	      * premise discharged separately against the real l1d.sv */
-	     if(backinv_d_ack & r_backinv_d & f_syn_bi)
-	       begin
-		  a_held[r_backinv_pidx_d] <= 1'b0;
-	       end
-	  end
-     end // always @ (posedge clk)
-
-   always @(posedge clk)
-     begin
-	if(!reset)
-	  begin
-`ifdef L1SYN_COVER_ONLY
-	     /* HUNT: reach two copies.  The assert must be OFF -- as a constraint it
-	      * excludes exactly the state being hunted. */
-	     cover((a_held & (a_held - 1)) != {L1SYN_NALIAS{1'b0}});
-`else
-	     assert((a_held & (a_held - 1)) == {L1SYN_NALIAS{1'b0}});
-`endif
-	  end
-     end // always @ (posedge clk)
-
-   /* vacuity: the line must be reachable at BOTH extreme sets, or at-most-one is
-    * trivially true and says nothing about aliasing */
-   always @(posedge clk)
-     begin
-	if(!reset)
-	  begin
-	     cover(a_held[0]);
-	     cover(a_held[L1SYN_NALIAS-1]);
-	  end
-     end // always @ (posedge clk)
-`endif
-
-`ifdef L2_PIDX_PROBE_PROP
-   /* ---- PROBE-NAMES-THE-RECORDED-SET (the honest L2-local property) ------------
-    * WHAT THIS DOES AND DOES NOT CLAIM.  It does NOT claim single-copy.  It cannot:
-    * the presence bit is an OVER-APPROXIMATION by design (see the w_bi_pres_clr
-    * comment above -- "a stale set bit costs a redundant probe, never a missed
-    * one"), so "presence set => the L1 really holds it there" is not a theorem about
-    * this design and no assertion phrased that way is provable.  Proving true
-    * single-copy needs the L1D's own tag/valid arrays, i.e. a combined L1D+L2 model.
-    *
-    * What it DOES claim is the piece the L2 is solely responsible for: when the L2
-    * sends a probe for a line, the PIdx on that probe is the one it recorded for
-    * that line.  A probe carrying the wrong PIdx lands in the wrong set, finds
-    * nothing, and acks clean while the real copy survives -- a silent lost
-    * invalidate.  That bug class is REAL and was already found once by reading: the
-    * eviction path sets n_backinv_* directly, bypassing the bq where
-    * n_backinv_pidx_* is otherwise loaded, so it shipped whatever the last queue pop
-    * left behind.
-    *
-    * WATCHED LINE.  f_watch_addr is an arbitrary but fixed address chosen by the
-    * solver, so proving the property for it proves it for every line -- one register
-    * instead of a shadow copy of the whole cache. */
-   (* anyconst *) reg [`PA_WIDTH-1:0] f_watch_addr;
-   wire f_watch_hit = (r_addr[`PA_WIDTH-1:4] == f_watch_addr[`PA_WIDTH-1:4]);
-
-   reg 		f_rec_d, f_rec_i;              /* the L2 has recorded a copy for it */
-   reg [`PIDX_W-1:0] f_pidx_d, f_pidx_i;        /* ... at THIS set */
-   always @(posedge clk)
-     begin
-	if(reset)
-	  begin
-	     f_rec_d <= 1'b0;
-	     f_rec_i <= 1'b0;
-	     f_pidx_d <= 'd0;
-	     f_pidx_i <= 'd0;
-	  end
-	else
-	  begin
-	     /* w_l1_copy_made is exactly the event that writes the PIdx rams, so this
-	      * shadow tracks the ram by construction rather than by re-deriving it. */
-	     if(w_l1_copy_made & f_watch_hit & ~r_from_l1i)
-	       begin
-		  f_rec_d <= 1'b1;
-		  f_pidx_d <= r_req_pidx;
-	       end
-	     if(w_l1_copy_made & f_watch_hit & r_from_l1i)
-	       begin
-		  f_rec_i <= 1'b1;
-		  f_pidx_i <= r_req_pidx;
-	       end
-	  end
-     end // always @ (posedge clk)
-
-   always @(posedge clk)
-     begin
-	if(!reset)
-	  begin
-	     /* a probe for the watched line must name the set we recorded for it */
-	     if(backinv_d_req & f_rec_d &
-		(backinv_addr[`PA_WIDTH-1:4] == f_watch_addr[`PA_WIDTH-1:4]))
-	       begin
-		  assert(backinv_d_pidx == f_pidx_d);
-	       end
-	     if(backinv_i_req & f_rec_i &
-		(backinv_addr[`PA_WIDTH-1:4] == f_watch_addr[`PA_WIDTH-1:4]))
-	       begin
-		  assert(backinv_i_pidx == f_pidx_i);
-	       end
-	  end
-     end // always @ (posedge clk)
-
-   /* VACUITY for THIS property: the watched line must actually get recorded and
-    * actually get probed, or the assertions above are never evaluated. */
-   always @(posedge clk)
-     begin
-	if(!reset)
-	  begin
-	     cover(f_rec_d);
-	     cover(f_rec_d & backinv_d_req &
-		   (backinv_addr[`PA_WIDTH-1:4] == f_watch_addr[`PA_WIDTH-1:4]));
-	  end
-     end // always @ (posedge clk)
-
-`endif
-
-`ifdef L2_PIDX_STRONG_PROP
-   /* PARKED, and NOT because it is hard -- because it is UNPROVABLE as stated.
-    * It asserts "presence set => the L1 holds it at this PIdx", which contradicts the
-    * design's own rule that presence is an over-approximation.  A stale set bit is
-    * legal here, so the solver can always construct one and the property fails on a
-    * machine that is behaving correctly.  Three counterexamples were burned learning
-    * this; the first two were additionally mis-scoped (see w_alias_ok).  Stating
-    * single-copy properly requires the L1D's tag/valid arrays -- a combined L1D+L2
-    * model -- which is the next step, not this one.  Kept, gated, so the reasoning
-    * survives with the code rather than in a commit message. */
-   /* ---- SINGLE COPY: the PIdx contract, proved by PDR ------------------------
-    * The L2 must never hand a primary cache a copy of a line that cache ALREADY
-    * holds in a different set.  Two copies of one line in one cache, one of them
-    * possibly dirty, is exactly the corruption a VIPT synonym causes, and it shows
-    * up in simulation only as a wrong value far downstream -- the directed test
-    * tests/cache/test_l1_synonym.S samples ONE interleaving, this quantifies over
-    * all of them.
-    *
-    * Stated at the cycle the response goes out, which is where the decision is
-    * made.  Deliberately NOT restricted to the hit path that implements the check:
-    * if any OTHER response path can hand out a copy while presence is set with a
-    * different PIdx -- a fill whose stale presence bit was never cleared on
-    * eviction, say -- that is a real bug and this should catch it.
-    *
-    * REQUIRES a geometry where the L1 exceeds a page (run_l2_pidx_formal.sh shrinks
-    * LG_PG_SZ alongside the caches).  At `PIDX_W==1 with zero alias bits every PIdx
-    * is 0, the compare is trivially true, and this passes vacuously -- which is what
-    * the cover points below exist to detect. */
-   always @(posedge clk)
-     begin
-	/* w_alias_ok (= CHECK_VALID_AND_TAG & w_hit) for the same reason the wires
-	 * need it: outside that state, or on a miss, the presence/PIdx at this index
-	 * belong to a different transaction or to the EVICTED line, and comparing
-	 * them to this request's PIdx compares unrelated things. */
-	if(!reset & n_rsp_valid & (r_opcode == 5'd4) & w_alias_ok)
-	  begin
-	     if(~r_from_l1i)
-	       begin
-		  assert(~w_l1d_pres | (w_l1d_pidx == r_req_pidx));
-	       end
-	     else
-	       begin
-		  assert(~w_l1i_pres | (w_l1i_pidx == r_req_pidx));
-	       end
-	  end
-     end // always @ (posedge clk)
-
-   /* VACUITY.  A proof that no synonym is ever mishandled is worthless if no synonym
-    * is ever REACHABLE.  These must all be hit or the assertion above proves nothing:
-    * the state space has to contain a line held at one PIdx and requested at
-    * another, and the conflict path has to actually fire. */
-   always @(posedge clk)
-     begin
-	if(!reset)
-	  begin
-	     cover(w_alias_d);
-	     cover(w_alias_i);
-	     cover(w_alias_conflict & (n_state == BACKINV_WAIT));
-	     cover(n_rsp_valid & (r_opcode == 5'd4) & ~r_from_l1i & w_l1d_pres);
-	  end
-     end // always @ (posedge clk)
-`endif
-`endif
-
-   /* ---- credit conservation, proved by BMC + k-induction -------------------
-    * Properties live HERE, inside the module, and NOT in the formal wrapper: yosys's
-    * Verilog frontend does not resolve cross-module hierarchical references, so a
-    * wrapper saying `dut.r_wb_credits` silently creates a floating wire literally
-    * named "dut.r_wb_credits" which `setundef -anyseq` then hands to the solver as a
-    * free input.  The assertions would constrain nothing and still report PASS.
-    * (formal_top.v sidesteps this by routing signals out as real ports.)
-    *
-    * The credit is a permit to occupy the ONE holding slot (r_wb_pend).  It is taken
-    * at the probe-issue gate and must be returned on every way a probe can resolve.
-    * Missing ONE of those paths -- the BACKINV_WB writeback -- stranded the only
-    * credit permanently and stopped dirty L1D data being recovered at all.  These
-    * assertions exist so a future release path added without a matching return fails
-    * here instead of 90M cycles later as a kernel panic.
-    *
-    * Immediate assertions in a clocked block, per formal_top.v -- concurrent SVA is
-    * the corner yosys supports least well and buys nothing here. */
-   always @(posedge clk)
-     begin
-	if(!reset)
-	  begin
-	     /* a credit handed back twice */
-	     assert(r_wb_credits <= N_WB_CREDITS[3:0]);
-	     /* two registers encoding one fact; disagreement IS the leak */
-	     assert(r_wb_credit_held == (r_wb_credits != N_WB_CREDITS[3:0]));
-	     /* THE BUG THIS FILE EXISTS FOR.  A back-invalidate ack carrying dirty data
-	      * from a line the L1D held MUST end up in the holding slot.  BACKINV_WB used
-	      * to clear n_wb_pend unconditionally LOWER DOWN the same always_comb than the
-	      * ack handler set it, so a writeback completing on the ack's cycle destroyed
-	      * the recovered line -- silently, and only visible as a wrong value tens of
-	      * millions of cycles later.  Stated as an assertion, it is a two-line proof. */
-	     if(backinv_d_ack & backinv_d_dirty & r_backinv_ev)
-	       begin
-		  assert(n_wb_pend);
-	       end
-	     /* the recovered line must never be clobbered while the slot is occupied */
-	     if(r_wb_pend & n_wb_pend & (n_wb_data != r_wb_data))
-	       begin
-		  assert(t_snoop_merge_done);
-	       end
-	     /* vacuity guards: a PASS is worthless if these are unreachable */
-	     cover(r_wb_pend);
-	     cover(r_wb_credits == 4'd0);
-	     cover(backinv_d_ack & backinv_d_dirty);
-	  end
-     end // always @ (posedge clk)
-`endif
 
 endmodule
