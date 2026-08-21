@@ -2451,6 +2451,16 @@ endfunction
 
 	       
 	       if(core_mem_req_valid &&
+		  /* port2 is a 2-stage pipe: the request is ACKed here in ACTIVE but
+		   * PROCESSED next cycle under `ACTIVE:`.  If this cycle's logic already
+		   * decided to leave ACTIVE (a chop's double beat -> CHOP_BEAT2_RD, a
+		   * flush -> FLUSH_CL_WAIT, ...), the accepted request lands in a state
+		   * with no port2 handling and is SILENTLY DROPPED -- no ack, no MQ push,
+		   * no fault.  The op then never completes and, being older, blocks retire
+		   * forever (IRIX wedged in cacheops_refill_1's `cache 0x19` loop).  Don't
+		   * take it: core_mem_req_valid stays asserted and we accept once back in
+		   * ACTIVE. */
+		  (n_state == ACTIVE) &&
 		  !t_got_miss && 
 		  !(mem_q_almost_full||mem_q_full) && 
 		  !t_got_rd_retry &&
