@@ -984,8 +984,12 @@ module decode_mips(
 		     * NOTE this diverges from MIPS twice over: architecturally any COP0 access
 		     * without Status.CU0 raises CpU (cause 11), and we raise RI (cause 10)
 		     * instead -- same SIGILL to userspace, different Cause. */
+		    /* rs==0 is MFC0, rs==1 is DMFC0.  Both are reads, so both are safe to
+		     * expose for $23/$24; DMFC0 is what you want since the 32-bit MFC0 view
+		     * wraps in seconds.  DMFC0 additionally requires 64-bit mode below, so a
+		     * 32-bit (o32) user still gets the MFC0 path only. */
 		    if(in_kernel_mode |
-		       ((insn[25:21] == 5'd0) & (insn[10:0] == 'd0) &
+		       (((insn[25:21] == 5'd0) | (insn[25:21] == 5'd1)) & (insn[10:0] == 'd0) &
 			((insn[15:11] == 5'd23) | (insn[15:11] == 5'd24))))
 		    begin
 		    if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd1))
@@ -1022,6 +1026,12 @@ module decode_mips(
 		      end
 		    else if((insn[25:21] == 5'd1) & (insn[10:0] == 'd0)) /* dmfc0 */
 		      begin
+			 /* NO counter exemption here: in 32-bit mode (o32 user) a 64-bit
+			  * GPR read has no meaning -- the ABI's registers are 32-bit -- so
+			  * DMFC0 correctly stays II and retires as RI, counters included.
+			  * o32 reads the counters with MFC0 (32-bit view, wraps); n32/n64
+			  * run with UX set, so w_in_64b_mode is already true for them and
+			  * they get the full 64-bit DMFC0. */
 			 if(w_in_64b_mode)
 			   begin
 			      uop.op = DMFC0;

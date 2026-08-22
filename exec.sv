@@ -734,7 +734,10 @@ module exec(clk,
 	
      end // always_ff@ (posedge clk)
    
-   logic [31:0]        r_cycle, r_retired_insns;
+   /* 64-bit: as 32-bit these wrap in ~43s at 100MHz (and r_retired_insns sooner
+    * under dual retire), which makes any long measurement useless.  MFC0 still
+    * returns the sign-extended LOW 32 for compatibility; DMFC0 returns all 64. */
+   logic [63:0]        r_cycle, r_retired_insns;
 `ifdef GHOST_DEBUG
    always_ff@(negedge clk)
      begin
@@ -2670,7 +2673,7 @@ module exec(clk,
 	t_mem_tail.mapped = w_mapped;
 `ifdef VERILATOR
 	t_mem_tail.pc = mem_uq.pc;
-	t_mem_tail.uuid = {32'd0, r_cycle};
+	t_mem_tail.uuid = {32'd0, r_cycle[31:0]};   /* r_cycle is now 64b; uuid keeps the low 32 */
 `endif	
 	case(mem_uq.op)
 	  CHWB:
@@ -3854,6 +3857,14 @@ module exec(clk,
 	  'd20:
 	    begin
 	       t_csr0_64_val = {r_xptebase, r_entryhi_r, r_badvpn2, 4'd0};
+	    end
+	  'd23:
+	    begin
+	       t_csr0_64_val = r_cycle;            /* full 64b cycle count */
+	    end
+	  'd24:
+	    begin
+	       t_csr0_64_val = r_retired_insns;    /* full 64b retired count */
 	    end
 	endcase
      end
