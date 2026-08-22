@@ -2163,9 +2163,17 @@ endfunction
 			      n_chop_wait = 1'b1;
 			      n_state = FLUSH_CL_WAIT;
 			   end
-			 else if(r_req.op != MEM_CHWB)
+			 else
 			   begin
-			      /* INV variants (clean hit or L1D miss): drop any L1D copy,
+			      /* INV variants AND CHWB (clean hit or L1D miss): drop any L1D copy,
+			       * CHWB was excluded here and fell into arms that issued NO memory
+			       * request -- on a MISS, literally nothing -- so the op never
+			       * completed and the core wedged with it at the ROB head (silicon:
+			       * IRIX hung in cacheops_refill_1's `cache 0x19` loop).  CHINV and
+			       * CHWBINV take this arm for every non-dirty-hit case and work
+			       * (tests/cache/test_chop_ops.S), so CHWB now follows the identical
+			       * flow -- which is what the WB arm above already claims: "CHWB is
+			       * conservatively treated as WB-Invalidate".
 			       * scrub the L2 copy (MEM_INVL, no WB -- DMA-in drop).
 			       * t_got_miss: see WB arm. */
 			      t_got_miss = 1'b1;
@@ -2178,12 +2186,6 @@ endfunction
 			      n_mem_req_valid = 1'b1;
 			      n_chop_wait = 1'b1;
 			      n_state = FLUSH_CL_WAIT;
-			   end
-			 else if(r_valid_out && (r_tag_out == r_cache_tag))
-			   begin
-			      /* CHWB clean hit: nothing dirty to push; drop the copy
-			       * (conservative WB-inval semantics, see above) */
-			      t_mark_invalid = 1'b1;
 			   end
 			 /* double-beat: if beat 0 issued NO flush (CHWB clean-hit or a
 			  * full miss), FLUSH_CL_WAIT never runs -- go straight to beat 2.
@@ -2714,8 +2716,10 @@ endfunction
 		    n_chop_wait = 1'b1;
 		    n_state = FLUSH_CL_WAIT;
 		 end
-	       else if(r_req.op != MEM_CHWB)
+	       else
 		 begin
+		    /* beat 2: same as beat 0 -- CHWB follows the INV flow rather than
+		     * an arm that issues nothing. */
 		    t_got_miss = 1'b1;
 		    if(r_valid_out && (r_tag_out == r_cache_tag))
 		      t_mark_invalid = 1'b1;
@@ -2726,14 +2730,6 @@ endfunction
 		    n_mem_req_valid = 1'b1;
 		    n_chop_wait = 1'b1;
 		    n_state = FLUSH_CL_WAIT;
-		 end
-	       else
-		 begin
-		    if(r_valid_out && (r_tag_out == r_cache_tag))
-		      t_mark_invalid = 1'b1;
-		    t_reset_graduated = 1'b1;
-		    n_chop_beat = 1'b0;
-		    n_state = ACTIVE;
 		 end
 	    end
 	  FLUSH_CACHE:
@@ -2953,6 +2949,180 @@ endfunction
 		  $display("[l1dprof] total=%0d active=%0d inject_wb=%0d inject_fill=%0d wait_inject=%0d handle=%0d uncache=%0d flush=%0d other=%0d",
 			   r_p_total, r_p_active, r_p_inject_wb, r_p_inject_fill,
 			   r_p_wait_inject, r_p_handle, r_p_uncache, r_p_flush, r_p_other);
+	       end
+	  end
+     end // always_ff
+`endif
+
+
+`ifdef SPEC_FILL_CHK
+   /* SPECULATIVE-FILL DETECTOR (stage 1: UNGATED).
+    *
+    * IRIX invalidates DMA buffers correctly -- measured in interp_mips: op 0x15
+    * (primary-D Hit-WB-Invalidate) on a 16B stride, exactly the L1D line size, on
+    * kseg0 addresses.  Coverage is complete.  Yet DMA'd blocks read back stale, so
+    * something REFILLS the line after the invalidate.
+    *
+    * r9999 is OOO and loads are NOT gated on graduation (stores are: see the
+    * r_graduated test at the mem-queue pop).  So a load on a mispredicted path can
+    * miss and refill a line from DRAM with pre-DMA contents.  Software has already
+    * done its invalidate and has no reason to repeat it.  An in-order R4400 cannot
+    * do this, which is why the Indy docs can specify non-coherent DMA and be right.
+    *
+    * Stage 1 counts EVERY fill whose requesting ROB entry is later squashed, with no
+    * gating on what was filled.  Later stages narrow it (fill into a line a recent
+    * CACHE op invalidated, then into a live DMA buffer).
+    *
+    * A bit is set when a cacheable fill installs for r_req's ROB entry, and cleared
+    * on that entry going dead (counted) or retiring normally (not counted).  The
+    * clear-on-retire matters: ROB slots are reused, so a stale bit would attribute a
+    * later squash to a fill that had already committed. */
+   /* STAGE 2 GATE: was the filled line one that a CACHE op just invalidated?
+    *
+    * IRIX's DMA invalidate is provably complete (interp_mips: op 0x15, 16B stride ==
+    * the L1D line size, kseg0), so a stale DMA'd block means something REFILLED a
+    * line after software cleaned it.  Counting all squashed-load fills is too broad
+    * (909/boot, mostly harmless lines); what matters is a squashed load refilling a
+    * line that was just invalidated -- that is the DMA-buffer signature.
+    *
+    * 256-entry direct-mapped table of the most recently CACHE-invalidated line
+    * address, indexed by PA[11:4].  Approximate by construction (a later invalidate
+    * to the same index evicts an earlier one), so the count is a LOWER bound. */
+   localparam CINV_TAB_SZ = 256;
+   logic [`PA_WIDTH-1:4] r_cinv_pa [CINV_TAB_SZ-1:0];
+   logic [CINV_TAB_SZ-1:0] r_cinv_vld;
+
+   /* Gate on ANY invalidate, not just the CACHE-hit-op path: cinv_ops read 0 when
+    * this required (t_mark_invalid & w_is_chop_r), because the chop arms only set
+    * t_mark_invalid on a TAG HIT and IRIX also invalidates via the FLUSH_CL funnel.
+    * Recording every invalidate is strictly more inclusive and needs no assumption
+    * about which path software used.  The line being invalidated is the one
+    * currently indexed, so reconstruct its PA the same way the writeback arm does. */
+   wire [`PA_WIDTH-1:0] w_cinv_pa_full =
+	{r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS], r_cache_idx, {`LG_L1D_CL_LEN{1'b0}}};
+   wire [7:0] w_cinv_wr_idx = w_cinv_pa_full[11:4];
+   wire       w_cinv_wr_en  = t_mark_invalid;
+
+   wire [`PA_WIDTH-1:4] w_fill_pa  = r_mem_req_addr[`PA_WIDTH-1:4];
+   wire [7:0] 	        w_fill_idx8 = r_mem_req_addr[11:4];
+   wire w_fill_hits_cinv = r_cinv_vld[w_fill_idx8] &
+			   (r_cinv_pa[w_fill_idx8] == w_fill_pa);
+
+   /* POISONED-LINE TRACKING.
+    * A fill is only known to be speculative at the squash, so remember which SET each
+    * in-flight fill installed into; on restart_valid every still-tracked fill belonged
+    * to an instruction that never committed, so mark its set POISONED.  The poison is
+    * cleared when software invalidates that line again or a committed fill replaces it.
+    * Consumption = an architectural LOAD hitting a poisoned line: that is the read of
+    * data from a region software had already invalidated. */
+   logic [`LG_L1D_NUM_SETS-1:0] r_fill_set [N_ROB_ENTRIES-1:0];
+   logic [L1D_NUM_SETS-1:0]     r_poison;
+   /* Poison must be qualified by TAG: the bit alone is per-SET, so any later load
+    * aliasing to that set would count as consumption even with a different line. */
+   logic [N_TAG_BITS-1:0]       r_poison_tag [L1D_NUM_SETS-1:0];
+   logic [N_TAG_BITS-1:0]       r_fill_tag [N_ROB_ENTRIES-1:0];
+   logic [31:0] 		r_n_poison_set;
+   logic [31:0] 		r_n_poison_hit;   /* stale data actually consumed */
+   logic [N_ROB_ENTRIES-1:0] r_fill_cinv;   /* fill landed on a just-invalidated line */
+   logic [31:0] r_n_spec_cinv;              /* AND squashed => the smoking gun */
+   logic [31:0] r_n_cinv_ops;
+   logic [N_ROB_ENTRIES-1:0] r_fill_rob;
+   logic [31:0] 	     r_n_spec_fill;   /* fills whose load was squashed */
+   logic [31:0] 	     r_n_fill_total;  /* all cacheable fills */
+
+   wire [N_ROB_ENTRIES-1:0] w_fill_set  = w_cacheable_mem_rsp_valid ?
+			    ({{(N_ROB_ENTRIES-1){1'b0}}, 1'b1} << r_req.rob_ptr) :
+			    {N_ROB_ENTRIES{1'b0}};
+   wire [N_ROB_ENTRIES-1:0] w_ret_clr =
+	(retired_rob_ptr_valid ?
+	 ({{(N_ROB_ENTRIES-1){1'b0}}, 1'b1} << retired_rob_ptr) : {N_ROB_ENTRIES{1'b0}}) |
+	(retired_rob_ptr_two_valid ?
+	 ({{(N_ROB_ENTRIES-1){1'b0}}, 1'b1} << retired_rob_ptr_two) : {N_ROB_ENTRIES{1'b0}});
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_fill_rob <= {N_ROB_ENTRIES{1'b0}};
+	     r_n_spec_fill <= 32'd0;
+	     r_n_fill_total <= 32'd0;
+	     r_fill_cinv <= {N_ROB_ENTRIES{1'b0}};
+	     r_cinv_vld <= {CINV_TAB_SZ{1'b0}};
+	     r_poison <= {L1D_NUM_SETS{1'b0}};
+	     r_n_poison_set <= 32'd0;
+	     r_n_poison_hit <= 32'd0;
+	     r_n_spec_cinv <= 32'd0;
+	     r_n_cinv_ops <= 32'd0;
+	  end
+	else
+	  begin
+	     /* dead_rob_mask is NOT "squashed" -- core.sv sets it on ALLOCATION and
+	      * clears it on RETIRE, i.e. it means "in flight".  Keying on it counted
+	      * essentially every fill.  A squash is restart_valid, which drives
+	      * t_clr_rob and wipes the whole ROB, so every fill still tracked at that
+	      * moment belonged to an instruction that never committed. */
+	     if(w_cinv_wr_en)
+	       begin
+		  r_cinv_pa[w_cinv_wr_idx] <= w_cinv_pa_full[`PA_WIDTH-1:4];
+		  r_cinv_vld[w_cinv_wr_idx] <= 1'b1;
+		  r_n_cinv_ops <= r_n_cinv_ops + 32'd1;
+	       end
+	     if(w_cacheable_mem_rsp_valid)
+	       begin
+		  r_fill_set[r_req.rob_ptr] <= r_cache_idx;
+		  r_fill_tag[r_req.rob_ptr] <= r_cache_tag;
+	       end
+	     /* consumption: an architectural load hits a line a squashed load resurrected */
+	     if(t_hit_cache & ~r_req.is_store & r_poison[r_cache_idx] &
+		(r_poison_tag[r_cache_idx] == r_cache_tag))
+	       begin
+		  r_n_poison_hit <= r_n_poison_hit + 32'd1;
+		  if(r_n_poison_hit < 32'd64)   /* cap: the count is the signal, not the spam */
+		    begin
+		       $display("[poisonhit] cyc=%0d set=%0d rob=%0d addr=%x",
+				r_cycle, r_cache_idx, r_req.rob_ptr, r_req.addr);
+		    end
+	       end
+	     /* software invalidating the line clears the poison */
+	     if(t_mark_invalid)
+	       begin
+		  r_poison[r_cache_idx] <= 1'b0;
+	       end
+	     else if(restart_valid)
+	       begin
+		  for(integer pi = 0; pi < N_ROB_ENTRIES; pi = pi + 1)
+		    begin
+		       if(r_fill_rob[pi])
+			 begin
+			    r_poison[r_fill_set[pi]] <= 1'b1;
+			    r_poison_tag[r_fill_set[pi]] <= r_fill_tag[pi];
+			 end
+		    end
+	       end
+	     if(restart_valid)
+	       begin
+		  r_n_poison_set <= r_n_poison_set + $countones(r_fill_rob);
+		  r_fill_rob <= w_fill_set;
+		  r_fill_cinv <= (w_cacheable_mem_rsp_valid & w_fill_hits_cinv) ?
+				 w_fill_set : {N_ROB_ENTRIES{1'b0}};
+		  r_n_spec_fill <= r_n_spec_fill + $countones(r_fill_rob);
+		  r_n_spec_cinv <= r_n_spec_cinv + $countones(r_fill_rob & r_fill_cinv);
+	       end
+	     else
+	       begin
+		  r_fill_rob <= (r_fill_rob & ~w_ret_clr) | w_fill_set;
+		  r_fill_cinv <= (r_fill_cinv & ~w_ret_clr) |
+				 ((w_cacheable_mem_rsp_valid & w_fill_hits_cinv) ?
+				  w_fill_set : {N_ROB_ENTRIES{1'b0}});
+	       end
+	     if(w_cacheable_mem_rsp_valid)
+	       begin
+		  r_n_fill_total <= r_n_fill_total + 32'd1;
+	       end
+	     if(r_cycle[22:0] == 23'h7fffff)
+	       begin
+		  $display("[specfill] cyc=%0d spec_fills=%0d SPEC_ON_INVALIDATED=%0d POISON_CONSUMED=%0d cinv_ops=%0d total_fills=%0d",
+			   r_cycle, r_n_spec_fill, r_n_spec_cinv, r_n_poison_hit, r_n_cinv_ops, r_n_fill_total);
 	       end
 	  end
      end // always_ff
