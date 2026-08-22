@@ -415,6 +415,8 @@ int main(int argc, char **argv) {
   uint64_t last_store_addr = 0, last_load_addr = 0, last_addr = 0;
   int misses_inflight = 0;
   std::map<uint32_t, uint64_t> pushout_histo;
+  std::map<uint64_t, double> tip_map;          /* full per-cycle attribution (TIP, ported from rv64core) */
+  std::map<uint64_t, uint64_t> tip_insn_cnts;
   int64_t mem_reply_cycle = -1L;
   try {
     po::options_description desc("Options");
@@ -731,6 +733,26 @@ int main(int argc, char **argv) {
      * RTL and sim both at bfc00180 when the handler starts retiring. */
     if(tb->took_irq && enable_checker) {
       raise_int(ss, (uint32_t)tb->epc);
+    }
+
+    /* TIP: full per-cycle attribution (rv64core top.cc parity). ROB-empty ->
+     * blame last-retired (stall is upstream/fetch); nothing retires -> blame the
+     * true ROB head (dbg_head_pc); something retires -> split 1.0/total across the
+     * retiring ops. sum(tip) == total cycles. */
+    if(tb->dbg_head_status & 0x1) {
+      tip_map[last_retired_pc] += 1.0;
+    }
+    else if(!(tb->retire_valid || tb->retire_two_valid)) {
+      tip_map[tb->dbg_head_pc] += 1.0;
+    }
+    else {
+      double total = static_cast<double>(tb->retire_valid) + static_cast<double>(tb->retire_two_valid);
+      tip_map[tb->retire_pc] += 1.0 / total;
+      tip_insn_cnts[tb->retire_pc]++;
+      if(tb->retire_two_valid) {
+	tip_map[tb->retire_two_pc] += 1.0 / total;
+	tip_insn_cnts[tb->retire_two_pc]++;
+      }
     }
 
     if(tb->retire_valid) {
@@ -1296,6 +1318,24 @@ int main(int argc, char **argv) {
     }
     out << total_pushout << " cycles of pushout\n";
     dump_histo(pushout_name, pushout_histo, s);
+
+    /* TIP dump (rv64core-format: PC:disasm,cycles,per-kiloinsn), sorted desc */
+    {
+      double tip_total = 0.0;
+      for(auto &p : tip_map) { tip_total += p.second; }
+      std::cout << "tip cycles  = " << tip_total << "\n";
+      std::vector<std::pair<uint64_t,double>> tv(tip_map.begin(), tip_map.end());
+      std::sort(tv.begin(), tv.end(), [](const std::pair<uint64_t,double> &a, const std::pair<uint64_t,double> &b){ return a.second > b.second; });
+      std::ofstream tf("tip.txt");
+      for(auto &p : tv) {
+	uint64_t pc = p.first & 0x1fffffff;
+	tf << std::hex << p.first << std::dec << ":"
+	   << getAsmString(get_insn(pc, s), pc) << ","
+	   << p.second << ","
+	   << (insns_retired ? (p.second / insns_retired) * 1000.0 : 0.0) << "\n";
+      }
+      tf.close();
+    }
 
     //std::ofstream branch_info("retire_info.csv");
     uint64_t total_retire = 0, total_cycle = 0;
