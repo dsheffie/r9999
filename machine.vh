@@ -170,7 +170,15 @@
  `elsif BIG_SIM_L2
   `define LG_L2_NUM_SETS 16     /* 65536 lines x 16B = 1MB (sim-only; too big for FPGA BRAM) */
  `else
-  `define LG_L2_NUM_SETS 13     /* 8192 lines x 16B = 128KB (default; fits henry xczu3eg BRAM) */
+  `define LG_L2_NUM_SETS 10     /* 1024 lines x 16B = 16KB (default) */
+  /* Back to 16KB from the 128KB of 2fb24a9.  128KB does shake out more L2 bugs, as
+   * that commit intended, but it also RETAINS a speculatively-filled line long
+   * enough to act as the stale reservoir for the R10000-class non-coherent-DMA bug
+   * -- the same reservoir ENABLE_L2_TINY / ENABLE_L2_NOCACHE above exist to kill.
+   * With both of those commented out and no HW snoop into the L1D
+   * (ENABLE_L2_INCLUSION is not defined by any build), a 128KB L2 against a 4KB L1D
+   * leaves IRIX dying in reconfigure with `xfs_iflush: Bad inode <n> magic number`.
+   * 16KB is the geometry 09d1ccf recorded as "configuration does not appear fail". */
  `endif
 `endif
 `endif
