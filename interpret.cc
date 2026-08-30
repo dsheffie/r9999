@@ -198,11 +198,19 @@ static inline void set_exc_pc(state_t *s) {
    * BD holding the ORIGINAL access so its eret retries it.  Matches the RTL, where
    * exec.sv gates the EPC write on r_sr_exl==0. */
   if(s->cpr0[CPR0_SR] & SR_EXL) return;
+  /* EPC has a 64-bit shadow (cpr0_64) that dmfc0 reads -- and a MIPS64 Linux
+   * exception handler reads EPC with `dmfc0 ra,$14`, not mfc0.  Every other CP0
+   * register written on an exception (BadVAddr/EntryHi/Context/XContext, in
+   * tlb_set_fault_state) already updates both arrays; EPC was the one that did
+   * not, so after any exception dmfc0 returned a STALE EPC from whenever dmtc0
+   * last wrote it.  eret was unaffected because it reads the 32-bit copy. */
   if(s->in_delay_slot) {
     s->cpr0[CPR0_EPC]    = (uint32_t)(s->pc - 4);
+    s->cpr0_64[CPR0_EPC] = sext32((uint32_t)(s->pc - 4));
     s->cpr0[CPR0_CAUSE] |=  (1u << 31);
   } else {
     s->cpr0[CPR0_EPC]    = (uint32_t)s->pc;
+    s->cpr0_64[CPR0_EPC] = sext32((uint32_t)s->pc);
     s->cpr0[CPR0_CAUSE] &= ~(1u << 31);
   }
 }
@@ -337,6 +345,7 @@ static void raise_trap(state_t *s) {
 void raise_int(state_t *s, uint32_t epc, uint32_t ip) {
   s->ll_link_valid = false;   /* interrupt breaks the LL/SC link */
   s->cpr0[CPR0_EPC]   = epc;
+  s->cpr0_64[CPR0_EPC] = sext32(epc);   /* keep the dmfc0-visible shadow in step */
   /* Cause.IP[7:0] = the REAL pending bits (from the RTL's w_ip in the checker),
    * ExcCode=0 (Int), BD=0.  Was hardcoded to IP[7] (timer) which mis-dispatched
    * every software (IP[1]) / device (IP[2]) interrupt in the IRIX ISR. */
