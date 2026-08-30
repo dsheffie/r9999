@@ -914,11 +914,22 @@ int main(int argc, char **argv) {
 	   * counter. */
 	  uint32_t rtl_pc32 = (uint32_t)tb->retire_pc;
 	  uint32_t sim_pc32 = (uint32_t)ss->pc;
+	  /* BEV=1 puts the vectors in the boot ROM (bfc00180+), but a Linux
+	   * checkpoint runs with BEV=0, where they live in kseg0: TLB refill
+	   * 0x80000000, XTLB refill 0x80000080, general 0x80000180.  Without the
+	   * BEV=0 range the sim is never advanced past the faulting instruction,
+	   * so it sits on the store while the RTL runs the handler and the desync
+	   * watchdog kills the run a few retires later. */
 	  bool rtl_in_exc_handler = (rtl_pc32 >= 0xbfc00180u &&
-				     rtl_pc32 <  0xbfc00400u);
-	  /* "sim in user code" = sim is not in the entire bfc00xxx ROM area */
-	  bool sim_in_user_code   = !(sim_pc32 >= 0xbfc00000u &&
-				      sim_pc32 <  0xbfc00400u);
+				     rtl_pc32 <  0xbfc00400u) ||
+				    (rtl_pc32 >= 0x80000000u &&
+				     rtl_pc32 <  0x80000200u);
+	  /* "sim in user code" = the sim has NOT yet taken the exception, i.e. it
+	   * is in neither vector area */
+	  bool sim_in_user_code   = !((sim_pc32 >= 0xbfc00000u &&
+				       sim_pc32 <  0xbfc00400u) ||
+				      (sim_pc32 >= 0x80000000u &&
+				       sim_pc32 <  0x80000200u));
 	  bool caught_up = false;
 
 	  if(rtl_in_exc_handler && sim_in_user_code) {

@@ -2677,7 +2677,16 @@ void execMips(state_t *s) {
 	    s->gpr[rt] = 0;
 	  } else {
 	    /* mfc0 sign-extends the 32-bit CP0 value to 64 bits, matching HW. */
-	    s->gpr[rt] = sext32(s->cpr0[rd]);
+	    uint32_t v = s->cpr0[rd];
+	    /* Status.CU2 is HARDWIRED to 1 in the RTL -- exec.sv's cpr0_status_reg
+	     * concatenation puts a literal 1'b1 in the cu2 slot.  A checkpoint whose
+	     * stored Status has CU2=0 therefore makes the co-sim diverge by exactly
+	     * bit 30 the first time a kernel exception handler does mfc0 k0,$12.
+	     * Mirror the hardware. */
+	    if(rd == CPR0_SR) {
+	      v |= 0x40000000u;
+	    }
+	    s->gpr[rt] = sext32(v);
 	  }
 	  s->insn_histo[mipsInsn::MFC0]++;
 	  break;
