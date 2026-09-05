@@ -345,7 +345,7 @@ module decode_mips(
 			   uop.srcA = rs;
 			   uop.srcA_valid = 1'b1;
 			   uop.has_delay_slot = 1'b1;
-			   uop.op = JALR;
+			   uop.op = (rd == 'd0) ? JR : JALR;  /* jalr $0,rx == jr rx: keep the jump, drop the dead link write */
 			   uop.dst_valid = rd != 'd0;
 			   uop.dst = rd;
 			   uop.imm = insn_pred_target[15:0];
@@ -496,7 +496,7 @@ module decode_mips(
 			   uop.srcB_valid = 1'b1;
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = ADD;
+			   uop.op = (rd == 'd0) ? NOP : ADD;
 			   uop.is_int = 1'b1;
 			end		 
 		      6'd33: /* addu */
@@ -878,7 +878,7 @@ module decode_mips(
 		 end // case: 6'd7
 	       6'd8: /* ADDI */
 		 begin
-		    uop.op = ADDI;
+		    uop.op = (rt == 'd0) ? NOP : ADDI;
 		    uop.srcA_valid = 1'b1;
 		    uop.srcA = rs;
 		    uop.dst_valid = (rt != 'd0);
@@ -1017,7 +1017,7 @@ module decode_mips(
 		      end	       
 		    else if((insn[25:21] == 5'd0) & (insn[10:0] == 'd0)) /* switch on RS */
 		      begin /* mfc0 */
-			 uop.op = MFC0;
+			 uop.op = (rt == 'd0) ? NOP : MFC0;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.srcA = rd;
@@ -1034,7 +1034,7 @@ module decode_mips(
 			  * they get the full 64-bit DMFC0. */
 			 if(w_in_64b_mode)
 			   begin
-			      uop.op = DMFC0;
+			      uop.op = (rt == 'd0) ? NOP : DMFC0;
 			      uop.dst = rt;
 			      uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			      uop.srcA = rd;
@@ -1134,7 +1134,7 @@ module decode_mips(
 		      end // if ((insn[25:21]==5'd4) && (insn[10:0] == 11'd0))
 		    else if((insn[25:21]==5'd2) && (insn[10:0] == 11'd0))
 		      begin /* cfc1: GPR[rt] <- FCR[fs] (fs=insn[15:11]: 0=FIR, 31=FCSR) */
-			 uop.op = CFC1;
+			 uop.op = (rt == 'd0) ? NOP : CFC1;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.srcA = fs;        /* carry the FCR number (NOT a PRF read) */
@@ -1401,7 +1401,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0);
-			 uop.op = DADDI;
+			 uop.op = (rt == 'd0) ? NOP : DADDI;
 			 uop.imm = insn[15:0];
 			 uop.is_int = 1'b1;
 		      end
@@ -1414,7 +1414,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0);
-			 uop.op = DADDIU;
+			 uop.op = (rt == 'd0) ? NOP : DADDIU;
 			 uop.imm = insn[15:0];
 			 uop.is_int = 1'b1;
 		      end

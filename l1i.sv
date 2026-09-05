@@ -43,6 +43,8 @@ module l1i(clk,
 	   restart_pc,
 	   restart_src_pc,
 	   restart_src_is_indirect,
+	   dbg_arch_hist,
+	   dbg_spec_hist,
 	   restart_valid,
 	   restart_ack,
 	   retire_valid,
@@ -100,6 +102,15 @@ module l1i(clk,
    input logic [`M_WIDTH-1:0] restart_pc;
    input logic [`M_WIDTH-1:0] restart_src_pc;
    input logic 	      restart_src_is_indirect;
+   /* Global history, read back over the existing trace-index debug port.
+    * ARCH is the RETIRED history (updated at branch retirement); SPEC is the
+    * speculative copy the PHT is actually indexed with.  Dumping BOTH lets a
+    * capture test whether speculative history was correctly restored after a
+    * squash (n_spec_gbl_hist = n_arch_gbl_hist) -- if it was not, later
+    * predictions index the wrong PHT entry, which no per-instruction pht_idx
+    * can reveal. */
+   output logic [63:0]        dbg_arch_hist;
+   output logic [63:0]        dbg_spec_hist;
    input logic 	      restart_valid;
    output logic       restart_ack;
    //return stack signals
@@ -236,6 +247,8 @@ module l1i(clk,
    
    logic [`GBL_HIST_LEN-1:0] 	     n_arch_gbl_hist, r_arch_gbl_hist;
    logic [`GBL_HIST_LEN-1:0] 	     n_spec_gbl_hist, r_spec_gbl_hist;
+   assign dbg_arch_hist = r_arch_gbl_hist;
+   assign dbg_spec_hist = r_spec_gbl_hist;
 
    logic [`GBL_HIST_LEN-1:0] 	     r_last_spec_gbl_hist;
    
@@ -498,8 +511,9 @@ endfunction
 
    always_ff@(posedge clk)
      begin
-	r_btb_pc <= reset ? 'd0 : 
-		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : 'd0;
+	/* cold/invalid entry -> POISON, not zero: see BTB_POISON_PC in machine.vh */
+	r_btb_pc <= reset ? `BTB_POISON_PC : 
+		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : `BTB_POISON_PC;
 	
      end
 
@@ -561,7 +575,11 @@ endfunction
 	r_tlb_pc <= reset ? 'd0 : w_la_pc;
 	r_la_pc <= reset ? 'd0 : w_la_pc;
 	r_cached <= reset ? 1'b0 : w_cached;
+`ifdef FORMAL_MINSTATE
+	r_mapped <= 1'b0;   /* fetch identity-translate: JTLB CAM swept */
+`else
 	r_mapped <= reset ? 1'b0 : w_mapped;
+`endif
 	r_bad_va <= reset ? 1'b0 : w_bad_perms;
      end
 

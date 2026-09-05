@@ -35,6 +35,22 @@ import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 `endif
 
 module core(clk,
+`ifdef FORMAL_DIVA_SLOT
+	    fml_diva_slot,
+`endif
+`ifdef FORMAL_DIVA
+	    fml_diva_bad,
+	    fml_diva_act,
+`endif
+`ifdef FORMAL_ROBWR_PORTS
+	    fml_robwr_badv,
+	    fml_robwr_act,
+`endif
+`ifdef FORMAL_RETIRE_PORTS
+	    fml_ret_bad,
+	    fml_ret_act,
+	    fml_ret_badv,
+`endif
 	    single_step,
 	    step,
 	    bp_enable,
@@ -307,9 +323,9 @@ module core(clk,
    output logic [31:0]			  dbg_serialize_cycle;
    output logic [31:0]			  dbg_cycle;
    output logic				  dbg_oldest_first_pending;
-   input  logic [11:0] 			  dbg_trace_index;
+   input logic [19:0] dbg_trace_index;
    output logic [31:0] 			  dbg_trace_data;
-   output logic [8:0] 			  dbg_trace_wptr;
+   output logic [15:0] 			  dbg_trace_wptr;
 
    assign in_64b_kernel_mode     = w_in_64b_kernel_mode;
    assign in_64b_supervisor_mode = w_in_64b_supervisor_mode;
@@ -573,6 +589,7 @@ module core(clk,
    logic 		     t_mem_req_valid;
 
    logic 		     n_machine_clr, r_machine_clr;
+   logic r_post_restart_arm;  /* arms at RAT->ACTIVE restart edge, stamps first alloc, disarms */
    logic 		     n_flush_req_l1d, r_flush_req_l1d;
    logic 		     n_flush_req_l1i, r_flush_req_l1i;
    
@@ -646,14 +663,20 @@ module core(clk,
    wire		w_wp_match      = w_wp_data_here & ((bp_wp_val == 32'hffffffff) | (core_store_data.data[31:0] == bp_wp_val));
 
    /* resettable fault-trap: while armed (bp_enable), the FIRST fatal USERSPACE arch-fault
-    * (AdEL/AdES/IBE/DBE/RI, EPC in useg) latches {epc,cause,badvaddr} + sets r_fault_hit,
+    * (AdEL/AdES/IBE/DBE, EPC in useg) latches {epc,cause,badvaddr} + sets r_fault_hit,
     * which folds into w_step_ok to FREEZE so the ARM can read a coherent fault state (the
     * latched taps override the live outputs below).  fault_clear clears + re-arms. */
    logic		r_fault_hit;
    logic [`M_WIDTH-1:0] r_fault_epc, r_fault_badv;
    logic [4:0]	r_fault_cause;
+   /* RI (cause 10) is deliberately NOT here: this kernel emulates RDHWR via the RI
+    * handler, so userspace takes an RI on every TLS access -- ~1600 per 10M instrs
+    * measured on the binutils workload.  Including it latched the trap milliseconds
+    * into the run and made bp_enable unusable (arming bp_pc also arms this trap).
+    * The remaining causes -- AdEL/AdES/IBE/DBE -- do not occur in healthy userspace,
+    * so they are a real corruption signature. */
    wire		w_fatal_cause = (n_cause == 5'd4) | (n_cause == 5'd5) | (n_cause == 5'd6) |
-		(n_cause == 5'd7) | (n_cause == 5'd10);
+		(n_cause == 5'd7);
    wire		w_fault_match = bp_enable & ~r_fault_hit & t_arch_fault & w_fatal_cause & ~n_epc[31];
 
    /* this gets consumed by retirement logic */
@@ -831,13 +854,359 @@ module core(clk,
      end
 `endif
 
-`ifdef ENABLE_TRACE_BUFFER
+   /* NULL-TARGET FREEZE.  A jump to VA 0 is architecturally legal but is
+    * essentially never correct: the 2026-08-24 Linux oops was exactly that -- a
+    * JALR that RETIRED with target 0 (epc=0, BadVA=0, ra=__split_vma+0x1a0).
+    * Detecting it HERE instead of waiting for the kernel oops is what makes the
+    * retire ring usable: the oops does not halt the machine, so the 256-entry
+    * ring wraps in microseconds and the evidence is gone.  Freezing on the
+    * event keeps the offending JALR and everything before it resident.
+    *
+    * Catches BOTH zero and BTB_POISON_PC, and the two mean different things:
+    * poison => a COLD/INVALID BTB entry reached retire (the predictor made it);
+    * zero   => a genuine NULL pointer in the program.  Without the poison split
+    * these are indistinguishable, which is why the 2026-08-24 dump could not
+    * say whether the predictor or the data was at fault.
+    *
+    * r_trace_frozen is a flop, so the triggering retire record is still written
+    * this cycle and only later writes are suppressed.  Sticky until reset. */
+   /* MUST check BOTH retire slots: the machine retires two per cycle, and an
+    * indirect that commits in the SECOND slot (t_retire_two / t_rob_next_head)
+    * would otherwise never be seen -- a detector that is structurally unable to
+    * report the event it exists for. */
+   /* COMMIT = either head-advance path (`if(t_retire || t_bump_rob_head)`, the
+    * ROB free logic).  A MISPREDICTED branch asserts BOTH (measured: retire=1
+    * bump=1 at the jalr commit), so t_retire alone was in fact sufficient for
+    * the is_indirect triggers -- verified by directed test, and NOT the reason
+    * the ring failed to freeze on 2026-08-27.  What t_retire cannot see is an
+    * ARCH-FAULT commit: t_retire = t_rob_head_complete & !t_arch_fault, so a
+    * faulting entry commits via t_bump_rob_head with t_retire LOW.  That is
+    * what w_null_pc_head below needs, and it also puts the fault records --
+    * the crash evidence -- into the ring instead of dropping them. */
+   wire 	      w_head_commit = t_retire | t_bump_rob_head;
+   wire 	      w_null_tgt_head = w_head_commit & t_rob_head.is_indirect &
+				        ((t_rob_head.target_pc == 'd0) |
+					 (t_rob_head.target_pc == `BTB_POISON_PC));
+   wire 	      w_null_tgt_two  = t_retire_two & t_rob_next_head.is_indirect &
+				        ((t_rob_next_head.target_pc == 'd0) |
+					 (t_rob_next_head.target_pc == `BTB_POISON_PC));
+   /* THE CRASH ITSELF, not one way of causing it.  On 2026-08-27 the board
+    * took the __split_vma oops (epc=0, cause 2) and the ring did NOT freeze,
+    * with the ring provably live -- so the transfer to 0 was NOT a committed
+    * indirect with target 0.  The is_indirect triggers above are structurally
+    * blind to an ERET into a corrupted EPC, or to any bad restart_pc.  An entry
+    * FETCHED from 0 reaching commit catches all of them: the faulting entry
+    * carries pc==0 and commits via t_bump_rob_head (t_retire is LOW on an arch
+    * fault), which is why this needs w_head_commit and not t_retire. */
+   wire 	      w_null_pc_head = w_head_commit & (t_rob_head.pc == 'd0);
+   /* WILD RESTART -- the trigger that cannot be blind to the route taken.
+    * Fires on ANY restart into the null page, which covers every way the core
+    * can architecturally arrive at pc 0: a mispredicted branch resolving to 0
+    * (target_pc), a faulted delay slot restarting through a stale
+    * r_last_branch_target, and an ERET into a corrupted EPC (resume_pc).  The
+    * is_indirect triggers above see only the first of those, which is why they
+    * stayed silent through the 2026-08-27 oops.  This is the silicon twin of
+    * the sim-only `if(n_epc < 'd1000) $stop()` in the arch-fault path: the null
+    * page is never mapped, so a restart into it is always a bug.  Reading
+    * n_restart_* here is safe -- w_null_target is consumed only by always_ff
+    * (a comb read would form a t_bump_rob_head/t_retire UNOPTFLAT loop). */
+   wire 	      w_wild_restart = n_restart_valid &
+				       (n_restart_pc[(`M_WIDTH-1):12] == 'd0);
+   /* KERNEL NULL-PAGE FAULT.  The four kernel-mode events (__split_vma,
+    * filp_flush x2, __get_unmapped_area) all reached PC=0 yet tripped NONE of the
+    * triggers above -- so whatever takes the kernel to 0 is not a committed
+    * indirect resolving to 0, and w_null_pc_head did not fire either.  Rather than
+    * keep guessing at the route, trigger on the CONSEQUENCE: an arch fault taken
+    * in kernel mode whose BadVA is in the never-mapped null page.  A kernel-mode
+    * access to page 0 is always a bug, and ordinary user demand-paging cannot trip
+    * it (that faults in user mode), so this cannot fire on normal activity.
+    * Consumed only by always_ff below -- reading n_* in a comb block that assigns
+    * them would form an UNOPTFLAT loop. */
+   wire 	      w_kernel_null_fault = t_bump_rob_head & in_kernel_mode &
+					    (n_badvaddr[(`M_WIDTH-1):12] == 'd0) &
+					    ((n_cause == 5'd2) | (n_cause == 5'd3));
+   /* WILD EPC -- the actual silicon twin of the pre-existing sim assertion
+    * `if(n_epc < 'd1000) $stop()` in the arch-fault path.
+    *
+    * WHY this and not the others: all FOUR kernel events (__split_vma,
+    * filp_flush x2, anon_pipe_read) report epc=0, yet NO trigger that detects a
+    * real path to PC 0 ever fires -- not a committed indirect with target 0, not
+    * a restart into the null page, and not a ROB entry committing with pc==0
+    * (which DOES fire in sim for a genuine null jump).  The consistent reading is
+    * that the kernel never executes at 0 at all and the EXCEPTION STATE is what
+    * is wrong -- which would also explain ra values matching no call site in the
+    * faulting function.  So trigger on the EPC being written wild, regardless of
+    * how control got there. */
+   /* ARMING GATE: at reset the ROB arrays are uninitialised (BRAM reads 0 on
+    * FPGA), so n_epc computes as 0 and this fires during boot firmware -- observed
+    * on 6d1f30fc, frozen at wptr=38 with the ring still showing 0xbfc000xx.  Arm
+    * only after the machine is well past reset.  Default is small enough for the
+    * directed sim test (which faults at ~16.7k cycles); silicon overrides it via
+    * SV2V_DEFINES with a value far past boot. */
+   /* Arm the wild-EPC trigger on the first USER-mode retire, not on a cycle count.
+    * The old `WILD_EPC_ARM_CYCLES 10000` arm fired during the FSBL -- which runs
+    * legitimately with EPC=0 -- so the trigger tripped at boot and latched the ring
+    * shut at wptr=38 before the workload started.  v5, v6 and 5004523d were all
+    * blinded this way, and 5004523d soaked for hours past three real userspace
+    * SIGSEGVs (one with epc=0) without recording a single retire.  Arming on the
+    * first user-mode commit is workload-relative, so it cannot race the firmware. */
+   logic 	      r_wild_epc_armed;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_wild_epc_armed <= 1'b0;
+	  end
+	else
+	  begin
+	     if(w_head_commit & !in_kernel_mode)
+	       begin
+		  r_wild_epc_armed <= 1'b1;
+	       end
+	  end
+     end // always_ff
+
+   wire 	      w_wild_epc = t_bump_rob_head & (n_epc[(`M_WIDTH-1):12] == 'd0) &
+				   r_wild_epc_armed;
+   wire 	      w_null_target = w_null_tgt_head | w_null_tgt_two |
+				      w_null_pc_head | w_wild_restart |
+				      w_kernel_null_fault | w_wild_epc;
+
+`ifdef ENABLE_PC_TRACE
+   /* ---- retire trace ring (rich) ---------------------------------------------
+    * Every field below is ALREADY unconditional in rob_entry_t, so logging costs
+    * ring storage only -- no new pipeline state.  Deliberately over-collects:
+    * a reproduction costs ~2.5 h, so a missing field is far more expensive than
+    * an unused one.
+    *
+    * 256 entries x 4 words (~1 BRAM36).  Readback reuses the existing debug port:
+    *   dbg_trace_index[7:0] = entry, [9:8] = word
+    *   w0 = pc[31:0]         w1 = target_pc[31:0]   (RESOLVED target for branches)
+    *   w2 = data[31:0]       (core_mem_rsp.data for a load == the LOADED VALUE)
+    *   w3 = {flags, ldst[4:0], opcode[7:0]}
+    * take_br is the resolved branch direction -- it answers directly whether the
+    * guard beqz was taken, which no register dump can show.
+    *
+    * Frozen on a retired indirect whose target is 0 or BTB_POISON_PC. */
+   /* TWO BANKS, not one array with two write ports: the machine retires two per
+    * cycle, and a single array written twice in a cycle will not infer as BRAM
+    * (it degrades to LUTRAM, far too costly at 256x128).  Bank E holds the head
+    * slot, bank O the second retire slot, both written in the same cycle and
+    * sharing one pair index.  Readback keeps the LINEAR order the driver already
+    * expects: entry[0] = E[0], entry[1] = O[0], entry[2] = E[1] ...  so
+    * dbg_trace_index[0] selects the bank and [7:1] the row, and the driver needs
+    * no change.  WHY this matters: logging only the head hid every second
+    * instruction -- both 2026-08-29 captures were missing the nop between the
+    * faulting load and the branch, so the retire stream was half blind. */
+   localparam LG_RT_BANK = `LG_RTRACE_ENTRIES - 1;   /* per-bank depth, log2 */
+   logic [215:0]       r_rtrace_e [(1<<LG_RT_BANK)-1:0];
+   logic [215:0]       r_rtrace_o [(1<<LG_RT_BANK)-1:0];
+   logic [LG_RT_BANK-1:0] r_rtrace_ptr;
+   logic 	       r_rtrace_frozen;
+   logic [215:0]       r_rtrace_row_e, r_rtrace_row_o;
+
+   /* Cycles since the previous committed head, saturating.  Logged with every
+    * record so a long push-out (mispredict recovery, miss, replay) is visible in
+    * the trace itself; the value stored with a record is the gap that PRECEDED
+    * it.  The record is 144b, not 128b, because each bank is 2 RAMB36 in 512x72
+    * SDP mode -- 144b is already paid for, so these bits cost no extra BRAM. */
+   localparam RT_GAP_W = 8;
+   logic [RT_GAP_W-1:0] r_rt_gap, n_rt_gap;
+   always_comb
+     begin
+	n_rt_gap = w_head_commit ? 'd0 :
+		   (r_rt_gap == {RT_GAP_W{1'b1}}) ? r_rt_gap : (r_rt_gap + 'd1);
+     end // always_comb
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_rt_gap <= 'd0;
+	  end
+	else
+	  begin
+	     r_rt_gap <= n_rt_gap;
+	  end
+     end // always_ff
+
+   wire [31:0] 	       w_rt_flags = {25'd0,
+				     t_rob_head.is_store,
+				     t_rob_head.valid_dst,
+				     t_rob_head.take_br,
+				     t_rob_head.is_br,
+				     t_rob_head.is_indirect,
+				     t_rob_head.in_delay_slot,
+				     t_rob_head.faulted};
+
+   wire [31:0] 	       w_rt_flags2 = {25'd0,
+				      t_rob_next_head.is_store,
+				      t_rob_next_head.valid_dst,
+				      t_rob_next_head.take_br,
+				      t_rob_next_head.is_br,
+				      t_rob_next_head.is_indirect,
+				      t_rob_next_head.in_delay_slot,
+				      t_rob_next_head.faulted};
+
+   wire [215:0]        w_rt_rec_head = { 3'd0,
+					 t_rob_head.hi_nzB,
+					 t_rob_head.hi_nzA,
+					 r_rob_head_ptr[`LG_ROB_ENTRIES-1:0],
+					 t_rob_head.wr_echo,
+					 t_rob_head.srcB_val,
+					 t_rob_head.fwd_selB,
+					 t_rob_head.post_restart,
+					 t_rob_head.has_nullifying_delay_slot,
+					 t_rob_head.has_delay_slot,
+					 t_rob_head.is_ret,
+					 t_rob_head.fwd_sel,   /* {fwd_int,fwd_mem} operand-mux select at execute */
+					 t_rob_head.srcA_arch,
+					 t_rob_head.srcA_ptr,
+					 t_rob_head.pdst,
+					 t_rob_head.exec_cycle,
+					 r_rt_gap,
+					 t_rob_head.pht_idx[10:0],
+					 t_rob_head.br_pred,
+					 w_rt_flags[6:0],
+					 t_rob_head.ldst,
+					 t_rob_head.opcode,
+					 t_rob_head.data[31:0],
+					 t_rob_head.target_pc[31:0],
+					 t_rob_head.pc[31:0] };
+
+   wire [215:0]        w_rt_rec_two  = { 3'd0,
+					 t_rob_next_head.hi_nzB,
+					 t_rob_next_head.hi_nzA,
+					 r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0],
+					 t_rob_next_head.wr_echo,
+					 t_rob_next_head.srcB_val,
+					 t_rob_next_head.fwd_selB,
+					 t_rob_next_head.post_restart,
+					 t_rob_next_head.has_nullifying_delay_slot,
+					 t_rob_next_head.has_delay_slot,
+					 t_rob_next_head.is_ret,
+					 t_rob_next_head.fwd_sel,   /* {fwd_int,fwd_mem} operand-mux select at execute */
+					 t_rob_next_head.srcA_arch,
+					 t_rob_next_head.srcA_ptr,
+					 t_rob_next_head.pdst,
+					 t_rob_next_head.exec_cycle,
+					 r_rt_gap,
+					 t_rob_next_head.pht_idx[10:0],
+					 t_rob_next_head.br_pred,
+					 w_rt_flags2[6:0],
+					 t_rob_next_head.ldst,
+					 t_rob_next_head.opcode,
+					 t_rob_next_head.data[31:0],
+					 t_rob_next_head.target_pc[31:0],
+					 t_rob_next_head.pc[31:0] };
+
+   /* Filler for a cycle that retired ONE instruction: all-ones is impossible for
+    * a real record (opcode ff is not a valid uop), so the dump shows ffffffff and
+    * op=ff and an odd slot is never mistaken for a retired instruction. */
+   wire [215:0]        w_rt_rec_none = {216{1'b1}};
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_rtrace_ptr <= 'd0;
+	     r_rtrace_frozen <= 1'b0;
+	  end
+	else
+	  begin
+	     if(w_null_target)
+	       begin
+		  r_rtrace_frozen <= 1'b1;
+	       end
+	     if(w_head_commit & !r_rtrace_frozen)
+	       begin
+		  r_rtrace_e[r_rtrace_ptr] <= w_rt_rec_head;
+		  r_rtrace_o[r_rtrace_ptr] <= t_retire_two ? w_rt_rec_two : w_rt_rec_none;
+		  r_rtrace_ptr <= r_rtrace_ptr + 'd1;
+	       end
+	  end
+	r_rtrace_row_e <= r_rtrace_e[dbg_trace_index[LG_RT_BANK:1]];
+	r_rtrace_row_o <= r_rtrace_o[dbg_trace_index[LG_RT_BANK:1]];
+     end // always_ff
+
+   /* linear next-write slot = pair index * 2, so the driver's 0..255 walk is unchanged */
+   wire [215:0]        w_rtrace_row = r_rtrace_sel ? r_rtrace_row_o : r_rtrace_row_e;
+   logic 	       r_rtrace_sel;
+   always_ff@(posedge clk)
+     begin
+	r_rtrace_sel <= dbg_trace_index[0];
+     end
+   /* Keep the frozen flag at bit 15 regardless of ring depth so the host decode
+    * (frozen=(s>>15)&1, wptr=s&0x7fff) is independent of LG_RTRACE_ENTRIES. */
+   assign dbg_trace_wptr = {r_rtrace_frozen, {(14-LG_RT_BANK){1'b0}}, r_rtrace_ptr, 1'b0};
+   /* 216b record = 7 words.  Word select is {index[18], index[16:15]} so index[17]
+    * stays free for the GHR readback in core_l1d_l1i (w_hist_sel = index[17:15]>=4). */
+   wire [2:0] w_rt_word = {dbg_trace_index[18], dbg_trace_index[16:15]};
+   assign dbg_trace_data = (w_rt_word == 3'd4) ? w_rtrace_row[159:128] :
+			   (w_rt_word == 3'd5) ? w_rtrace_row[191:160] :
+			   (w_rt_word == 3'd6) ? {8'd0, w_rtrace_row[215:192]} :
+			   (w_rt_word == 3'd7) ? 32'd0 :
+			   (dbg_trace_index[16:15] == 2'd0) ? w_rtrace_row[31:0]   :
+			   (dbg_trace_index[16:15] == 2'd1) ? w_rtrace_row[63:32]  :
+			   (dbg_trace_index[16:15] == 2'd2) ? w_rtrace_row[95:64]  :
+			                                      w_rtrace_row[127:96];
+`elsif ENABLE_TRACE_BUFFER
    // ---- trace buffer: log head + next_head {pc,counters,flags} on retire OR arch-fault (incl. II) ----
    // row = 12 words = 2 records; record = {pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, {valid,faulted,cause}}
    logic [11:0][31:0] r_trace_ram [255:0];
    logic [7:0] 	      r_trace_wptr;
    logic [11:0][31:0] r_trace_row;
-   wire 	      w_trace_we   = (t_retire | (t_arch_fault & (|n_cause))) & (r_state != DEAD);
+   logic 	      r_trace_frozen;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_trace_frozen <= 1'b0;
+	  end
+	else if(w_null_target)
+	  begin
+	     r_trace_frozen <= 1'b1;
+	  end
+     end // always_ff
+
+   wire 	      w_trace_we   = (t_retire | (t_arch_fault & (|n_cause))) & (r_state != DEAD) & !r_trace_frozen;
+
+`ifdef VERILATOR
+   /* make the event loud in sim too -- on silicon it shows up by itself as
+    * epc/BadVA = deadcafc in the oops, but a sim run would otherwise only
+    * reveal it via the frozen-ring bit, which nobody thinks to read. */
+   always_ff@(posedge clk)
+     begin
+	if(w_null_target)
+	  begin
+	     if(w_wild_epc)
+	       begin
+		  $display("[WILD-EPC] cyc=%d n_epc=%x cause=%d kernel=%b head_pc=%x",
+			   r_cycle, n_epc, n_cause, in_kernel_mode, t_rob_head.pc);
+	       end
+	     if(w_kernel_null_fault)
+	       begin
+		  $display("[KERN-NULL] cyc=%d badvaddr=%x cause=%d", r_cycle, n_badvaddr, n_cause);
+	       end
+	     if(w_wild_restart)
+	       begin
+		  $display("[WILD-RESTART] cyc=%d restart_pc=%x (head pc=%x op=%d in_ds=%b)",
+			   r_cycle, n_restart_pc, t_rob_head.pc, t_rob_head.opcode,
+			   t_rob_head.in_delay_slot);
+	       end
+	     if(w_null_pc_head)
+	       begin
+		  $display("[NULL-PC] cyc=%d commit of an entry FETCHED from 0 (faulted=%b in_ds=%b)",
+			   r_cycle, t_rob_head.faulted, t_rob_head.in_delay_slot);
+	       end
+	     $display("[NULL-TARGET] cyc=%d slot=%s pc=%x target=%x src=%s",
+		      r_cycle, w_null_tgt_head ? "head" : "two",
+		      w_null_tgt_head ? t_rob_head.pc : t_rob_next_head.pc,
+		      w_null_tgt_head ? t_rob_head.target_pc : t_rob_next_head.target_pc,
+		      ((w_null_tgt_head ? t_rob_head.target_pc : t_rob_next_head.target_pc)
+		       == `BTB_POISON_PC) ? "COLD-BTB-POISON" : "REAL-NULL");
+	  end
+     end // always_ff
+`endif
    wire [31:0] 	      w_head_flags = {25'd0, (t_retire | t_arch_fault), t_arch_fault, n_cause};
    wire [31:0] 	      w_next_flags = {25'd0, t_retire_two, 1'b0, 5'd0};
    always_ff@(posedge clk)
@@ -852,7 +1221,9 @@ module core(clk,
 	  end
 	r_trace_row <= r_trace_ram[dbg_trace_index[11:4]];
      end
-   assign dbg_trace_wptr = {1'b0, r_trace_wptr};
+   /* MSB of the wptr readback = "ring is frozen on a null-target event", so the
+    * host can tell a captured trace from a live wrapping one with no new reg. */
+   assign dbg_trace_wptr = {7'd0, r_trace_frozen, r_trace_wptr};   /* port widened to 16b for the 32K PC-trace ring */
    assign dbg_trace_data = r_trace_row[dbg_trace_index[3:0]];
 `else
    assign dbg_trace_wptr = 'd0;
@@ -1067,6 +1438,7 @@ module core(clk,
 	     r_state <= FLUSH_FOR_HALT;
 	     r_restart_cycles <= 'd0;
 	     r_machine_clr <= 1'b0;
+	     r_post_restart_arm <= 1'b0;
 	     r_got_restart_ack <= 1'b0;
 	     r_cause <= 5'd0;
 	     r_ce <= 2'd0;
@@ -1084,6 +1456,14 @@ module core(clk,
 	     r_state <= n_state;
 	     r_restart_cycles <= n_restart_cycles;
 	     r_machine_clr <= n_machine_clr;
+	     if(r_state == RAT && n_state == ACTIVE)
+	       begin
+		  r_post_restart_arm <= 1'b1;
+	       end
+	     else if(t_alloc)
+	       begin
+		  r_post_restart_arm <= 1'b0;
+	       end
 	     r_got_restart_ack <= n_got_restart_ack;
 	     r_cause <= n_cause;
 	     r_ce <= n_ce;
@@ -1566,6 +1946,14 @@ module core(clk,
 			   end // else: !if(t_uop.serializing_op && !t_dq_empty)
 		      end // if (!t_dq_empty)
 		    t_retire = t_rob_head_complete & !t_arch_fault;
+`ifdef SINGLE_RETIRE
+		    /* Bug-hunt knob: force single (in-order, one-per-cycle) retirement.
+		     * Two purposes: it halves the retire-PC ring (one record per row,
+		     * no slot-2 entry to miss), and it BISECTS the bug -- if
+		     * __split_vma still reproduces with dual retire off, the entire
+		     * dual-retire path is exonerated. */
+		    t_retire_two = 1'b0;
+`else
 		    t_retire_two = !t_rob_next_empty
 		    		   & !t_rob_head.faulted
 		    		   & !t_rob_next_head.faulted 				    
@@ -1577,6 +1965,7 @@ module core(clk,
 		    		   & !t_rob_next_head.valid_hilo_dst
 				   & !t_rob_next_head.valid_fcr_dst 
 				   & ~single_step;
+`endif
 		    /* non-trapping FP ops retiring this cycle: accumulate IEEE flags
 		     * into FCSR.Flags and set Cause to the youngest's exceptions. */
 		    if(t_retire & t_rob_head.fp_set_flags)
@@ -2395,6 +2784,10 @@ module core(clk,
 	t_rob_tail.ldst  = 'd0;
 	t_rob_tail.pdst  = 'd0;
 	t_rob_tail.old_pdst  = 'd0;
+	/* renamed srcA + its arch name, for the retire trace's rename self-check */
+	t_rob_tail.srcA_ptr  = t_alloc_uop.srcA;
+	t_rob_tail.srcA_arch = t_uop.srcA[4:0];
+	t_rob_tail.post_restart = r_post_restart_arm;
 	t_rob_tail.pc = t_alloc_uop.pc;
 	/* carry the decode-time 64b-mode flag into the ROB (the P-mode-hazard guard at
 	 * ARCH_FAULT reads t_rob_head.mode_when_fetched).  Was dropped here -> the guard
@@ -2439,6 +2832,7 @@ module core(clk,
 	t_rob_tail.data = 'd0;
 	t_rob_tail.opcode = t_alloc_uop.op;
 	t_rob_tail.pht_idx = t_alloc_uop.pht_idx;
+	t_rob_tail.br_pred = t_alloc_uop.br_pred;
 	t_rob_tail.oldest_first = t_uop.oldest_first;
 	
 	t_rob_next_tail.faulted  = 1'b0;
@@ -2449,6 +2843,9 @@ module core(clk,
 	t_rob_next_tail.ldst  = 'd0;
 	t_rob_next_tail.pdst  = 'd0;
 	t_rob_next_tail.old_pdst  = 'd0;
+	t_rob_next_tail.srcA_ptr  = t_alloc_uop2.srcA;
+	t_rob_next_tail.srcA_arch = t_uop2.srcA[4:0];
+	t_rob_next_tail.post_restart = r_post_restart_arm & ~t_alloc;
 	t_rob_next_tail.pc = t_alloc_uop2.pc;
 	t_rob_next_tail.mode_when_fetched = t_alloc_uop2.mode_when_fetched;   /* see slot0 note above */
 	t_rob_next_tail.target_pc = (t_alloc_uop2.op == J) ? t_alloc_uop2.pred_target : (t_alloc_uop2.pc + 'd4);
@@ -2485,6 +2882,7 @@ module core(clk,
 	t_rob_next_tail.in_delay_slot = r_in_delay_slot;
 	t_rob_next_tail.data = 'd0;
 	t_rob_next_tail.pht_idx = t_alloc_uop2.pht_idx;
+	t_rob_next_tail.br_pred = t_alloc_uop2.br_pred;
 	t_rob_next_tail.oldest_first = t_uop2.oldest_first;
 	
 	t_rob_tail.has_delay_slot = t_alloc_uop.has_delay_slot;
@@ -2738,6 +3136,17 @@ module core(clk,
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= t_complete_bundle_1.data;
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].overflow <= t_complete_bundle_1.overflow;
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].trap <= t_complete_bundle_1.trap;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].fwd_selB <= t_complete_bundle_1.fwd_selB;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].srcB_val <= t_complete_bundle_1.srcB_val;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].hi_nzA <= t_complete_bundle_1.hi_nzA;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].hi_nzB <= t_complete_bundle_1.hi_nzB;
+`ifdef FORMAL_DIVA
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].diva_srcA <= t_complete_bundle_1.diva_srcA;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].diva_srcB <= t_complete_bundle_1.diva_srcB;
+`endif
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0];
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].fwd_sel <= t_complete_bundle_1.fwd_sel;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
 `endif
@@ -2750,6 +3159,17 @@ module core(clk,
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= t_complete_bundle_1.data;
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].overflow <= t_complete_bundle_1.overflow;
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].trap <= t_complete_bundle_1.trap;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].fwd_selB <= t_complete_bundle_1.fwd_selB;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].srcB_val <= t_complete_bundle_1.srcB_val;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].hi_nzA <= t_complete_bundle_1.hi_nzA;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].hi_nzB <= t_complete_bundle_1.hi_nzB;
+`ifdef FORMAL_DIVA
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].diva_srcA <= t_complete_bundle_1.diva_srcA;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].diva_srcB <= t_complete_bundle_1.diva_srcB;
+`endif
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0];
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].fwd_sel <= t_complete_bundle_1.fwd_sel;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
 `endif
@@ -2767,6 +3187,9 @@ module core(clk,
 		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= t_complete_bundle_2.data;
 		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].overflow <= t_complete_bundle_2.overflow;
 		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].trap <= t_complete_bundle_2.trap;
+		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
+		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:0];
+		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].fwd_sel <= t_complete_bundle_2.fwd_sel;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		     r_rob_odd[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
 `endif
@@ -2781,6 +3204,9 @@ module core(clk,
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= t_complete_bundle_2.data;
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].overflow <= t_complete_bundle_2.overflow;
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].trap <= t_complete_bundle_2.trap;
+		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
+		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:0];
+		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].fwd_sel <= t_complete_bundle_2.fwd_sel;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		     r_rob_even[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
 `endif
@@ -2799,6 +3225,8 @@ module core(clk,
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_hit <= core_mem_rsp.tlb_hit;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_index <= core_mem_rsp.tlb_index;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_bad_addr <= core_mem_rsp.bad_addr;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:0];
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
 `endif
@@ -2812,6 +3240,8 @@ module core(clk,
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_hit <= core_mem_rsp.tlb_hit;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_index <= core_mem_rsp.tlb_index;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_bad_addr <= core_mem_rsp.bad_addr;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:0];
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
 `endif
@@ -3636,5 +4066,381 @@ module core(clk,
      if(!reset)
        cover((r_state == ARCH_FAULT) && t_rob_head.is_ii && !t_rob_head.is_break && !t_rob_head.is_syscall);
 `endif
+
+
+`ifdef FORMAL_RETIRE_MON
+   /* ------------------------------------------------------------------------
+    * Retire-count monitor for the mispredicted-branch + delay-slot protocol.
+    * Property (dsheffie 2026-09-04): after a mispredicted branch with a delay
+    * slot enters DRAIN, EXACTLY ONE instruction retires before the restart --
+    * the delay slot itself (pc+4, in_delay_slot) -- except a not-taken
+    * branch-likely, whose nullified slot must contribute EXACTLY ZERO; a
+    * delay slot that arch-faults ends the window at ARCH_FAULT instead.
+    * This is the guard against "bug #3" (wrong-path retires after the ds).
+    * The monitor latches its OWN copies of the branch state at the arming
+    * cycle so a bug in the DUT's r_has_delay_slot/r_take_br latches cannot
+    * blind it.
+    * ---------------------------------------------------------------------- */
+`ifdef FORMAL_RETIRE_PORTS
+   output logic fml_ret_bad;
+   output logic fml_ret_act;
+   output logic [3:0] fml_ret_badv;
+`endif
+   logic        r_mon_armed;
+   logic [1:0]  r_mon_cnt;
+   logic        r_mon_expect_zero;   /* not-taken likely: nullified slot */
+   logic [`M_WIDTH-1:0] r_mon_ds_pc;
+   logic 	r_mon_bad, r_mon_act;
+   logic [3:0] r_mon_badv;   /* {cnt-at-restart, extra/zero-retire, wrong-ds, dual-retire} */
+`ifdef VERILATOR
+   logic [63:0] r_mon_arm_cnt = 'd0;
+   logic [63:0] r_mon_nullify_cnt = 'd0;
+`endif
+`ifdef VERILATOR
+   logic [63:0] r_mon_drain_cnt = 'd0;
+   logic [63:0] r_mon_cfault_cnt = 'd0;
+   logic [63:0] r_mon_fret_cnt = 'd0;
+   always_ff@(posedge clk)
+     begin
+	r_mon_cfault_cnt <= r_mon_cfault_cnt
+			    + ((t_complete_valid_1 && t_complete_bundle_1.faulted) ? 64'd1 : 64'd0)
+			    + ((t_complete_valid_2 && t_complete_bundle_2.faulted) ? 64'd1 : 64'd0);
+	if(t_retire && t_rob_head.faulted)
+	  begin
+	     r_mon_fret_cnt <= r_mon_fret_cnt + 64'd1;
+	  end
+	if((r_mon_cfault_cnt & 64'h3ff) == 64'd1023)
+	  begin
+	     $display("[RETMON-CNT] cyc=%0d cfaults=%0d fretire=%0d drains=%0d",
+		      r_cycle, r_mon_cfault_cnt, r_mon_fret_cnt, r_mon_drain_cnt);
+	  end
+	if((r_state == ACTIVE) && (n_state != ACTIVE) && (r_mon_drain_cnt < 64'd12))
+	  begin
+	     $display("[RETMON-XSTATE] cyc=%0d n_state=%0d faulted=%b hds=%b", r_cycle, n_state,
+		      t_rob_head.faulted, t_rob_head.has_delay_slot);
+	  end
+	if((r_state == ACTIVE) && (n_state == DRAIN))
+	  begin
+	     r_mon_drain_cnt <= r_mon_drain_cnt + 64'd1;
+	     if(r_mon_drain_cnt < 64'd6)
+	       begin
+		  $display("[RETMON-DRAIN] cyc=%0d faulted=%b hds=%b nds=%b pc=%x",
+			   r_cycle, t_rob_head.faulted, t_rob_head.has_delay_slot,
+			   t_rob_head.has_nullifying_delay_slot, t_rob_head.pc);
+	       end
+	  end
+     end
+`endif
+   wire w_mon_arm = (r_state == ACTIVE) && (n_state == DRAIN) &&
+		    t_rob_head.faulted &&
+		    (t_rob_head.has_delay_slot | t_rob_head.has_nullifying_delay_slot);
+   wire w_mon_ret = t_retire | t_retire_two;
+   wire w_mon_end_ok  = t_restart_complete;
+   wire w_mon_end_af  = (n_state == ARCH_FAULT);
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_mon_armed <= 1'b0;
+	     r_mon_cnt <= 2'd0;
+	     r_mon_expect_zero <= 1'b0;
+	     r_mon_ds_pc <= 'd0;
+	     r_mon_bad <= 1'b0;
+	     r_mon_act <= 1'b0;
+	     r_mon_badv <= 4'd0;
+	  end
+	else if(w_mon_arm)
+	  begin
+	     r_mon_armed <= 1'b1;
+	     r_mon_cnt <= 2'd0;
+	     r_mon_expect_zero <= t_rob_head.has_nullifying_delay_slot & ~t_rob_head.take_br;
+	     r_mon_ds_pc <= t_rob_head.pc + 'd4;
+	     r_mon_act <= 1'b1;
+`ifdef VERILATOR
+	     r_mon_arm_cnt <= r_mon_arm_cnt + 64'd1;
+	     r_mon_nullify_cnt <= r_mon_nullify_cnt +
+				  ((t_rob_head.has_nullifying_delay_slot & ~t_rob_head.take_br) ? 64'd1 : 64'd0);
+	     if(r_mon_arm_cnt < 64'd4 || ((r_mon_arm_cnt & 64'hfffff) == 64'd0))
+	       begin
+		  $display("[RETMON-ARM] cyc=%0d arms=%0d nullified=%0d pc=%x nds=%b tb=%b",
+			   r_cycle, r_mon_arm_cnt, r_mon_nullify_cnt, t_rob_head.pc,
+			   t_rob_head.has_nullifying_delay_slot, t_rob_head.take_br);
+	       end
+`endif
+	  end
+	else if(r_mon_armed)
+	  begin
+	     if(w_mon_ret)
+	       begin
+		  r_mon_cnt <= r_mon_cnt + (t_retire ? 2'd1 : 2'd0) + (t_retire_two ? 2'd1 : 2'd0);
+		  /* any retire in the window when zero are allowed, a second retire,
+		   * a dual retire, or a retire that is not the delay slot = bad */
+		  if(r_mon_expect_zero
+		     | (r_mon_cnt != 2'd0)
+		     | t_retire_two
+		     | (t_rob_head.pc != r_mon_ds_pc)
+		     | ~t_rob_head.in_delay_slot)
+		    begin
+		       r_mon_bad <= 1'b1;
+		       r_mon_badv[0] <= r_mon_badv[0] | t_retire_two;
+		       r_mon_badv[1] <= r_mon_badv[1] | (t_rob_head.pc != r_mon_ds_pc) | ~t_rob_head.in_delay_slot;
+		       r_mon_badv[2] <= r_mon_badv[2] | r_mon_expect_zero | (r_mon_cnt != 2'd0);
+`ifdef VERILATOR
+		       $display("[RETMON-BAD] cyc=%0d cnt=%0d exp0=%b two=%b pc=%x want=%x ids=%b",
+				r_cycle, r_mon_cnt, r_mon_expect_zero, t_retire_two,
+				t_rob_head.pc, r_mon_ds_pc, t_rob_head.in_delay_slot);
+`endif
+		    end
+	       end
+	     if(w_mon_end_ok)
+	       begin
+		  r_mon_armed <= 1'b0;
+		  /* at a clean restart the count must equal expectation */
+		  if((r_mon_expect_zero ? (r_mon_cnt != 2'd0) : (r_mon_cnt != 2'd1)) & ~w_mon_ret)
+		    begin
+		       r_mon_bad <= 1'b1;
+		       r_mon_badv[3] <= 1'b1;
+`ifdef VERILATOR
+		       $display("[RETMON-BADCNT] cyc=%0d cnt=%0d exp0=%b", r_cycle, r_mon_cnt, r_mon_expect_zero);
+`endif
+		    end
+	       end
+	     else if(w_mon_end_af)
+	       begin
+		  r_mon_armed <= 1'b0;   /* ds arch-faulted: window void */
+	       end
+	  end
+     end // always_ff
+`ifdef FORMAL_RETIRE_PORTS
+   assign fml_ret_bad = r_mon_bad;
+   assign fml_ret_act = r_mon_act;
+   assign fml_ret_badv = r_mon_badv;
+`endif
+`endif //  FORMAL_RETIRE_MON
+
+
+`ifdef FORMAL_ROBWR_MON
+   /* ------------------------------------------------------------------------
+    * ROB write-integrity monitor (2026-09-05).  Three field-writers exist
+    * (bundle_1, bundle_2, core_mem_rsp) across two always_ff blocks with
+    * independent pointer fanouts.  Prove, in RTL, that
+    *   [0] the two exec bundles never target the same slot in one cycle,
+    *   [1] bundle_1 never writes a slot already marked complete,
+    *   [2] bundle_2 never writes a slot already marked complete,
+    *   [3] a mem response never completes an already-complete slot,
+    *   [4] a mem response never collides with an exec bundle on one slot.
+    * If these PROVE, a ring row with foreign fields (wr_echo mismatch) can only
+    * be a physical mis-latch, never a logical double/misdirected write.
+    * ENV: core_mem_rsp is a free input at -top core; a scoreboard tracks
+    * outstanding request rob_ptrs and r_fml_env_ok goes 0 forever on any
+    * response to a non-outstanding slot -- all bads are gated by it, so the
+    * proof quantifies only over protocol-legal environments.
+    * ---------------------------------------------------------------------- */
+`ifdef FORMAL_ROBWR_PORTS
+   output logic [4:0] fml_robwr_badv;
+   output logic [2:0] fml_robwr_act;
+`endif
+   logic [N_ROB_ENTRIES-1:0] r_fml_out;
+   logic r_fml_env_ok;
+   logic [4:0] r_fml_badv;
+   logic [2:0] r_fml_act;
+   wire [`LG_ROB_ENTRIES-1:0] w_fml_p1 = t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0];
+   wire [`LG_ROB_ENTRIES-1:0] w_fml_p2 = t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:0];
+   wire [`LG_ROB_ENTRIES-1:0] w_fml_pm = core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:0];
+   wire w_fml_rsp_legal = core_mem_rsp_valid & r_fml_out[w_fml_pm];
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_fml_out <= 'd0;
+	     r_fml_env_ok <= 1'b1;
+	     r_fml_badv <= 5'd0;
+	     r_fml_act <= 3'd0;
+	  end
+	else
+	  begin
+	     if(t_clr_rob)
+	       begin
+		  r_fml_out <= 'd0;
+	       end
+	     else
+	       begin
+		  if(core_mem_req_valid & core_mem_req_ack)
+		    begin
+		       r_fml_out[core_mem_req.rob_ptr[`LG_ROB_ENTRIES-1:0]] <= 1'b1;
+		    end
+		  if(core_mem_rsp_valid)
+		    begin
+		       r_fml_out[w_fml_pm] <= 1'b0;
+		    end
+	       end
+	     if(core_mem_rsp_valid & !r_fml_out[w_fml_pm])
+	       begin
+		  r_fml_env_ok <= 1'b0;
+	       end
+`ifdef VERILATOR
+	     /* in sim the environment IS the real l1d: a response for a slot with
+	      * no outstanding request = a spurious/double response = the bug */
+	     if(core_mem_rsp_valid & !r_fml_out[w_fml_pm])
+	       begin
+		  $display("[ROBWR-SPURIOUS-RSP] cyc=%0d rob_ptr=%0d (no outstanding request)",
+			   r_cycle, w_fml_pm);
+		  $stop();
+	       end
+`endif
+	     /* a response is only protocol-legal THIS cycle if it targets an
+	      * outstanding request; the sticky env_ok covers history, the
+	      * combinational term covers the violating cycle itself. */
+	     if(r_fml_env_ok)
+	       begin
+		  r_fml_badv[0] <= r_fml_badv[0] | (t_complete_valid_1 & t_complete_valid_2 & (w_fml_p1 == w_fml_p2));
+		  r_fml_badv[1] <= r_fml_badv[1] | (t_complete_valid_1 & r_rob_complete[w_fml_p1]);
+		  r_fml_badv[2] <= r_fml_badv[2] | (t_complete_valid_2 & r_rob_complete[w_fml_p2]);
+		  r_fml_badv[3] <= r_fml_badv[3] | (w_fml_rsp_legal & r_rob_complete[w_fml_pm]);
+		  r_fml_badv[4] <= r_fml_badv[4] | (w_fml_rsp_legal &
+						    ((t_complete_valid_1 & (w_fml_p1 == w_fml_pm)) |
+						     (t_complete_valid_2 & (w_fml_p2 == w_fml_pm))));
+	       end
+	     r_fml_act[0] <= r_fml_act[0] | t_complete_valid_1;
+	     r_fml_act[1] <= r_fml_act[1] | t_complete_valid_2;
+	     r_fml_act[2] <= r_fml_act[2] | (core_mem_rsp_valid & r_fml_env_ok & r_fml_out[w_fml_pm]);
+	  end
+     end // always_ff
+`ifdef FORMAL_ROBWR_PORTS
+   assign fml_robwr_badv = r_fml_badv;
+   assign fml_robwr_act = r_fml_act;
+`endif
+`ifdef VERILATOR
+   always_ff@(posedge clk)
+     begin
+	if(|r_fml_badv)
+	  begin
+	     $display("[ROBWR-BAD] cyc=%0d badv=%b", r_cycle, r_fml_badv);
+	     $stop();
+	  end
+     end
+`endif
+`endif //  FORMAL_ROBWR_MON
+
+
+`ifdef FORMAL_DIVA
+   /* ==================================================================
+    * DIVA-style retirement checker, formal form (dsheffie 2026-09-05):
+    * for is_int ops in the recompute set, the RETIRED answer must match a
+    * recomputation from the RETIRED (execute-time-saved) operands.  Spans
+    * execute -> completion-write -> ROB storage -> retire.  Requires
+    * FORMAL_ROBWR_MON (bads gated by r_fml_env_ok so free mem responses
+    * cannot fabricate ROB-field corruption).
+    * ================================================================== */
+`ifdef FORMAL_DIVA_SLOT
+   input logic [`LG_ROB_ENTRIES-1:0] fml_diva_slot;  /* frozen: check only this ROB slot */
+`endif
+   output logic [1:0] fml_diva_bad;   /* [0] branch cond, [1] alu data */
+   output logic [1:0] fml_diva_act;
+   logic [1:0] r_diva_bad, r_diva_act;
+   logic       t_diva_isbr, t_diva_isalu, t_diva_cond;
+   logic [63:0] t_diva_alu;
+   logic [31:0] t_diva_sum32;
+   wire [63:0] w_diva_a = t_rob_head.diva_srcA;
+   wire [63:0] w_diva_b = t_rob_head.diva_srcB;
+   always_comb
+     begin
+	t_diva_isbr = 1'b0;
+	t_diva_isalu = 1'b0;
+	t_diva_cond = 1'b0;
+	t_diva_alu = 'd0;
+	t_diva_sum32 = w_diva_a[31:0] + w_diva_b[31:0];
+	case(t_rob_head.opcode)
+	  BEQ:
+	    begin
+	       t_diva_isbr = 1'b1;
+	       t_diva_cond = (w_diva_a == w_diva_b);
+	    end
+	  BNE:
+	    begin
+	       t_diva_isbr = 1'b1;
+	       t_diva_cond = (w_diva_a != w_diva_b);
+	    end
+	  BLEZ:
+	    begin
+	       t_diva_isbr = 1'b1;
+	       t_diva_cond = w_diva_a[63] | (w_diva_a == 'd0);
+	    end
+	  BGTZ:
+	    begin
+	       t_diva_isbr = 1'b1;
+	       t_diva_cond = ~w_diva_a[63] & (w_diva_a != 'd0);
+	    end
+	  BLTZ:
+	    begin
+	       t_diva_isbr = 1'b1;
+	       t_diva_cond = w_diva_a[63];
+	    end
+	  BGEZ:
+	    begin
+	       t_diva_isbr = 1'b1;
+	       t_diva_cond = ~w_diva_a[63];
+	    end
+	  ADDU:
+	    begin
+	       t_diva_isalu = 1'b1;
+	       t_diva_alu = {{32{t_diva_sum32[31]}}, t_diva_sum32};
+	    end
+	  AND:
+	    begin
+	       t_diva_isalu = 1'b1;
+	       t_diva_alu = w_diva_a & w_diva_b;
+	    end
+	  OR:
+	    begin
+	       t_diva_isalu = 1'b1;
+	       t_diva_alu = w_diva_a | w_diva_b;
+	    end
+	  XOR:
+	    begin
+	       t_diva_isalu = 1'b1;
+	       t_diva_alu = w_diva_a ^ w_diva_b;
+	    end
+	  NOR:
+	    begin
+	       t_diva_isalu = 1'b1;
+	       t_diva_alu = ~(w_diva_a | w_diva_b);
+	    end
+	  default:
+	    begin
+	    end
+	endcase // case (t_rob_head.opcode)
+     end // always_comb
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_diva_bad <= 2'd0;
+	     r_diva_act <= 2'd0;
+	  end
+	else if(t_retire
+`ifndef FORMAL_DIVA_TRUSTED_RSP
+		& r_fml_env_ok   /* -top core: guard against fabricated free core_mem_rsp */
+`endif
+`ifdef FORMAL_DIVA_SLOT
+		& (r_rob_head_ptr[`LG_ROB_ENTRIES-1:0] == fml_diva_slot)
+`endif
+		)
+	  begin
+	     if(t_diva_isbr)
+	       begin
+		  r_diva_bad[0] <= r_diva_bad[0] | (t_rob_head.take_br != t_diva_cond);
+		  r_diva_act[0] <= 1'b1;
+	       end
+	     if(t_diva_isalu & t_rob_head.valid_dst)
+	       begin
+		  r_diva_bad[1] <= r_diva_bad[1] | (t_rob_head.data != t_diva_alu);
+		  r_diva_act[1] <= 1'b1;
+	       end
+	  end
+     end // always_ff
+   assign fml_diva_bad = r_diva_bad;
+   assign fml_diva_act = r_diva_act;
+`endif //  FORMAL_DIVA
 
 endmodule

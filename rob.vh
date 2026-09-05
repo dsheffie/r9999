@@ -27,6 +27,14 @@ typedef struct packed {
    logic       in_delay_slot;
    logic [4:0] ldst;
 
+   /* Renamed srcA pointer + its architectural name, captured at ALLOC.  With pdst
+    * below this makes the retire trace self-checking for renaming: a consumer whose
+    * srcA_ptr does not match the producer's pdst was pointed at the wrong physical
+    * register (RAT bug), as opposed to reading the right register and getting stale
+    * data (delivery/bypass bug).  The captured jr faults cannot distinguish those
+    * two without this. */
+   logic [(`LG_PRF_ENTRIES-1):0] srcA_ptr;
+   logic [4:0] 		         srcA_arch;
    logic [(`LG_PRF_ENTRIES-1):0] pdst;
    logic [(`LG_PRF_ENTRIES-1):0] old_pdst;
    logic [(`M_WIDTH-1):0] 	 pc;
@@ -42,6 +50,12 @@ typedef struct packed {
    logic [(`M_WIDTH-1):0]	 data;
    logic [7:0]			 opcode;
    logic [`LG_PHT_SZ-1:0] 	 pht_idx;
+   /* PREDICTED direction, kept alongside the RESOLVED take_br so a capture can
+    * separate "predictor said taken" from "branch resolved taken".  The
+    * 2026-08-29 captures showed a bnez that took wrongly with faulted=0, i.e.
+    * NO mispredict was signalled -- prediction and resolution agreed, and both
+    * were wrong.  Without this bit we cannot tell which one drove that. */
+   logic 			 br_pred;
    logic                         oldest_first;
 
    logic       tlb_refill;
@@ -50,6 +64,26 @@ typedef struct packed {
    logic       tlb_hit;
    logic [5:0] tlb_index;
    logic       mode_when_fetched;
+   /* Low 8 bits of the free-running cycle counter, stamped when the uop COMPLETES
+    * (for a load: when its memory response lands).  Deliberately OUTSIDE the
+    * ENABLE_CYCLE_ACCOUNTING guard -- the 64-bit fetch/alloc/complete cycles below
+    * are Verilator-only, so silicon had no way to order a producer against its
+    * consumer.  Comparing this stamp on a load against the stamp on the branch that
+    * consumes it is what distinguishes "consumer issued before the data returned"
+    * from "consumer read the right value". */
+   logic [7:0] exec_cycle;
+   logic [1:0] fwd_sel;   /* operand-mux select at execute; see complete_t */
+   logic [1:0] fwd_selB;  /* srcB operand-mux select at execute */
+   logic [31:0] srcB_val; /* srcB operand value at execute (branches: the $zero-side compare input) */
+   logic hi_nzA;  /* |t_srcA[63:32] at execute -- the compare is 64b, the ring data field 32b */
+   logic hi_nzB;  /* |t_srcB[63:32] */
+`ifdef FORMAL_DIVA
+   logic [63:0] diva_srcA;  /* full execute-time operands, for the retire-time recompute */
+   logic [63:0] diva_srcB;
+`endif
+   logic [`LG_ROB_ENTRIES-1:0] wr_echo; /* rob_ptr of the completion that wrote this slot's fields --
+                                         * a misdirected field-write stamps a ptr != the slot index */
+   logic       post_restart;  /* 1 = first uop allocated after a machine-clear/restart (RAT->ACTIVE) */
 `ifdef ENABLE_CYCLE_ACCOUNTING
    logic [63:0] 	    fetch_cycle;
    logic [63:0] 	    alloc_cycle;
@@ -69,6 +103,23 @@ typedef struct packed {
    logic		       trap;
    logic [5:0]		       fp_flags;  /* {denorm(E), V,Z,O,U,I} of a completing FP op (port 2) */
    logic [(`M_WIDTH-1):0]      data;
+   /* Which source the operand mux actually used for srcA at execute:
+    *   bit1 = r_fwd_int_srcA (forwarded ALU result)
+    *   bit0 = r_fwd_mem_srcA (forwarded load data)
+    *   00   = read from the register file (w_srcA)
+    * The 2026-09-02 captures prove two readers of one physreg disagreed but NOT
+    * which source delivered the wrong value; every hypothesis (stale PRF read,
+    * wrong forward flag, r_mem_result skewed by the next response) fits the
+    * evidence equally.  These two bits discriminate. */
+   logic [1:0] 		       fwd_sel;
+   logic [1:0] 		       fwd_selB;
+   logic [31:0] 	       srcB_val;
+   logic 		       hi_nzA;
+   logic 		       hi_nzB;
+`ifdef FORMAL_DIVA
+   logic [63:0] 	       diva_srcA;
+   logic [63:0] 	       diva_srcB;
+`endif
 } complete_t;
 
 typedef struct packed {

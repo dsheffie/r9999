@@ -121,7 +121,11 @@ module tlb(clk,
 	       end
 `endif
 	  end
+`ifdef FORMAL_MINSTATE
+	else if(1'b0)  /* MINSTATE: no TLB writes -> r_tlb_written stays 0 -> CAM cone dead -> swept */
+`else
 	else if(tlb_entry_in_valid)
+`endif
 	  begin
 	     r_tlb_written[tlb_entry_in.entry] <= 1'b1;
 	     /* copy the stored fields (everything except the entry write-index) */
