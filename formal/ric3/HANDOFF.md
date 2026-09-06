@@ -121,7 +121,7 @@ do NOT theorize about proof depth or memory.
 
 | define | effect | files |
 |---|---|---|
-| `FORMAL` | ROB=16, PHT=4, **PRF=64** (`LG_PRF_ENTRIES=6`), **BTB=4** (`LG_BTB_SZ=2`) | `machine.vh` |
+| `FORMAL` | **ROB=4** (`LG_ROB_ENTRIES=2`; non-FORMAL is 16), PHT=4, **PRF=64** (`LG_PRF_ENTRIES=6`), **BTB=4** (`LG_BTB_SZ=2`) | `machine.vh` |
 | `FORMAL_MINSTATE` | FP off (`cu1=0`→COP1 CpU→fp_regfile swept), identity translate (`mapped=0` both fetch+data), TLB CAM writes gated, shadow-TLB stubbed | `exec.sv`, `l1i.sv`, `tlb.sv` |
 | `FORMAL_DIVA` | operand save + retirement recompute monitor + ports | `rob.vh`, `core.sv`, `core_l1d_l1i.sv` |
 | `FORMAL_DIVA_TRUSTED_RSP` | drop the `env_ok` gate (internal `core_mem_rsp`) | `core.sv` |

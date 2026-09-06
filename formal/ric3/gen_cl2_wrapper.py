@@ -67,7 +67,8 @@ L[-1] = L[-1].rstrip(',')
 L.append(");")
 L.append("   input clk;")
 L.append("   input mem_rsp_free;")
-L.append("   input [`LG_ROB_ENTRIES-1:0] slot_seed;")
+SLOTW = decl.get('fml_diva_slot', (None, ''))[1] or ""   # e.g. "[1:0]"; macros do not
+L.append("   input %s slot_seed;" % SLOTW)          # carry into this standalone file
 for p, d, w in io:
     if p == 'clk':
         continue
@@ -77,7 +78,7 @@ L.append("   reg [3:0] r_cnt = 4'd0;")
 L.append("   always @(posedge clk) if(r_cnt != 4'hf) r_cnt <= r_cnt + 4'd1;")
 L.append("   wire w_rst = (r_cnt == 4'd0);")
 # frozen DIVA slot (approach-1 single-slot reduction): capture the seed at reset, hold
-L.append("   reg [`LG_ROB_ENTRIES-1:0] r_slot = 'd0;")
+L.append("   reg %s r_slot = 'd0;" % SLOTW)
 L.append("   always @(posedge clk) if(w_rst) r_slot <= slot_seed;")
 # resume handshake (mirrors top.cc): the core resets into FLUSH_FOR_HALT/HALT and does
 # NOTHING until resume is pulsed. Wait for ready_for_resume, then assert resume once.
