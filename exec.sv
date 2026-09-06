@@ -3411,10 +3411,7 @@ module exec(clk,
 `else
 	r_tlb_entry <= r_shadow_tlb[r_index];
 `endif
-`ifdef FORMAL_MINSTATE
-	if(1'b0)
-	  begin
-`else
+`ifndef FORMAL_MINSTATE
 	if(r_tlb_entry_out_valid)
 	  begin
 	     /* copy the stored fields (everything except the entry write-index) */
@@ -3438,6 +3435,7 @@ module exec(clk,
 	                $time, tlb_entry_out.r, tlb_entry_out.vpn, tlb_entry_out.pfn0, tlb_entry_out.v0, tlb_entry_out.pfn1, tlb_entry_out.v1);
 `endif
 	  end
+`endif
      end
 
    always_comb
