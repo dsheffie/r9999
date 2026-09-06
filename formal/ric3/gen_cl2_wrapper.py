@@ -29,9 +29,14 @@ for dm in re.finditer(r'\n\s*(input|output)\s+(?:wire|reg)?\s*(\[[^\]]+\])?\s*([
 missing = [p for p in ports if p not in decl]
 assert not missing, "undeclared ports: %s" % missing
 
-# debug/driver inputs tied to 0 (not part of the formal environment)
+# debug/driver inputs tied to 0 (not part of the formal environment).
+# dma_inval_* is tied off too: the DIVA branch/ALU property is coherence-
+# independent (a result is a function of its operands), so free DMA invalidation
+# is pure input/state bloat here. For a "DIVA holds under adversarial concurrent
+# DMA" coverage variant, remove dma_inval_req/addr from this set (leave the ack).
 TIE0 = {'single_step', 'step', 'bp_enable', 'fault_clear',
-        'bp_pc', 'bp_wp_addr', 'bp_wp_val'}
+        'bp_pc', 'bp_wp_addr', 'bp_wp_val',
+        'dma_inval_req', 'dma_inval_addr'}
 
 io = []      # free primary I/O to expose on the wrapper
 conns = []   # dut connections

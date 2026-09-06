@@ -33,24 +33,33 @@ In `core.sv` under `` `ifdef FORMAL_DIVA `` (operand save in `rob.vh`, plumbed u
 This spans execute → completion-write → ROB storage → retire, so it also covers the
 misdirected/corrupted ROB-field class, not just the ALU/branch logic.
 
-## Result: PARKED — did not close on a 60 GB box
+## Result: PARKED — but the OOMs were self-inflicted, not a real memory wall
 
 | model | latches | outcome |
 |---|---|---|
 | `-top core` (exec-level, free fetch) | ~1.5K aig | **fabricated CEX** — free `insn`/predecode makes a branch "retire" that was never fetched. Not the DUT. Must use `-top core_l1d_l1i`. |
 | `-top core_l1d_l1i`, full FORMAL | 58,467 | too big; BMC can't reach a branch retire |
 | + PRF 128→64, BTB 128→4 | 41,580 | lossless shrink |
-| + FP off, TLB identity, shadow-TLB stub | 35,845 | `ic3` **times out @30min**; `bmc` (non-vacuity) **OOMs** |
-| + TLB CAM writes gated (`r_tlb_written` never set → CAM cone swept) | **30,515** | `ic3` still exceeds 60 GB → OOM |
+| + FP off, TLB identity, shadow-TLB stub | 35,845 | `ic3` timed out @30min (uncontended?); `bmc` non-vacuity deep |
+| + TLB CAM writes gated (`r_tlb_written` never set → CAM cone swept) | **30,515** | OOM'd — but see Bottom line (portfolio fan-out / leftover procs, not a real 60 GB need) |
 
-**Bottom line:** the DIVA property (relating operands-at-completion to a flag-at-retire
-across the 16-entry ROB + scheduler) is a wide relational obligation that IC3 could not
-close within 60 GB, and BMC cannot reach a branch retirement from cold reset (icache fill
-from DRAM + decode + issue + retire ≈ hundreds of cycles) before OOM. This is the point
-where a machine with more RAM, or a commercial tool with **datapath abstraction**
-(Jasper/etc. — treat the 64-bit operands as uninterpreted bitvector terms), is the real
-lever. `reader-agreement` and `ds-identity` (see `[[project_retire_ds_formal]]`) are
-blocked on the same wall — same model, same abstraction need.
+**Bottom line — the "60 GB ceiling" was likely a self-inflicted OOM, not rIC3's real
+need.** A run that *completed* (actBR, UNSAT) peaked at **4.9 GB** — reasonable. The OOMs
+came from operator error on a thin-swap (7 GB) box, not from the property:
+- `portfolio` `fork`s ~19 **separate solver processes**. `/usr/bin/time -f %M` reports only
+  the *parent's* RSS (hence the misleading 4.9 GB), so a portfolio run silently ran ~19×
+  that and blew past 60 GB + 7 GB swap. **Never run `portfolio` here** — use one engine.
+- single-engine `ic3`/`bmc` use worker **threads** (one shared address space), so they are
+  bounded to a single process's footprint. The single-engine OOM I hit was most likely
+  leftover processes from earlier sloppy cleanup, not the engine.
+So: **the DIVA property is NOT proven un-provable.** A clean single `ic3` run, on a box
+with real RAM headroom or adequate swap, may well close it — I simply never got a clean,
+uncontended single-engine run to completion. BMC-for-non-vaciuity is the genuinely hard
+part (deep cold-start unroll); prefer `ic3` for the property and establish non-vacuity a
+cheaper way (warm-start, or trust the sim controls). `reader-agreement` and `ds-identity`
+(`[[project_retire_ds_formal]]`) share this model. Datapath abstraction (word-level
+`wl-kind`/`cegar` on a `write_btor` model) remains the strongest lever if a single `ic3`
+still stalls — but try the plain single-engine run on a real box FIRST.
 
 ## THE VACUITY TRAP (read this before trusting any UNSAT here)
 
@@ -95,12 +104,22 @@ Do **NOT** shrink `N_TLB_ENTRIES` — the TLB index is architecturally 6-bit (ha
 `[5:0]` in `exec.sv`), a smaller array + 6-bit index = real OOB (56 WIDTH warnings). It's
 neutered instead by gating its writes (above).
 
+**DMA-invalidate ports** (`dma_inval_req`/`dma_inval_addr`, exposed by `l1d` at this top)
+are tied to 0 in the wrapper (`gen_cl2_wrapper.py` `TIE0`). The DIVA branch/ALU property is
+coherence-independent — a result is a function of its operands, not of whether a concurrent
+DMA evicted a line — so free DMA invalidation is pure input/state bloat for this proof.
+NOTE: the 2026-09-05 latch-count/OOM runs were built with these ports FREE (the tie-off
+came after), so those numbers carried unnecessary DMA input space; a re-run with them tied
+will be a touch smaller. For a separate "DIVA holds under adversarial concurrent DMA"
+coverage run, drop `dma_inval_req/addr` from `TIE0`.
+
 ## Toolchain
 
 - **yosys 0.64** / built-in `yosys-abc` (ABC). AIGER recipe: `memory_map; opt; techmap; opt;
   setundef -zero -init/-undriven; dffunmap (LAST); abc -fast -g AND; write_aiger -zinit`.
-- **rIC3 1.5.2** — `git clone https://github.com/gipsyh/rIC3 && cd rIC3 &&
-  git submodule update --init --recursive && cargo build --release`. Binary at
+- **rIC3 1.5.2** (git `7149d56`, 2026-06-28) — `git clone https://github.com/gipsyh/rIC3 &&
+  cd rIC3 && git checkout 7149d56 && git submodule update --init --recursive &&
+  cargo build --release`. Binary at
   `target/release/ric3`. It cracked the retire-count clause abc pdr couldn't (24 s vs
   14,000 s DNF), so it is worth having — but see the memory warnings.
 - **abc/AIGER** for anything core-sized; `write_smt2`+cvc5 does NOT scale (memory_map blasts

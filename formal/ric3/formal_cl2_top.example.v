@@ -1,5 +1,6 @@
 module formal_cl2_top(
 	mem_rsp_free,
+	slot_seed,
 	clk,
 	fml_diva_bad,
 	fml_diva_act,
@@ -68,8 +69,6 @@ module formal_cl2_top(
 	ext_flush_req,
 	ext_flush_done,
 	dbg_flush,
-	dma_inval_req,
-	dma_inval_addr,
 	dma_inval_ack,
 	snoop_req_valid,
 	snoop_req_addr,
@@ -89,6 +88,7 @@ module formal_cl2_top(
 );
    input clk;
    input mem_rsp_free;
+   input [`LG_ROB_ENTRIES-1:0] slot_seed;
    output [1:0] fml_diva_bad;
    output [1:0] fml_diva_act;
    input  ip6;
@@ -156,8 +156,6 @@ module formal_cl2_top(
    input  ext_flush_req;
    output  ext_flush_done;
    output [31:0] dbg_flush;
-   input  dma_inval_req;
-   input [35:0] dma_inval_addr;
    output  dma_inval_ack;
    input  snoop_req_valid;
    input [35:0] snoop_req_addr;
@@ -177,16 +175,15 @@ module formal_cl2_top(
    reg [3:0] r_cnt = 4'd0;
    always @(posedge clk) if(r_cnt != 4'hf) r_cnt <= r_cnt + 4'd1;
    wire w_rst = (r_cnt == 4'd0);
+   reg [`LG_ROB_ENTRIES-1:0] r_slot = 'd0;
+   always @(posedge clk) if(w_rst) r_slot <= slot_seed;
    reg r_dram_out = 1'b0;
    wire w_mem_rsp_valid = mem_rsp_free & r_dram_out;
    always @(posedge clk) begin
      if(w_rst) r_dram_out <= 1'b0;
-     else begin
-       if(mem_req_valid & mem_req_ack & ~w_mem_rsp_valid) r_dram_out <= 1'b1;
-       else if(w_mem_rsp_valid) r_dram_out <= 1'b0;
-     end
+     else if(mem_req_valid & mem_req_ack & ~w_mem_rsp_valid) r_dram_out <= 1'b1;
+     else if(w_mem_rsp_valid) r_dram_out <= 1'b0;
    end
-
    core_l1d_l1i dut (
       .clk(clk),
       .fml_diva_bad(fml_diva_bad),
@@ -265,8 +262,8 @@ module formal_cl2_top(
       .ext_flush_req(ext_flush_req),
       .ext_flush_done(ext_flush_done),
       .dbg_flush(dbg_flush),
-      .dma_inval_req(dma_inval_req),
-      .dma_inval_addr(dma_inval_addr),
+      .dma_inval_req(1'b0),
+      .dma_inval_addr({(35+1){1'b0}}),
       .dma_inval_ack(dma_inval_ack),
       .snoop_req_valid(snoop_req_valid),
       .snoop_req_addr(snoop_req_addr),
