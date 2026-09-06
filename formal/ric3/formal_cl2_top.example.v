@@ -16,8 +16,6 @@ module formal_cl2_top(
 	putchar_fifo_wptr,
 	putchar_fifo_rptr,
 	in_flush_mode,
-	resume,
-	resume_pc,
 	ready_for_resume,
 	mem_req_valid,
 	mem_req_addr,
@@ -103,8 +101,6 @@ module formal_cl2_top(
    output [3:0] putchar_fifo_wptr;
    output [3:0] putchar_fifo_rptr;
    output  in_flush_mode;
-   input  resume;
-   input [63:0] resume_pc;
    output  ready_for_resume;
    output  mem_req_valid;
    output [35:0] mem_req_addr;
@@ -177,11 +173,14 @@ module formal_cl2_top(
    wire w_rst = (r_cnt == 4'd0);
    reg [`LG_ROB_ENTRIES-1:0] r_slot = 'd0;
    always @(posedge clk) if(w_rst) r_slot <= slot_seed;
+   reg r_resumed = 1'b0;
+   wire w_resume = ready_for_resume & ~r_resumed & ~w_rst;
+   always @(posedge clk) if(w_resume) r_resumed <= 1'b1;
    reg r_dram_out = 1'b0;
    wire w_mem_rsp_valid = mem_rsp_free & r_dram_out;
    always @(posedge clk) begin
      if(w_rst) r_dram_out <= 1'b0;
-     else if(mem_req_valid & mem_req_ack & ~w_mem_rsp_valid) r_dram_out <= 1'b1;
+     else if(mem_req_valid & ~r_dram_out & ~w_mem_rsp_valid) r_dram_out <= 1'b1;
      else if(w_mem_rsp_valid) r_dram_out <= 1'b0;
    end
    core_l1d_l1i dut (
@@ -208,8 +207,8 @@ module formal_cl2_top(
       .bp_wp_val({(31+1){1'b0}}),
       .step(1'b0),
       .in_flush_mode(in_flush_mode),
-      .resume(resume),
-      .resume_pc(resume_pc),
+      .resume(w_resume),
+      .resume_pc(64'hffffffffbfc00000),
       .ready_for_resume(ready_for_resume),
       .mem_req_valid(mem_req_valid),
       .mem_req_addr(mem_req_addr),

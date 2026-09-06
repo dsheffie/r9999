@@ -3,6 +3,9 @@
 `include "uop.vh"
 
 module core_l1d_l1i(clk, 
+`ifdef FORMAL_DIVA
+		    fml_retire_any,
+`endif
 `ifdef FORMAL_DIVA_SLOT
 		    fml_diva_slot,
 `endif
@@ -179,6 +182,7 @@ module core_l1d_l1i(clk,
    input logic [`LG_ROB_ENTRIES-1:0] fml_diva_slot;
 `endif
 `ifdef FORMAL_DIVA
+   output logic fml_retire_any;
    output logic [1:0] fml_diva_bad;
    output logic [1:0] fml_diva_act;
 `endif
@@ -891,6 +895,7 @@ module core_l1d_l1i(clk,
 	     .fml_diva_slot(fml_diva_slot),
 `endif
 `ifdef FORMAL_DIVA
+	     .fml_retire_any(fml_retire_any),
 	     .fml_diva_bad(fml_diva_bad),
 	     .fml_diva_act(fml_diva_act),
 `endif

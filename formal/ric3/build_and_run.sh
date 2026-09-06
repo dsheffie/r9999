@@ -3,10 +3,18 @@
 # run rIC3 on it.  See HANDOFF.md for the full story (results, the ceiling, the
 # vacuity trap).  Run from the r9999 checkout root.
 #
-#   formal/ric3/build_and_run.sh <workdir> <property|control> [engine]
-#     property : prove fml_diva_bad[0] (branch)   -- expect UNSAT if it closes
-#     control  : reach fml_diva_act[0] (branch retired) -- MUST be SAT for the
-#                property proof to be non-vacuous.  RUN THIS FIRST.
+#   formal/ric3/build_and_run.sh <workdir> <liveness|control|property> [engine]
+#     liveness : reach fml_retire_any (ANY instruction retires) -- MUST be SAT.
+#                RUN THIS FIRST, ALWAYS. If it is not SAT the harness is modelling
+#                a DEAD CORE (resume never pulsed / memory never responds) and every
+#                other result is meaningless. This exact failure cost a full session:
+#                a phantom mem_req_ack and undriven resume made the core never run,
+#                and the unreachable controls got misdiagnosed three different ways.
+#     control  : reach fml_diva_act[0] (a DIVA-checked branch retired) -- MUST be SAT
+#                for a property UNSAT to be non-vacuous. (dsheffie: SAT at depth 31;
+#                act[1] ALU at depth 37.)
+#     property : prove fml_diva_bad[0] (branch) -- UNSAT only means something if
+#                BOTH liveness and control are SAT.
 #     engine   : ic3 (default) | bmc | wl-kind | cegar   (NEVER portfolio -- see below)
 #
 # MEMORY WARNING (learned the hard way, 4 OOMs in one session):
@@ -46,11 +54,13 @@ yosys -p "read_verilog mipscore.v formal_cl2_top.v; \
 echo "latches: $(grep -oE 'aig [0-9]+ [0-9]+ [0-9]+' cl2.aig | head -1 | awk '{print $4}')"
 
 # 4. extract the requested single-output cone and run rIC3
-if [ "$WHAT" = property ]; then
-  PO=$(awk '$1=="output" && $4=="fml_diva_bad" && $3==0 {print $2}' cl2.map)
-else
-  PO=$(awk '$1=="output" && $4=="fml_diva_act" && $3==0 {print $2}' cl2.map)
-fi
+case "$WHAT" in
+  liveness) PO=$(awk '$1=="output" && $4=="fml_retire_any" {print $2}' cl2.map) ;;
+  control)  PO=$(awk '$1=="output" && $4=="fml_diva_act" && $3==0 {print $2}' cl2.map) ;;
+  property) PO=$(awk '$1=="output" && $4=="fml_diva_bad" && $3==0 {print $2}' cl2.map) ;;
+  *) echo "unknown target: $WHAT (liveness|control|property)"; exit 2 ;;
+esac
+[ -n "$PO" ] || { echo "FATAL: no PO for $WHAT -- is the monitor gated in? check SV2V_DEFINES"; exit 2; }
 yosys-abc -c "read_aiger cl2.aig; cone -O $PO; strash; write_aiger prop.aig"
 echo "=== rIC3 $ENGINE on $WHAT (PO $PO) ==="
 "$RIC3" check prop.aig "$ENGINE"

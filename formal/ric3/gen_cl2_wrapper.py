@@ -49,13 +49,18 @@ for p in ports:
         conns.append(".reset(w_rst)")
     elif p == 'mem_rsp_valid':
         conns.append(".mem_rsp_valid(w_mem_rsp_valid)")   # DRAM scoreboard drives it
+    elif p == 'resume':
+        conns.append(".resume(w_resume)")                 # handshake, see below
+    elif p == 'resume_pc':
+        conns.append(".resume_pc(64'hffffffffbfc00000)")  # MIPS reset vector
     elif p == 'fml_diva_slot':
         conns.append(".fml_diva_slot(r_slot)")            # frozen slot (approach-1)
     else:
         io.append((p, d, w))
         conns.append(".%s(%s)" % (p, p))
 
-hdr = [p for p, _, _ in io if p not in ('mem_rsp_valid', 'fml_diva_slot')]
+hdr = [p for p, _, _ in io
+       if p not in ('mem_rsp_valid', 'fml_diva_slot', 'resume', 'resume_pc')]
 L = ["module formal_cl2_top(", "\tmem_rsp_free,", "\tslot_seed,"]
 L += ["\t%s," % p for p in hdr]
 L[-1] = L[-1].rstrip(',')
@@ -74,12 +79,21 @@ L.append("   wire w_rst = (r_cnt == 4'd0);")
 # frozen DIVA slot (approach-1 single-slot reduction): capture the seed at reset, hold
 L.append("   reg [`LG_ROB_ENTRIES-1:0] r_slot = 'd0;")
 L.append("   always @(posedge clk) if(w_rst) r_slot <= slot_seed;")
-# DRAM scoreboard: single outstanding; a response is legal only when a request is pending
+# resume handshake (mirrors top.cc): the core resets into FLUSH_FOR_HALT/HALT and does
+# NOTHING until resume is pulsed. Wait for ready_for_resume, then assert resume once.
+# Leaving resume free lets the solver simply never start the core -> every control is
+# trivially unreachable and every property vacuously UNSAT.
+L.append("   reg r_resumed = 1'b0;")
+L.append("   wire w_resume = ready_for_resume & ~r_resumed & ~w_rst;")
+L.append("   always @(posedge clk) if(w_resume) r_resumed <= 1'b1;")
+# DRAM scoreboard: the core_l1d_l1i <-> DRAM interface has NO ack -- mem_req_valid is
+# HELD until mem_rsp_valid comes back (valid-held-until-response), single outstanding.
+# A response is legal only while a request is actually outstanding.
 L.append("   reg r_dram_out = 1'b0;")
 L.append("   wire w_mem_rsp_valid = mem_rsp_free & r_dram_out;")
 L.append("   always @(posedge clk) begin")
 L.append("     if(w_rst) r_dram_out <= 1'b0;")
-L.append("     else if(mem_req_valid & mem_req_ack & ~w_mem_rsp_valid) r_dram_out <= 1'b1;")
+L.append("     else if(mem_req_valid & ~r_dram_out & ~w_mem_rsp_valid) r_dram_out <= 1'b1;")
 L.append("     else if(w_mem_rsp_valid) r_dram_out <= 1'b0;")
 L.append("   end")
 L.append("   core_l1d_l1i dut (")

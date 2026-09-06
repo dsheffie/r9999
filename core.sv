@@ -35,6 +35,9 @@ import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 `endif
 
 module core(clk,
+`ifdef FORMAL_DIVA
+	    fml_retire_any,
+`endif
 `ifdef FORMAL_DIVA_SLOT
 	    fml_diva_slot,
 `endif
@@ -4336,6 +4339,11 @@ module core(clk,
    input logic [`LG_ROB_ENTRIES-1:0] fml_diva_slot;  /* frozen: check only this ROB slot */
 `endif
    output logic [1:0] fml_diva_bad;   /* [0] branch cond, [1] alu data */
+   /* LIVENESS COVER: sticky 'any instruction retired'.  Must be reachable (SAT)
+    * before ANY other formal result is believed -- a harness that fails to resume
+    * the core, or whose memory never responds, makes every control unreachable and
+    * every property vacuously UNSAT.  Check this FIRST. */
+   output logic fml_retire_any;
    output logic [1:0] fml_diva_act;
    logic [1:0] r_diva_bad, r_diva_act;
    logic       t_diva_isbr, t_diva_isalu, t_diva_cond;
@@ -4439,6 +4447,19 @@ module core(clk,
 	       end
 	  end
      end // always_ff
+   logic r_retire_any;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_retire_any <= 1'b0;
+	  end
+	else if(t_retire)
+	  begin
+	     r_retire_any <= 1'b1;
+	  end
+     end // always_ff
+   assign fml_retire_any = r_retire_any;
    assign fml_diva_bad = r_diva_bad;
    assign fml_diva_act = r_diva_act;
 `endif //  FORMAL_DIVA

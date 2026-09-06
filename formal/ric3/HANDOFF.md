@@ -33,33 +33,53 @@ In `core.sv` under `` `ifdef FORMAL_DIVA `` (operand save in `rob.vh`, plumbed u
 This spans execute → completion-write → ROB storage → retire, so it also covers the
 misdirected/corrupted ROB-field class, not just the ALU/branch logic.
 
-## Result: PARKED — but the OOMs were self-inflicted, not a real memory wall
+## Result: the model WORKS — earlier failures were two harness bugs (mine)
 
-| model | latches | outcome |
+| model | latches | note |
 |---|---|---|
-| `-top core` (exec-level, free fetch) | ~1.5K aig | **fabricated CEX** — free `insn`/predecode makes a branch "retire" that was never fetched. Not the DUT. Must use `-top core_l1d_l1i`. |
-| `-top core_l1d_l1i`, full FORMAL | 58,467 | too big; BMC can't reach a branch retire |
+| `-top core` (exec-level, free fetch) | small | **fabricated CEX** — free `insn`/predecode "retires" branches never fetched. Not the DUT. Use `-top core_l1d_l1i`. |
+| `-top core_l1d_l1i`, full FORMAL | 58,467 | |
 | + PRF 128→64, BTB 128→4 | 41,580 | lossless shrink |
-| + FP off, TLB identity, shadow-TLB stub | 35,845 | `ic3` timed out @30min (uncontended?); `bmc` non-vacuity deep |
-| + TLB CAM writes gated (`r_tlb_written` never set → CAM cone swept) | **30,515** | OOM'd — but see Bottom line (portfolio fan-out / leftover procs, not a real 60 GB need) |
+| + FP off, TLB identity, shadow-TLB stub | 35,845 | |
+| + TLB CAM writes gated (`r_tlb_written` never set → CAM cone swept) | **30,515** | current |
 
-**Bottom line — the "60 GB ceiling" was likely a self-inflicted OOM, not rIC3's real
-need.** A run that *completed* (actBR, UNSAT) peaked at **4.9 GB** — reasonable. The OOMs
-came from operator error on a thin-swap (7 GB) box, not from the property:
-- `portfolio` `fork`s ~19 **separate solver processes**. `/usr/bin/time -f %M` reports only
-  the *parent's* RSS (hence the misleading 4.9 GB), so a portfolio run silently ran ~19×
-  that and blew past 60 GB + 7 GB swap. **Never run `portfolio` here** — use one engine.
-- single-engine `ic3`/`bmc` use worker **threads** (one shared address space), so they are
-  bounded to a single process's footprint. The single-engine OOM I hit was most likely
-  leftover processes from earlier sloppy cleanup, not the engine.
-So: **the DIVA property is NOT proven un-provable.** A clean single `ic3` run, on a box
-with real RAM headroom or adequate swap, may well close it — I simply never got a clean,
-uncontended single-engine run to completion. BMC-for-non-vaciuity is the genuinely hard
-part (deep cold-start unroll); prefer `ic3` for the property and establish non-vacuity a
-cheaper way (warm-start, or trust the sim controls). `reader-agreement` and `ds-identity`
-(`[[project_retire_ds_formal]]`) share this model. Datapath abstraction (word-level
-`wl-kind`/`cegar` on a `write_btor` model) remains the strongest lever if a single `ic3`
-still stalls — but try the plain single-engine run on a real box FIRST.
+**Confirmed reachable on a large-memory box (2026-09-05, dsheffie):**
+`fml_diva_act[0]` (branch retire, DIVA-checked) **SAT at depth 31**;
+`fml_diva_act[1]` (ALU retire) **SAT at depth 37**. ~3.5 GB per single engine.
+Non-vacuity is therefore ESTABLISHED — a subsequent `fml_diva_bad[*]` UNSAT is a real proof.
+
+### The two harness bugs that made everything look impossible
+
+Both were in `gen_cl2_wrapper.py`; both made the DUT **a core that never runs**, so every
+control was unreachable and every property vacuously UNSAT:
+
+1. **DRAM scoreboard gated on a non-existent `mem_req_ack`.** `core_l1d_l1i` has NO ack on
+   the memory interface — it is **valid-held-until-response** (`mem_req_valid` held until
+   `mem_rsp_valid`). The phantom `mem_req_ack` became an undriven implicit net → `setundef
+   -zero` → 0 → the outstanding flag never set → **the DRAM never responded** → no icache
+   fill → nothing ever fetched.
+2. **`resume`/`resume_pc` left as free inputs.** The core resets into FLUSH_FOR_HALT/HALT
+   and does nothing until `resume` is pulsed (see `top.cc`: wait `ready_for_resume`, then
+   assert `resume` with `resume_pc`). Free → the solver can simply never start the core.
+
+Both are fixed in `gen_cl2_wrapper.py` (resume handshake off `ready_for_resume`, `resume_pc`
+= `0xffffffffbfc00000`; DRAM outstanding tracked from `mem_req_valid` alone).
+
+### Wrong theories I published before finding them (do not repeat)
+
+- "the `env_ok` scoreboard bug caused the vacuity" — `env_ok` **is** a real bug (see below)
+  but was NOT why controls were unreachable; the core was never running.
+- "BMC can't reach a branch retire, cold-start is hundreds of cycles" — **false**, it is
+  depth **31**.
+- "IC3 needs >60 GB / needs bigger iron or a commercial tool" — **false**, ~3.5 GB per
+  engine. The OOMs were `portfolio`'s ~19-process fan-out plus leftover processes on a
+  thin-swap box.
+
+**Rule that would have caught all of it in one step:** before believing any control is
+unreachable, **validate the environment** — check that the core resumes and that memory
+actually responds (a `retire_any` cover reaching SAT). Positive-control the harness, not
+just the property. This is the same discipline applied to silicon probes all session; I
+failed to apply it to my own testbench.
 
 ## THE VACUITY TRAP (read this before trusting any UNSAT here)
 
@@ -81,13 +101,21 @@ fix, whether `act` is reachable was never definitively answered (BMC OOM'd), so 
 30.5K result is not a proven non-vacuous UNSAT.** Nothing about DIVA is proved yet. Do not
 cite a DIVA proof.
 
-## Reproduce
+## Reproduce — RUN IN THIS ORDER, EACH MUST PASS
 
 ```
-formal/ric3/build_and_run.sh /tmp/divawork control   # MUST print SAT (branch retires)
-formal/ric3/build_and_run.sh /tmp/divawork property   # UNSAT only means something if control=SAT
+formal/ric3/build_and_run.sh /tmp/divawork liveness   # MUST be SAT: any insn retires
+formal/ric3/build_and_run.sh /tmp/divawork control    # MUST be SAT: a DIVA-checked branch retires
+formal/ric3/build_and_run.sh /tmp/divawork property   # UNSAT = the proof (only if both above SAT)
 ```
-`RIC3=<path>` env var points at your rIC3 1.5.2 build (see below). Run **control first**.
+
+`liveness` covers `fml_retire_any` (sticky "any instruction retired"). It exists because a
+broken environment silently models a **dead core**, and then every control is unreachable
+and every property is vacuously UNSAT. If `liveness` is not SAT, **debug the harness**
+(is `resume` pulsed after `ready_for_resume`? does the DRAM scoreboard ever respond?) —
+do NOT theorize about proof depth or memory.
+
+`RIC3=<path>` points at your rIC3 build (see below). Use ONE engine; never `portfolio`.
 
 ## The formal gates (all in tracked RTL on this branch)
 
@@ -127,8 +155,20 @@ coverage run, drop `dma_inval_req/addr` from `TIE0`.
 
 ### rIC3 memory discipline (4 OOMs in one session — do not repeat)
 
-- `portfolio` = **~19 processes**. It is not a "solo" run. It OOM'd a 60 GB box repeatedly.
-  Use a **single** engine: `ic3`, `bmc`, `wl-kind`, `cegar`.
+- **`portfolio` races ~17 differently-tuned solver configs as SEPARATE PROCESSES**, each
+  with its own copy of the model + clause DB. See `src/portfolio/portfolio.toml`: the
+  `bl_default` set is 11 `ic3` variants (no-preproc, no-parent-lemma, abs-cst,
+  abs-cst+abs-trans, pred-prop, ctg-limited, inn, inn+ctp, inn-noctg, inn-dynamic) +
+  4 `bmc` variants (step 1, kissat 10/65/dyn) + `kind`; `wl_default` adds word-level
+  `wl-bmc`/`wl-kind`. It is doing exactly what it should — it is just **17–34× the
+  single-engine footprint**.
+  MEASURED on the 2026-09-05 OOM (kernel OOM process table): **34 `ric3` processes holding
+  57.7 GB of private anon memory** on a 60 GB box — that, and nothing else, was the OOM.
+  (`gvfsd-trash` showed 444 procs / 62 GB raw but only 0.3 GB private — shared-library
+  double-counting, a red herring.) A single engine is ~1.7–4 GB.
+  **Rule: budget ~17 × 2 GB ≈ 35 GB minimum before using `portfolio`.** Below that use a
+  single engine — `ic3` for proofs, `bmc` for reachability. On a large-memory box portfolio
+  is the *best* mode (highest chance of closing a hard property fast).
 - Even single `ic3`/`bmc` can exceed 60 GB on the 30.5K model. `bmc` unrolls per frame; deep
   reachability blows memory before reaching a retire.
 - After launch: `pgrep -cf 'target/release/ric3'` (the `[r]ic3` bracket trick self-matches
