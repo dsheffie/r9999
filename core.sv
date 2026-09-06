@@ -35,6 +35,11 @@ import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 `endif
 
 module core(clk,
+`ifdef FORMAL_RDAGREE
+	    fml_rda_preg,
+	    fml_rda_bad,
+	    fml_rda_act,
+`endif
 `ifdef FORMAL_DIVA
 	    fml_retire_any,
 `endif
@@ -3815,6 +3820,11 @@ module core(clk,
    
    
    exec e (
+`ifdef FORMAL_RDAGREE
+	   .fml_rda_preg(fml_rda_preg),
+	   .fml_rda_bad(fml_rda_bad),
+	   .fml_rda_act(fml_rda_act),
+`endif
 	   .clk(clk), 
 	   .reset(reset),
 	   .ip6(ip6),
@@ -4343,6 +4353,11 @@ module core(clk,
     * before ANY other formal result is believed -- a harness that fails to resume
     * the core, or whose memory never responds, makes every control unreachable and
     * every property vacuously UNSAT.  Check this FIRST. */
+`ifdef FORMAL_RDAGREE
+   input logic [`LG_PRF_ENTRIES-1:0] fml_rda_preg;
+   output logic fml_rda_bad;
+   output logic [1:0] fml_rda_act;
+`endif
    output logic fml_retire_any;
    output logic [1:0] fml_diva_act;
    logic [1:0] r_diva_bad, r_diva_act;

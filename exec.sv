@@ -24,6 +24,7 @@ import "DPI-C" function int     loadfcsr();
 
 module exec(clk, 
 `ifdef FORMAL_RDAGREE
+	    fml_rda_preg,
 	    fml_rda_bad,
 	    fml_rda_act,
 `endif
@@ -4220,31 +4221,47 @@ module exec(clk,
 
 `ifdef FORMAL_RDAGREE
    /* ==================================================================
-    * READER-AGREEMENT, formal form (2026-09-05).  Every reader of a physreg
-    * sees the same value as the FIRST reader, in windows with no intervening
-    * write or dst-allocation to that preg (writes/allocs RESET the reference,
-    * so the property is sound under an arbitrary environment -- no SSA
-    * assumption needed).  This is exactly what silicon violated: lw->p65,
-    * bnez(p65) saw nonzero, jr(p65) saw zero, no write between.
-    * Covers BOTH operand ports (srcA and srcB).
+    * READER AGREEMENT, symbolic-physreg form (dsheffie 2026-09-06).
+    *   "every reader of a physreg gets the same value, MODULO RECYCLING"
+    * This is the silicon failure stated directly: the 2026-09-02 ring capture
+    * had lw->p65, then bnez(p65) saw non-zero and jr(p65) saw zero with NO
+    * write between.  Strictly narrower than DIVA: no ROB, no completion write,
+    * no retire recompute -- just two reads inside one physreg lifetime.
+    *
+    * REDUCTION: rather than shadow all 64 physregs (64x64 = 4096 bits), track
+    * ONE physreg chosen by the frozen free input fml_rda_preg.  Proving the
+    * property for an arbitrary frozen P proves it for all P (universal
+    * quantification), at ~65 bits of monitor state instead of 4160.
+    *
+    * RECYCLING: the reference is dropped on any write to P and on any
+    * ALLOCATION of P as a destination (uq_push*.dst) -- that is the lifetime
+    * boundary.  Without it, readers of two different allocations of the same
+    * physreg get compared and the property false-fires.
+    * The one-cycle-delayed write clears cover the registered rf4r2w read: a
+    * consumer executing the cycle after a write legitimately carries the
+    * pre-write value.
     * ================================================================== */
+   input logic [`LG_PRF_ENTRIES-1:0] fml_rda_preg;   /* frozen by the wrapper */
    output logic fml_rda_bad;
    output logic [1:0] fml_rda_act;
-   logic [`M_WIDTH-1:0] r_rda_ref [N_INT_PRF_ENTRIES-1:0];
-   logic [N_INT_PRF_ENTRIES-1:0] r_rda_seen;
-   logic r_rda_bad;
-   logic [1:0] r_rda_act;
-   logic r_rda_wr0_d, r_rda_wr1_d;
-   logic [`LG_PRF_ENTRIES-1:0] r_rda_wr0_ptr, r_rda_wr1_ptr;
-   wire w_rda_wr0 = r_start_int & t_wr_int_prf;
-   wire w_rda_wr1 = mem_rsp_dst_valid & (~mem_rsp_fp_dst);
-   wire w_rda_rdA = r_start_int & int_uop.srcA_valid & (~int_uop.fp_srcA_valid) & (int_uop.srcA != 'd0);
-   wire w_rda_rdB = r_start_int & int_uop.srcB_valid & (~int_uop.fp_srcB_valid) & (int_uop.srcB != 'd0);
+   logic [`M_WIDTH-1:0] r_rda_ref;      /* the ONE tracked value */
+   logic 	        r_rda_seen;
+   logic 	        r_rda_bad;
+   logic [1:0] 	        r_rda_act;
+   logic 	        r_rda_wr0_d, r_rda_wr1_d;
+   wire w_rda_wr0 = r_start_int & t_wr_int_prf & (int_uop.dst == fml_rda_preg);
+   wire w_rda_wr1 = mem_rsp_dst_valid & (~mem_rsp_fp_dst) & (mem_rsp_dst_ptr == fml_rda_preg);
+   wire w_rda_rdA = r_start_int & int_uop.srcA_valid & (~int_uop.fp_srcA_valid)
+		    & (int_uop.srcA != 'd0) & (int_uop.srcA == fml_rda_preg);
+   wire w_rda_rdB = r_start_int & int_uop.srcB_valid & (~int_uop.fp_srcB_valid)
+		    & (int_uop.srcB != 'd0) & (int_uop.srcB == fml_rda_preg);
+   wire w_rda_alloc = (uq_push & uq_uop.dst_valid & (uq_uop.dst == fml_rda_preg))
+		      | (uq_push_two & uq_uop_two.dst_valid & (uq_uop_two.dst == fml_rda_preg));
    always_ff@(posedge clk)
      begin
 	if(reset)
 	  begin
-	     r_rda_seen <= 'd0;
+	     r_rda_seen <= 1'b0;
 	     r_rda_bad <= 1'b0;
 	     r_rda_act <= 2'd0;
 	     r_rda_wr0_d <= 1'b0;
@@ -4252,66 +4269,53 @@ module exec(clk,
 	  end
 	else
 	  begin
+	     /* reads first: compare against the reference, or establish it */
 	     if(w_rda_rdA)
 	       begin
-		  if(r_rda_seen[int_uop.srcA])
+		  if(r_rda_seen)
 		    begin
-		       r_rda_bad <= r_rda_bad | (t_srcA != r_rda_ref[int_uop.srcA]);
+`ifdef FORMAL_RDA_BRANCH_ONLY
+		       /* prune: assert only on BRANCH readers -- both observed silicon
+			* failures were branches misreading their operand.  Any reader
+			* still establishes the reference, so the cover stays reachable. */
+		       r_rda_bad <= r_rda_bad | (int_uop.is_br & (t_srcA != r_rda_ref));
+		       r_rda_act[0] <= r_rda_act[0] | int_uop.is_br;
+`else
+		       r_rda_bad <= r_rda_bad | (t_srcA != r_rda_ref);
 		       r_rda_act[0] <= 1'b1;
+`endif
 		    end
 		  else
 		    begin
-		       r_rda_ref[int_uop.srcA] <= t_srcA;
-		       r_rda_seen[int_uop.srcA] <= 1'b1;
+		       r_rda_ref <= t_srcA;
+		       r_rda_seen <= 1'b1;
 		    end
 	       end
-	     if(w_rda_rdB)
+	     if(w_rda_rdB & !w_rda_rdA)
 	       begin
-		  if(r_rda_seen[int_uop.srcB] & !(w_rda_rdA & (int_uop.srcA == int_uop.srcB)))
+		  if(r_rda_seen)
 		    begin
-		       r_rda_bad <= r_rda_bad | (t_srcB != r_rda_ref[int_uop.srcB]);
+`ifdef FORMAL_RDA_BRANCH_ONLY
+		       r_rda_bad <= r_rda_bad | (int_uop.is_br & (t_srcB != r_rda_ref));
+		       r_rda_act[1] <= r_rda_act[1] | int_uop.is_br;
+`else
+		       r_rda_bad <= r_rda_bad | (t_srcB != r_rda_ref);
 		       r_rda_act[1] <= 1'b1;
+`endif
 		    end
-		  else if(!r_rda_seen[int_uop.srcB] & !(w_rda_rdA & (int_uop.srcA == int_uop.srcB)))
+		  else
 		    begin
-		       r_rda_ref[int_uop.srcB] <= t_srcB;
-		       r_rda_seen[int_uop.srcB] <= 1'b1;
+		       r_rda_ref <= t_srcB;
+		       r_rda_seen <= 1'b1;
 		    end
 	       end
-	     /* writes/allocs LAST: reset the reference window (dominates same-cycle
-	      * reads -- conservative, absorbs the pick-to-exec skew).  The clear also
-	      * applies ONE CYCLE LATER (r_rda_wr*_d): rf4r2w reads are registered, so
-	      * a consumer executing the cycle after a write legitimately carries the
-	      * pre-write value -- without the delayed clear that stale-but-legal
-	      * reader re-establishes the OLD reference and later readers false-flag. */
-	     if(w_rda_wr0)
+	     /* recycling boundary LAST: any write or allocation ends the lifetime */
+	     if(w_rda_wr0 | w_rda_wr1 | w_rda_alloc | r_rda_wr0_d | r_rda_wr1_d)
 	       begin
-		  r_rda_seen[int_uop.dst] <= 1'b0;
-	       end
-	     if(w_rda_wr1)
-	       begin
-		  r_rda_seen[mem_rsp_dst_ptr] <= 1'b0;
-	       end
-	     if(r_rda_wr0_d)
-	       begin
-		  r_rda_seen[r_rda_wr0_ptr] <= 1'b0;
-	       end
-	     if(r_rda_wr1_d)
-	       begin
-		  r_rda_seen[r_rda_wr1_ptr] <= 1'b0;
+		  r_rda_seen <= 1'b0;
 	       end
 	     r_rda_wr0_d <= w_rda_wr0;
-	     r_rda_wr0_ptr <= int_uop.dst;
 	     r_rda_wr1_d <= w_rda_wr1;
-	     r_rda_wr1_ptr <= mem_rsp_dst_ptr;
-	     if(uq_push & uq_uop.dst_valid)
-	       begin
-		  r_rda_seen[uq_uop.dst] <= 1'b0;
-	       end
-	     if(uq_push_two & uq_uop_two.dst_valid)
-	       begin
-		  r_rda_seen[uq_uop_two.dst] <= 1'b0;
-	       end
 	  end
      end // always_ff
    assign fml_rda_bad = r_rda_bad;

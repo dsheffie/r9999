@@ -3,6 +3,11 @@
 `include "uop.vh"
 
 module core_l1d_l1i(clk, 
+`ifdef FORMAL_RDAGREE
+		    fml_rda_preg,
+		    fml_rda_bad,
+		    fml_rda_act,
+`endif
 `ifdef FORMAL_DIVA
 		    fml_retire_any,
 `endif
@@ -180,6 +185,11 @@ module core_l1d_l1i(clk,
    
 `ifdef FORMAL_DIVA_SLOT
    input logic [`LG_ROB_ENTRIES-1:0] fml_diva_slot;
+`endif
+`ifdef FORMAL_RDAGREE
+   input logic [`LG_PRF_ENTRIES-1:0] fml_rda_preg;
+   output logic fml_rda_bad;
+   output logic [1:0] fml_rda_act;
 `endif
 `ifdef FORMAL_DIVA
    output logic fml_retire_any;
@@ -891,6 +901,11 @@ module core_l1d_l1i(clk,
 	      );
 
    core cpu (
+`ifdef FORMAL_RDAGREE
+	     .fml_rda_preg(fml_rda_preg),
+	     .fml_rda_bad(fml_rda_bad),
+	     .fml_rda_act(fml_rda_act),
+`endif
 `ifdef FORMAL_DIVA_SLOT
 	     .fml_diva_slot(fml_diva_slot),
 `endif

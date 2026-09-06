@@ -55,13 +55,15 @@ for p in ports:
         conns.append(".resume_pc(64'hffffffffbfc00000)")  # MIPS reset vector
     elif p == 'fml_diva_slot':
         conns.append(".fml_diva_slot(r_slot)")            # frozen slot (approach-1)
+    elif p == 'fml_rda_preg':
+        conns.append(".fml_rda_preg(r_preg)")             # frozen physreg (reader-agreement)
     else:
         io.append((p, d, w))
         conns.append(".%s(%s)" % (p, p))
 
 hdr = [p for p, _, _ in io
-       if p not in ('mem_rsp_valid', 'fml_diva_slot', 'resume', 'resume_pc')]
-L = ["module formal_cl2_top(", "\tmem_rsp_free,", "\tslot_seed,"]
+       if p not in ('mem_rsp_valid', 'fml_diva_slot', 'fml_rda_preg', 'resume', 'resume_pc')]
+L = ["module formal_cl2_top(", "\tmem_rsp_free,", "\tslot_seed,", "\tpreg_seed,"]
 L += ["\t%s," % p for p in hdr]
 L[-1] = L[-1].rstrip(',')
 L.append(");")
@@ -69,6 +71,8 @@ L.append("   input clk;")
 L.append("   input mem_rsp_free;")
 SLOTW = decl.get('fml_diva_slot', (None, ''))[1] or ""   # e.g. "[1:0]"; macros do not
 L.append("   input %s slot_seed;" % SLOTW)          # carry into this standalone file
+PREGW = decl.get('fml_rda_preg', (None, ''))[1] or ""
+L.append("   input %s preg_seed;" % PREGW)
 for p, d, w in io:
     if p == 'clk':
         continue
@@ -80,6 +84,9 @@ L.append("   wire w_rst = (r_cnt == 4'd0);")
 # frozen DIVA slot (approach-1 single-slot reduction): capture the seed at reset, hold
 L.append("   reg %s r_slot = 'd0;" % SLOTW)
 L.append("   always @(posedge clk) if(w_rst) r_slot <= slot_seed;")
+# frozen physreg for reader-agreement: universal quantification over one arbitrary P
+L.append("   reg %s r_preg = 'd0;" % PREGW)
+L.append("   always @(posedge clk) if(w_rst) r_preg <= preg_seed;")
 # resume handshake (mirrors top.cc): the core resets into FLUSH_FOR_HALT/HALT and does
 # NOTHING until resume is pulsed. Wait for ready_for_resume, then assert resume once.
 # Leaving resume free lets the solver simply never start the core -> every control is
