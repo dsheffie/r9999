@@ -3464,8 +3464,20 @@ module core(clk,
 	  begin
 	     for(integer i = 0; i < N_PRF_ENTRIES; i = i + 1)
 	       begin
+`ifdef FORMAL_PRF_SMALL
+		  /* Formal-only: hand out only 16 entries per BANK instead of the
+		   * whole pool.  The bank is the pointer MSB (rf4r2w), so the free
+		   * set must straddle N/2: 32..47 in the ALU bank, 64..79 in the
+		   * MEM bank.  Entries 48..63 and 80..127 are never allocated, so
+		   * they are never written and never read.  With ROB=4 under FORMAL
+		   * at most 4 destinations are in flight, so 8 even + 8 odd per bank
+		   * is far more than the machine can consume. */
+		  r_prf_free[i] <= (((i >= 32) && (i < 48)) || ((i >= 64) && (i < 80))) ? 1'b1 : 1'b0;
+		  r_retire_prf_free[i] <= (((i >= 32) && (i < 48)) || ((i >= 64) && (i < 80))) ? 1'b1 : 1'b0;
+`else
 		  r_prf_free[i] <= (i < 32) ? 1'b0 : 1'b1;
 		  r_retire_prf_free[i] <= (i < 32) ? 1'b0 : 1'b1;
+`endif
 	       end
 	  end
 	else
@@ -4336,6 +4348,11 @@ module core(clk,
 `endif //  FORMAL_ROBWR_MON
 
 
+`ifdef FORMAL_RDAGREE
+   input logic [`LG_PRF_ENTRIES-1:0] fml_rda_preg;
+   output logic fml_rda_bad;
+   output logic [1:0] fml_rda_act;
+`endif
 `ifdef FORMAL_DIVA
    /* ==================================================================
     * DIVA-style retirement checker, formal form (dsheffie 2026-09-05):
@@ -4353,11 +4370,6 @@ module core(clk,
     * before ANY other formal result is believed -- a harness that fails to resume
     * the core, or whose memory never responds, makes every control unreachable and
     * every property vacuously UNSAT.  Check this FIRST. */
-`ifdef FORMAL_RDAGREE
-   input logic [`LG_PRF_ENTRIES-1:0] fml_rda_preg;
-   output logic fml_rda_bad;
-   output logic [1:0] fml_rda_act;
-`endif
    output logic fml_retire_any;
    output logic [1:0] fml_diva_act;
    logic [1:0] r_diva_bad, r_diva_act;
