@@ -86,6 +86,9 @@ module l1d(clk,
 	   flush_cl_req,
 	   flush_cl_addr,
 	   flush_cl_inval,
+	   dma_inval_req,
+	   dma_inval_addr,
+	   dma_inval_ack,
 	   //inputs from core
 	   core_mem_req_valid,
 	   core_mem_req,
@@ -149,6 +152,16 @@ module l1d(clk,
    input logic flush_cl_req;
    input logic [`M_WIDTH-1:0] flush_cl_addr;
    input logic 		      flush_cl_inval;
+   /* DMA-completion invalidate: a SECOND requester into the same per-line
+    * invalidate machinery, independent of the CPU's CACHE-op handshake so the
+    * core never stalls on it.  One 16B line per request; the SoC-side walker
+    * steps the range and holds dma_inval_addr stable until dma_inval_ack.
+    * Always drop-without-writeback (software already invalidated pre-DMA, so a
+    * line present here is a clean speculative refill -- writing it back would
+    * stomp the DMA'd data). */
+   input logic 		      dma_inval_req;
+   input logic [`PA_WIDTH-1:0] dma_inval_addr;
+   output logic 	      dma_inval_ack;
    input logic 		      flush_req;
    output logic 	      flush_complete;
 
@@ -341,6 +354,13 @@ endfunction
 
    logic 				  r_flush_req, n_flush_req;
    logic 				  r_flush_cl_req, n_flush_cl_req;
+   logic 				  r_dma_inval_req, n_dma_inval_req;
+   logic 				  r_dma_inval_ack, n_dma_inval_ack;
+   logic 				  r_cl_is_dma, n_cl_is_dma;   /* owner of the in-flight FLUSH_CL */
+   assign dma_inval_ack = r_dma_inval_ack;
+   /* arbitrated line address/op: the CPU CACHE-op wins; DMA is always invalidate */
+   wire [`M_WIDTH-1:0] 			  w_cl_addr  = r_cl_is_dma ? {{(`M_WIDTH-`PA_WIDTH){1'b0}}, dma_inval_addr} : flush_cl_addr;
+   wire 				  w_cl_inval = r_cl_is_dma ? 1'b1 : flush_cl_inval;
    logic 				  r_flush_complete, n_flush_complete;
    
 
@@ -349,6 +369,11 @@ endfunction
    logic [31:0] 			  t_w32_2, t_bswap_w32_2;
 
    logic 				  t_got_rd_retry, t_port2_hit_cache;
+`ifdef L1D_PORT2_ALWAYS_MISS
+   wire 				  w_p2_force_miss = 1'b1;
+`else
+   wire 				  w_p2_force_miss = 1'b0;
+`endif
       
    logic 				  t_mark_invalid;
    logic 				  t_wr_array;
@@ -487,8 +512,14 @@ endfunction
    assign mem_req_cacheable = r_mem_req_cacheable;
    assign mem_req_mask = r_mem_req_mask;
 
+`ifdef REG_L1D_RSP
+   /* registered response -- matches rv64core; see REG_L1D_RSP in machine.vh */
+   assign core_mem_rsp_valid = r_core_mem_rsp_valid;
+   assign core_mem_rsp = r_core_mem_rsp;
+`else
    assign core_mem_rsp_valid = n_core_mem_rsp_valid;
    assign core_mem_rsp = n_core_mem_rsp;
+`endif
    
    assign cache_accesses = r_cache_accesses;
    assign cache_hits = r_cache_hits;
@@ -992,6 +1023,9 @@ endfunction
 	     r_flush_complete <= 1'b0;
 	     r_flush_req <= 1'b0;
 	     r_flush_cl_req <= 1'b0;
+	     r_dma_inval_req <= 1'b0;
+	     r_dma_inval_ack <= 1'b0;
+	     r_cl_is_dma <= 1'b0;
 	     r_chop_wait <= 1'b0;
 	     r_chop_beat <= 1'b0;
 	     r_flush_cl_beat <= 1'b0;
@@ -1046,6 +1080,9 @@ endfunction
 	     r_flush_complete <= n_flush_complete;
 	     r_flush_req <= n_flush_req;
 	     r_flush_cl_req <= n_flush_cl_req;
+	     r_dma_inval_req <= n_dma_inval_req;
+	     r_dma_inval_ack <= n_dma_inval_ack;
+	     r_cl_is_dma <= n_cl_is_dma;
 	     r_chop_wait <= n_chop_wait;
 	     r_chop_beat <= n_chop_beat;
 	     r_flush_cl_beat <= n_flush_cl_beat;
@@ -1904,6 +1941,9 @@ endfunction
 	
 	n_flush_req = r_flush_req | flush_req;
 	n_flush_cl_req = r_flush_cl_req | flush_cl_req;
+	n_dma_inval_req = r_dma_inval_req | dma_inval_req;
+	n_dma_inval_ack = 1'b0;
+	n_cl_is_dma = r_cl_is_dma;
 	n_flush_complete = 1'b0;
 	t_addr = 'd0;
 	
@@ -2106,8 +2146,21 @@ endfunction
 			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
 			 n_core_mem_rsp.tlb_index = w_tlb_index;
 		      end
-		    else if(t_port2_hit_cache && !r_hit_busy_addr2)
+		    /* L1D_PORT2_ALWAYS_MISS: force port-2 ops off the FAST-HIT reply path
+		     * and down the miss queue instead.  Diagnostic for whether the
+		     * port-2 fast-hit reply is the source of the stale-register
+		     * load-use failure captured 2026-08-29/30.
+		     * Deliberately gates only the REPLY, not t_port2_hit_cache itself,
+		     * so hit counters and r_missed[] stay truthful.  The else branch
+		     * below already services present-but-busy lines via the MQ, so this
+		     * reuses an exercised path rather than a new one -- and unlike
+		     * L1D_ONE_MEMOP it never REFUSES a request, which is what wedged
+		     * retirement on silicon in the 2026-07-26 attempt. */
+		    else if(t_port2_hit_cache && !r_hit_busy_addr2 && !w_p2_force_miss)
 		      begin
+`ifdef P2_FASTHIT_PROBE
+			 $display("[P2FH] port2 fast-hit reply");
+`endif
 `ifdef VERBOSE_L1D
 			 $display("cycle %d port2 hit for uuid %d, addr %x, data %x", 
 				  r_cycle, r_req2.uuid, r_req2.addr, t_rsp_data2);
@@ -2521,6 +2574,17 @@ endfunction
 		    t_cache_idx = flush_cl_addr[IDX_STOP-1:IDX_START];
 		    //$display("flush addr %x, maps to cl %d at cycle", flush_cl_addr, t_cache_idx, r_cycle);
 		    n_flush_cl_req = 1'b0;
+		    n_cl_is_dma = 1'b0;
+		    n_state = FLUSH_CL;
+		 end
+	       else if(r_dma_inval_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
+		 begin
+		    /* DMA-completion invalidate of one line.  Lower priority than the
+		     * CPU's CACHE op above, and only when the mem pipe is quiet -- the
+		     * same guard the CPU path uses. */
+		    t_cache_idx = dma_inval_addr[IDX_STOP-1:IDX_START];
+		    n_dma_inval_req = 1'b0;
+		    n_cl_is_dma = 1'b1;
 		    n_state = FLUSH_CL;
 		 end
 	    end // case: ACTIVE
@@ -2591,15 +2655,17 @@ endfunction
 	    end
 	  FLUSH_CL:
 	    begin
-	       if(flush_cl_inval)
+	       if(w_cl_inval)
 		 begin
 		    /* CACHE D-Hit-Invalidate (DMA-in): drop the line WITHOUT writeback,
 		     * but only on a real hit (tag match) so we never discard a
 		     * different dirty line that happens to alias this index. Then tell
-		     * L2 to drop its copy too (caches are non-inclusive). */
-		    if(r_valid_out && (r_tag_out == flush_cl_addr[`PA_WIDTH-1:TAG_LSB]))
+		     * L2 to drop its copy too (caches are non-inclusive).
+		     * w_cl_* is the arbitrated address/op: CPU CACHE-op or the
+		     * DMA-completion invalidate (see r_cl_is_dma). */
+		    if(r_valid_out && (r_tag_out == w_cl_addr[`PA_WIDTH-1:TAG_LSB]))
 		      t_mark_invalid = 1'b1;
-		    n_mem_req_addr = {flush_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = {w_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_opcode = MEM_INVL;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_mask = 16'hffff;
@@ -2645,6 +2711,16 @@ endfunction
 		  begin
 		     n_inhibit_write = 1'b0;
 		     n_chop_wait = 1'b0;
+		     if(r_cl_is_dma)
+		       begin
+			  /* DMA-completion invalidate: exactly ONE 16B line -- the
+			   * SoC-side walker steps the range itself, so do NOT run the
+			   * 32B-stride second beat the Index CACHE ops need. */
+			  n_dma_inval_ack = 1'b1;
+			  n_cl_is_dma = 1'b0;
+			  n_state = ACTIVE;
+		       end
+		     else
 		     /* mem-pipe CACHE hit-ops were early-acked; do NOT pulse the
 		      * core's funnel flush handshake (it latches and would falsely
 		      * satisfy a later CACHE_FLUSH wait). */

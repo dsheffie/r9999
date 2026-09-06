@@ -271,7 +271,10 @@ void record_retirement(long long pc, long long fetch_cycle, long long alloc_cycl
   l1d_insns += is_mem;
   
   if((pl != nullptr) and (record_insns_retired >= pipestart) and (record_insns_retired < pipeend)) {
-    pl->append(record_insns_retired, getAsmString(get_insn(pc, s), pc), pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, faulted);
+    /* loadelf stores the image at va2pa(vaddr), but get_insn() was handed the
+     * raw virtual pc -- so every kseg0 (bare-metal) pipetrace disassembled as
+     * "nop" (the zero it read decodes to nop).  Translate first. */
+    pl->append(record_insns_retired, getAsmString(get_insn(va2pa(pc), s), pc), pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, faulted);
   }
   ++record_insns_retired;
 }
@@ -636,6 +639,19 @@ int main(int argc, char **argv) {
   tb->step = 0;
   double t0 = timestamp();
   while(!Verilated::gotFinish() && (globals::cycle < max_cycle) && (insns_retired < max_icnt)) {
+    /* EARLY-RETIRE PROBE: how many instructions have actually retired by cycle N?
+     * Needed to interpret BMC depth: a formal run that is "clean to frame 30" is
+     * only meaningful if the machine has executed something by cycle 30. */
+    { static const bool early = getenv("R9999_EARLY_RETIRE") != nullptr;
+      if(early && globals::cycle <= 120) {
+        static uint64_t last = ~0ull;
+        if(insns_retired != last) {
+          fprintf(stderr, "[early] cyc=%lu retired=%lu\n",
+                  (unsigned long)globals::cycle, (unsigned long)insns_retired);
+          last = insns_retired;
+        }
+      }
+    }
     contextp->timeInc(1);  // 1 timeprecision periodd passes...
 
     tb->clk = 1;
@@ -1389,6 +1405,13 @@ int main(int argc, char **argv) {
     std::cout << "total_retire = " << total_retire << "\n";
     std::cout << "total_cycle  = " << total_cycle << "\n";
     std::cout << "total ipc    = " << static_cast<double>(total_retire) / total_cycle << "\n";
+    /* L1D/L1I/L2 access+hit counters (l1d.sv).  Tied off at the henry_soc level,
+     * so nothing has ever read them -- print here to establish WHAT THEY COUNT
+     * before wiring them to AXI regs. */
+    std::cout << "[ctr] l1d acc=" << tb->l1d_cache_accesses << " hit=" << tb->l1d_cache_hits;
+    if(tb->l1d_cache_accesses) std::cout << " (" << (100.0*tb->l1d_cache_hits)/tb->l1d_cache_accesses << "%)";
+    std::cout << "\n[ctr] l1i acc=" << tb->l1i_cache_accesses << " hit=" << tb->l1i_cache_hits;
+    std::cout << "\n[ctr] l2  acc=" << tb->l2_cache_accesses  << " hit=" << tb->l2_cache_hits << "\n";
 
     uint64_t total_histo = 0;
     for(auto &p : ss->insn_histo) {
@@ -1402,6 +1425,19 @@ int main(int argc, char **argv) {
   }
   else {
     std::cout << "instructions retired = " << insns_retired << "\n";
+  /* L1D/L1I/L2 access+hit counters (l1d.sv r_cache_accesses/r_cache_hits).  These
+   * have never been read by anything -- they are tied off at the henry_soc level
+   * -- so print them here to establish WHAT THEY COUNT before anyone wires them
+   * to AXI regs and draws conclusions from them. */
+  std::cout << "[ctr] l1d_accesses = " << tb->l1d_cache_accesses
+            << "  l1d_hits = " << tb->l1d_cache_hits;
+  if(tb->l1d_cache_accesses) {
+    std::cout << "  (" << (100.0*tb->l1d_cache_hits)/tb->l1d_cache_accesses << "% hit)";
+  }
+  std::cout << "\n[ctr] l1i_accesses = " << tb->l1i_cache_accesses
+            << "  l1i_hits = " << tb->l1i_cache_hits << "\n";
+  std::cout << "[ctr] l2_accesses  = " << tb->l2_cache_accesses
+            << "  l2_hits  = " << tb->l2_cache_hits << "\n";
   }
   
   std::cout << "simulation took " << t0 << " seconds, " << (insns_retired/t0)
