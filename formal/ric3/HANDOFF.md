@@ -121,12 +121,72 @@ do NOT theorize about proof depth or memory.
 
 | define | effect | files |
 |---|---|---|
-| `FORMAL` | **ROB=4** (`LG_ROB_ENTRIES=2`; non-FORMAL is 16), PHT=4, **PRF=64** (`LG_PRF_ENTRIES=6`), **BTB=4** (`LG_BTB_SZ=2`) | `machine.vh` |
+| `FORMAL` | **ROB=4** (`LG_ROB_ENTRIES=2`; non-FORMAL is 16), PHT=4, **BTB=4** (`LG_BTB_SZ=2`). Does **not** touch the PRF — see the trap below | `machine.vh` |
+| `FORMAL_PRF_SMALL` | free list restricted to 32..47 (ALU bank) + 64..79 (MEM bank) | `core.sv` |
+| `FORMAL_RDAGREE` / `FORMAL_RDA_BRANCH_ONLY` | reader-agreement monitor on one frozen physreg; branch-only variant | `exec.sv` |
 | `FORMAL_MINSTATE` | FP off (`cu1=0`→COP1 CpU→fp_regfile swept), identity translate (`mapped=0` both fetch+data), TLB CAM writes gated, shadow-TLB stubbed | `exec.sv`, `l1i.sv`, `tlb.sv` |
 | `FORMAL_DIVA` | operand save + retirement recompute monitor + ports | `rob.vh`, `core.sv`, `core_l1d_l1i.sv` |
 | `FORMAL_DIVA_TRUSTED_RSP` | drop the `env_ok` gate (internal `core_mem_rsp`) | `core.sv` |
 | `FORMAL_ROBWR_MON` | ROB write-integrity scoreboard (provides `r_fml_env_ok`, `act`) | `core.sv` |
 | `FORMAL_DIVA_SLOT` | single-slot reduction: gate check on a frozen `fml_diva_slot` | `core.sv`, `core_l1d_l1i.sv` |
+
+### TRAP: do NOT shrink `LG_PRF_ENTRIES` (cost a full session, 2026-09-06)
+
+The PRF is **banked by pointer MSB** (`rf4r2w.sv`: `HALF = 1 << (LG_DEPTH-1)`; write
+port0 → ALU bank, port1 → MEM bank). The 32 architectural registers are permanently
+mapped to phys 0..31, which all sit in the **low (ALU) bank**. A legal config needs
+`N/2 > 32`, i.e. `LG_PRF_ENTRIES >= 7`. `e4a4aa4` bumped 6→7 for exactly this reason;
+`093b1fb` put the 6 back behind `` `ifdef FORMAL `` and silently undid it.
+
+At LG=6 the ALU free list is **empty at reset** and can only be primed by a *load*
+retiring (loads allocate from the MEM bank; freeing `old_pdst` hands back a reserved
+reg 0..31, which lives in the ALU bank). An ALU op with a destination stalls at
+allocate, and allocation is in-order, so the machine wedges. Measured with everything
+else held at `FORMAL`, on `tests/cache/test_ds_plain_hammer.elf`:
+
+| PRF | result |
+|---|---|
+| LG=6 (N=64) | `no retire in 65537 cycles`, total_retire = **0** |
+| LG=7 (N=128) | `HAMR OK`, total_retire = **55342** |
+
+**Why it hid: every vacuity cover was SAT the whole time.** SAT is *consistent with*
+the starvation — loads allocate from the MEM bank, branches and stores need no
+destination, and the solver can order a load first to unlock a single ALU entry. So a
+passing liveness/control cover proves the model is not **dead**; it does *not* prove
+the model is not **crippled**. Sanity-check any formal config by running the same
+defines through Verilator on a real test and checking `total_retire` — do not rely on
+covers alone. Discard every rIC3 result on these branches between `093b1fb` and
+`f213f0d`/`5a15c8e`.
+
+To cut the pool, use `FORMAL_PRF_SMALL` instead — but mind its own trap, below.
+
+### TRAP: a per-bank pool smaller than `32 + ROB` deadlocks silently
+
+`FORMAL_PRF_SMALL` restricts the free list to 32..47 (ALU) and 64..111 (MEM) and
+physically shrinks the `rf4r2w` arrays to 48 entries per bank. Both halves are
+needed: the free-list restriction **alone changes nothing** (39461 latches with and
+without it) because the PRF write index is data-dependent, so yosys cannot prove the
+dead entries are never written and `opt_clean` keeps every flop. Shrinking the arrays
+takes the model to **37413 latches / 855538 ands** (−5.2% / −3.3%).
+
+The sizing is load-bearing. Retire frees `t_rob_head.old_pdst`, which returns to
+whichever bank the **old** mapping lived in, not the bank that allocated — so a bank
+is never replenished by the other bank's traffic. Once the 32 committed architectural
+mappings plus in-flight destinations all land in one bank and exceed its live entries,
+that pool empties **permanently**: allocation stalls, the ROB drains, and nothing can
+free back into it. The invariant is **live entries per bank ≥ 32 + ROB size**.
+
+A 16-entry MEM pool violated this and deadlocked dhrystone after exactly 3836 retires
+at pc `800211e4` — *identically* at ROB=16 with full caches and at ROB=4 with 64B
+caches. Geometry-independent means structural, not capacity pressure; that identical
+digit is the tell. At 48 per bank dhrystone retires 169252, bit-identical to the
+unrestricted build.
+
+**The `tests/cache/test_ds_plain_hammer.elf` smoke test passed every broken variant.**
+It is too short and touches too few distinct architectural registers to expose a pool
+that drains over time. Validate any PRF change with `tests/dhrystone` (build it small,
+`make RUNS=200`), and run it with `-c 0`: the co-sim checker trips on `bm_shim`'s
+`dtime()` CP0-Count read, which the ISS does not model cycle-for-cycle.
 
 Do **NOT** shrink `N_TLB_ENTRIES` — the TLB index is architecturally 6-bit (hardcoded
 `[5:0]` in `exec.sv`), a smaller array + 6-bit index = real OOB (56 WIDTH warnings). It's

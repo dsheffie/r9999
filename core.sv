@@ -3460,15 +3460,30 @@ module core(clk,
 	     for(integer i = 0; i < N_PRF_ENTRIES; i = i + 1)
 	       begin
 `ifdef FORMAL_PRF_SMALL
-		  /* Formal-only: hand out only 16 entries per BANK instead of the
-		   * whole pool.  The bank is the pointer MSB (rf4r2w), so the free
-		   * set must straddle N/2: 32..47 in the ALU bank, 64..79 in the
-		   * MEM bank.  Entries 48..63 and 80..127 are never allocated, so
-		   * they are never written and never read.  With ROB=4 under FORMAL
-		   * at most 4 destinations are in flight, so 8 even + 8 odd per bank
-		   * is far more than the machine can consume. */
-		  r_prf_free[i] <= (((i >= 32) && (i < 48)) || ((i >= 64) && (i < 80))) ? 1'b1 : 1'b0;
-		  r_retire_prf_free[i] <= (((i >= 32) && (i < 48)) || ((i >= 64) && (i < 80))) ? 1'b1 : 1'b0;
+		  /* Formal-only: shrink the allocatable pool so rf4r2w can drop the
+		   * dead entries (see the note there).  The bank is the pointer MSB,
+		   * so the free set must straddle N/2: 32..47 in the ALU bank and
+		   * 64..111 in the MEM bank.  Entries 112..127 are never allocated.
+		   *
+		   * SIZING IS NOT FREE -- a pool that is too small DEADLOCKS, silently
+		   * and deterministically.  Retire frees t_rob_head.old_pdst, which
+		   * goes back to whichever bank the OLD mapping lived in, NOT the bank
+		   * that allocated.  So a bank is never replenished by the other
+		   * bank's traffic: once the 32 committed architectural mappings plus
+		   * the in-flight destinations all sit in one bank and exceed its live
+		   * entries, that pool empties FOREVER, allocation stalls, the ROB
+		   * drains, and nothing can ever free back into it.  The invariant is
+		   *     live entries per bank >= 32 + ROB size.
+		   * An earlier 16-entry MEM pool violated this: dhrystone deadlocked
+		   * after exactly 3836 retires at pc 800211e4, identically at ROB=16
+		   * with full caches and at ROB=4 with 64B caches (geometry-independent
+		   * = structural, not capacity pressure).  48 per bank clears the bound
+		   * for both, and dhrystone then retires 169252, bit-identical to the
+		   * unrestricted build.  Do not shrink these ranges without re-running
+		   * tests/dhrystone -- the ds hammer is far too short to expose a pool
+		   * that drains slowly. */
+		  r_prf_free[i] <= (((i >= 32) && (i < 48)) || ((i >= 64) && (i < 112))) ? 1'b1 : 1'b0;
+		  r_retire_prf_free[i] <= (((i >= 32) && (i < 48)) || ((i >= 64) && (i < 112))) ? 1'b1 : 1'b0;
 `else
 		  r_prf_free[i] <= (i < 32) ? 1'b0 : 1'b1;
 		  r_retire_prf_free[i] <= (i < 32) ? 1'b0 : 1'b1;

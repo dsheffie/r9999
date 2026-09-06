@@ -30,7 +30,16 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$WORK"; cd "$WORK"
 
 # 1. flatten the RTL to one Verilog with the formal gates active.
-#    FORMAL             : shrinks ROB=16, PHT=4, PRF=64, BTB=4 (see machine.vh)
+#    FORMAL             : shrinks ROB=4, PHT=4, BTB=4 (see machine.vh).  It does
+#                         NOT shrink the PRF: LG_PRF_ENTRIES must stay 7 (=128)
+#                         because the PRF is banked by pointer MSB and the 32
+#                         arch regs fill the whole low bank at LG=6, leaving the
+#                         ALU free list EMPTY.  To cut the pool, add
+#                         FORMAL_PRF_SMALL (free list restricted to 32..47 and
+#                         64..111, plus shrunk rf4r2w arrays: 37413 latches vs
+#                         39461).  Do NOT shrink those ranges further -- a bank
+#                         needs >= 32 + ROB live entries or it drains and
+#                         deadlocks.  See HANDOFF.md.
 #    FORMAL_MINSTATE    : FP off (cu1=0), identity translation, TLB CAM writes gated
 #    FORMAL_DIVA        : the retirement recompute checker (rob.vh operand save + core.sv monitor)
 #    FORMAL_DIVA_TRUSTED_RSP : drop the env_ok gate (core_mem_rsp is internal here, not free)
