@@ -34,9 +34,20 @@ assert not missing, "undeclared ports: %s" % missing
 # independent (a result is a function of its operands), so free DMA invalidation
 # is pure input/state bloat here. For a "DIVA holds under adversarial concurrent
 # DMA" coverage variant, remove dma_inval_req/addr from this set (leave the ack).
+# ip2..ip6 are the EXTERNAL interrupt inputs.  Tied off: with COP0 excluded from
+# the fill set, MTC0 (and ERET) can never execute, so Status.IE / Status.IM can
+# never leave their reset values (sr=0x54400004: IE=0, ERL=1) and
+#   irq_pending = r_sr_ie & ~r_sr_exl & ~r_sr_erl & |(w_ip & r_sr_im)
+# is already unreachable -- free ip* bits only wiggled five Cause.IP flops that
+# nothing could act on.  Tie them anyway: it drops 5 free inputs and 5 latches,
+# and it stops the model from silently gaining an interrupt path if the allowed
+# instruction set is ever widened to include COP0.  For an "does the property hold
+# under interrupts" variant, remove ip2..ip6 here AND admit MTC0 to the fill set --
+# removing them here alone would achieve nothing.
 TIE0 = {'single_step', 'step', 'bp_enable', 'fault_clear',
         'bp_pc', 'bp_wp_addr', 'bp_wp_val',
-        'dma_inval_req', 'dma_inval_addr'}
+        'dma_inval_req', 'dma_inval_addr',
+        'ip2', 'ip3', 'ip4', 'ip5', 'ip6'}
 
 io = []      # free primary I/O to expose on the wrapper
 conns = []   # dut connections

@@ -51,6 +51,20 @@ module fp_regfile(clk, reset,
    `RF_RAM_STYLE logic [WIDTH-1:0] r_ram_fpu[HALF-1:0];   // bank 0 (MSB=0)
    `RF_RAM_STYLE logic [WIDTH-1:0] r_ram_mem[HALF-1:0];   // bank 1 (MSB=1)
 
+`ifdef FORMAL_STRIP_FPMD
+   /* Formal-only: the FP register file is DEAD STATE in the formal model.
+    * FORMAL_MINSTATE forces cu1=0 so every COP1 op takes a CpU exception, and the
+    * rIC3 fill constraint never emits op 17 / lwc1 / swc1, so no FP instruction can
+    * even be fetched.  But unreachable is not the same as absent: yosys cannot prove
+    * it, so every flop survived -- 8192 latches, 22% of the whole model (measured).
+    * Same trap as the PRF free list: a constraint the tool cannot see buys nothing.
+    * Dropping the r_* <= n_* updates makes these constants at their reset value, so
+    * opt_clean sweeps the arrays AND everything downstream of them.  rd0..rd3 keep
+    * no driver and setundef -undriven -zero ties them to 0. */
+   always_ff@(posedge clk)
+     begin
+     end // always_ff
+`else
    always_ff@(posedge clk)
      begin
 `ifdef VERILATOR
@@ -78,5 +92,6 @@ module fp_regfile(clk, reset,
 	  end // else: !if(reset)
 `endif
      end
+`endif //  `ifdef FORMAL_STRIP_FPMD
 
 endmodule
