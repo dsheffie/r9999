@@ -74,11 +74,15 @@
 //page size
 `define LG_PG_SZ 12
 
-`ifdef FORMAL
- `define LG_PRF_ENTRIES 6
-`else
- `define LG_PRF_ENTRIES 7
-`endif
+/* The PRF is BANKED BY POINTER MSB (rf4r2w: HALF = 1 << (LG_DEPTH-1); write
+ * port0 -> ALU bank, port1 -> MEM bank).  The 32 architectural regs are
+ * permanently mapped to phys 0..31, which all sit in the LOW (ALU) bank, so a
+ * legal config needs N/2 > 32, i.e. LG_PRF_ENTRIES >= 7.  LG=6 leaves the ALU
+ * free-list EMPTY: no ALU op with a destination can ever allocate, the machine
+ * retires nothing (measured: total_retire = 0 vs 55342 at LG=7).  DO NOT shrink
+ * this for formal -- use +define+FORMAL_PRF_SMALL (core.sv free-list reset) to
+ * cut the number of ALLOCATABLE entries instead. */
+`define LG_PRF_ENTRIES 7
 
 `define LG_HILO_PRF_ENTRIES 2
 

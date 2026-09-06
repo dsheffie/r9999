@@ -3459,8 +3459,20 @@ module core(clk,
 	  begin
 	     for(integer i = 0; i < N_PRF_ENTRIES; i = i + 1)
 	       begin
+`ifdef FORMAL_PRF_SMALL
+		  /* Formal-only: hand out only 16 entries per BANK instead of the
+		   * whole pool.  The bank is the pointer MSB (rf4r2w), so the free
+		   * set must straddle N/2: 32..47 in the ALU bank, 64..79 in the
+		   * MEM bank.  Entries 48..63 and 80..127 are never allocated, so
+		   * they are never written and never read.  With ROB=4 under FORMAL
+		   * at most 4 destinations are in flight, so 8 even + 8 odd per bank
+		   * is far more than the machine can consume. */
+		  r_prf_free[i] <= (((i >= 32) && (i < 48)) || ((i >= 64) && (i < 80))) ? 1'b1 : 1'b0;
+		  r_retire_prf_free[i] <= (((i >= 32) && (i < 48)) || ((i >= 64) && (i < 80))) ? 1'b1 : 1'b0;
+`else
 		  r_prf_free[i] <= (i < 32) ? 1'b0 : 1'b1;
 		  r_retire_prf_free[i] <= (i < 32) ? 1'b0 : 1'b1;
+`endif
 	       end
 	  end
 	else

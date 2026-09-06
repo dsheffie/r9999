@@ -47,6 +47,8 @@ for p in ports:
                      else ".%s({(%s+1){1'b0}})" % (p, w[1:-1].split(':')[0]))
     elif p == 'reset':
         conns.append(".reset(w_rst)")
+    elif p == 'mem_rsp_load_data':
+        conns.append(".mem_rsp_load_data(w_fill_data)")   # constrained on i-fills
     elif p == 'mem_rsp_valid':
         conns.append(".mem_rsp_valid(w_mem_rsp_valid)")   # DRAM scoreboard drives it
     elif p == 'resume':
@@ -55,13 +57,16 @@ for p in ports:
         conns.append(".resume_pc(64'hffffffffbfc00000)")  # MIPS reset vector
     elif p == 'fml_diva_slot':
         conns.append(".fml_diva_slot(r_slot)")            # frozen slot (approach-1)
+    elif p == 'fml_rda_preg':
+        conns.append(".fml_rda_preg(r_preg)")             # frozen physreg (reader-agreement)
     else:
         io.append((p, d, w))
         conns.append(".%s(%s)" % (p, p))
 
 hdr = [p for p, _, _ in io
-       if p not in ('mem_rsp_valid', 'fml_diva_slot', 'resume', 'resume_pc')]
-L = ["module formal_cl2_top(", "\tmem_rsp_free,", "\tslot_seed,"]
+       if p not in ('mem_rsp_valid', 'mem_rsp_load_data', 'fml_diva_slot',
+                    'fml_rda_preg', 'resume', 'resume_pc')]
+L = ["module formal_cl2_top(", "\tmem_rsp_free,", "\tslot_seed,", "\tpreg_seed,", "\tfill_raw,"]
 L += ["\t%s," % p for p in hdr]
 L[-1] = L[-1].rstrip(',')
 L.append(");")
@@ -69,6 +74,9 @@ L.append("   input clk;")
 L.append("   input mem_rsp_free;")
 SLOTW = decl.get('fml_diva_slot', (None, ''))[1] or ""   # e.g. "[1:0]"; macros do not
 L.append("   input %s slot_seed;" % SLOTW)          # carry into this standalone file
+PREGW = decl.get('fml_rda_preg', (None, ''))[1] or ""
+L.append("   input %s preg_seed;" % PREGW)
+L.append("   input [127:0] fill_raw;")
 for p, d, w in io:
     if p == 'clk':
         continue
@@ -80,6 +88,9 @@ L.append("   wire w_rst = (r_cnt == 4'd0);")
 # frozen DIVA slot (approach-1 single-slot reduction): capture the seed at reset, hold
 L.append("   reg %s r_slot = 'd0;" % SLOTW)
 L.append("   always @(posedge clk) if(w_rst) r_slot <= slot_seed;")
+# frozen physreg for reader-agreement: universal quantification over one arbitrary P
+L.append("   reg %s r_preg = 'd0;" % PREGW)
+L.append("   always @(posedge clk) if(w_rst) r_preg <= preg_seed;")
 # resume handshake (mirrors top.cc): the core resets into FLUSH_FOR_HALT/HALT and does
 # NOTHING until resume is pulsed. Wait for ready_for_resume, then assert resume once.
 # Leaving resume free lets the solver simply never start the core -> every control is
@@ -97,6 +108,40 @@ L.append("     if(w_rst) r_dram_out <= 1'b0;")
 L.append("     else if(mem_req_valid & ~r_dram_out & ~w_mem_rsp_valid) r_dram_out <= 1'b1;")
 L.append("     else if(w_mem_rsp_valid) r_dram_out <= 1'b0;")
 L.append("   end")
+# ---- instruction-fill constraint -------------------------------------------
+# EVERY DRAM fill is forced to 4 legal, non-FP MIPS words.  Free garbage in an
+# icache fill makes the solver explore decode-fault paths irrelevant to the
+# property and blows up the reachable state space.
+# Applying the SAME constraint to data-side fills is deliberate (dsheffie): the
+# legal-encoding set is huge (all opcodes x arbitrary reg/imm fields), and
+# critically it INCLUDES 0x00000000 (= sll $0,$0,0), so a load returning ZERO --
+# the exact value our bug produces -- stays reachable.  No i/d distinction is
+# needed, which keeps the wrapper simple and adds no RTL port.
+# This is an ENVIRONMENT RESTRICTION: a proof covers only legal-encoding fills.
+L.append("   wire [127:0] w_fill_data;")
+L.append("   genvar gi;")
+L.append("   generate")
+L.append("     for(gi = 0; gi < 4; gi = gi + 1) begin : g_fill")
+L.append("       wire [31:0] w_raw = fill_raw[gi*32 +: 32];")
+L.append("       wire [5:0]  w_op  = w_raw[31:26];")
+L.append("       wire [5:0]  w_fn  = w_raw[5:0];")
+# SPECIAL(0) restricted to the common ALU/shift/jr set; plus addiu/lw/sw/beq/bne/blez/bgtz/lui/andi/ori/xori/slti
+L.append("       wire w_special_ok = (w_op == 6'd0) &&")
+L.append("            ((w_fn == 6'h08) || (w_fn == 6'h09) ||")
+L.append("             (w_fn == 6'h21) || (w_fn == 6'h23) ||")
+L.append("             (w_fn == 6'h24) || (w_fn == 6'h25) ||")
+L.append("             (w_fn == 6'h26) || (w_fn == 6'h27) ||")
+L.append("             (w_fn == 6'h2a) || (w_fn == 6'h2b) ||")
+L.append("             (w_fn == 6'h00) || (w_fn == 6'h02) || (w_fn == 6'h03));")
+L.append("       wire w_imm_ok = (w_op == 6'd4) || (w_op == 6'd5) || (w_op == 6'd6) ||")
+L.append("            (w_op == 6'd7) || (w_op == 6'd9) || (w_op == 6'd10) || (w_op == 6'd11) ||")
+L.append("            (w_op == 6'd12) || (w_op == 6'd13) || (w_op == 6'd14) || (w_op == 6'd15) ||")
+L.append("            (w_op == 6'd35) || (w_op == 6'd43);")
+L.append("       /* NO cop1 (op 17) / lwc1 / swc1 -- FP is disabled under FORMAL_MINSTATE")
+L.append("        * and would only add CpU-exception paths. */")
+L.append("       assign w_fill_data[gi*32 +: 32] = (w_special_ok | w_imm_ok) ? w_raw : 32'h00000000;")
+L.append("     end")
+L.append("   endgenerate")
 L.append("   core_l1d_l1i dut (")
 L.append(",\n".join("      " + c for c in conns))
 L.append("   );")
