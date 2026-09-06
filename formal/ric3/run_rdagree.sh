@@ -3,6 +3,14 @@
 #
 #   formal/ric3/run_rdagree.sh <workdir> [engine] [extra defines...]
 #
+#   engine   : engine for the PROPERTY (default ic3).  The COVERS always run under
+#              bmc, overridable with COVER_ENGINE=.  This matters a lot: a cover is
+#              an EXISTENTIAL question ("is there a trace reaching this?"), which is
+#              what bmc does, while ic3 is built to prove UNreachability and only
+#              stumbles onto witnesses.  Measured on c_rda_act0 (37413 latches):
+#              bmc SAT in 49s / 3.0GB, ic3 still running at 37 MINUTES on the same
+#              cone.  Do not gate covers with ic3.
+#
 # The property is "every reader of physreg P sees the same value, modulo
 # recycling", checked on ONE physreg frozen by a free input (universal
 # quantification over P).  FORMAL_RDA_BRANCH_ONLY narrows the assertion to
@@ -20,6 +28,7 @@ set -e
 WORK=${1:?workdir}; ENGINE=${2:-ic3}; shift 2 || true
 EXTRA="$*"
 RIC3=${RIC3:-$HOME/scratch/rIC3/target/release/ric3}
+COVER_ENGINE=${COVER_ENGINE:-bmc}   # covers are existential -- bmc, not ic3 (see header)
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 DEFS="FORMAL FORMAL_MINSTATE FORMAL_DIVA FORMAL_DIVA_TRUSTED_RSP FORMAL_ROBWR_MON \
 FORMAL_RDAGREE FORMAL_RDA_BRANCH_ONLY LG_L1D_NUM_SETS=2 LG_L1I_NUM_SETS=2 LG_L2_NUM_SETS=2 $EXTRA"
@@ -63,8 +72,8 @@ for C in "retire_any:fml_retire_any:-" "rda_act0:fml_rda_act:0" "rda_act1:fml_rd
 	fi
 	[ -n "$PO" ] || { echo "FATAL: no PO for $NAME -- monitor not gated in?"; exit 2; }
 	cone "c_$NAME.aig" "$PO"
-	echo "=== cover $NAME (PO $PO) ==="
-	R=$("$RIC3" check "c_$NAME.aig" "$ENGINE" 2>&1 | tail -5)
+	echo "=== cover $NAME (PO $PO), engine $COVER_ENGINE ==="
+	R=$("$RIC3" check "c_$NAME.aig" "$COVER_ENGINE" 2>&1 | tail -5)
 	echo "$R"
 	echo "$R" | grep -q "^SAT" || { echo "FATAL: cover $NAME is not SAT -- every property result below would be vacuous. STOP."; exit 2; }
 done
