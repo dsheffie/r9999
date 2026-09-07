@@ -199,7 +199,27 @@ typedef enum logic [7:0]
    CVT_D_L,
    /* catch-all: any COP1 op not implemented in HW -> raise Unimplemented (E) like
     * div/sqrt, so the OS soft-float emulator handles it instead of SIGILL. */
-   FP_UNIMPL
+   FP_UNIMPL,
+   /* Zero-compare branches decoded into their OWN uops so exec compares against a
+    * literal 0 instead of reading $zero through the PRF/forwarding network.
+    * `beqz rs' IS `beq rs,$zero' and `b lbl' IS `beq $0,$0', so today every one of
+    * them reads physreg 0 (measured: 10240 physreg-0 port-B reads in one ds hammer
+    * run).  These carry NO srcB, which removes that read, drops a source from the
+    * ALU scheduler's O(N^2) wakeup, and makes the branch immune to $zero
+    * corruption on the bypass.  BRA is `beq $0,$0' -- taken, no sources at all.
+    * APPENDED AT THE END ON PURPOSE: this enum mixes explicit 'dN entries with
+    * IMPLICIT ones, so inserting in the middle silently renumbers everything
+    * downstream (it collided with BLTZAL/BLTZALL/TGE when tried). */
+   BEQZ,
+   BNEZ,
+   BRA,
+   /* Same treatment for the register-form traps.  GCC's divide-by-zero guard is
+    * exactly `teq'/`tne' against $zero (and the `break 0x7' that the SIGFPE
+    * signature fires), so these were reading physreg 0 on the operand that decides
+    * whether the trap fires.  TEQZ/TNEZ carry only the non-zero operand.
+    * teq $0,$0 / tne $0,$0 are degenerate and stay plain TEQ/TNE. */
+   TEQZ,
+   TNEZ
    } opcode_t;
 
 function logic is_mult(opcode_t op);

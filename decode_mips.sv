@@ -699,20 +699,28 @@ module decode_mips(
 			end
 		      6'd52: /* teq */
 			begin
-			   uop.op = TEQ;
-			   uop.srcA = rt;
+			   /* steer `teq rs,$zero' (the div-by-zero guard shape) to a
+			    * uop that carries only the non-zero operand, so the trap
+			    * decision never reads physreg 0.  Both-zero is degenerate
+			    * and stays plain TEQ. */
+			   uop.op = ((rs == 'd0) ^ (rt == 'd0)) ? TEQZ : TEQ;
+			   uop.srcA = (rt == 'd0) ? rs : rt;
 			   uop.srcA_valid = 1'b1;
 			   uop.srcB = rs;
-			   uop.srcB_valid = 1'b1;
+			   uop.srcB_valid = !((rs == 'd0) ^ (rt == 'd0));
 			   uop.is_int = 1'b1;
 			end
 		      6'd54: /* tne */
 			begin
-			   uop.op = TNE;
-			   uop.srcA = rt;
+			   /* steer `tne rs,$zero' (the div-by-zero guard shape) to a
+			    * uop that carries only the non-zero operand, so the trap
+			    * decision never reads physreg 0.  Both-zero is degenerate
+			    * and stays plain TNE. */
+			   uop.op = ((rs == 'd0) ^ (rt == 'd0)) ? TNEZ : TNE;
+			   uop.srcA = (rt == 'd0) ? rs : rt;
 			   uop.srcA_valid = 1'b1;
 			   uop.srcB = rs;
-			   uop.srcB_valid = 1'b1;
+			   uop.srcB_valid = !((rs == 'd0) ^ (rt == 'd0));
 			   uop.is_int = 1'b1;
 			end
 		      default:
@@ -822,15 +830,26 @@ module decode_mips(
 		    uop.is_br = 1'b1;
 		    uop.is_int = 1'b1;	       
 		 end
-	       6'd4: /* BEQ */
+	       6'd4: /* BEQ -- steered to a zero-compare uop when either side is $zero */
 		 begin
-		    uop.op = BEQ;
+		    /* `beqz rs' is `beq rs,$zero' and `b lbl' is `beq $0,$0', so the
+		     * plain BEQ arm made both read physreg 0 through the forwarding
+		     * network.  Emit uops that carry NO srcB (and no sources at all
+		     * for the unconditional case) so the compare is against a literal
+		     * zero in exec.  Removes the read, drops a source from the
+		     * scheduler wakeup, and makes the branch immune to $zero
+		     * corruption on the bypass. */
+		    uop.op = (rs == 'd0 && rt == 'd0) ? BRA :
+			     (rt == 'd0) ? BEQZ :
+			     (rs == 'd0) ? BEQZ : BEQ;
+
 		    uop.dst_valid = 1'b0;
 		    uop.dst = 'd0;
-		    uop.srcA = rs;
-		    uop.srcA_valid = 1'b1;
+		    /* BEQZ keeps the ONE non-zero operand in srcA */
+		    uop.srcA = (rs == 'd0) ? rt : rs;
+		    uop.srcA_valid = (rs == 'd0 && rt == 'd0) ? 1'b0 : 1'b1;
 		    uop.srcB = rt;
-		    uop.srcB_valid = 1'b1;
+		    uop.srcB_valid = (rs != 'd0 && rt != 'd0);
 		    uop.has_delay_slot = 1'b1;
 		    uop.imm = insn[15:0];
 		    uop.br_pred = insn_pred;
@@ -840,13 +859,18 @@ module decode_mips(
 	       6'd5: /* BNE */
 		 begin
 		    //$display("decoded bne, rs = %d, rs = %d", rs, rt);
-		    uop.op = BNE;
+		    /* mirror of the BEQ arm above.  `bne $0,$0' is never taken; it is
+		     * rare enough that it stays a plain BNE (still reads $zero) rather
+		     * than earning a fourth uop. */
+		    uop.op = (rs == 'd0 && rt == 'd0) ? BNE :
+			     (rt == 'd0) ? BNEZ :
+			     (rs == 'd0) ? BNEZ : BNE;
 		    uop.dst_valid = 1'b0;
 		    uop.dst = 'd0;
-		    uop.srcA = rs;
+		    uop.srcA = (rs == 'd0 && rt != 'd0) ? rt : rs;
 		    uop.srcA_valid = 1'b1;
 		    uop.srcB = rt;
-		    uop.srcB_valid = 1'b1;
+		    uop.srcB_valid = !((rs == 'd0) ^ (rt == 'd0));
 		    uop.has_delay_slot = 1'b1;
 		    uop.imm = insn[15:0];
 		    uop.br_pred = insn_pred;
