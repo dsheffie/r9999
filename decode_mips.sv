@@ -166,33 +166,42 @@ module decode_mips(
 		    case(insn[5:0])
 		      6'd0: /* sll */
 			begin
+			   /* Two separate physreg-0 reads hid here.  (1) `sll $0,..' is
+			    * nop/ssnop/ehb: already NOP'd, but srcA_valid was left set, so
+			    * every nop still READ a register -- physreg 0 for the canonical
+			    * `sll $0,$0,0'.  A NOP needs no sources.  (2) `sll rd,$0,sa' is
+			    * statically zero, so emit MOVI with a zero immediate rather than
+			    * shifting physreg 0.  imm MUST be forced to 0 on that path --
+			    * MOVI would otherwise return the shift amount. */
 			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
+			   uop.srcA_valid = (rd != 'd0) && (rt != 'd0);
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : SLL; /* rd==0 (nop/ssnop/ehb/any sll $0) -> NOP, never writes p0 */
+			   uop.op = (rd == 'd0) ? NOP : ((rt == 'd0) ? MOVI : SLL);
 			   uop.is_int = 1'b1;
-			   uop.imm = {10'b0, shamt};
+			   uop.imm = (rt == 'd0) ? 16'd0 : {10'b0, shamt};
 			end
 		      6'd2: /* srl */
 			begin
+			   /* see the sll arm: NOP reads nothing, `srl rd,$0,sa' is MOVI 0 */
 			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
-			   uop.imm = {10'b0, shamt};			   
+			   uop.srcA_valid = (rd != 'd0) && (rt != 'd0);
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : SRL;
+			   uop.op = (rd == 'd0) ? NOP : ((rt == 'd0) ? MOVI : SRL);
 			   uop.is_int = 1'b1;
+			   uop.imm = (rt == 'd0) ? 16'd0 : {10'b0, shamt};
 			end
 		      6'd3: /* sra */
 			begin
+			   /* see the sll arm: NOP reads nothing, `sra rd,$0,sa' is MOVI 0 */
 			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
-			   uop.imm = {10'b0, shamt};
+			   uop.srcA_valid = (rd != 'd0) && (rt != 'd0);
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : SRA;
+			   uop.op = (rd == 'd0) ? NOP : ((rt == 'd0) ? MOVI : SRA);
 			   uop.is_int = 1'b1;
+			   uop.imm = (rt == 'd0) ? 16'd0 : {10'b0, shamt};
 			end
 		      6'd4: /* sllv */
 			begin
@@ -496,58 +505,153 @@ module decode_mips(
 			   uop.srcB_valid = 1'b1;
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : ADD;
+			   uop.op = (rd == 'd0) ? ADDCHK : ADD;
 			   uop.is_int = 1'b1;
 			end		 
 		      6'd33: /* addu */
 			begin
-			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
-			   uop.srcB = rs;
-			   uop.srcB_valid = 1'b1;
-			   uop.dst = rd;
-			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : ADDU;
-			   uop.is_int = 1'b1;
+			   /* `move rd,rs' assembles to `addu rd,rs,$0', which is the single
+			    * biggest physreg-0 reader in compiled code -- 1099 static reads
+			    * in the o32 `wc' binary, against 896 for every $0-comparing
+			    * branch combined.  Steer the $0 forms to single-source uops so
+			    * the read never happens (same triage as BEQZ/BNEZ/BRA).
+			    * NOTE: ADDU is a 32-bit add whose result is sign-extended, NOT a
+			    * 64-bit copy, so the one-source form is SLL with shamt 0 -- the
+			    * ISA's own sext32 idiom.  MOV is WRONG here: it copies all 64
+			    * bits and would carry bits 63:32 that ADDU must clear/replicate. */
+			   if((rs == 'd0) && (rt == 'd0))
+			     begin
+				/* `addu rd,$0,$0': statically zero, no sources at all */
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : MOVI;
+				uop.imm = 16'd0;
+				uop.is_int = 1'b1;
+			     end
+			   else if((rs == 'd0) || (rt == 'd0))
+			     begin
+				uop.srcA = (rs == 'd0) ? rt : rs;
+				uop.srcA_valid = 1'b1;
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : SLL;
+				uop.imm = 16'd0;  /* sext32(srcA << 0) == addu rd,srcA,$0 */
+				uop.is_int = 1'b1;
+			     end
+			   else
+			     begin
+				uop.srcA = rt;
+				uop.srcA_valid = 1'b1;
+				uop.srcB = rs;
+				uop.srcB_valid = 1'b1;
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : ADDU;
+				uop.is_int = 1'b1;
+			     end
 			end
 		      6'd34: /* sub */
 			begin
-			   uop.srcA = rs;
-			   uop.srcA_valid = 1'b1;
-			   uop.srcB = rt;
-			   uop.srcB_valid = 1'b1;
-			   uop.dst = rd;
-			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : SUB;
-			   uop.is_int = 1'b1;
+			   /* rd==$0 keeps SUBCHK (overflow check, no dst) and genuinely
+			    * needs both operands.  Otherwise fold the $0 forms:
+			    *   sub rd,$0,rt == trapping neg -> NEGT (traps only at INT_MIN)
+			    *   sub rd,rs,$0 == rs - 0, cannot overflow -> SLL 0
+			    *   sub rd,$0,$0 == 0 -> MOVI 0 */
+			   if(rd == 'd0)
+			     begin
+				uop.srcA = rs;
+				uop.srcA_valid = 1'b1;
+				uop.srcB = rt;
+				uop.srcB_valid = 1'b1;
+				uop.op = SUBCHK;
+				uop.is_int = 1'b1;
+			     end
+			   else
+			     begin
+				uop.srcA = (rs == 'd0) ? rt : rs;
+				uop.srcA_valid = !((rs == 'd0) && (rt == 'd0));
+				uop.srcB = rt;
+				uop.srcB_valid = (rs != 'd0) && (rt != 'd0);
+				uop.dst = rd;
+				uop.dst_valid = 1'b1;
+				uop.op = ((rs == 'd0) && (rt == 'd0)) ? MOVI :
+					 (rs == 'd0) ? NEGT :
+					 (rt == 'd0) ? SLL : SUB;
+				uop.imm = 16'd0;
+				uop.is_int = 1'b1;
+			     end
 			end
 		      6'd35: /* subu */
 			begin
-			   uop.srcA = rs;
-			   uop.srcA_valid = 1'b1;
+			   /* `subu rd,$0,rt' is `negu rd,rt' -- 6039 static occurrences,
+			    * the last large physreg-0 reader.  NOTE subu decodes
+			    * srcA=rs, srcB=rt (the opposite of slt), so the non-zero
+			    * operand for NEG is rt.  Free foldings of the other forms:
+			    *   subu rd,rs,$0 == sext32(rs) -> SLL 0 (as for `addu')
+			    *   subu rd,$0,$0 == 0          -> MOVI 0 */
+			   uop.srcA = (rs == 'd0) ? rt : rs;
+			   uop.srcA_valid = !((rs == 'd0) && (rt == 'd0));
 			   uop.srcB = rt;
-			   uop.srcB_valid = 1'b1;
+			   uop.srcB_valid = (rs != 'd0) && (rt != 'd0);
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : SUBU;
+			   uop.op = (rd == 'd0) ? NOP :
+				    ((rs == 'd0) && (rt == 'd0)) ? MOVI :
+				    (rs == 'd0) ? NEG :
+				    (rt == 'd0) ? SLL : SUBU;
+			   uop.imm = 16'd0;
 			   uop.is_int = 1'b1;
 			end
 		      6'd36: /* and */
 			begin
-			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
-			   uop.srcB = rs;
-			   uop.srcB_valid = 1'b1;
-			   uop.dst = rd;
-			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : AND;
-			   uop.is_int = 1'b1;
+			   /* `and rd,rs,$0' is statically ZERO whichever operand is $0, so
+			    * emit MOVI with a zero immediate -- no source reads at all. */
+			   if((rs == 'd0) || (rt == 'd0))
+			     begin
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : MOVI;
+				uop.imm = 16'd0;
+				uop.is_int = 1'b1;
+			     end
+			   else
+			     begin
+				uop.srcA = rt;
+				uop.srcA_valid = 1'b1;
+				uop.srcB = rs;
+				uop.srcB_valid = 1'b1;
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : AND;
+				uop.is_int = 1'b1;
+			     end
 			end
 		      6'd37: /* or */
 			begin
 			   if(rs == 'd0)
 			     begin
+				/* `or rd,$0,rt' is `move rd,rt' -- already a single-source
+				 * MOV.  But when rt is ALSO $0 (`move rd,$zero') the result
+				 * is statically 0, and MOV would read physreg 0 to compute
+				 * it: 967 such reads in one dhrystone run.  Emit MOVI with a
+				 * zero immediate instead -- no sources at all.  This reuses
+				 * the idiom decode already applies to `li' (addiu rt,$0,imm
+				 * -> MOVI), so no new uop is needed. */
 				uop.srcA = rt;
+				uop.srcA_valid = (rt != 'd0);
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : ((rt == 'd0) ? MOVI : MOV);
+				uop.imm = 16'd0;   /* MOVI path: result = sext(imm) = 0 */
+				uop.is_int = 1'b1;
+			     end
+			   else if(rt == 'd0)
+			     begin
+				/* `or rd,rs,$0' is the other `move rd,rs' encoding (712 static
+				 * reads in the same binary; gas picks it over addu depending on
+				 * the macro).  OR is a full 64-bit bitwise op, so MOV -- a plain
+				 * 64-bit copy -- is exact here, unlike the ADDU case above. */
+				uop.srcA = rs;
 				uop.srcA_valid = 1'b1;
 				uop.dst = rd;
 				uop.dst_valid = (rd != 'd0);
@@ -568,46 +672,109 @@ module decode_mips(
 			end
 		      6'd38: /* xor */
 			begin
-			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
-			   uop.srcB = rs;
-			   uop.srcB_valid = 1'b1;
-			   uop.dst = rd;
-			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : XOR;
-			   uop.is_int = 1'b1;
-			end	
+			   /* `xor rd,rs,$0' is just `rs'.  XOR is a full 64-bit bitwise op,
+			    * so a plain MOV copy is exact (contrast ADDU, which sign-extends).
+			    * Both operands $0 is statically zero -> MOVI, no sources. */
+			   if((rs == 'd0) && (rt == 'd0))
+			     begin
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : MOVI;
+				uop.imm = 16'd0;
+				uop.is_int = 1'b1;
+			     end
+			   else if((rs == 'd0) || (rt == 'd0))
+			     begin
+				uop.srcA = (rs == 'd0) ? rt : rs;
+				uop.srcA_valid = 1'b1;
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : MOV;
+				uop.is_int = 1'b1;
+			     end
+			   else
+			     begin
+				uop.srcA = rt;
+				uop.srcA_valid = 1'b1;
+				uop.srcB = rs;
+				uop.srcB_valid = 1'b1;
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : XOR;
+				uop.is_int = 1'b1;
+			     end
+			end
 		      6'd39: /* nor */
 			begin
-			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
-			   uop.srcB = rs;
-			   uop.srcB_valid = 1'b1;
-			   uop.dst = rd;
-			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : NOR;
-			   uop.is_int = 1'b1;
+			   /* `nor rd,rs,$0' is the canonical `not rd,rs' -- steer it to the
+			    * single-source NOT uop.  NOR(x,x) would give the same value and
+			    * also avoid physreg 0, but it still occupies two RF read ports;
+			    * NOT occupies one, which is what makes single-reader uops useful
+			    * for shrinking the port count later.
+			    * `nor rd,$0,$0' is ~0 == -1 -> MOVI 16'hffff (t_simm sign-extends
+			    * from bit 15, giving all ones). */
+			   if((rs == 'd0) && (rt == 'd0))
+			     begin
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : MOVI;
+				uop.imm = 16'hffff;
+				uop.is_int = 1'b1;
+			     end
+			   else if((rs == 'd0) || (rt == 'd0))
+			     begin
+				uop.srcA = (rs == 'd0) ? rt : rs;
+				uop.srcA_valid = 1'b1;
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : NOT;
+				uop.is_int = 1'b1;
+			     end
+			   else
+			     begin
+				uop.srcA = rt;
+				uop.srcA_valid = 1'b1;
+				uop.srcB = rs;
+				uop.srcB_valid = 1'b1;
+				uop.dst = rd;
+				uop.dst_valid = (rd != 'd0);
+				uop.op = (rd == 'd0) ? NOP : NOR;
+				uop.is_int = 1'b1;
+			     end
 			end
 		      6'd42: /* slt */
 			begin
-			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
+			   /* exec computes (srcB < srcA) with srcA=rt, srcB=rs.
+			    *   slt rd,$0,rt -> (0 < rt) -> SGTZ on rt
+			    *   slt rd,rs,$0 -> (rs < 0) -> SLTZ on rs
+			    *   slt rd,$0,$0 -> 0        -> MOVI 0 */
+			   uop.srcA = (rt == 'd0) ? rs : rt;
+			   uop.srcA_valid = !((rs == 'd0) && (rt == 'd0));
 			   uop.srcB = rs;
-			   uop.srcB_valid = 1'b1;
+			   uop.srcB_valid = (rs != 'd0) && (rt != 'd0);
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : SLT;
+			   uop.op = (rd == 'd0) ? NOP :
+				    ((rs == 'd0) && (rt == 'd0)) ? MOVI :
+				    (rs == 'd0) ? SGTZ :
+				    (rt == 'd0) ? SLTZ : SLT;
+			   uop.imm = 16'd0;
 			   uop.is_int = 1'b1;
 			end
 		      6'd43: /* sltu */
 			begin
+			   /*   sltu rd,$0,rt -> (0 <u rt) == (rt != 0) -> SNEZ on rt
+			    *   sltu rd,rs,$0 -> (rs <u 0)  is never true  -> MOVI 0 */
 			   uop.srcA = rt;
-			   uop.srcA_valid = 1'b1;
+			   uop.srcA_valid = (rt != 'd0);
 			   uop.srcB = rs;
-			   uop.srcB_valid = 1'b1;
+			   uop.srcB_valid = (rs != 'd0) && (rt != 'd0);
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : SLTU;
+			   uop.op = (rd == 'd0) ? NOP :
+				    (rt == 'd0) ? MOVI :
+				    (rs == 'd0) ? SNEZ : SLTU;
+			   uop.imm = 16'd0;
 			   uop.is_int = 1'b1;
 			end // case: 6'd43
 		      6'd44: /* dadd */
@@ -620,7 +787,7 @@ module decode_mips(
 				uop.srcB_valid = 1'b1;
 				uop.dst = rd;
 				uop.dst_valid = (rd != 'd0);
-				uop.op = (rd == 'd0) ? NOP : DADD;
+				uop.op = (rd == 'd0) ? DADDCHK : DADD;
 				uop.is_int = 1'b1;
 			     end
 			end
@@ -628,14 +795,37 @@ module decode_mips(
 			begin
 			   if(w_in_64b_mode)
 			     begin
-				uop.srcA = rt;
-				uop.srcA_valid = 1'b1;
-				uop.srcB = rs;
-				uop.srcB_valid = 1'b1;
-				uop.dst = rd;
-				uop.dst_valid = (rd != 'd0);
-				uop.op = (rd == 'd0) ? NOP : DADDU;
-				uop.is_int = 1'b1;
+				/* the 64-bit ABI spells `move rd,rs' as `daddu rd,rs,$0'.  DADDU
+				 * is a true 64-bit add, so MOV is exact here -- contrast ADDU
+				 * above, which must sign-extend and therefore uses SLL 0. */
+				if((rs == 'd0) && (rt == 'd0))
+				  begin
+				     uop.dst = rd;
+				     uop.dst_valid = (rd != 'd0);
+				     uop.op = (rd == 'd0) ? NOP : MOVI;
+				     uop.imm = 16'd0;
+				     uop.is_int = 1'b1;
+				  end
+				else if((rs == 'd0) || (rt == 'd0))
+				  begin
+				     uop.srcA = (rs == 'd0) ? rt : rs;
+				     uop.srcA_valid = 1'b1;
+				     uop.dst = rd;
+				     uop.dst_valid = (rd != 'd0);
+				     uop.op = (rd == 'd0) ? NOP : MOV;
+				     uop.is_int = 1'b1;
+				  end
+				else
+				  begin
+				     uop.srcA = rt;
+				     uop.srcA_valid = 1'b1;
+				     uop.srcB = rs;
+				     uop.srcB_valid = 1'b1;
+				     uop.dst = rd;
+				     uop.dst_valid = (rd != 'd0);
+				     uop.op = (rd == 'd0) ? NOP : DADDU;
+				     uop.is_int = 1'b1;
+				  end
 			     end
 			end
 		      6'd46: /* dsub */
@@ -648,7 +838,7 @@ module decode_mips(
 				uop.srcB_valid = 1'b1;
 				uop.dst = rd;
 				uop.dst_valid = (rd != 'd0);
-				uop.op = (rd == 'd0) ? NOP : DSUB;
+				uop.op = (rd == 'd0) ? DSUBCHK : DSUB;
 				uop.is_int = 1'b1;
 			     end
 			end
@@ -675,10 +865,24 @@ module decode_mips(
 			end
 		      6'd49: /* tgeu */
 			begin
-			   uop.op = TGEU;
-			   uop.srcA = rs; uop.srcA_valid = 1'b1;
-			   uop.srcB = rt; uop.srcB_valid = 1'b1;
-			   uop.is_int = 1'b1;
+			   /* `tgeu $0,rt' is `0 >=u rt', i.e. exactly rt == 0 -- reuse
+			    * TEQZ, single source, no physreg-0 read.
+			    * (`tgeu rs,$0' is unsigned `>= 0' and so traps ALWAYS; that
+			    *  would need a source-free always-trap uop.  Left as TGEU:
+			    *  0 static occurrences across wc/dhrystone/big-csmith/hello.) */
+			   if((rs == 'd0) && (rt != 'd0))
+			     begin
+				uop.op = TEQZ;
+				uop.srcA = rt; uop.srcA_valid = 1'b1;
+				uop.is_int = 1'b1;
+			     end
+			   else
+			     begin
+				uop.op = TGEU;
+				uop.srcA = rs; uop.srcA_valid = 1'b1;
+				uop.srcB = rt; uop.srcB_valid = 1'b1;
+				uop.is_int = 1'b1;
+			     end
 			end
 		      6'd50: /* tlt  */
 			begin
@@ -689,10 +893,27 @@ module decode_mips(
 			end
 		      6'd51: /* tltu */
 			begin
-			   uop.op = TLTU;
-			   uop.srcA = rs; uop.srcA_valid = 1'b1;
-			   uop.srcB = rt; uop.srcB_valid = 1'b1;
-			   uop.is_int = 1'b1;
+			   /* `tltu rs,$0' is unsigned `< 0' -- can never trap, so it is a
+			    * NOP with no sources at all.  `tltu $0,rt' is `0 <u rt', i.e.
+			    * exactly rt != 0 -- reuse TNEZ, single source. */
+			   if(rt == 'd0)
+			     begin
+				uop.op = NOP;
+				uop.is_int = 1'b1;
+			     end
+			   else if(rs == 'd0)
+			     begin
+				uop.op = TNEZ;
+				uop.srcA = rt; uop.srcA_valid = 1'b1;
+				uop.is_int = 1'b1;
+			     end
+			   else
+			     begin
+				uop.op = TLTU;
+				uop.srcA = rs; uop.srcA_valid = 1'b1;
+				uop.srcB = rt; uop.srcB_valid = 1'b1;
+				uop.is_int = 1'b1;
+			     end
 			end
 		      6'd52: /* teq */
 			begin
@@ -763,6 +984,16 @@ module decode_mips(
 			   uop.dst = 'd31;
 			   uop.srcB = 'd31;
 			   uop.srcB_valid = 1'b0;   /* *al links unconditionally: no old-r31 src */
+			   /* `bal off' IS `bgezal $0,off': $0 >= 0 always, so the branch is
+			    * UNCONDITIONAL and the operand is never consulted.  The shared
+			    * REGIMM prologue above set srcA=rs=$0 with srcA_valid=1, which
+			    * made every `bal' read physreg 0 for nothing -- 1888 of them in
+			    * one dhrystone run, on a CONTROL TRANSFER, the same class as the
+			    * bug being hunted.  Drop the source. */
+			   if(rs == 'd0)
+			     begin
+				uop.srcA_valid = 1'b0;
+			     end
 			end
 		      'd16:
 			begin /* BLTZAL */
@@ -902,8 +1133,11 @@ module decode_mips(
 		 end // case: 6'd7
 	       6'd8: /* ADDI */
 		 begin
-		    uop.op = (rt == 'd0) ? NOP : ADDI;
-		    uop.srcA_valid = 1'b1;
+		    /* `addi rt,$0,imm' is 0 + sext(imm): it cannot overflow, so the
+		     * trap is unreachable and it degenerates to a plain MOVI. */
+		    uop.op = (rt == 'd0) ? ((rs == 'd0) ? NOP : ADDICHK)
+					 : ((rs == 'd0) ? MOVI : ADDI);
+		    uop.srcA_valid = (rs != 'd0);
 		    uop.srcA = rs;
 		    uop.dst_valid = (rt != 'd0);
 		    uop.is_int = 1'b1;
@@ -953,18 +1187,23 @@ module decode_mips(
 		 end
 	       6'd12: /* ANDI */
 		 begin
-		    uop.op = (rt == 'd0) ? NOP : ANDI;
-		    uop.srcA_valid = 1'b1;
+		    /* `andi rt,$0,imm' is statically zero -> MOVI with a zero imm */
+		    uop.op = (rt == 'd0) ? NOP : ((rs == 'd0) ? MOVI : ANDI);
+		    uop.srcA_valid = (rs != 'd0);
 		    uop.srcA = rs;
 		    uop.dst_valid = (rt != 'd0);
 		    uop.dst = rt;
 		    uop.is_int = 1'b1;
-		    uop.imm = insn[15:0];	       
+		    uop.imm = (rs == 'd0) ? 16'd0 : insn[15:0];	       
 		 end
 	       6'd13: /* ORI */
 		 begin
-		    uop.op = (rt == 'd0) ? NOP : ORI;
-		    uop.srcA_valid = 1'b1;
+		    /* `ori rt,$0,imm' is a zero-extended immediate load (1935 static
+		     * occurrences -- the biggest physreg-0 reader left after `move').
+		     * MOVIU, not MOVI: MOVI sign-extends and would be wrong for
+		     * imm[15]=1. */
+		    uop.op = (rt == 'd0) ? NOP : ((rs == 'd0) ? MOVIU : ORI);
+		    uop.srcA_valid = (rs != 'd0);
 		    uop.srcA = rs;	       
 		    uop.dst_valid = (rt != 'd0);
 		    uop.dst = rt;
@@ -975,8 +1214,9 @@ module decode_mips(
 		 end
 	       6'd14: /* XORI */
 		 begin
-		    uop.op = (rt == 'd0) ? NOP : XORI;
-		    uop.srcA_valid = 1'b1;
+		    /* `xori rt,$0,imm' == `ori rt,$0,imm' -- zero-extended immediate */
+		    uop.op = (rt == 'd0) ? NOP : ((rs == 'd0) ? MOVIU : XORI);
+		    uop.srcA_valid = (rs != 'd0);
 		    uop.srcA = rs;	       
 		    uop.dst_valid = (rt != 'd0);
 		    uop.dst = rt;
@@ -1359,13 +1599,19 @@ module decode_mips(
 		 end // case: 6'd17
 	       6'd20: /* BEQL */
 		 begin
-		    uop.op = BEQL;
+		    /* `beqzl rs' IS `beql rs,$0' -- the same physreg-0 read BEQZ/BNEZ
+		     * already removed for the non-likely forms; branch-likely was
+		     * simply missed.  Both operands $0 is degenerate (beql $0,$0 is
+		     * always taken, bnel $0,$0 never taken but STILL nullifies its
+		     * delay slot, so it is not a NOP) -- left as plain BEQL, matching
+		     * the teq/tne $0,$0 precedent. */
+		    uop.op = ((rs == 'd0) ^ (rt == 'd0)) ? BEQZL : BEQL;
 		    uop.dst_valid = 1'b0;
 		    uop.dst = 'd0;
-		    uop.srcA = rs;
+		    uop.srcA = (rs == 'd0) ? rt : rs;
 		    uop.srcA_valid = 1'b1;
 		    uop.srcB = rt;
-		    uop.srcB_valid = 1'b1;
+		    uop.srcB_valid = !((rs == 'd0) ^ (rt == 'd0));
 		    uop.has_delay_slot = 1'b1;
 		    uop.has_nullifying_delay_slot = 1'b1;
 		    uop.imm = insn[15:0];
@@ -1375,13 +1621,19 @@ module decode_mips(
 		 end // case: 6'd20
 	       6'd21: /* BNEL */
 		 begin
-		    uop.op = BNEL;
+		    /* `bnezl rs' IS `bnel rs,$0' -- the same physreg-0 read BEQZ/BNEZ
+		     * already removed for the non-likely forms; branch-likely was
+		     * simply missed.  Both operands $0 is degenerate (beql $0,$0 is
+		     * always taken, bnel $0,$0 never taken but STILL nullifies its
+		     * delay slot, so it is not a NOP) -- left as plain BNEL, matching
+		     * the teq/tne $0,$0 precedent. */
+		    uop.op = ((rs == 'd0) ^ (rt == 'd0)) ? BNEZL : BNEL;
 		    uop.dst_valid = 1'b0;
 		    uop.dst = 'd0;
-		    uop.srcA = rs;
+		    uop.srcA = (rs == 'd0) ? rt : rs;
 		    uop.srcA_valid = 1'b1;
 		    uop.srcB = rt;
-		    uop.srcB_valid = 1'b1;
+		    uop.srcB_valid = !((rs == 'd0) ^ (rt == 'd0));
 		    uop.has_delay_slot = 1'b1;
 		    uop.has_nullifying_delay_slot = 1'b1;
 		    uop.imm = insn[15:0];
@@ -1425,7 +1677,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0);
-			 uop.op = (rt == 'd0) ? NOP : DADDI;
+			 uop.op = (rt == 'd0) ? DADDICHK : DADDI;
 			 uop.imm = insn[15:0];
 			 uop.is_int = 1'b1;
 		      end

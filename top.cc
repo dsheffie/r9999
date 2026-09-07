@@ -985,6 +985,17 @@ int main(int argc, char **argv) {
 	      }
 	    }
 	    if(last_check > 2) {
+	      /* The RTL and the checker have taken DIFFERENT control flow.  This is
+	       * a real failure -- notably it is the shape of a mis-resolved branch,
+	       * the bug this core is being hunted for -- but it used to break out
+	       * without setting `incorrect', so the run wrote its normal stats log
+	       * and a stdout-only reader saw nothing wrong.  (run_parallel.sh greps
+	       * stderr for "no match", but a direct ooo_core invocation does not.)
+	       * Mark it failed and put a greppable marker on stdout. */
+	      incorrect = true;
+	      std::cout << "COSIM DESYNC: rtl pc " << std::hex << tb->retire_pc
+			<< " != sim pc " << ss->pc << std::dec
+			<< " -- control flow diverged\n";
 	      uint32_t linsn = bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>((uint32_t)last_match_pc & 0x1fffffffu));
 	      std::cerr << "no match in a while, last match : "
 		        << std::hex

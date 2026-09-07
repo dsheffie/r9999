@@ -226,7 +226,18 @@ module exec(clk,
     * PRF, not the int PRF.  int/FP physical reg numbers OVERLAP, so int-domain
     * wakeup/bypass must gate on this -- else an FP load whose FP pdst happens to
     * equal an int op's source pdst would falsely forward FP data into the int op. */
-   wire w_mem_rsp_int_valid = mem_rsp_dst_valid & ~mem_rsp_fp_dst;
+   /* PRODUCER-SIDE $zero GUARD (mem).  rf4r2w refuses to WRITE physreg 0
+    * (wrptr0 != 'd0, the r0/SSNOP fix) but nothing refused to BYPASS onto it: a
+    * producer with dst==0 was blocked from the register file yet would still
+    * forward its result to every consumer reading $zero.  That asymmetry is the
+    * hazard; the decode-side work only removed some of the readers.  Qualifying
+    * the single valid signal here covers every mem forward and wakeup compare at
+    * once.  Per the decode audit this is currently redundant (all 13 integer
+    * loads plus SC/SCD/MFC1/DMFC1 set dst_valid=(rt!='d0)), which is the point --
+    * it makes the invariant STRUCTURAL instead of resting on ~68 per-arm guards,
+    * two of which were already found missing this month. */
+   wire w_mem_rsp_int_valid = mem_rsp_dst_valid & ~mem_rsp_fp_dst &
+			      (mem_rsp_dst_ptr != 'd0);
    
 
    output tlb_data_t	             tlb_entry_out;
@@ -923,11 +934,11 @@ module exec(clk,
 	//allocation forwarding
 	t_alu_alloc_srcA_match = uq.srcA_valid && (
 						   (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq.srcA)) ||
-						   (r_start_int && t_wr_int_prf & (int_uop.dst == uq.srcA))
+						   (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == uq.srcA))
 						   );
 	t_alu_alloc_srcB_match = uq.srcB_valid && (
 						   (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq.srcB)) ||
-						   (r_start_int && t_wr_int_prf & (int_uop.dst == uq.srcB))
+						   (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == uq.srcB))
 						   );
 
 	t_alu_alloc_hilo_match = uq.hilo_src_valid && (
@@ -987,11 +998,11 @@ module exec(clk,
 	     begin
 		t_alu_srcA_match[i] = r_alu_sched_uops[i].srcA_valid && (
 									 (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcA)) ||
-									 (r_start_int && t_wr_int_prf & (int_uop.dst == r_alu_sched_uops[i].srcA))
+									 (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == r_alu_sched_uops[i].srcA))
 									 );
 		t_alu_srcB_match[i] = r_alu_sched_uops[i].srcB_valid && (
 									 (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcB)) ||
-									 (r_start_int && t_wr_int_prf & (int_uop.dst == r_alu_sched_uops[i].srcB))
+									 (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == r_alu_sched_uops[i].srcB))
 									 );
 		
 		t_alu_hilo_match[i] = r_alu_sched_uops[i].hilo_src_valid && (
@@ -1801,8 +1812,8 @@ module exec(clk,
 
    wire [31:0] w_imm32 = { {16{int_uop.imm[15]}},int_uop.imm};
    csa #(.N(32)) csa0 (.a(t_srcA[31:0]),
-		       .b((int_uop.op == SUBU|int_uop.op==SUB) ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? w_imm32 : t_srcB[31:0]))), 
-		       .cin((int_uop.op == SUBU|int_uop.op==SUB) ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
+		       .b((int_uop.op == SUBU|int_uop.op==SUB|int_uop.op==SUBCHK) ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI | int_uop.op == ADDICHK) ? w_imm32 : t_srcB[31:0]))), 
+		       .cin((int_uop.op == SUBU|int_uop.op==SUB|int_uop.op==SUBCHK) ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
 
    wire [31:0] w_add_srcA = {w_c_sub32[30:0], 1'b0};
    wire [31:0] w_add_srcB = w_s_sub32;
@@ -1811,7 +1822,7 @@ module exec(clk,
    /* Overflow must use the SAME (forwarded) operands the adder used: t_srcA and
     * the effective addend (the immediate for ADDI/ADDIU, else t_srcB).  The raw
     * PRF reads w_srcA/w_srcB hold stale values on same-cycle forwarding. */
-   wire [31:0] w_ovf_srcB = (int_uop.op == ADDIU | int_uop.op == ADDI) ? w_imm32 : t_srcB[31:0];
+   wire [31:0] w_ovf_srcB = (int_uop.op == ADDIU | int_uop.op == ADDI | int_uop.op == ADDICHK) ? w_imm32 : t_srcB[31:0];
    wire	       w_add32_overflow = (w_add32[31] != w_ovf_srcB[31]) & (t_srcA[31] == w_ovf_srcB[31]);
    /* A - B overflows iff A,B differ in sign AND the result sign differs from A (the minuend). */
    wire	       w_sub32_overflow = (w_add32[31] != t_srcA[31]) & (t_srcA[31] != w_ovf_srcB[31]);
@@ -1825,13 +1836,13 @@ module exec(clk,
 	   wire [63:0] w_s_sub64, w_c_sub64;
 	   wire [63:0] w_imm64 = { {48{int_uop.imm[15]}},int_uop.imm};
 	   csa #(.N(64)) csa0 (.a(t_srcA),
-			       .b((int_uop.op == DSUBU|int_uop.op==DSUB) ? ~t_srcB : (((int_uop.op == DADDIU | int_uop.op == DADDI) ? w_imm64 : t_srcB))), 
-			       .cin((int_uop.op == DSUBU|int_uop.op==DSUB) ? 64'd1 : 64'd0), .s(w_s_sub64), .cout(w_c_sub64) );
+			       .b((int_uop.op == DSUBU|int_uop.op==DSUB|int_uop.op==DSUBCHK) ? ~t_srcB : (((int_uop.op == DADDIU | int_uop.op == DADDI | int_uop.op == DADDICHK) ? w_imm64 : t_srcB))), 
+			       .cin((int_uop.op == DSUBU|int_uop.op==DSUB|int_uop.op==DSUBCHK) ? 64'd1 : 64'd0), .s(w_s_sub64), .cout(w_c_sub64) );
 	   
 	   wire [63:0] w_add64_srcA = {w_c_sub64[62:0], 1'b0};
 	   wire [63:0] w_add64_srcB = w_s_sub64;
 	   assign w_add64 = w_add64_srcA + w_add64_srcB;
-		   wire [63:0] w_ovf64_srcB = (int_uop.op == DADDIU | int_uop.op == DADDI) ? w_imm64 : t_srcB;
+		   wire [63:0] w_ovf64_srcB = (int_uop.op == DADDIU | int_uop.op == DADDI | int_uop.op == DADDICHK) ? w_imm64 : t_srcB;
 	   assign w_add64_overflow = (w_add64[63] != w_ovf64_srcB[63]) & (t_srcA[63] == w_ovf64_srcB[63]);
 	   assign w_sub64_overflow = (w_add64[63] != t_srcA[63]) & (t_srcA[63] != w_ovf64_srcB[63]);   	   
 	end
@@ -2136,6 +2147,23 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
+	  NEG:
+	    begin
+	       /* `subu rd,$0,rt' -- 0 - rt, sign-extended, one source */
+	       t_result = sign_extend32(32'd0 - t_srcA[31:0]);
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  NEGT:
+	    begin
+	       /* `sub rd,$0,rt' -- same value, but traps on the one overflowing
+		* input (rt == INT_MIN); verified on silicon-model by directed test. */
+	       t_result = sign_extend32(32'd0 - t_srcA[31:0]);
+	       t_overflow = (t_srcA[31:0] == 32'h80000000);
+	       t_fault = t_overflow;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  DSUBU:
 	    begin
 	       t_result = w_add64;
@@ -2172,6 +2200,52 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
+	  NOT:
+	    begin
+	       /* `nor rd,rs,$0' -- single source, so no physreg-0 read and only
+		* one RF read port occupied. */
+	       t_result = ~t_srcA;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  /* Overflow-check forms: raise the trap, write NOTHING.  Deliberately no
+	   * t_result and no t_wr_int_prf -- that is the whole point, see uop.vh. */
+	  ADDCHK:
+	    begin
+	       t_overflow = w_add32_overflow;
+	       t_fault = w_add32_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  ADDICHK:
+	    begin
+	       t_overflow = w_add32_overflow;
+	       t_fault = w_add32_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  SUBCHK:
+	    begin
+	       t_overflow = w_sub32_overflow;
+	       t_fault = w_sub32_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  DADDCHK:
+	    begin
+	       t_overflow = w_add64_overflow;
+	       t_fault = w_add64_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  DADDICHK:
+	    begin
+	       t_overflow = w_add64_overflow;
+	       t_fault = w_add64_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSUBCHK:
+	    begin
+	       t_overflow = w_sub64_overflow;
+	       t_fault = w_sub64_overflow;
+	       t_alu_valid = 1'b1;
+	    end
 	  SLT:
 	    begin
 	       t_result = (($signed(t_srcB) <  $signed(t_srcA)) ? 'd1 : 'd0);
@@ -2184,6 +2258,31 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end // case: SLTU
+	  MOVIU:
+	    begin
+	       /* zero-extended immediate -- contrast MOVI, which sign-extends */
+	       t_result = {{(`M_WIDTH-16){1'b0}}, int_uop.imm};
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  SNEZ:
+	    begin
+	       t_result = (t_srcA != 'd0) ? 'd1 : 'd0;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  SGTZ:
+	    begin
+	       t_result = ($signed(t_srcA) > $signed({`M_WIDTH{1'b0}})) ? 'd1 : 'd0;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  SLTZ:
+	    begin
+	       t_result = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}})) ? 'd1 : 'd0;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  BEQ:
 	    begin
 	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
@@ -2228,6 +2327,24 @@ module exec(clk,
 	       t_result = t_srcA;
 	       t_alu_valid = 1'b1;
 	    end // case: BNEZ
+	  BEQZL:
+	    begin
+	       /* == BEQZ, plus the branch-likely `|| !t_take_br' restart that
+		* nullifies the delay slot when the branch is not taken. */
+	       t_take_br = (t_srcA == 'd0);
+	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_srcA;   /* log the compared operand into the retire ring */
+	       t_alu_valid = 1'b1;
+	    end
+	  BNEZL:
+	    begin
+	       t_take_br = (t_srcA != 'd0);
+	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_srcA;
+	       t_alu_valid = 1'b1;
+	    end
 	  BRA:
 	    begin
 	       /* `b lbl' == `beq $0,$0': unconditionally taken, NO source operands. */
@@ -3038,8 +3155,8 @@ module exec(clk,
 
    always_comb
      begin
-	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf &&(t_mem_uq.srcA == int_uop.dst);
-	t_fwd_int_mem_srcB = r_start_int && t_wr_int_prf &&(t_mem_dq.src_ptr == int_uop.dst);
+	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_mem_uq.srcA == int_uop.dst);
+	t_fwd_int_mem_srcB = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_mem_dq.src_ptr == int_uop.dst);
 	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_mem_uq.srcA == mem_rsp_dst_ptr);
 	t_fwd_mem_mem_srcB = w_mem_rsp_int_valid && (t_mem_dq.src_ptr == mem_rsp_dst_ptr);
      end
@@ -3067,8 +3184,8 @@ module exec(clk,
 	     r_fwd_mem_srcB_data <= mem_rsp_load_data[`M_WIDTH-1:0];
 	  end
 	
-	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (t_picked_uop.srcA == int_uop.dst);
-	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (t_picked_uop.srcB == int_uop.dst);
+	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst);
+	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcB == int_uop.dst);
 	
 	r_fwd_mem_srcA <= w_mem_rsp_int_valid && (t_picked_uop.srcA == mem_rsp_dst_ptr);
 	r_fwd_mem_srcB <= w_mem_rsp_int_valid && (t_picked_uop.srcB == mem_rsp_dst_ptr);
