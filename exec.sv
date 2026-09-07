@@ -226,7 +226,18 @@ module exec(clk,
     * PRF, not the int PRF.  int/FP physical reg numbers OVERLAP, so int-domain
     * wakeup/bypass must gate on this -- else an FP load whose FP pdst happens to
     * equal an int op's source pdst would falsely forward FP data into the int op. */
-   wire w_mem_rsp_int_valid = mem_rsp_dst_valid & ~mem_rsp_fp_dst;
+   /* PRODUCER-SIDE $zero GUARD (mem).  rf4r2w refuses to WRITE physreg 0
+    * (wrptr0 != 'd0, the r0/SSNOP fix) but nothing refused to BYPASS onto it: a
+    * producer with dst==0 was blocked from the register file yet would still
+    * forward its result to every consumer reading $zero.  That asymmetry is the
+    * hazard; the decode-side work only removed some of the readers.  Qualifying
+    * the single valid signal here covers every mem forward and wakeup compare at
+    * once.  Per the decode audit this is currently redundant (all 13 integer
+    * loads plus SC/SCD/MFC1/DMFC1 set dst_valid=(rt!='d0)), which is the point --
+    * it makes the invariant STRUCTURAL instead of resting on ~68 per-arm guards,
+    * two of which were already found missing this month. */
+   wire w_mem_rsp_int_valid = mem_rsp_dst_valid & ~mem_rsp_fp_dst &
+			      (mem_rsp_dst_ptr != 'd0);
    
 
    output tlb_data_t	             tlb_entry_out;
@@ -907,11 +918,11 @@ module exec(clk,
 	//allocation forwarding
 	t_alu_alloc_srcA_match = uq.srcA_valid && (
 						   (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq.srcA)) ||
-						   (r_start_int && t_wr_int_prf & (int_uop.dst == uq.srcA))
+						   (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == uq.srcA))
 						   );
 	t_alu_alloc_srcB_match = uq.srcB_valid && (
 						   (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq.srcB)) ||
-						   (r_start_int && t_wr_int_prf & (int_uop.dst == uq.srcB))
+						   (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == uq.srcB))
 						   );
 
 	t_alu_alloc_hilo_match = uq.hilo_src_valid && (
@@ -971,11 +982,11 @@ module exec(clk,
 	     begin
 		t_alu_srcA_match[i] = r_alu_sched_uops[i].srcA_valid && (
 									 (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcA)) ||
-									 (r_start_int && t_wr_int_prf & (int_uop.dst == r_alu_sched_uops[i].srcA))
+									 (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == r_alu_sched_uops[i].srcA))
 									 );
 		t_alu_srcB_match[i] = r_alu_sched_uops[i].srcB_valid && (
 									 (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcB)) ||
-									 (r_start_int && t_wr_int_prf & (int_uop.dst == r_alu_sched_uops[i].srcB))
+									 (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == r_alu_sched_uops[i].srcB))
 									 );
 		
 		t_alu_hilo_match[i] = r_alu_sched_uops[i].hilo_src_valid && (
@@ -3059,8 +3070,8 @@ module exec(clk,
 
    always_comb
      begin
-	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf &&(t_mem_uq.srcA == int_uop.dst);
-	t_fwd_int_mem_srcB = r_start_int && t_wr_int_prf &&(t_mem_dq.src_ptr == int_uop.dst);
+	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_mem_uq.srcA == int_uop.dst);
+	t_fwd_int_mem_srcB = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_mem_dq.src_ptr == int_uop.dst);
 	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_mem_uq.srcA == mem_rsp_dst_ptr);
 	t_fwd_mem_mem_srcB = w_mem_rsp_int_valid && (t_mem_dq.src_ptr == mem_rsp_dst_ptr);
      end
@@ -3072,8 +3083,8 @@ module exec(clk,
 	r_fwd_mem_mem_srcA <= t_fwd_mem_mem_srcA;
 	r_fwd_mem_mem_srcB <= t_fwd_mem_mem_srcB;
 	
-	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (t_picked_uop.srcA == int_uop.dst);
-	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (t_picked_uop.srcB == int_uop.dst);
+	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst);
+	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcB == int_uop.dst);
 	
 	r_fwd_mem_srcA <= w_mem_rsp_int_valid && (t_picked_uop.srcA == mem_rsp_dst_ptr);
 	r_fwd_mem_srcB <= w_mem_rsp_int_valid && (t_picked_uop.srcB == mem_rsp_dst_ptr);
