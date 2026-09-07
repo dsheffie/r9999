@@ -219,7 +219,13 @@ typedef enum logic [7:0]
     * whether the trap fires.  TEQZ/TNEZ carry only the non-zero operand.
     * teq $0,$0 / tne $0,$0 are degenerate and stay plain TEQ/TNE. */
    TEQZ,
-   TNEZ
+   TNEZ,
+   /* Single-source bitwise complement.  `nor rd,rs,$0' is the canonical MIPS
+    * `not rd,rs'.  NOR(x,x) yields the same value without reading physreg 0,
+    * but still occupies TWO register read ports -- which defeats the point if
+    * we ever want to exploit single-reader uops to shrink the RF port count.
+    * NOT reads exactly one source. */
+   NOT
    } opcode_t;
 
 function logic is_mult(opcode_t op);

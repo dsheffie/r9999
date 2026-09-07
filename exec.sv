@@ -2151,6 +2151,14 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
+	  NOT:
+	    begin
+	       /* `nor rd,rs,$0' -- single source, so no physreg-0 read and only
+		* one RF read port occupied. */
+	       t_result = ~t_srcA;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  SLT:
 	    begin
 	       t_result = (($signed(t_srcB) <  $signed(t_srcA)) ? 'd1 : 'd0);
