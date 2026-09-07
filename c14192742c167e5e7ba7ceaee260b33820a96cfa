@@ -1,0 +1,26 @@
+CORRECTION (2026-09-07): the COVERAGE GAP paragraph in this message is WRONG.
+
+It claims randgen emitted "84 beq/bne and ZERO with a $0 operand" across 12 seeds.
+That measurement was broken, not the generator: every gen_mips_test.py invocation
+in it was called positionally (`gen_mips_test.py <seed>`) when the script requires
+`--seed`, so every call errored.  stderr was suppressed, so the loop silently read
+a stale rt.S left over from an earlier run and reported its contents as the result.
+
+Remeasured properly over 60 freshly generated seeds:
+
+    449 beq/bne emitted, 16 of them with a $0 operand  = 3.6%
+
+which is what the generator's own source predicts: sources come from
+`rs() = random.choice(POOL + [0])`, i.e. $0 with probability 1/24 per operand.
+The same holds for the R-type arms (per 60 seeds: 7 nor, 4 and, 3 xor with $0).
+
+So the randgen sweep IS evidence for these paths, not merely non-regression.
+The TNEZ remark stands for a different reason: randgen emits no traps at all.
+
+Two later findings also bear on this commit:
+  * BEQZ/BNEZ/BRA/TEQZ/TNEZ covered only 42% of static physreg-0 reads.  `move'
+    (addu/or rd,rs,$0) was the largest reader and was missed; so were the
+    branch-likely forms (beql/bnel), ori/xori $0, subu $0 (negu) and nop.
+  * A directed branch test must SELF-CHECK: the co-sim's GPR compare is gated on
+    fall-through, so a wrong branch direction can be missed if the program ends
+    before the next fall-through instruction.
