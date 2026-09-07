@@ -219,7 +219,66 @@ typedef enum logic [7:0]
     * whether the trap fires.  TEQZ/TNEZ carry only the non-zero operand.
     * teq $0,$0 / tne $0,$0 are degenerate and stay plain TEQ/TNE. */
    TEQZ,
-   TNEZ
+   TNEZ,
+   /* Single-source bitwise complement.  `nor rd,rs,$0' is the canonical MIPS
+    * `not rd,rs'.  NOR(x,x) yields the same value without reading physreg 0,
+    * but still occupies TWO register read ports -- which defeats the point if
+    * we ever want to exploit single-reader uops to shrink the RF port count.
+    * NOT reads exactly one source. */
+   NOT,
+   /* Overflow-CHECK forms of the trapping arithmetic: `add $0,rs,rt' and friends.
+    * These are documented MIPS idioms -- the result is discarded but Integer
+    * Overflow is STILL raised (the exception is independent of rd/rt; interpret.cc
+    * raises it before the gpr[] write), so they cannot be folded to NOP the way
+    * `addu $0,..' can -- that silently disarms the check.  Nor can they keep the
+    * trapping opcode: ADD & co. assert t_wr_int_prf, and with dst_valid=0 the dst
+    * field keeps its default of 0, which the (unguarded) bypass compares would then
+    * match against every concurrent $zero read.  The CHK forms keep the trap and
+    * have NO destination, so they are not int-PRF writers and can never present
+    * dst==0 to the bypass.  One per {overflow signal, operand-mux group}: the csa
+    * operand selects in exec.sv key off the opcode and MUST list these. */
+   ADDCHK,      /* add   $0,rs,rt  -> w_add32_overflow, addend = t_srcB  */
+   ADDICHK,     /* addi  $0,rs,imm -> w_add32_overflow, addend = imm     */
+   SUBCHK,      /* sub   $0,rs,rt  -> w_sub32_overflow, addend = ~t_srcB */
+   DADDCHK,     /* dadd  $0,rs,rt  -> w_add64_overflow, addend = t_srcB  */
+   DADDICHK,    /* daddi $0,rs,imm -> w_add64_overflow, addend = imm     */
+   DSUBCHK,     /* dsub  $0,rs,rt  -> w_sub64_overflow, addend = ~t_srcB */
+   /* Branch-LIKELY zero compares.  `beqzl rs' IS `beql rs,$0' and `bnezl rs' IS
+    * `bnel rs,$0', so they read physreg 0 exactly like the non-likely forms that
+    * BEQZ/BNEZ already fixed -- these were simply missed.  They matter in a
+    * workload the earlier measurements could not see: modern gcc emits NO
+    * branch-likely (0 in wc/dhrystone/hello), but big-csmith has 7942 of them,
+    * 514 with a $0 operand, and MIPSpro-built IRIX code uses them idiomatically
+    * -- IRIX being where this bug was first observed.
+    * Identical to BEQZ/BNEZ except t_mispred_br also asserts when NOT taken,
+    * which is how the likely form nullifies its delay slot. */
+   BEQZL,
+   BNEZL,
+   /* Zero-extended immediate load.  `ori rt,$0,imm' is how gas builds any constant
+    * that does not fit a signed 16-bit `li' -- measured 1935 static occurrences
+    * across wc+dhrystone+big-csmith+hello, the largest remaining physreg-0 reader
+    * after `move' was fixed.  MOVI cannot be reused: it SIGN-extends, so it is
+    * wrong whenever imm[15] is set.  Same uop serves `xori rt,$0,imm'. */
+   MOVIU,
+   /* Single-source compare-against-zero forms of slt/sltu.
+    *   sltu rd,$0,rt  ==  (rt != 0)   -> SNEZ   (461 occurrences)
+    *   slt  rd,$0,rt  ==  (rt >  0)   -> SGTZ   (16)
+    *   slt  rd,rs,$0  ==  (rs <  0)   -> SLTZ   (0 measured; same arm, free)
+    * (sltu rd,rs,$0 is unsigned `< 0' -- statically 0 -> MOVI, no uop needed.) */
+   SNEZ,
+   SGTZ,
+   SLTZ,
+   /* 32-bit negate, single source.  `subu rd,$0,rt' is `negu rd,rt' -- 6039 static
+    * occurrences across wc+dhrystone+big-csmith+hello, the last large physreg-0
+    * reader.  Result is sign-extended like SUBU. */
+   NEG,
+   /* TRAPPING negate: `sub rd,$0,rt' (gas/objdump spell it `neg rd,rt').  Unlike
+    * NEG it can raise Integer Overflow -- but for exactly ONE input, rt ==
+    * INT_MIN, because -INT_MIN is not representable in 32 bits.  It is NOT
+    * "trap if negative": the overflow rule needs the result sign to differ from
+    * the minuend's, and with a $0 minuend only 0x80000000 does that.  So the
+    * whole overflow condition collapses to a single equality. */
+   NEGT
    } opcode_t;
 
 function logic is_mult(opcode_t op);

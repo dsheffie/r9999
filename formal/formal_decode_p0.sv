@@ -65,6 +65,7 @@ module formal_decode_p0(
 			   (uop.op == MOV) |
 			   (uop.op == MOVI) |
 			   (uop.op == NOR) |
+			   (uop.op == NOT) |
 			   (uop.op == OR) |
 			   (uop.op == ORI) |
 			   (uop.op == SLL) |
