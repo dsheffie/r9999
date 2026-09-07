@@ -505,7 +505,7 @@ module decode_mips(
 			   uop.srcB_valid = 1'b1;
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = ADD;
+			   uop.op = (rd == 'd0) ? ADDCHK : ADD;
 			   uop.is_int = 1'b1;
 			end		 
 		      6'd33: /* addu */
@@ -558,7 +558,7 @@ module decode_mips(
 			   uop.srcB_valid = 1'b1;
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = (rd == 'd0) ? NOP : SUB;
+			   uop.op = (rd == 'd0) ? SUBCHK : SUB;
 			   uop.is_int = 1'b1;
 			end
 		      6'd35: /* subu */
@@ -744,7 +744,7 @@ module decode_mips(
 				uop.srcB_valid = 1'b1;
 				uop.dst = rd;
 				uop.dst_valid = (rd != 'd0);
-				uop.op = (rd == 'd0) ? NOP : DADD;
+				uop.op = (rd == 'd0) ? DADDCHK : DADD;
 				uop.is_int = 1'b1;
 			     end
 			end
@@ -795,7 +795,7 @@ module decode_mips(
 				uop.srcB_valid = 1'b1;
 				uop.dst = rd;
 				uop.dst_valid = (rd != 'd0);
-				uop.op = (rd == 'd0) ? NOP : DSUB;
+				uop.op = (rd == 'd0) ? DSUBCHK : DSUB;
 				uop.is_int = 1'b1;
 			     end
 			end
@@ -1059,7 +1059,7 @@ module decode_mips(
 		 end // case: 6'd7
 	       6'd8: /* ADDI */
 		 begin
-		    uop.op = ADDI;
+		    uop.op = (rt == 'd0) ? ADDICHK : ADDI;
 		    uop.srcA_valid = 1'b1;
 		    uop.srcA = rs;
 		    uop.dst_valid = (rt != 'd0);
@@ -1582,7 +1582,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0);
-			 uop.op = DADDI;
+			 uop.op = (rt == 'd0) ? DADDICHK : DADDI;
 			 uop.imm = insn[15:0];
 			 uop.is_int = 1'b1;
 		      end

@@ -1780,8 +1780,8 @@ module exec(clk,
 
    wire [31:0] w_imm32 = { {16{int_uop.imm[15]}},int_uop.imm};
    csa #(.N(32)) csa0 (.a(t_srcA[31:0]),
-		       .b((int_uop.op == SUBU|int_uop.op==SUB) ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI) ? w_imm32 : t_srcB[31:0]))), 
-		       .cin((int_uop.op == SUBU|int_uop.op==SUB) ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
+		       .b((int_uop.op == SUBU|int_uop.op==SUB|int_uop.op==SUBCHK) ? ~t_srcB[31:0] : (((int_uop.op == ADDIU | int_uop.op == ADDI | int_uop.op == ADDICHK) ? w_imm32 : t_srcB[31:0]))), 
+		       .cin((int_uop.op == SUBU|int_uop.op==SUB|int_uop.op==SUBCHK) ? 32'd1 : 32'd0), .s(w_s_sub32), .cout(w_c_sub32) );
 
    wire [31:0] w_add_srcA = {w_c_sub32[30:0], 1'b0};
    wire [31:0] w_add_srcB = w_s_sub32;
@@ -1790,7 +1790,7 @@ module exec(clk,
    /* Overflow must use the SAME (forwarded) operands the adder used: t_srcA and
     * the effective addend (the immediate for ADDI/ADDIU, else t_srcB).  The raw
     * PRF reads w_srcA/w_srcB hold stale values on same-cycle forwarding. */
-   wire [31:0] w_ovf_srcB = (int_uop.op == ADDIU | int_uop.op == ADDI) ? w_imm32 : t_srcB[31:0];
+   wire [31:0] w_ovf_srcB = (int_uop.op == ADDIU | int_uop.op == ADDI | int_uop.op == ADDICHK) ? w_imm32 : t_srcB[31:0];
    wire	       w_add32_overflow = (w_add32[31] != w_ovf_srcB[31]) & (t_srcA[31] == w_ovf_srcB[31]);
    /* A - B overflows iff A,B differ in sign AND the result sign differs from A (the minuend). */
    wire	       w_sub32_overflow = (w_add32[31] != t_srcA[31]) & (t_srcA[31] != w_ovf_srcB[31]);
@@ -1804,13 +1804,13 @@ module exec(clk,
 	   wire [63:0] w_s_sub64, w_c_sub64;
 	   wire [63:0] w_imm64 = { {48{int_uop.imm[15]}},int_uop.imm};
 	   csa #(.N(64)) csa0 (.a(t_srcA),
-			       .b((int_uop.op == DSUBU|int_uop.op==DSUB) ? ~t_srcB : (((int_uop.op == DADDIU | int_uop.op == DADDI) ? w_imm64 : t_srcB))), 
-			       .cin((int_uop.op == DSUBU|int_uop.op==DSUB) ? 64'd1 : 64'd0), .s(w_s_sub64), .cout(w_c_sub64) );
+			       .b((int_uop.op == DSUBU|int_uop.op==DSUB|int_uop.op==DSUBCHK) ? ~t_srcB : (((int_uop.op == DADDIU | int_uop.op == DADDI | int_uop.op == DADDICHK) ? w_imm64 : t_srcB))), 
+			       .cin((int_uop.op == DSUBU|int_uop.op==DSUB|int_uop.op==DSUBCHK) ? 64'd1 : 64'd0), .s(w_s_sub64), .cout(w_c_sub64) );
 	   
 	   wire [63:0] w_add64_srcA = {w_c_sub64[62:0], 1'b0};
 	   wire [63:0] w_add64_srcB = w_s_sub64;
 	   assign w_add64 = w_add64_srcA + w_add64_srcB;
-		   wire [63:0] w_ovf64_srcB = (int_uop.op == DADDIU | int_uop.op == DADDI) ? w_imm64 : t_srcB;
+		   wire [63:0] w_ovf64_srcB = (int_uop.op == DADDIU | int_uop.op == DADDI | int_uop.op == DADDICHK) ? w_imm64 : t_srcB;
 	   assign w_add64_overflow = (w_add64[63] != w_ovf64_srcB[63]) & (t_srcA[63] == w_ovf64_srcB[63]);
 	   assign w_sub64_overflow = (w_add64[63] != t_srcA[63]) & (t_srcA[63] != w_ovf64_srcB[63]);   	   
 	end
@@ -2157,6 +2157,44 @@ module exec(clk,
 		* one RF read port occupied. */
 	       t_result = ~t_srcA;
 	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  /* Overflow-check forms: raise the trap, write NOTHING.  Deliberately no
+	   * t_result and no t_wr_int_prf -- that is the whole point, see uop.vh. */
+	  ADDCHK:
+	    begin
+	       t_overflow = w_add32_overflow;
+	       t_fault = w_add32_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  ADDICHK:
+	    begin
+	       t_overflow = w_add32_overflow;
+	       t_fault = w_add32_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  SUBCHK:
+	    begin
+	       t_overflow = w_sub32_overflow;
+	       t_fault = w_sub32_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  DADDCHK:
+	    begin
+	       t_overflow = w_add64_overflow;
+	       t_fault = w_add64_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  DADDICHK:
+	    begin
+	       t_overflow = w_add64_overflow;
+	       t_fault = w_add64_overflow;
+	       t_alu_valid = 1'b1;
+	    end
+	  DSUBCHK:
+	    begin
+	       t_overflow = w_sub64_overflow;
+	       t_fault = w_sub64_overflow;
 	       t_alu_valid = 1'b1;
 	    end
 	  SLT:

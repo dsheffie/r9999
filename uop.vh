@@ -225,7 +225,24 @@ typedef enum logic [7:0]
     * but still occupies TWO register read ports -- which defeats the point if
     * we ever want to exploit single-reader uops to shrink the RF port count.
     * NOT reads exactly one source. */
-   NOT
+   NOT,
+   /* Overflow-CHECK forms of the trapping arithmetic: `add $0,rs,rt' and friends.
+    * These are documented MIPS idioms -- the result is discarded but Integer
+    * Overflow is STILL raised (the exception is independent of rd/rt; interpret.cc
+    * raises it before the gpr[] write), so they cannot be folded to NOP the way
+    * `addu $0,..' can -- that silently disarms the check.  Nor can they keep the
+    * trapping opcode: ADD & co. assert t_wr_int_prf, and with dst_valid=0 the dst
+    * field keeps its default of 0, which the (unguarded) bypass compares would then
+    * match against every concurrent $zero read.  The CHK forms keep the trap and
+    * have NO destination, so they are not int-PRF writers and can never present
+    * dst==0 to the bypass.  One per {overflow signal, operand-mux group}: the csa
+    * operand selects in exec.sv key off the opcode and MUST list these. */
+   ADDCHK,      /* add   $0,rs,rt  -> w_add32_overflow, addend = t_srcB  */
+   ADDICHK,     /* addi  $0,rs,imm -> w_add32_overflow, addend = imm     */
+   SUBCHK,      /* sub   $0,rs,rt  -> w_sub32_overflow, addend = ~t_srcB */
+   DADDCHK,     /* dadd  $0,rs,rt  -> w_add64_overflow, addend = t_srcB  */
+   DADDICHK,    /* daddi $0,rs,imm -> w_add64_overflow, addend = imm     */
+   DSUBCHK      /* dsub  $0,rs,rt  -> w_sub64_overflow, addend = ~t_srcB */
    } opcode_t;
 
 function logic is_mult(opcode_t op);
