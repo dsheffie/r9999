@@ -547,11 +547,19 @@ module decode_mips(
 			begin
 			   if(rs == 'd0)
 			     begin
+				/* `or rd,$0,rt' is `move rd,rt' -- already a single-source
+				 * MOV.  But when rt is ALSO $0 (`move rd,$zero') the result
+				 * is statically 0, and MOV would read physreg 0 to compute
+				 * it: 967 such reads in one dhrystone run.  Emit MOVI with a
+				 * zero immediate instead -- no sources at all.  This reuses
+				 * the idiom decode already applies to `li' (addiu rt,$0,imm
+				 * -> MOVI), so no new uop is needed. */
 				uop.srcA = rt;
-				uop.srcA_valid = 1'b1;
+				uop.srcA_valid = (rt != 'd0);
 				uop.dst = rd;
 				uop.dst_valid = (rd != 'd0);
-				uop.op = (rd == 'd0) ? NOP : MOV;
+				uop.op = (rd == 'd0) ? NOP : ((rt == 'd0) ? MOVI : MOV);
+				uop.imm = 16'd0;   /* MOVI path: result = sext(imm) = 0 */
 				uop.is_int = 1'b1;
 			     end
 			   else
@@ -763,6 +771,16 @@ module decode_mips(
 			   uop.dst = 'd31;
 			   uop.srcB = 'd31;
 			   uop.srcB_valid = 1'b0;   /* *al links unconditionally: no old-r31 src */
+			   /* `bal off' IS `bgezal $0,off': $0 >= 0 always, so the branch is
+			    * UNCONDITIONAL and the operand is never consulted.  The shared
+			    * REGIMM prologue above set srcA=rs=$0 with srcA_valid=1, which
+			    * made every `bal' read physreg 0 for nothing -- 1888 of them in
+			    * one dhrystone run, on a CONTROL TRANSFER, the same class as the
+			    * bug being hunted.  Drop the source. */
+			   if(rs == 'd0)
+			     begin
+				uop.srcA_valid = 1'b0;
+			     end
 			end
 		      'd16:
 			begin /* BLTZAL */
