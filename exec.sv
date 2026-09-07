@@ -3193,7 +3193,7 @@ module exec(clk,
 
 	/* capture the forwarded DATA with its flag -- int result wins if both
 	 * match, mirroring the mux priority above */
-	if(r_start_int && t_wr_int_prf && (t_picked_uop.srcA == int_uop.dst))
+	if(r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst))
 	  begin
 	     r_fwd_srcA_data <= t_result;
 	  end
@@ -3201,7 +3201,7 @@ module exec(clk,
 	  begin
 	     r_fwd_srcA_data <= mem_rsp_load_data[`M_WIDTH-1:0];
 	  end
-	if(r_start_int && t_wr_int_prf && (t_picked_uop.srcB == int_uop.dst))
+	if(r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcB == int_uop.dst))
 	  begin
 	     r_fwd_srcB_data <= t_result;
 	  end
