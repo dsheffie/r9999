@@ -271,7 +271,10 @@ void record_retirement(long long pc, long long fetch_cycle, long long alloc_cycl
   l1d_insns += is_mem;
   
   if((pl != nullptr) and (record_insns_retired >= pipestart) and (record_insns_retired < pipeend)) {
-    pl->append(record_insns_retired, getAsmString(get_insn(pc, s), pc), pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, faulted);
+    /* loadelf stores the image at va2pa(vaddr), but get_insn() was handed the
+     * raw virtual pc -- so every kseg0 (bare-metal) pipetrace disassembled as
+     * "nop" (the zero it read decodes to nop).  Translate first. */
+    pl->append(record_insns_retired, getAsmString(get_insn(va2pa(pc), s), pc), pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, faulted);
   }
   ++record_insns_retired;
 }
@@ -415,6 +418,8 @@ int main(int argc, char **argv) {
   uint64_t last_store_addr = 0, last_load_addr = 0, last_addr = 0;
   int misses_inflight = 0;
   std::map<uint32_t, uint64_t> pushout_histo;
+  std::map<uint64_t, double> tip_map;          /* full per-cycle attribution (TIP, ported from rv64core) */
+  std::map<uint64_t, uint64_t> tip_insn_cnts;
   int64_t mem_reply_cycle = -1L;
   try {
     po::options_description desc("Options");
@@ -634,6 +639,19 @@ int main(int argc, char **argv) {
   tb->step = 0;
   double t0 = timestamp();
   while(!Verilated::gotFinish() && (globals::cycle < max_cycle) && (insns_retired < max_icnt)) {
+    /* EARLY-RETIRE PROBE: how many instructions have actually retired by cycle N?
+     * Needed to interpret BMC depth: a formal run that is "clean to frame 30" is
+     * only meaningful if the machine has executed something by cycle 30. */
+    { static const bool early = getenv("R9999_EARLY_RETIRE") != nullptr;
+      if(early && globals::cycle <= 120) {
+        static uint64_t last = ~0ull;
+        if(insns_retired != last) {
+          fprintf(stderr, "[early] cyc=%lu retired=%lu\n",
+                  (unsigned long)globals::cycle, (unsigned long)insns_retired);
+          last = insns_retired;
+        }
+      }
+    }
     contextp->timeInc(1);  // 1 timeprecision periodd passes...
 
     tb->clk = 1;
@@ -731,6 +749,26 @@ int main(int argc, char **argv) {
      * RTL and sim both at bfc00180 when the handler starts retiring. */
     if(tb->took_irq && enable_checker) {
       raise_int(ss, (uint32_t)tb->epc);
+    }
+
+    /* TIP: full per-cycle attribution (rv64core top.cc parity). ROB-empty ->
+     * blame last-retired (stall is upstream/fetch); nothing retires -> blame the
+     * true ROB head (dbg_head_pc); something retires -> split 1.0/total across the
+     * retiring ops. sum(tip) == total cycles. */
+    if(tb->dbg_head_status & 0x1) {
+      tip_map[last_retired_pc] += 1.0;
+    }
+    else if(!(tb->retire_valid || tb->retire_two_valid)) {
+      tip_map[tb->dbg_head_pc] += 1.0;
+    }
+    else {
+      double total = static_cast<double>(tb->retire_valid) + static_cast<double>(tb->retire_two_valid);
+      tip_map[tb->retire_pc] += 1.0 / total;
+      tip_insn_cnts[tb->retire_pc]++;
+      if(tb->retire_two_valid) {
+	tip_map[tb->retire_two_pc] += 1.0 / total;
+	tip_insn_cnts[tb->retire_two_pc]++;
+      }
     }
 
     if(tb->retire_valid) {
@@ -892,11 +930,22 @@ int main(int argc, char **argv) {
 	   * counter. */
 	  uint32_t rtl_pc32 = (uint32_t)tb->retire_pc;
 	  uint32_t sim_pc32 = (uint32_t)ss->pc;
+	  /* BEV=1 puts the vectors in the boot ROM (bfc00180+), but a Linux
+	   * checkpoint runs with BEV=0, where they live in kseg0: TLB refill
+	   * 0x80000000, XTLB refill 0x80000080, general 0x80000180.  Without the
+	   * BEV=0 range the sim is never advanced past the faulting instruction,
+	   * so it sits on the store while the RTL runs the handler and the desync
+	   * watchdog kills the run a few retires later. */
 	  bool rtl_in_exc_handler = (rtl_pc32 >= 0xbfc00180u &&
-				     rtl_pc32 <  0xbfc00400u);
-	  /* "sim in user code" = sim is not in the entire bfc00xxx ROM area */
-	  bool sim_in_user_code   = !(sim_pc32 >= 0xbfc00000u &&
-				      sim_pc32 <  0xbfc00400u);
+				     rtl_pc32 <  0xbfc00400u) ||
+				    (rtl_pc32 >= 0x80000000u &&
+				     rtl_pc32 <  0x80000200u);
+	  /* "sim in user code" = the sim has NOT yet taken the exception, i.e. it
+	   * is in neither vector area */
+	  bool sim_in_user_code   = !((sim_pc32 >= 0xbfc00000u &&
+				       sim_pc32 <  0xbfc00400u) ||
+				      (sim_pc32 >= 0x80000000u &&
+				       sim_pc32 <  0x80000200u));
 	  bool caught_up = false;
 
 	  if(rtl_in_exc_handler && sim_in_user_code) {
@@ -1297,6 +1346,24 @@ int main(int argc, char **argv) {
     out << total_pushout << " cycles of pushout\n";
     dump_histo(pushout_name, pushout_histo, s);
 
+    /* TIP dump (rv64core-format: PC:disasm,cycles,per-kiloinsn), sorted desc */
+    {
+      double tip_total = 0.0;
+      for(auto &p : tip_map) { tip_total += p.second; }
+      std::cout << "tip cycles  = " << tip_total << "\n";
+      std::vector<std::pair<uint64_t,double>> tv(tip_map.begin(), tip_map.end());
+      std::sort(tv.begin(), tv.end(), [](const std::pair<uint64_t,double> &a, const std::pair<uint64_t,double> &b){ return a.second > b.second; });
+      std::ofstream tf("tip.txt");
+      for(auto &p : tv) {
+	uint64_t pc = p.first & 0x1fffffff;
+	tf << std::hex << p.first << std::dec << ":"
+	   << getAsmString(get_insn(pc, s), pc) << ","
+	   << p.second << ","
+	   << (insns_retired ? (p.second / insns_retired) * 1000.0 : 0.0) << "\n";
+      }
+      tf.close();
+    }
+
     //std::ofstream branch_info("retire_info.csv");
     uint64_t total_retire = 0, total_cycle = 0;
     for(auto &p : retire_map) {
@@ -1338,6 +1405,13 @@ int main(int argc, char **argv) {
     std::cout << "total_retire = " << total_retire << "\n";
     std::cout << "total_cycle  = " << total_cycle << "\n";
     std::cout << "total ipc    = " << static_cast<double>(total_retire) / total_cycle << "\n";
+    /* L1D/L1I/L2 access+hit counters (l1d.sv).  Tied off at the henry_soc level,
+     * so nothing has ever read them -- print here to establish WHAT THEY COUNT
+     * before wiring them to AXI regs. */
+    std::cout << "[ctr] l1d acc=" << tb->l1d_cache_accesses << " hit=" << tb->l1d_cache_hits;
+    if(tb->l1d_cache_accesses) std::cout << " (" << (100.0*tb->l1d_cache_hits)/tb->l1d_cache_accesses << "%)";
+    std::cout << "\n[ctr] l1i acc=" << tb->l1i_cache_accesses << " hit=" << tb->l1i_cache_hits;
+    std::cout << "\n[ctr] l2  acc=" << tb->l2_cache_accesses  << " hit=" << tb->l2_cache_hits << "\n";
 
     uint64_t total_histo = 0;
     for(auto &p : ss->insn_histo) {
@@ -1351,6 +1425,19 @@ int main(int argc, char **argv) {
   }
   else {
     std::cout << "instructions retired = " << insns_retired << "\n";
+  /* L1D/L1I/L2 access+hit counters (l1d.sv r_cache_accesses/r_cache_hits).  These
+   * have never been read by anything -- they are tied off at the henry_soc level
+   * -- so print them here to establish WHAT THEY COUNT before anyone wires them
+   * to AXI regs and draws conclusions from them. */
+  std::cout << "[ctr] l1d_accesses = " << tb->l1d_cache_accesses
+            << "  l1d_hits = " << tb->l1d_cache_hits;
+  if(tb->l1d_cache_accesses) {
+    std::cout << "  (" << (100.0*tb->l1d_cache_hits)/tb->l1d_cache_accesses << "% hit)";
+  }
+  std::cout << "\n[ctr] l1i_accesses = " << tb->l1i_cache_accesses
+            << "  l1i_hits = " << tb->l1i_cache_hits << "\n";
+  std::cout << "[ctr] l2_accesses  = " << tb->l2_cache_accesses
+            << "  l2_hits  = " << tb->l2_cache_hits << "\n";
   }
   
   std::cout << "simulation took " << t0 << " seconds, " << (insns_retired/t0)

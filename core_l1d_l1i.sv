@@ -38,6 +38,24 @@ module core_l1d_l1i(clk,
 		    mem_rsp_bad,		    
 		    mem_rsp_load_data,
 		    
+		    asid,
+		    retire_fp_reg_ptr,
+		    retire_fp_reg_data,
+		    retire_fp_reg_valid,
+		    retire_fp_reg_two_ptr,
+		    retire_fp_reg_two_data,
+		    retire_fp_reg_two_valid,
+		    retire_fcr_reg_ptr,
+		    retire_fcr_reg_data,
+		    retire_fcr_reg_valid,
+		    retire_fcr_reg_two_ptr,
+		    retire_fcr_reg_two_data,
+		    retire_fcr_reg_two_valid,
+		    retire_load_addr,
+		    retire_load_addr_two,
+		    wf_epc,
+		    wf_badv,
+		    wf_stat,
 		    retire_reg_ptr,
 		    retire_reg_data,
 		    retire_reg_valid,
@@ -78,6 +96,12 @@ module core_l1d_l1i(clk,
 		    l1i_flush_done,
 		    l1d_flush_done,
 		    l2_flush_done,
+		    ext_flush_req,
+		    ext_flush_done,
+		    dbg_flush,
+		    dma_inval_req,
+		    dma_inval_addr,
+		    dma_inval_ack,
 		    snoop_req_valid,
 		    snoop_req_addr,
 		    snoop_req_ack,
@@ -171,6 +195,52 @@ module core_l1d_l1i(clk,
    
    input logic [127:0] 			  mem_rsp_load_data;
 
+   /* henry_soc taps.  `asid' is REAL -- core.sv drives it and core_l1d_l1i already
+    * receives it as w_asid, it was simply never exposed.  The rest are DEAD STUBS:
+    * henry_soc.sv reaches for FP/FCR retire taps, retiring-load VAs and the
+    * wild-fault latch, but no r9999 core implements them (they were added on the
+    * henry side and never plumbed through).  Nothing consumes them either -- the
+    * on-board driver reads none of these, and the AXI wrapper touches only wf_*.
+    * Tied to zero so the SoC elaborates; they READ ZERO, they are not measurements.
+    * Implement them for real before trusting any register that shows them. */
+   output logic [7:0] 			  asid;
+   output logic [4:0] 			  retire_fp_reg_ptr;
+   output logic [`M_WIDTH-1:0]		  retire_fp_reg_data;
+   output logic 			  retire_fp_reg_valid;
+   output logic [4:0] 			  retire_fp_reg_two_ptr;
+   output logic [`M_WIDTH-1:0]		  retire_fp_reg_two_data;
+   output logic 			  retire_fp_reg_two_valid;
+   output logic [4:0] 			  retire_fcr_reg_ptr;
+   output logic [`M_WIDTH-1:0]		  retire_fcr_reg_data;
+   output logic 			  retire_fcr_reg_valid;
+   output logic [4:0] 			  retire_fcr_reg_two_ptr;
+   output logic [`M_WIDTH-1:0]		  retire_fcr_reg_two_data;
+   output logic 			  retire_fcr_reg_two_valid;
+   output logic [31:0] 			  retire_load_addr;
+   output logic [31:0] 			  retire_load_addr_two;
+   output logic [31:0] 			  wf_epc;
+   output logic [31:0] 			  wf_badv;
+   output logic [31:0] 			  wf_stat;
+
+   assign asid                     = w_asid;   /* real */
+   assign retire_fp_reg_ptr        = 5'd0;
+   assign retire_fp_reg_data       = 'd0;
+   assign retire_fp_reg_valid      = 1'b0;
+   assign retire_fp_reg_two_ptr    = 5'd0;
+   assign retire_fp_reg_two_data   = 'd0;
+   assign retire_fp_reg_two_valid  = 1'b0;
+   assign retire_fcr_reg_ptr       = 5'd0;
+   assign retire_fcr_reg_data      = 'd0;
+   assign retire_fcr_reg_valid     = 1'b0;
+   assign retire_fcr_reg_two_ptr   = 5'd0;
+   assign retire_fcr_reg_two_data  = 'd0;
+   assign retire_fcr_reg_two_valid = 1'b0;
+   assign retire_load_addr         = 32'd0;
+   assign retire_load_addr_two     = 32'd0;
+   assign wf_epc                   = 32'd0;
+   assign wf_badv                  = 32'd0;
+   assign wf_stat                  = 32'd0;
+
    output logic [4:0] 			  retire_reg_ptr;
    output logic [`M_WIDTH-1:0]		  retire_reg_data;
    output logic 			  retire_reg_valid;
@@ -220,6 +290,30 @@ module core_l1d_l1i(clk,
    output logic			 l1d_flush_done;
    output logic			 l1i_flush_done;
    output logic			 l2_flush_done;
+   /* DMA-completion invalidate (henry SoC -> L1D, which forwards MEM_INVL to L2).
+    * Independent of the CPU CACHE-op handshake: the core never stalls on it, and
+    * it must NOT pulse l1d flush_complete (that latches into the whole-cache flush
+    * arbiter above and would falsely satisfy a pending CACHE_FLUSH). */
+   /* Whole-cache flush request from the SoC (DMA completion).  Feeds the SAME
+    * L1I->L1D->L2 sequencer the CPU's CACHE_FLUSH uses; the sticky req/done
+    * latches below mean a concurrent CPU request cannot be dropped.  Over-
+    * flushing is always safe, so a shared sequence satisfying both is fine.
+    * Observe completion via in_flush_mode (r_flush) going 1 -> 0. */
+   input logic 		 ext_flush_req;
+   /* Explicit completion PULSE for the external requester.  Do NOT have the SoC
+    * poll in_flush_mode instead: r_flush takes a couple of cycles to rise after
+    * ext_flush_req, so a requester that samples it immediately sees 0, concludes
+    * the flush already finished, and drops the ordering guarantee silently.
+    * Request -> wait for this pulse has no such gap. */
+   output logic 	 ext_flush_done;
+   /* On-silicon flush diagnostics, readable over AXI even when the CORE is wedged
+    * (mips-axi reads registers on the ARM bus).  REQ != DONE counts => a flush is
+    * outstanding, and [2:0] says which stage owns it.  Localising the L2 stall
+    * cost three board deploys without this. */
+   output logic [31:0]   dbg_flush;
+   input logic 		 dma_inval_req;
+   input logic [`PA_WIDTH-1:0] dma_inval_addr;
+   output logic 	 dma_inval_ack;
    input logic 		 snoop_req_valid;
    input logic [`PA_WIDTH-1:0] snoop_req_addr;
    output logic		 snoop_req_ack;
@@ -232,9 +326,9 @@ module core_l1d_l1i(clk,
    output logic [31:0]  dbg_serialize_cycle;
    output logic [31:0]  dbg_cycle;
    output logic         dbg_oldest_first_pending;
-   input  logic [11:0]  dbg_trace_index;
+   input  logic [19:0]  dbg_trace_index;
    output logic [31:0]  dbg_trace_data;
-   output logic [8:0]   dbg_trace_wptr;
+   output logic [15:0]  dbg_trace_wptr;
       
 
 
@@ -277,6 +371,92 @@ module core_l1d_l1i(clk,
    } flush_state_t;
    flush_state_t n_flush_state, r_flush_state;
    logic 	r_flush, n_flush;
+   logic 	r_ext_pend, n_ext_pend;      /* an external flush is outstanding */
+   logic 	r_ext_cov,  n_ext_cov;       /* the IN-FLIGHT sequence started while pending */
+   logic 	r_ext_done, n_ext_done;
+   assign ext_flush_done = r_ext_done;
+
+   logic [7:0] r_ext_req_cnt, r_ext_done_cnt;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_ext_req_cnt <= 8'd0;
+	     r_ext_done_cnt <= 8'd0;
+	  end
+	else
+	  begin
+	     if(ext_flush_req)
+	       begin
+		  r_ext_req_cnt <= r_ext_req_cnt + 8'd1;
+	       end
+	     if(r_ext_done)
+	       begin
+		  r_ext_done_cnt <= r_ext_done_cnt + 8'd1;
+	       end
+	  end
+     end // always_ff
+
+   assign dbg_flush = { r_ext_done_cnt,            /* [31:24] completed flushes */
+			r_ext_req_cnt,             /* [23:16] requested flushes */
+			5'd0,
+			w_l2_flush_complete,       /* [10] */
+			r_dn_l1d, r_dn_l1i,        /* [9:8] */
+			r_req_l1d_l, r_req_l1i_l,  /* [7:6] */
+			r_ext_done,                /* [5] */
+			r_ext_cov,                 /* [4] */
+			r_ext_pend,                /* [3] */
+			r_flush_state[2:0] };      /* [2:0] 0=IDLE 4=FLUSH_L2 */
+
+`ifdef VERILATOR
+   /* Which stage stalls?  Print every flush-FSM transition plus the handshake
+    * latches, and nag if a sequence sits in one state -- distinguishes "never
+    * started" (stuck in FLUSH_IDLE waiting for mem_q_empty) from "started and
+    * hung" (WAIT_FOR_L1D_L1I awaiting a cache that never completes) from
+    * "L2 never finishes" (FLUSH_L2). */
+   logic [63:0] r_dbg_cyc, r_dbg_stuck;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_dbg_cyc <= 64'd0;
+	     r_dbg_stuck <= 64'd0;
+	  end
+	else
+	  begin
+	     r_dbg_cyc <= r_dbg_cyc + 64'd1;
+	     if(n_flush_state != r_flush_state)
+	       begin
+		  r_dbg_stuck <= 64'd0;
+		  $display("[flushfsm] cyc=%0d st %0d->%0d req(i=%b d=%b) dn(i=%b d=%b) l2dn=%b pend=%b cov=%b",
+			   r_dbg_cyc, r_flush_state, n_flush_state,
+			   n_req_l1i_l, n_req_l1d_l, n_dn_l1i, n_dn_l1d,
+			   w_l2_flush_complete, r_ext_pend, r_ext_cov);
+	       end
+	     else if(r_flush_state != FLUSH_IDLE)
+	       begin
+		  r_dbg_stuck <= r_dbg_stuck + 64'd1;
+		  if(r_dbg_stuck == 64'd200000)
+		    begin
+		       $display("[flushfsm] STUCK cyc=%0d in st %0d for 200k cyc: req(i=%b d=%b) dn(i=%b d=%b) l2dn=%b pend=%b cov=%b",
+				r_dbg_cyc, r_flush_state,
+				n_req_l1i_l, n_req_l1d_l, n_dn_l1i, n_dn_l1d,
+				w_l2_flush_complete, r_ext_pend, r_ext_cov);
+		    end
+	       end
+	     else if(r_ext_pend && (r_dbg_stuck == 64'd200000))
+	       begin
+		  /* pending but FSM never left IDLE -> the cache never reached a
+		   * quiescent point to begin the flush */
+		  $display("[flushfsm] PEND-IN-IDLE cyc=%0d req(i=%b d=%b)", r_dbg_cyc, n_req_l1i_l, n_req_l1d_l);
+	       end
+	     else if(r_ext_pend)
+	       begin
+		  r_dbg_stuck <= r_dbg_stuck + 64'd1;
+	       end
+	  end
+     end // always_ff
+`endif
    logic 	r_flush_l2, n_flush_l2;
    /* sticky latches for the flush handshake: flush_req_l1i/l1d and
     * l1i/l1d_flush_complete arrive as SINGLE-CYCLE pulses.  The old arbiter checked
@@ -302,6 +482,9 @@ module core_l1d_l1i(clk,
 	  begin
 	     r_flush_state <= FLUSH_IDLE;
 	     r_flush <= 1'b0;
+	     r_ext_pend <= 1'b0;
+	     r_ext_cov <= 1'b0;
+	     r_ext_done <= 1'b0;
 	     r_flush_l2 <= 1'b0;
 	     r_req_l1i_l <= 1'b0;
 	     r_req_l1d_l <= 1'b0;
@@ -313,6 +496,9 @@ module core_l1d_l1i(clk,
 	     r_flush_state <= n_flush_state;
 	     r_flush <= n_flush;
 	     r_flush_l2 <= n_flush_l2;
+	     r_ext_pend <= n_ext_pend;
+	     r_ext_cov <= n_ext_cov;
+	     r_ext_done <= n_ext_done;
 	     r_req_l1i_l <= n_req_l1i_l;
 	     r_req_l1d_l <= n_req_l1d_l;
 	     r_dn_l1i <= n_dn_l1i;
@@ -327,8 +513,14 @@ module core_l1d_l1i(clk,
 	n_flush = r_flush;
 	n_flush_l2 = 1'b0;
 	/* accumulate the single-cycle req/complete pulses so no state can miss one */
-	n_req_l1i_l = r_req_l1i_l | flush_req_l1i;
-	n_req_l1d_l = r_req_l1d_l | flush_req_l1d;
+	n_ext_pend  = r_ext_pend | ext_flush_req;
+	n_ext_cov   = r_ext_cov;
+	n_ext_done  = 1'b0;
+	/* drive from the PENDING flag, not the request pulse: a request arriving
+	 * mid-sequence would otherwise be stranded (pulse gone by the time the FSM
+	 * returns to FLUSH_IDLE) and the SoC would wait for a done that never comes. */
+	n_req_l1i_l = r_req_l1i_l | flush_req_l1i | n_ext_pend;
+	n_req_l1d_l = r_req_l1d_l | flush_req_l1d | n_ext_pend;
 	n_dn_l1i    = r_dn_l1i    | l1i_flush_complete;
 	n_dn_l1d    = r_dn_l1d    | l1d_flush_complete;
 
@@ -339,6 +531,13 @@ module core_l1d_l1i(clk,
 		* prior-sequence pulse can't pre-satisfy this one. */
 	       n_dn_l1i = 1'b0;
 	       n_dn_l1d = 1'b0;
+	       /* a pending external request is only covered by a sequence that
+		* STARTS now -- one already in flight may have walked past the
+		* DMA'd lines before the transfer landed. */
+	       if(n_req_l1i_l | n_req_l1d_l)
+		 begin
+		    n_ext_cov = n_ext_pend;
+		 end
 	       if(n_req_l1i_l && n_req_l1d_l)
 		 begin
 		    n_flush_state = WAIT_FOR_L1D_L1I;
@@ -404,6 +603,14 @@ module core_l1d_l1i(clk,
 		    $display("L2 FLUSH COMPLETE");
 		    n_flush = 1'b0;
 		    n_flush_state = FLUSH_IDLE;
+		    /* an externally-requested flush is satisfied by ANY completed
+		     * sequence -- the caches are scrubbed either way. */
+		    if(r_ext_cov)
+		      begin
+			 n_ext_done = 1'b1;
+			 n_ext_pend = 1'b0;
+			 n_ext_cov  = 1'b0;
+		      end
 		    /* sequence done: clear all handshake latches */
 		    n_req_l1i_l = 1'b0;
 		    n_req_l1d_l = 1'b0;
@@ -553,8 +760,12 @@ module core_l1d_l1i(clk,
 	       .reset(reset),
 	       .state(l2_state),
 	       .rsp_state(l2_rsp_state),
-	       .l1i_flush_req(flush_req_l1i),
-	       .l1d_flush_req(flush_req_l1d),
+	       /* the L2 keys its own flush off these (n_need_l1i/l1d in l2.sv), so the
+		* external request must be OR'd here TOO -- omitting it left the L2
+		* never starting and w_l2_flush_complete never asserting, hanging the
+		* sequence in FLUSH_L2 forever. */
+	       .l1i_flush_req(flush_req_l1i | ext_flush_req),
+	       .l1d_flush_req(flush_req_l1d | ext_flush_req),
 	       .l1i_flush_complete(l1i_flush_complete),
 	       .l1d_flush_complete(l1d_flush_complete),
 	       
@@ -638,10 +849,19 @@ module core_l1d_l1i(clk,
 	       .memq_empty(memq_empty),
 	       .drain_ds_complete(drain_ds_complete),
 	       .dead_rob_mask(dead_rob_mask),
-	       .flush_req(flush_req_l1d),
+	       /* BUGFIX: the external (DMA-completion) request must reach the CACHE
+		* itself, not just the FSM's bookkeeping latches.  Wiring only the
+		* latches made the FSM wait forever in WAIT_FOR_L1D_L1I for a
+		* completion from a cache that was never told to flush -> ext_flush_done
+		* never fired -> the SCSI IRQ was held forever and the disk never
+		* attached.  l1d/l1i latch flush_req stickily, so a pulse suffices. */
+	       .flush_req(flush_req_l1d | ext_flush_req),
 	       .flush_cl_req(flush_cl_req),
 	       .flush_cl_addr(flush_cl_addr),
 	       .flush_cl_inval(flush_cl_inval),
+	       .dma_inval_req(dma_inval_req),
+	       .dma_inval_addr(dma_inval_addr),
+	       .dma_inval_ack(dma_inval_ack),
 	       .flush_complete(l1d_flush_complete),
 	       .core_mem_req_valid(core_mem_req_valid),
 	       .core_mem_req(core_mem_req),
@@ -681,11 +901,13 @@ module core_l1d_l1i(clk,
 	      .in_64b_kernel_mode(w_in_64b_kernel_mode),
 	      .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 	      .in_64b_user_mode(w_in_64b_user_mode),
-	      .flush_req(flush_req_l1i),
+	      .flush_req(flush_req_l1i | ext_flush_req),
 	      .flush_complete(l1i_flush_complete),
 	      .restart_pc(restart_pc),
 	      .restart_src_pc(restart_src_pc),
 	      .restart_src_is_indirect(restart_src_is_indirect),
+	      .dbg_arch_hist(w_dbg_arch_hist),
+	      .dbg_spec_hist(w_dbg_spec_hist),
 	      .restart_valid(restart_valid),
 	      .restart_ack(restart_ack),
 	      .retire_reg_ptr(retire_reg_ptr),
@@ -852,8 +1074,19 @@ module core_l1d_l1i(clk,
     * at each -- e.g. a req issued with no following rsp = stuck AXI turnaround.
     * Muxed into the existing dbg_trace readback on dbg_trace_index[11] (1=L2 ring,
     * 0=core retire ring), so it reuses the driver's trace readback path. */
+   logic [63:0] w_dbg_arch_hist, w_dbg_spec_hist;
+   /* Free word slots on the existing debug read port.  dbg_trace_index is
+    * {row[7:0], word[3:0]}; bit 11 already selects the L2 trace, and the retire
+    * ring uses words 0-3, so words 4-7 are free.  One register dumped once beats
+    * replicating predictor state into all 256 ring entries. */
+   wire [31:0] w_hist_word = (dbg_trace_index[16:15] == 2'd0) ? w_dbg_arch_hist[31:0]  :
+			     (dbg_trace_index[16:15] == 2'd1) ? w_dbg_arch_hist[63:32] :
+			     (dbg_trace_index[16:15] == 2'd2) ? w_dbg_spec_hist[31:0]  :
+							      w_dbg_spec_hist[63:32];
+   wire        w_hist_sel  = (dbg_trace_index[17:15] >= 3'd4);
+
    logic [31:0] w_core_trace_data;
-   logic [8:0]  w_core_trace_wptr;
+   logic [15:0] w_core_trace_wptr;
    /* Gated debug: define ENABLE_L2_EVENT_RING (e.g. sv2v -DENABLE_L2_EVENT_RING, or
     * a Verilator +define) to synthesize the ring; a bare per-file `ifdef strips
     * cleanly through sv2v (unlike the machine.vh-scoped ENABLE_TRACE_BUFFER). When
@@ -886,10 +1119,12 @@ module core_l1d_l1i(clk,
 	  end
 	r_l2trace_row <= r_l2trace_ram[dbg_trace_index[9:2]];
      end // always_ff
-   assign dbg_trace_data = dbg_trace_index[11] ? r_l2trace_row[dbg_trace_index[1:0]] : w_core_trace_data;
-   assign dbg_trace_wptr = dbg_trace_index[11] ? {1'b0, r_l2trace_wptr}              : w_core_trace_wptr;
+   assign dbg_trace_data = dbg_trace_index[19] ? r_l2trace_row[dbg_trace_index[1:0]] :
+			   w_hist_sel                ? w_hist_word :
+						       w_core_trace_data;
+   assign dbg_trace_wptr = dbg_trace_index[19] ? {8'd0, r_l2trace_wptr}              : w_core_trace_wptr;
 `else
-   assign dbg_trace_data = w_core_trace_data;
+   assign dbg_trace_data = w_hist_sel ? w_hist_word : w_core_trace_data;
    assign dbg_trace_wptr = w_core_trace_wptr;
 `endif
 

@@ -348,7 +348,7 @@ module decode_mips(
 			   uop.srcA = rs;
 			   uop.srcA_valid = 1'b1;
 			   uop.has_delay_slot = 1'b1;
-			   uop.op = JALR;
+			   uop.op = (rd == 'd0) ? JR : JALR;  /* jalr $0,rx == jr rx: keep the jump, drop the dead link write */
 			   uop.dst_valid = rd != 'd0;
 			   uop.dst = rd;
 			   uop.imm = insn_pred_target[15:0];
@@ -499,7 +499,7 @@ module decode_mips(
 			   uop.srcB_valid = 1'b1;
 			   uop.dst = rd;
 			   uop.dst_valid = (rd != 'd0);
-			   uop.op = ADD;
+			   uop.op = (rd == 'd0) ? NOP : ADD;
 			   uop.is_int = 1'b1;
 			end		 
 		      6'd33: /* addu */
@@ -881,7 +881,7 @@ module decode_mips(
 		 end // case: 6'd7
 	       6'd8: /* ADDI */
 		 begin
-		    uop.op = ADDI;
+		    uop.op = (rt == 'd0) ? NOP : ADDI;
 		    uop.srcA_valid = 1'b1;
 		    uop.srcA = rs;
 		    uop.dst_valid = (rt != 'd0);
@@ -972,7 +972,28 @@ module decode_mips(
 		 end
 	       6'd16: /* coproc0 */
 		 begin	
-		    if(in_kernel_mode)
+		    /* COP0 is kernel-only, with ONE deliberate exception: a user-mode MFC0 of
+		     * the two custom performance counters (CP0 $23 = r_cycle, $24 =
+		     * r_retired_insns).  These are hacks of ours living in CP0 space the R4x00
+		     * marks Reserved (R4400 UM Table 1-19: 21-25 "--"), and reading them from
+		     * userspace is the entire point -- without this the instruction matches no
+		     * clause below, uop.op stays II, and it retires as RI, which IRIX reports
+		     * as SIGILL.
+		     *
+		     * Deliberately narrow: MFC0 only (rs==0), reads only, and only those two
+		     * register numbers.  Opening the whole block to user mode would let
+		     * userspace MTC0 scribble on Status/EntryHi.
+		     *
+		     * NOTE this diverges from MIPS twice over: architecturally any COP0 access
+		     * without Status.CU0 raises CpU (cause 11), and we raise RI (cause 10)
+		     * instead -- same SIGILL to userspace, different Cause. */
+		    /* rs==0 is MFC0, rs==1 is DMFC0.  Both are reads, so both are safe to
+		     * expose for $23/$24; DMFC0 is what you want since the 32-bit MFC0 view
+		     * wraps in seconds.  DMFC0 additionally requires 64-bit mode below, so a
+		     * 32-bit (o32) user still gets the MFC0 path only. */
+		    if(in_kernel_mode |
+		       (((insn[25:21] == 5'd0) | (insn[25:21] == 5'd1)) & (insn[10:0] == 'd0) &
+			((insn[15:11] == 5'd23) | (insn[15:11] == 5'd24))))
 		    begin
 		    if((insn[25]==1'b1) & (insn[24:6] == 19'd0) & (insn[5:0] == 6'd1))
 		      begin
@@ -999,7 +1020,7 @@ module decode_mips(
 		      end	       
 		    else if((insn[25:21] == 5'd0) & (insn[10:0] == 'd0)) /* switch on RS */
 		      begin /* mfc0 */
-			 uop.op = MFC0;
+			 uop.op = (rt == 'd0) ? NOP : MFC0;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.srcA = rd;
@@ -1008,9 +1029,15 @@ module decode_mips(
 		      end
 		    else if((insn[25:21] == 5'd1) & (insn[10:0] == 'd0)) /* dmfc0 */
 		      begin
+			 /* NO counter exemption here: in 32-bit mode (o32 user) a 64-bit
+			  * GPR read has no meaning -- the ABI's registers are 32-bit -- so
+			  * DMFC0 correctly stays II and retires as RI, counters included.
+			  * o32 reads the counters with MFC0 (32-bit view, wraps); n32/n64
+			  * run with UX set, so w_in_64b_mode is already true for them and
+			  * they get the full 64-bit DMFC0. */
 			 if(w_in_64b_mode)
 			   begin
-			      uop.op = DMFC0;
+			      uop.op = (rt == 'd0) ? NOP : DMFC0;
 			      uop.dst = rt;
 			      uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			      uop.srcA = rd;
@@ -1110,7 +1137,7 @@ module decode_mips(
 		      end // if ((insn[25:21]==5'd4) && (insn[10:0] == 11'd0))
 		    else if((insn[25:21]==5'd2) && (insn[10:0] == 11'd0))
 		      begin /* cfc1: GPR[rt] <- FCR[fs] (fs=insn[15:11]: 0=FIR, 31=FCSR) */
-			 uop.op = CFC1;
+			 uop.op = (rt == 'd0) ? NOP : CFC1;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.srcA = fs;        /* carry the FCR number (NOT a PRF read) */
@@ -1377,7 +1404,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0);
-			 uop.op = DADDI;
+			 uop.op = (rt == 'd0) ? NOP : DADDI;
 			 uop.imm = insn[15:0];
 			 uop.is_int = 1'b1;
 		      end
@@ -1390,7 +1417,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.dst = rt;
 			 uop.dst_valid = (rt != 'd0);
-			 uop.op = DADDIU;
+			 uop.op = (rt == 'd0) ? NOP : DADDIU;
 			 uop.imm = insn[15:0];
 			 uop.is_int = 1'b1;
 		      end

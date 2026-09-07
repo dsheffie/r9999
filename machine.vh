@@ -1,11 +1,24 @@
 `ifndef __machine_hdr__
 `define __machine_hdr__
 
+/* Retire-ring depth, log2 of TOTAL records (split across two banks).  MUST be
+ * outside `ifdef VERILATOR -- core.sv uses it in the synthesized ring, so a
+ * sim-only definition builds under Verilator and then fails sv2v with
+ * "Undefined macro: LG_RTRACE_ENTRIES".
+ * 8=256 (original), 14=16K (~57 BRAM36), 15=32K (~114 BRAM36, 93% of the part). */
+`ifndef LG_RTRACE_ENTRIES
+ /* 2048 entries.  Measured on three real captures: the whole evidence window (the
+  * jalr that set ra, the epilogue reload, the faulting jr) spans ~20 retires, i.e.
+  * 0.09% of the old 32K ring -- which cost ~125 BRAM tiles and forced 98.6% BRAM
+  * occupancy.  Shallow-and-wide beats deep-and-narrow here. */
+ `define LG_RTRACE_ENTRIES 11
+`endif
+
 // Debug trace infrastructure (ROB cycle stamps + HW trace buffer): sim-only.
 // Synth/FPGA builds omit it -- the 256x384-bit trace RAM dominates build time.
 `ifdef VERILATOR
  `define ENABLE_CYCLE_ACCOUNTING 1
- `define ENABLE_TRACE_BUFFER 1
+`define ENABLE_TRACE_BUFFER 1
 `endif
 
 // On-silicon HW breakpoint/value-watchpoint in core.sv (freeze the pipe at an offending
@@ -53,7 +66,7 @@
 `ifdef FORMAL
  `define LG_PHT_SZ 2
 `else
- `define LG_PHT_SZ 16
+ `define LG_PHT_SZ 14
 `endif
 
 `define GBL_HIST_LEN 64
@@ -113,20 +126,41 @@
 
 
 // cacheline length (in bytes)
+/* L1D_STATE_PROFILE: per-state cycle occupancy of the L1D FSM, dumped every
+ * L1D_PROFILE_PERIOD cycles.  Off by default -- pure instrumentation. */
+//`define L1D_STATE_PROFILE 1   /* uncomment to dump L1D FSM occupancy */
+`ifndef L1D_PROFILE_PERIOD
+ `define L1D_PROFILE_PERIOD 100000000
+`endif
+
 `define LG_L1D_CL_LEN 4
 
 //number of sets in direct mapped cache
+/* GEOMETRY OVERRIDE: each size below is wrapped in `ifndef, so ANY of them can be set
+ * straight from the build command line and wins over every branch here:
+ *     SV2V_DEFINES="... LG_L2_NUM_SETS=8"      ./gen_mipscore.sh     (FPGA)
+ *     make VFLAGS_EXTRA=+define+LG_L2_NUM_SETS=8                     (verilator)
+ * A size is a NUMBER, so pass the number -- this replaces the per-size boolean knobs
+ * (ENABLE_L1_4K, ENABLE_L2_4K, ...) that were accreting one `elsif per experiment,
+ * and the chosen value is echoed into the build log so the artifact records what it
+ * actually is.  The branches below remain the DEFAULTS when nothing is passed. */
+`ifndef LG_L1D_NUM_SETS
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
 `else
  `define LG_L1D_NUM_SETS 10   // 1024 sets x 16B = 16KB
 `endif
+`endif
 
+
+`ifndef LG_L1I_NUM_SETS
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
 `else
  `define LG_L1I_NUM_SETS 10   // 1024 sets x 16B = 16KB (4KB direct-mapped thrashed dhry_henny code -> L1I conflict misses)
 `endif
+`endif
+
 
 // EXPERIMENT: shrink the L2 to 4 lines (LG_L2_NUM_SETS=2).  Keeps the correct
 // write-back path but a 4-set direct-mapped L2 aliases constantly, so a
@@ -138,6 +172,7 @@
 // to DRAM, L2 holds nothing.  Comment out to restore the write-back L2.
 //`define ENABLE_L2_NOCACHE 1   // off by default on main; enable for the L2-bypass (non-coherent-DMA) workaround
 
+`ifndef LG_L2_NUM_SETS
 `ifdef FORMAL
  `define LG_L2_NUM_SETS 2
 `elsif ENABLE_L2_TINY
@@ -151,6 +186,8 @@
   `define LG_L2_NUM_SETS 13      /* 8192 lines x 16B = 128KB (restored for debug bit; deep trace lives in DRAM, not BRAM) */
  `endif
 `endif
+`endif
+
 
 
 `define M_WIDTH (1 << `LG_M_WIDTH)
@@ -205,6 +242,40 @@
  *   TLB_SHADOW_RAM_STYLE -> exec's CP0 maintenance shadow TLB (r_shadow_tlb)
  *   RF_RAM_STYLE         -> the rf4r2w register-file banks (int/FP/hilo PRFs) */
 `define TLB_SHADOW_RAM_STYLE (* ram_style = "block" *)
+/* rw_addr_collision: force Vivado to insert explicit read-during-write BYPASS
+ * logic on the register-file banks.  Two reasons:
+ *   1. ram_style="block" is NOT being honoured -- 4 read + 2 write ports exceed
+ *      what a BRAM can do, so synthesis reports
+ *        [Synth 8-6849] Infeasible attribute ram_style = "block" ... using LUTRAM
+ *      and the banks are built from ~1678 LUTs of REPLICATED distributed RAM.
+ *   2. The 2026-09-02 captures put the fault in a same-cycle read/write window on
+ *      exactly these arrays, and today nothing but the operand mux covers that
+ *      collision -- there is no RAM-level bypass.  AMD documents a bug class where
+ *      synthesized hardware diverges from RTL simulation on RAM address collisions,
+ *      with rw_addr_collision as the documented remedy (UG901 RAM_STYLE; see also
+ *      beyond-circuits.com 2019/10 "RAM address conflicts and a Vivado synthesis
+ *      bug").  That matches the shape of this bug: reproduces on silicon, will not
+ *      reproduce in 1.24e9 Verilator cycles.
+ * If the fault survives this, the whole RAM-collision class is eliminated rather
+ * than merely suspected. */
+/* Register the L1D -> core response instead of driving it combinationally.
+ *
+ * rv64core does this unconditionally (l1d.sv:361-365 -- BOTH arms of its
+ * `ifdef FOUR_CYCLE_L1D use r_core_mem_rsp*), r9999 does not.  Two reasons to
+ * follow it:
+ *   TIMING: core_mem_rsp is a wide combinational output of the L1D that feeds
+ *   the PRF write port, r_mem_result and r_fwd_mem_srcA.  This design closes at
+ *   WNS +0.06 ns, i.e. inside its own noise floor, and that path is a prime
+ *   suspect for the remaining margin.
+ *   CORRECTNESS: those three consumers must AGREE.  If the path is marginal they
+ *   can latch inconsistent values -- the forward flag set while the data is
+ *   stale -- which is exactly the 2026-09-02 silicon symptom (a consumer read a
+ *   value its producer never wrote) and exactly the kind of thing Verilator,
+ *   having no delays, can never reproduce.
+ * Costs one cycle of load-use latency.  r_core_mem_rsp/_valid already exist and
+ * are already maintained in l1d.sv -- this only changes which one is driven. */
+`define REG_L1D_RSP 1
+
 `define RF_RAM_STYLE         (* ram_style = "block" *)
 
 /* CP0 PRId (processor identification) values. imp field is bits [15:8];
@@ -223,6 +294,23 @@
 `define PRID_VALUE  `PRID_R4400
 
 `define LG_BTB_SZ 7
+
+/* Poison for a COLD/INVALID branch-target prediction.  MUST NOT be zero.
+ *
+ * The tagless BTB returns its "no entry" value straight into n_pc with no
+ * validity check at the use site, so every cold indirect call speculatively
+ * fetches it.  With that value = 0, a wild jump to 0 is AMBIGUOUS: it looks
+ * identical to a genuine NULL function pointer in the program (which is what
+ * the 2026-08-24 __split_vma oops looked like).  A distinct poison separates
+ * the two in a crash dump: land here => the PREDICTOR produced it; land on 0
+ * => it was real data.
+ *
+ * Kept in USER space and 4-byte aligned ON PURPOSE.  A kernel-space poison
+ * would turn the routine cold-indirect speculative fetch from a TLB miss into
+ * a privilege AdEL, changing the fault class in exactly the squash window
+ * under investigation; an unaligned one may not fault cleanly at all (see the
+ * Sail conformance gap on address-errors for out-of-range fetch). */
+`define BTB_POISON_PC 64'h00000000deadcafc
 
 typedef enum logic [4:0] {
    MEM_LB   = 5'd0,

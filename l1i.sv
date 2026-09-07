@@ -9,14 +9,6 @@ import "DPI-C" function void record_fetch(int push1, int push2, int push3, int p
 
 `endif
 
-`ifdef ENABLE_STORE_CHECK
-// L1I line-lifecycle trace (henry_tb only): l1i_fill records the fetch pc/cycle that brought
-// an instruction line into the L1I (speculative if a wrong-path fetch); l1i_flush marks the
-// whole L1I invalidated (r9999 only does whole-cache I-flush).  Pairs with the L1D hooks to
-// answer "is the stale reservoir the L1D (data) or the L1I (code)?"
-import "DPI-C" function void l1i_fill(input longint unsigned cycle, input longint unsigned pa);
-import "DPI-C" function void l1i_flush(input longint unsigned cycle);
-`endif
 
 
 
@@ -29,7 +21,10 @@ module compute_pht_idx(pc, hist, idx);
    wire [31:0] 			   w_fold_0 = hist[31:0] ^ hist[63:32];
    wire [15:0] 			   w_fold_1 = w_fold_0[31:16] ^ w_fold_0[15:0];
 
-   assign idx = w_fold_1[`LG_PHT_SZ-1:0]  ^ pc[`LG_PHT_SZ+2:3];
+   /* index per 16B LINE (bit 4 up): the entry now holds a counter for each of the
+    * 4 slots, so the low bits that used to select between adjacent instructions
+    * are supplied by the slot mux instead. */
+   assign idx = w_fold_1[`LG_PHT_SZ-1:0]  ^ pc[`LG_PHT_SZ+3:4];
    
 endmodule
 
@@ -48,6 +43,8 @@ module l1i(clk,
 	   restart_pc,
 	   restart_src_pc,
 	   restart_src_is_indirect,
+	   dbg_arch_hist,
+	   dbg_spec_hist,
 	   restart_valid,
 	   restart_ack,
 	   retire_valid,
@@ -105,6 +102,15 @@ module l1i(clk,
    input logic [`M_WIDTH-1:0] restart_pc;
    input logic [`M_WIDTH-1:0] restart_src_pc;
    input logic 	      restart_src_is_indirect;
+   /* Global history, read back over the existing trace-index debug port.
+    * ARCH is the RETIRED history (updated at branch retirement); SPEC is the
+    * speculative copy the PHT is actually indexed with.  Dumping BOTH lets a
+    * capture test whether speculative history was correctly restored after a
+    * squash (n_spec_gbl_hist = n_arch_gbl_hist) -- if it was not, later
+    * predictions index the wrong PHT entry, which no per-instruction pht_idx
+    * can reveal. */
+   output logic [63:0]        dbg_arch_hist;
+   output logic [63:0]        dbg_spec_hist;
    input logic 	      restart_valid;
    output logic       restart_ack;
    //return stack signals
@@ -175,9 +181,22 @@ module l1i(clk,
    logic [N_TAG_BITS-1:0] 		  t_cache_tag, r_cache_tag, r_tag_out;
 
    logic 				  r_pht_update;
-   logic [1:0] 				  r_pht_out, r_pht_update_out;
+   /* PHT entry holds FOUR packed 2-bit counters, one per instruction slot in the
+    * 16B line (rv64core l1i_2way parity).  Previously one 2-bit counter indexed at
+    * 8-byte granularity, so ADJACENT instructions aliased onto the same counter --
+    * and, more importantly, only the first slot's prediction was consulted when
+    * forming a fetch group, so a not-taken branch anywhere in the line truncated
+    * it.  LG_PHT_SZ drops 16->14 to keep total storage identical (2^14 x 8 bits ==
+    * 2^16 x 2 bits = 128Kbit); the bits-per-predicted-branch is unchanged at 2. */
+   logic [7:0] 				  r_pht_out_vec, r_pht_update_out;
+   logic [1:0] 				  t_pht_out;
+   logic [7:0] 				  t_pht_val_vec;
    logic [1:0] 				  t_pht_val;
    logic 				  t_do_pht_wr;
+   /* per-slot "is a predicted-TAKEN control transfer" */
+   logic 				  t_tcb0, t_tcb1, t_tcb2, t_tcb3;
+   logic [1:0] 				  r_pht_update_slot;
+   logic [1:0] 				  t_pht_old;
    
    logic [`LG_PHT_SZ-1:0] 		  n_pht_idx,r_pht_idx;
    logic [`LG_PHT_SZ-1:0] 		  r_pht_update_idx;
@@ -228,6 +247,8 @@ module l1i(clk,
    
    logic [`GBL_HIST_LEN-1:0] 	     n_arch_gbl_hist, r_arch_gbl_hist;
    logic [`GBL_HIST_LEN-1:0] 	     n_spec_gbl_hist, r_spec_gbl_hist;
+   assign dbg_arch_hist = r_arch_gbl_hist;
+   assign dbg_spec_hist = r_spec_gbl_hist;
 
    logic [`GBL_HIST_LEN-1:0] 	     r_last_spec_gbl_hist;
    
@@ -344,21 +365,6 @@ endfunction
 	r_cycle <= reset ? 'd0 : r_cycle + 'd1;
      end
 
-`ifdef ENABLE_STORE_CHECK
-   always_ff@(posedge clk)
-     begin
-	if(!reset)
-	  begin
-	     /* L1I line fill: the reload data arrived for r_miss_pc's line (the fetch
-	      * that missed brought it in -- speculative if a mispredicted-path fetch). */
-	     if((r_state == INJECT_RELOAD) & mem_rsp_valid)
-	       l1i_fill(r_cycle, {r_miss_pc[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}});
-	     /* whole-L1I flush completed (I-cache CACHE op / code-coherence flush). */
-	     if(n_flush_complete)
-	       l1i_flush(r_cycle);
-	  end
-     end
-`endif
 
    assign flush_complete = r_flush_complete;
    
@@ -505,8 +511,9 @@ endfunction
 
    always_ff@(posedge clk)
      begin
-	r_btb_pc <= reset ? 'd0 : 
-		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : 'd0;
+	/* cold/invalid entry -> POISON, not zero: see BTB_POISON_PC in machine.vh */
+	r_btb_pc <= reset ? `BTB_POISON_PC : 
+		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : `BTB_POISON_PC;
 	
      end
 
@@ -654,13 +661,26 @@ endfunction
                            select_pd(r_jump_out, 'd0) != 4'd0
                            } >> t_insn_idx;
 
-	t_spec_branch_marker = ({1'b1,
-				select_pd(r_jump_out, 'd3) != 4'd0,
-				select_pd(r_jump_out, 'd2) != 4'd0,
-				select_pd(r_jump_out, 'd1) != 4'd0,
-				select_pd(r_jump_out, 'd0) != 4'd0
-				} >> t_insn_idx) & 
-			       {4'b1111, !((t_pd == 4'd1) && !r_pht_out[1])};
+	/* the 2-bit counter for the instruction actually being fetched */
+	t_pht_out = (t_insn_idx == 2'd0) ? r_pht_out_vec[1:0] :
+		    (t_insn_idx == 2'd1) ? r_pht_out_vec[3:2] :
+		    (t_insn_idx == 2'd2) ? r_pht_out_vec[5:4] :
+		    r_pht_out_vec[7:6];
+
+	/* Predicted-TAKEN per slot: a conditional branch (pd==1) predicted not-taken
+	 * does NOT end the fetch group, and neither does a non-branch.  This is the
+	 * whole point -- the old marker used (pd != 0), so ~7-8% of instructions
+	 * (not-taken conditional branches) truncated a group for no reason. */
+	t_tcb0 = ~((((select_pd(r_jump_out, 'd0) == 4'd1) & ~r_pht_out_vec[1]) |
+		    (select_pd(r_jump_out, 'd0) == 4'd0)));
+	t_tcb1 = ~((((select_pd(r_jump_out, 'd1) == 4'd1) & ~r_pht_out_vec[3]) |
+		    (select_pd(r_jump_out, 'd1) == 4'd0)));
+	t_tcb2 = ~((((select_pd(r_jump_out, 'd2) == 4'd1) & ~r_pht_out_vec[5]) |
+		    (select_pd(r_jump_out, 'd2) == 4'd0)));
+	t_tcb3 = ~((((select_pd(r_jump_out, 'd3) == 4'd1) & ~r_pht_out_vec[7]) |
+		    (select_pd(r_jump_out, 'd3) == 4'd0)));
+
+	t_spec_branch_marker = ({1'b1, t_tcb3, t_tcb2, t_tcb1, t_tcb0} >> t_insn_idx);
 
 	
 	t_first_branch = 'd7;
@@ -830,8 +850,14 @@ endfunction
 		      end
 		    else if(t_pd == 4'd9)
 		      begin
-			 //check if insn is bal or cond branch thinks its gonna be taken
-			 if(r_pht_out[1] || t_insn_data[25:21] == 5'd0)
+			 /* REGIMM branch-and-link: rt 16 BLTZAL / 17 BGEZAL / 18 BLTZALL /
+			  * 19 BGEZALL.  The rs==$zero shortcut below means "this is the
+			  * unconditional-call idiom, always taken" -- but that is only true
+			  * for the BGEZ-flavours (rs>=0).  For the BLTZ-flavours rs<0 is
+			  * NEVER true when rs==$zero, so predicting them taken would be
+			  * exactly backwards.  rt bit0 (insn[16]) selects: 1 = BGEZ-type,
+			  * 0 = BLTZ-type. */
+			 if(t_pht_out[1] || (t_insn_data[16] && t_insn_data[25:21] == 5'd0))
 			   begin
 			      t_is_cflow = 1'b1;
 			      n_delay_slot = 1'b1;			      
@@ -841,7 +867,7 @@ endfunction
 			      //$display("some flavor of branch and link, predicting target %x", n_pc);
 			   end
 		      end
-		    else if(t_pd == 4'd1 && r_pht_out[1])
+		    else if(t_pd == 4'd1 && t_pht_out[1])
 		      begin
 			 t_is_cflow = 1'b1;			 
 			 n_delay_slot = 1'b1;
@@ -1095,7 +1121,12 @@ endfunction
 	t_insn2.pc = r_cache_pc + 'd4;
 	t_insn2.pred_target = 'd0;
 	t_insn2.pred = 1'b0;
-	t_insn2.pht_idx = 'd0;
+	/* same 16B line as slot 0 -> SAME PHT entry (the slot is disambiguated at
+	 * retire by branch_pc[3:2]).  Was 'd0: harmless while the fetch group
+	 * truncated at any branch (slots 2-4 could never BE branches), but with
+	 * predicted-taken grouping they can, and they then trained entry 0 -- 2.85
+	 * -> 18.8 mispredicts/kiloinsn. */
+	t_insn2.pht_idx = r_pht_idx;
 	t_insn2.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd1) != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn2.fetch_cycle = r_cycle;
@@ -1108,7 +1139,7 @@ endfunction
 	t_insn3.pc = r_cache_pc + 'd8;
 	t_insn3.pred_target = 'd0;
 	t_insn3.pred = 1'b0;
-	t_insn3.pht_idx = 'd0;
+	t_insn3.pht_idx = r_pht_idx;
 	t_insn3.is_branch = 1'b0;
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn3.fetch_cycle = r_cycle;
@@ -1121,7 +1152,7 @@ endfunction
 	t_insn4.pc = r_cache_pc + 'd12;
 	t_insn4.pred_target = 'd0;
 	t_insn4.pred = 1'b0;
-	t_insn4.pht_idx = 'd0;
+	t_insn4.pht_idx = r_pht_idx;
 	t_insn4.is_branch = 1'b0;
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn4.fetch_cycle = r_cycle;
@@ -1166,10 +1197,16 @@ endfunction
    
    always_comb
      begin
-	t_pht_val = r_pht_update_out;
+	/* read-modify-write: the retiring branch updates only ITS 2-bit field and the
+	 * other three counters in the entry are written back unchanged. */
+	t_pht_old = (r_pht_update_slot == 2'd0) ? r_pht_update_out[1:0] :
+		    (r_pht_update_slot == 2'd1) ? r_pht_update_out[3:2] :
+		    (r_pht_update_slot == 2'd2) ? r_pht_update_out[5:4] :
+		    r_pht_update_out[7:6];
+	t_pht_val = t_pht_old;
 	t_do_pht_wr = r_pht_update;
 
-	case(r_pht_update_out)
+	case(t_pht_old)
 	  2'd0:
 	    begin
 	       if(r_take_br)
@@ -1200,7 +1237,13 @@ endfunction
 		    t_do_pht_wr = 1'b0;
 		 end
 	    end
-	endcase // case (r_pht_update_out)
+	endcase // case (t_pht_old)
+
+	/* splice the updated counter back into its slot, leaving the other three */
+	t_pht_val_vec = (r_pht_update_slot == 2'd0) ? {r_pht_update_out[7:2], t_pht_val} :
+			(r_pht_update_slot == 2'd1) ? {r_pht_update_out[7:4], t_pht_val, r_pht_update_out[1:0]} :
+			(r_pht_update_slot == 2'd2) ? {r_pht_update_out[7:6], t_pht_val, r_pht_update_out[3:0]} :
+			{t_pht_val, r_pht_update_out[5:0]};
      end
    
    always_ff@(posedge clk)
@@ -1211,6 +1254,7 @@ endfunction
 	     r_last_spec_gbl_hist <= 'd0;
 	     r_pht_update <= 1'b0;
 	     r_pht_update_idx <= 'd0;
+	     r_pht_update_slot <= 2'd0;
 	     r_take_br <= 1'b0;
 	     r_pd <= 'd0;
 	  end
@@ -1220,6 +1264,8 @@ endfunction
 	     r_last_spec_gbl_hist <= r_spec_gbl_hist;
 	     r_pht_update <= branch_pc_valid;
 	     r_pht_update_idx <= t_retire_pht_idx;
+	     /* which of the 4 packed counters this retiring branch owns */
+	     r_pht_update_slot <= branch_pc[3:2];
 	     r_take_br <= took_branch;
 	     r_pd <= t_pd;
 	  end
@@ -1246,15 +1292,15 @@ endfunction
 `endif
 	  
 
-   ram2r1w #(.WIDTH(2), .LG_DEPTH(`LG_PHT_SZ) ) pht
+   ram2r1w #(.WIDTH(8), .LG_DEPTH(`LG_PHT_SZ) ) pht
      (
       .clk(clk),
       .rd_addr0(n_pht_idx),
       .rd_addr1(t_retire_pht_idx),
       .wr_addr(t_init_pht ? r_init_pht_idx : r_pht_update_idx),
-      .wr_data(t_init_pht ? 2'd1 : t_pht_val),
+      .wr_data(t_init_pht ? 8'b01010101 : t_pht_val_vec),
       .wr_en(t_init_pht || t_do_pht_wr),
-      .rd_data0(r_pht_out),
+      .rd_data0(r_pht_out_vec),
       .rd_data1(r_pht_update_out)
       );
          

@@ -45,6 +45,32 @@ module predecode(insn_, pd);
 		   begin
 		      pd = 4'd9;
 		   end
+		 /* REGIMM branch-and-link family.  rt 16/18/19 were falling to `default`
+		  * => pd=0, which l1i treats as "NOT control flow" (t_update_spec_hist =
+		  * (t_pd != 4'd0); the cflow if-chain never matches 0).  So t_is_cflow,
+		  * n_delay_slot and t_take_br all stayed 0 and the front end ran straight
+		  * through a real branch, mispredicting it every time and never marking its
+		  * delay slot -- while decode_mips.sv DID decode all four.  Measured on IRIX
+		  * `be` (2026-08-06) via bgezall: the target's `addiu sp,sp,-112` prologue
+		  * committed BEFORE the delay slot retired, the restart re-ran it, and sp
+		  * ended one 112-byte frame low -> wrong stack slot -> wild deref.
+		  *   rt 16 BLTZAL   rt 17 BGEZAL   rt 18 BLTZALL   rt 19 BGEZALL
+		  * All four share pd=9.  The pd9 arm's "predict taken" shortcut keys on
+		  * rs==$zero, which is only valid for the BGEZ-flavours (rs>=0 is always
+		  * true); for the BLTZ-flavours rs<0 is never true when rs==$zero, so l1i
+		  * gates that shortcut on rt bit0 (insn[16]: 1 = BGEZ-type, 0 = BLTZ-type). */
+		 'd16:
+		   begin
+		      pd = 4'd9;
+		   end
+		 'd18:
+		   begin
+		      pd = 4'd9;
+		   end
+		 'd19:
+		   begin
+		      pd = 4'd9;
+		   end
 		 default:
 		   begin
 		   end

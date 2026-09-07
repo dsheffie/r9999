@@ -198,11 +198,19 @@ static inline void set_exc_pc(state_t *s) {
    * BD holding the ORIGINAL access so its eret retries it.  Matches the RTL, where
    * exec.sv gates the EPC write on r_sr_exl==0. */
   if(s->cpr0[CPR0_SR] & SR_EXL) return;
+  /* EPC has a 64-bit shadow (cpr0_64) that dmfc0 reads -- and a MIPS64 Linux
+   * exception handler reads EPC with `dmfc0 ra,$14`, not mfc0.  Every other CP0
+   * register written on an exception (BadVAddr/EntryHi/Context/XContext, in
+   * tlb_set_fault_state) already updates both arrays; EPC was the one that did
+   * not, so after any exception dmfc0 returned a STALE EPC from whenever dmtc0
+   * last wrote it.  eret was unaffected because it reads the 32-bit copy. */
   if(s->in_delay_slot) {
     s->cpr0[CPR0_EPC]    = (uint32_t)(s->pc - 4);
+    s->cpr0_64[CPR0_EPC] = sext32((uint32_t)(s->pc - 4));
     s->cpr0[CPR0_CAUSE] |=  (1u << 31);
   } else {
     s->cpr0[CPR0_EPC]    = (uint32_t)s->pc;
+    s->cpr0_64[CPR0_EPC] = sext32((uint32_t)s->pc);
     s->cpr0[CPR0_CAUSE] &= ~(1u << 31);
   }
 }
@@ -337,6 +345,7 @@ static void raise_trap(state_t *s) {
 void raise_int(state_t *s, uint32_t epc, uint32_t ip) {
   s->ll_link_valid = false;   /* interrupt breaks the LL/SC link */
   s->cpr0[CPR0_EPC]   = epc;
+  s->cpr0_64[CPR0_EPC] = sext32(epc);   /* keep the dmfc0-visible shadow in step */
   /* Cause.IP[7:0] = the REAL pending bits (from the RTL's w_ip in the checker),
    * ExcCode=0 (Int), BD=0.  Was hardcoded to IP[7] (timer) which mis-dispatched
    * every software (IP[1]) / device (IP[2]) interrupt in the IRIX ISR. */
@@ -2677,7 +2686,16 @@ void execMips(state_t *s) {
 	    s->gpr[rt] = 0;
 	  } else {
 	    /* mfc0 sign-extends the 32-bit CP0 value to 64 bits, matching HW. */
-	    s->gpr[rt] = sext32(s->cpr0[rd]);
+	    uint32_t v = s->cpr0[rd];
+	    /* Status.CU2 is HARDWIRED to 1 in the RTL -- exec.sv's cpr0_status_reg
+	     * concatenation puts a literal 1'b1 in the cu2 slot.  A checkpoint whose
+	     * stored Status has CU2=0 therefore makes the co-sim diverge by exactly
+	     * bit 30 the first time a kernel exception handler does mfc0 k0,$12.
+	     * Mirror the hardware. */
+	    if(rd == CPR0_SR) {
+	      v |= 0x40000000u;
+	    }
+	    s->gpr[rt] = sext32(v);
 	  }
 	  s->insn_histo[mipsInsn::MFC0]++;
 	  break;
@@ -2687,8 +2705,16 @@ void execMips(state_t *s) {
 	  break;
 	case 0x4: /*mtc0*/
 	  if(rd != 15) { /* PRId (reg 15) is read-only */
-	    s->cpr0[rd] = (uint32_t)s->gpr[rt];
-	    s->cpr0_64[rd] = (uint64_t)(uint32_t)s->gpr[rt];
+	    /* Sail mips_insts.sail execute(MTC0 ...EntryHi): EntryHi takes its value from
+	     * the FULL 64-bit GPR; every other CP0 register gets the usual 32-bit write.
+	     * EntryHi's R field is bits [63:62] and the TLB match compares it against
+	     * VA[63:62], so zero-extending here gives a kernel-mapped entry R=0 while any
+	     * kseg2/kseg3/xkseg VA has R=3 -- the entry could then NEVER match and the
+	     * checker took a spurious TLB refill where the RTL translated correctly.
+	     * interp_mips already carries this fix; r9999 had not. */
+	    s->cpr0_64[rd] = (rd == CPR0_ENTRYHI) ? s->gpr[rt]
+	                                          : (uint64_t)(uint32_t)s->gpr[rt];
+	    s->cpr0[rd] = (uint32_t)s->cpr0_64[rd];
 	  }
 	  /* CP0 reg 7 is the simulator putchar port */
 	  if(rd == 7 && !s->silent) {
