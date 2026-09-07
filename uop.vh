@@ -242,7 +242,18 @@ typedef enum logic [7:0]
    SUBCHK,      /* sub   $0,rs,rt  -> w_sub32_overflow, addend = ~t_srcB */
    DADDCHK,     /* dadd  $0,rs,rt  -> w_add64_overflow, addend = t_srcB  */
    DADDICHK,    /* daddi $0,rs,imm -> w_add64_overflow, addend = imm     */
-   DSUBCHK      /* dsub  $0,rs,rt  -> w_sub64_overflow, addend = ~t_srcB */
+   DSUBCHK,     /* dsub  $0,rs,rt  -> w_sub64_overflow, addend = ~t_srcB */
+   /* Branch-LIKELY zero compares.  `beqzl rs' IS `beql rs,$0' and `bnezl rs' IS
+    * `bnel rs,$0', so they read physreg 0 exactly like the non-likely forms that
+    * BEQZ/BNEZ already fixed -- these were simply missed.  They matter in a
+    * workload the earlier measurements could not see: modern gcc emits NO
+    * branch-likely (0 in wc/dhrystone/hello), but big-csmith has 7942 of them,
+    * 514 with a $0 operand, and MIPSpro-built IRIX code uses them idiomatically
+    * -- IRIX being where this bug was first observed.
+    * Identical to BEQZ/BNEZ except t_mispred_br also asserts when NOT taken,
+    * which is how the likely form nullifies its delay slot. */
+   BEQZL,
+   BNEZL
    } opcode_t;
 
 function logic is_mult(opcode_t op);

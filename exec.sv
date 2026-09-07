@@ -2261,6 +2261,24 @@ module exec(clk,
 	       t_result = t_srcA;
 	       t_alu_valid = 1'b1;
 	    end // case: BNEZ
+	  BEQZL:
+	    begin
+	       /* == BEQZ, plus the branch-likely `|| !t_take_br' restart that
+		* nullifies the delay slot when the branch is not taken. */
+	       t_take_br = (t_srcA == 'd0);
+	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_srcA;   /* log the compared operand into the retire ring */
+	       t_alu_valid = 1'b1;
+	    end
+	  BNEZL:
+	    begin
+	       t_take_br = (t_srcA != 'd0);
+	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_srcA;
+	       t_alu_valid = 1'b1;
+	    end
 	  BRA:
 	    begin
 	       /* `b lbl' == `beq $0,$0': unconditionally taken, NO source operands. */

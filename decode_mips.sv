@@ -1516,13 +1516,19 @@ module decode_mips(
 		 end // case: 6'd17
 	       6'd20: /* BEQL */
 		 begin
-		    uop.op = BEQL;
+		    /* `beqzl rs' IS `beql rs,$0' -- the same physreg-0 read BEQZ/BNEZ
+		     * already removed for the non-likely forms; branch-likely was
+		     * simply missed.  Both operands $0 is degenerate (beql $0,$0 is
+		     * always taken, bnel $0,$0 never taken but STILL nullifies its
+		     * delay slot, so it is not a NOP) -- left as plain BEQL, matching
+		     * the teq/tne $0,$0 precedent. */
+		    uop.op = ((rs == 'd0) ^ (rt == 'd0)) ? BEQZL : BEQL;
 		    uop.dst_valid = 1'b0;
 		    uop.dst = 'd0;
-		    uop.srcA = rs;
+		    uop.srcA = (rs == 'd0) ? rt : rs;
 		    uop.srcA_valid = 1'b1;
 		    uop.srcB = rt;
-		    uop.srcB_valid = 1'b1;
+		    uop.srcB_valid = !((rs == 'd0) ^ (rt == 'd0));
 		    uop.has_delay_slot = 1'b1;
 		    uop.has_nullifying_delay_slot = 1'b1;
 		    uop.imm = insn[15:0];
@@ -1532,13 +1538,19 @@ module decode_mips(
 		 end // case: 6'd20
 	       6'd21: /* BNEL */
 		 begin
-		    uop.op = BNEL;
+		    /* `bnezl rs' IS `bnel rs,$0' -- the same physreg-0 read BEQZ/BNEZ
+		     * already removed for the non-likely forms; branch-likely was
+		     * simply missed.  Both operands $0 is degenerate (beql $0,$0 is
+		     * always taken, bnel $0,$0 never taken but STILL nullifies its
+		     * delay slot, so it is not a NOP) -- left as plain BNEL, matching
+		     * the teq/tne $0,$0 precedent. */
+		    uop.op = ((rs == 'd0) ^ (rt == 'd0)) ? BNEZL : BNEL;
 		    uop.dst_valid = 1'b0;
 		    uop.dst = 'd0;
-		    uop.srcA = rs;
+		    uop.srcA = (rs == 'd0) ? rt : rs;
 		    uop.srcA_valid = 1'b1;
 		    uop.srcB = rt;
-		    uop.srcB_valid = 1'b1;
+		    uop.srcB_valid = !((rs == 'd0) ^ (rt == 'd0));
 		    uop.has_delay_slot = 1'b1;
 		    uop.has_nullifying_delay_slot = 1'b1;
 		    uop.imm = insn[15:0];
