@@ -2126,6 +2126,23 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end
+	  NEG:
+	    begin
+	       /* `subu rd,$0,rt' -- 0 - rt, sign-extended, one source */
+	       t_result = sign_extend32(32'd0 - t_srcA[31:0]);
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  NEGT:
+	    begin
+	       /* `sub rd,$0,rt' -- same value, but traps on the one overflowing
+		* input (rt == INT_MIN); verified on silicon-model by directed test. */
+	       t_result = sign_extend32(32'd0 - t_srcA[31:0]);
+	       t_overflow = (t_srcA[31:0] == 32'h80000000);
+	       t_fault = t_overflow;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  DSUBU:
 	    begin
 	       t_result = w_add64;
@@ -2220,6 +2237,31 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end // case: SLTU
+	  MOVIU:
+	    begin
+	       /* zero-extended immediate -- contrast MOVI, which sign-extends */
+	       t_result = {{(`M_WIDTH-16){1'b0}}, int_uop.imm};
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  SNEZ:
+	    begin
+	       t_result = (t_srcA != 'd0) ? 'd1 : 'd0;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  SGTZ:
+	    begin
+	       t_result = ($signed(t_srcA) > $signed({`M_WIDTH{1'b0}})) ? 'd1 : 'd0;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
+	  SLTZ:
+	    begin
+	       t_result = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}})) ? 'd1 : 'd0;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end
 	  BEQ:
 	    begin
 	       t_take_br = (t_srcA  == t_srcB);

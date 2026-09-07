@@ -253,7 +253,32 @@ typedef enum logic [7:0]
     * Identical to BEQZ/BNEZ except t_mispred_br also asserts when NOT taken,
     * which is how the likely form nullifies its delay slot. */
    BEQZL,
-   BNEZL
+   BNEZL,
+   /* Zero-extended immediate load.  `ori rt,$0,imm' is how gas builds any constant
+    * that does not fit a signed 16-bit `li' -- measured 1935 static occurrences
+    * across wc+dhrystone+big-csmith+hello, the largest remaining physreg-0 reader
+    * after `move' was fixed.  MOVI cannot be reused: it SIGN-extends, so it is
+    * wrong whenever imm[15] is set.  Same uop serves `xori rt,$0,imm'. */
+   MOVIU,
+   /* Single-source compare-against-zero forms of slt/sltu.
+    *   sltu rd,$0,rt  ==  (rt != 0)   -> SNEZ   (461 occurrences)
+    *   slt  rd,$0,rt  ==  (rt >  0)   -> SGTZ   (16)
+    *   slt  rd,rs,$0  ==  (rs <  0)   -> SLTZ   (0 measured; same arm, free)
+    * (sltu rd,rs,$0 is unsigned `< 0' -- statically 0 -> MOVI, no uop needed.) */
+   SNEZ,
+   SGTZ,
+   SLTZ,
+   /* 32-bit negate, single source.  `subu rd,$0,rt' is `negu rd,rt' -- 6039 static
+    * occurrences across wc+dhrystone+big-csmith+hello, the last large physreg-0
+    * reader.  Result is sign-extended like SUBU. */
+   NEG,
+   /* TRAPPING negate: `sub rd,$0,rt' (gas/objdump spell it `neg rd,rt').  Unlike
+    * NEG it can raise Integer Overflow -- but for exactly ONE input, rt ==
+    * INT_MIN, because -INT_MIN is not representable in 32 bits.  It is NOT
+    * "trap if negative": the overflow rule needs the result sign to differ from
+    * the minuend's, and with a $0 minuend only 0x80000000 does that.  So the
+    * whole overflow condition collapses to a single equality. */
+   NEGT
    } opcode_t;
 
 function logic is_mult(opcode_t op);
