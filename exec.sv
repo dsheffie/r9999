@@ -2184,6 +2184,34 @@ module exec(clk,
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
 	       t_alu_valid = 1'b1;
 	    end // case: BNE
+	  /* Zero-compare branches: the compare is against a LITERAL zero, so these
+	   * never read $zero through the PRF or the forwarding network.  Direction
+	   * and target maths are copied verbatim from BEQ/BNE above so semantics
+	   * cannot drift; only the operand source differs. */
+	  BEQZ:
+	    begin
+	       t_take_br = (t_srcA == 'd0);
+	       t_mispred_br = int_uop.br_pred != t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_srcA;   /* log the compared operand into the retire ring */
+	       t_alu_valid = 1'b1;
+	    end // case: BEQZ
+	  BNEZ:
+	    begin
+	       t_take_br = (t_srcA != 'd0);
+	       t_mispred_br = int_uop.br_pred != t_take_br;
+	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
+	       t_result = t_srcA;
+	       t_alu_valid = 1'b1;
+	    end // case: BNEZ
+	  BRA:
+	    begin
+	       /* `b lbl' == `beq $0,$0': unconditionally taken, NO source operands. */
+	       t_take_br = 1'b1;
+	       t_mispred_br = int_uop.br_pred != 1'b1;
+	       t_pc = t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0};
+	       t_alu_valid = 1'b1;
+	    end // case: BRA
 	  BC1T:
 	    begin
 	       t_take_br = r_fcr_prf[int_uop.hilo_src][int_uop.srcC[2:0]];
@@ -2481,6 +2509,19 @@ module exec(clk,
 	  TNE:
 	    begin
 	       t_trap = (t_srcA != (int_uop.srcB_valid ? t_srcB : t_simm));
+	       t_fault = t_trap;
+	       t_alu_valid = 1'b1;
+	    end
+	  /* zero-compare traps: compare against a LITERAL 0, no $zero read */
+	  TEQZ:
+	    begin
+	       t_trap = (t_srcA == 'd0);
+	       t_fault = t_trap;
+	       t_alu_valid = 1'b1;
+	    end
+	  TNEZ:
+	    begin
+	       t_trap = (t_srcA != 'd0);
 	       t_fault = t_trap;
 	       t_alu_valid = 1'b1;
 	    end
