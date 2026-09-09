@@ -116,7 +116,8 @@ module core_l1d_l1i(clk,
 		    dbg_oldest_first_pending,
 		    dbg_trace_index,
 		    dbg_trace_data,
-		    dbg_trace_wptr
+		    dbg_trace_wptr,
+		    dbg_rdchk
 		    );
 
    localparam L1D_CL_LEN = 1 << `LG_L1D_CL_LEN;
@@ -329,6 +330,7 @@ module core_l1d_l1i(clk,
    input  logic [19:0]  dbg_trace_index;
    output logic [31:0]  dbg_trace_data;
    output logic [15:0]  dbg_trace_wptr;
+   output logic [31:0]  dbg_rdchk;   /* reader-agreement checker status -> AXI 0x1B */
       
 
 
@@ -1064,7 +1066,8 @@ module core_l1d_l1i(clk,
 	     .dbg_oldest_first_pending(dbg_oldest_first_pending),
 	     .dbg_trace_index(dbg_trace_index),
 	     .dbg_trace_data(w_core_trace_data),
-	     .dbg_trace_wptr(w_core_trace_wptr)
+	     .dbg_trace_wptr(w_core_trace_wptr),
+	     .dbg_rdchk(dbg_rdchk)
 	     );
 
    /* ---- L2<->AXI event trace ring (debug the uncached-turnaround deadlock) ----

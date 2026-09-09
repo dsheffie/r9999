@@ -167,7 +167,8 @@ module core(clk,
 	    dbg_oldest_first_pending,
 	    dbg_trace_index,
 	    dbg_trace_data,
-	    dbg_trace_wptr);
+	    dbg_trace_wptr,
+	    dbg_rdchk);
 
    input logic clk;
    input logic reset;
@@ -324,6 +325,18 @@ module core(clk,
    input logic [19:0] dbg_trace_index;
    output logic [31:0] 			  dbg_trace_data;
    output logic [15:0] 			  dbg_trace_wptr;
+   /* Reader-agreement checker status, read on AXI 0x1B.
+    *   [0]    hit      -- a reader disagreed with its producer.  Needed because
+    *                     w_null_target ORs EIGHT triggers into one frozen bit, so
+    *                     `frozen' alone cannot say which fired.
+    *   [1]    degraded -- the record FIFO overflowed, so some candidate reads went
+    *                     unchecked.  Coverage is all-or-nothing by construction,
+    *                     so this one bit IS the coverage story: degraded=0 means
+    *                     every candidate read was checked.
+    *   [31:2] checked  -- low bits of the check count; not needed for coverage,
+    *                     carried as proof-of-life so a quiet board can be told
+    *                     apart from a checker that never ran. */
+   output logic [31:0] 			  dbg_rdchk;
 
    assign in_64b_kernel_mode     = w_in_64b_kernel_mode;
    assign in_64b_supervisor_mode = w_in_64b_supervisor_mode;
@@ -992,15 +1005,455 @@ module core(clk,
     * USER mode only: the kernel's BUG()/BRK paths use break legitimately. */
    wire 	      w_user_break = t_bump_rob_head & (~in_kernel_mode) &
 				     (n_cause == 5'd9);
+   /* Reader-agreement violation (exec.sv, ENABLE_RDAGREE_HW): two readers of the
+    * same INSTANCE of a physical register saw different values.  That is
+    * impossible in a correct machine -- a physreg is written once per allocation
+    * -- and it is the microarchitectural EVENT rather than its rare
+    * architectural consequence, so it fires far sooner than a wild jump or a
+    * break trap does.  Sticky in exec; folding it in here freezes the ring and
+    * shows up on the board as frozen=1 in the existing dbg_trace_wptr readback,
+    * with no new AXI register and no IP re-package. */
+   wire 	      w_rdchk_hit;
+   wire 	      w_rdchk_stall;
+
+`ifdef ENABLE_RDCHK
+   /* ============ RETIRE-TIME READER-AGREEMENT CHECK ============
+    * Every reader of a given INSTANCE of a physical register must see the same
+    * value.  Each reader is compared against the value its PRODUCER logged when
+    * IT retired -- strictly stronger than reader-vs-reader (it also catches a
+    * lone stale reader), and at retire it is free of every hazard the
+    * execute-side version had: retire is IN ORDER, mis-speculated readers never
+    * retire, and nothing here is near the operand path.
+    *
+    * SERIALIZED FRONT END.  Peak demand is 2 writes + 4 reads per cycle (two
+    * retire slots x {srcA,srcB}) against a 2-port table -- direct issue measured
+    * only 57.1% coverage (3498 checked / 2623 dropped over 8 randgen seeds).  So
+    * retire records are pushed into an IN-ORDER FIFO and drained at up to 2
+    * accesses/cycle: <=2 cycles per record, ~0.5 records/cycle throughput against
+    * ~0.31 actual (IPC).  Full coverage, and the FIFO absorbs dual-retire bursts.
+    *
+    * Serializing also DELETES a hazard rather than adding one.  Draining in
+    * retire order means a producer's write is always processed before any later
+    * consumer's check, so the same-cycle dual-retire bypass that v1 needed (and
+    * whose absence caused 6000 false positives across 24 seeds) cannot arise:
+    * within a record dst is a freshly-allocated physreg and never one of its own
+    * sources, and across records the write lands a cycle before the next read.
+    *
+    * OVERFLOW is never silently dropped -- losing a WRITE would leave a stale
+    * entry and manufacture false positives later.  It sets a sticky degraded
+    * flag instead, so a quiet result can be distinguished from a blind one.
+    * ==================================================================== */
+   logic [1:0] 	  t_ck_v;
+   logic [1:0] 	  t_ck_pool [1:0];
+   logic [`M_WIDTH-1:0]   t_ck_exp [1:0];
+
+   /* ---- storage: mirror the machine's OWN four-way physreg partition ----
+    * The allocator already splits the free list {alu,mem} x {even,odd} and gives
+    * the two alloc slots OPPOSITE parity, rotating which slot gets which every
+    * cycle (r_bank_sel <= ~r_bank_sel).  ALU vs MEM is disjoint by design -- it is
+    * the same MSB split rf4r2w uses for its two write ports.  So pool =
+    * {ptr[MSB], ptr[0]} costs nothing to compute and buys 4 write + 4 read ports
+    * out of four 32-entry memories, which finally exceeds the 2W+4R worst case.
+    * Each pool is 32 x 65: small enough for distributed RAM (~65 LUTs as
+    * RAM32X1D) rather than BRAM, which matters at 82.8% LUT utilisation. */
+   localparam LG_NF   = 5;
+   localparam N_F     = (1<<LG_NF);
+   localparam RGRPW   = 1 + `LG_PRF_ENTRIES + `M_WIDTH;
+   localparam RECW    = 3*RGRPW;
+   localparam PIDXW   = `LG_PRF_ENTRIES-2;          /* 5 -> 32 entries per pool */
+
+   logic [`M_WIDTH:0] 	  r_pt0 [(1<<PIDXW)-1:0];
+   logic [`M_WIDTH:0] 	  r_pt1 [(1<<PIDXW)-1:0];
+   logic [`M_WIDTH:0] 	  r_pt2 [(1<<PIDXW)-1:0];
+   logic [`M_WIDTH:0] 	  r_pt3 [(1<<PIDXW)-1:0];
+   logic [`M_WIDTH:0] 	  r_q0, r_q1, r_q2, r_q3;
+
+   logic [3:0] 		  t_we, t_re;
+   logic [PIDXW-1:0] 	  t_wa0, t_wa1, t_wa2, t_wa3;
+   logic [PIDXW-1:0] 	  t_ra0, t_ra1, t_ra2, t_ra3;
+   logic [`M_WIDTH:0] 	  t_wd0, t_wd1, t_wd2, t_wd3;
+
+   /* EVEN/ODD BANKED record FIFO.  A dual retire pushes indices ft and ft+1,
+    * which have OPPOSITE parity, so banking on index[0] gives each bank exactly
+    * ONE write port.  That matters: distributed RAM (RAM32X1D) is a synchronous
+    * WRITE with an ASYNCHRONOUS read, so the async read below is fine -- it was
+    * the second write port that made it uninferable.  Unbanked, Vivado said
+    * "[Synth 8-4767] Trying to implement RAM 'r_fifo_reg' in registers ...
+    * dissolved into registers" and the 32x216 array cost +9839 FF and +15370 LUT
+    * (101.5% of the device -- the placer could not fit it).  Same trick the
+    * allocator and the four producer-table pools already use. */
+   logic [RECW-1:0] 	  r_fifo0 [(N_F/2)-1:0];
+   logic [RECW-1:0] 	  r_fifo1 [(N_F/2)-1:0];
+   logic 		  t_fwe0, t_fwe1;
+   logic [LG_NF-2:0] 	  t_fwa0, t_fwa1;
+   logic [RECW-1:0] 	  t_fwd0, t_fwd1;
+   logic [LG_NF:0] 	  r_fh, r_ft;
+   logic [RECW-1:0] 	  r_cur;
+   logic 		  r_busy;
+   logic 		  r_rdchk_hit, r_rdchk_degraded;
+   logic [31:0] 	  r_rdchk_checked;
+`ifdef VERILATOR
+   logic [31:0] r_pushed_reads, r_recs_in, r_recs_out, r_issued;
+   /* diagnosis-only shadow of the record FIFO: the retiring reader's PC, plus
+    * the physreg pointer each in-flight compare is against.  Lets a [RDCHK]
+    * report name the instruction instead of just two values. */
+   logic [`M_WIDTH-1:0] 	  r_fifo_pc [N_F-1:0];
+   logic [`M_WIDTH-1:0] 	  r_cur_pc, r_ck_pc;
+   logic [`LG_PRF_ENTRIES-1:0] 	  r_ck_ptr [1:0];
+   logic [31:0] 		  r_maxocc, r_drops, r_hits, r_stallc;
+`endif
+
+   /* two in-flight compares, one per read that issued */
+   logic [1:0] 		  r_ck_v;
+   logic [1:0] 		  r_ck_pool [1:0];
+   logic [`M_WIDTH-1:0]   r_ck_exp [1:0];
+
+   function automatic [1:0] f_pool(input [`LG_PRF_ENTRIES-1:0] p);
+      begin
+	 f_pool = {p[`LG_PRF_ENTRIES-1], p[0]};
+      end
+   endfunction
+   function automatic [PIDXW-1:0] f_idx(input [`LG_PRF_ENTRIES-1:0] p);
+      begin
+	 f_idx = p[`LG_PRF_ENTRIES-2:1];
+      end
+   endfunction
+
+   function automatic [RECW-1:0] f_rec(input rob_entry_t e);
+      begin
+	 f_rec = { e.valid_dst, e.pdst, e.data,
+		   (e.chk_vals_valid & e.srcA_rd), e.srcA_ptr, e.chk_srcA_val,
+		   (e.chk_vals_valid & e.srcB_rd), e.srcB_ptr, e.chk_srcB_val };
+      end
+   endfunction
+
+   wire w_push0 = w_head_commit;
+   wire w_push1 = w_head_commit & t_retire_two;
+   wire [LG_NF:0] w_fcnt   = r_ft - r_fh;
+   wire 	  w_ffull  = (w_fcnt >= (N_F-2));
+   /* Retire back-pressure trips EARLIER than the drop guard.  The ARCH_FAULT /
+    * EXCEPTION_DRAIN t_bump_rob_head paths also commit a head, and they are NOT
+    * gated by w_rt_stall -- one per exception, so a few slots of headroom above
+    * the stall point is enough to keep them from ever reaching w_ffull. */
+   wire 	  w_fnear  = (w_fcnt >= (N_F-6));
+   wire 	  w_fempty = (r_fh == r_ft);
+
+   wire [LG_NF-1:0] w_ft0 = r_ft[LG_NF-1:0];
+   wire [LG_NF-1:0] w_ft1 = r_ft[LG_NF-1:0] + 1'd1;
+   wire [LG_NF-1:0] w_fh0 = r_fh[LG_NF-1:0];
+   wire [RECW-1:0]  w_fifo_out = w_fh0[0] ? r_fifo1[w_fh0[LG_NF-1:1]] : r_fifo0[w_fh0[LG_NF-1:1]];
+
+   wire [RECW-1:0] w_rec = r_busy ? r_cur : w_fifo_out;
+`ifdef VERILATOR
+   wire [`M_WIDTH-1:0] w_rec_pc = r_busy ? r_cur_pc : r_fifo_pc[r_fh[LG_NF-1:0]];
+`endif
+   wire 	   w_rw  = w_rec[RECW-1];
+   wire [`LG_PRF_ENTRIES-1:0] w_rwp = w_rec[RECW-2 -: `LG_PRF_ENTRIES];
+   wire [`M_WIDTH-1:0] 	      w_rwd = w_rec[2*RGRPW +: `M_WIDTH];
+   wire 	   w_ra  = w_rec[2*RGRPW-1];
+   wire [`LG_PRF_ENTRIES-1:0] w_rap = w_rec[2*RGRPW-2 -: `LG_PRF_ENTRIES];
+   wire [`M_WIDTH-1:0] 	      w_rav = w_rec[RGRPW +: `M_WIDTH];
+   wire 	   w_rb  = w_rec[RGRPW-1];
+   wire [`LG_PRF_ENTRIES-1:0] w_rbp = w_rec[RGRPW-2 -: `LG_PRF_ENTRIES];
+   wire [`M_WIDTH-1:0] 	      w_rbv = w_rec[0 +: `M_WIDTH];
+
+   /* a record needs a second cycle only when BOTH its sources live in the SAME
+    * pool -- with four pools that is ~25% of the ~7% two-source records */
+   wire w_need2 = w_ra & w_rb & (f_pool(w_rap) == f_pool(w_rbp));
+
+   /* Decode the (at most) two pushes into ONE write per bank, so each bank
+    * infers as a single-write-port distributed RAM.  Slot 0 goes to the bank
+    * named by ft's parity, slot 1 to the other one. */
+   always_comb
+     begin
+	t_fwe0 = 1'b0; t_fwe1 = 1'b0;
+	t_fwa0 = 'd0;  t_fwa1 = 'd0;
+	t_fwd0 = 'd0;  t_fwd1 = 'd0;
+	if(~w_ffull)
+	  begin
+	     if(w_ft0[0] == 1'b0)
+	       begin
+		  t_fwe0 = w_push0;
+		  t_fwa0 = w_ft0[LG_NF-1:1];
+		  t_fwd0 = f_rec(t_rob_head);
+		  t_fwe1 = w_push1;
+		  t_fwa1 = w_ft1[LG_NF-1:1];
+		  t_fwd1 = f_rec(t_rob_next_head);
+	       end
+	     else
+	       begin
+		  t_fwe1 = w_push0;
+		  t_fwa1 = w_ft0[LG_NF-1:1];
+		  t_fwd1 = f_rec(t_rob_head);
+		  t_fwe0 = w_push1;
+		  t_fwa0 = w_ft1[LG_NF-1:1];
+		  t_fwd0 = f_rec(t_rob_next_head);
+	       end
+	  end
+     end // always_comb
+
+   /* two independent 1W + 1 async-R memories */
+   always_ff@(posedge clk)
+     begin
+	if(t_fwe0) begin r_fifo0[t_fwa0] <= t_fwd0; end
+	if(t_fwe1) begin r_fifo1[t_fwa1] <= t_fwd1; end
+     end // always_ff
+
+   always_comb
+     begin
+	t_we = 4'd0; t_re = 4'd0;
+	t_wa0 = 'd0; t_wa1 = 'd0; t_wa2 = 'd0; t_wa3 = 'd0;
+	t_ra0 = 'd0; t_ra1 = 'd0; t_ra2 = 'd0; t_ra3 = 'd0;
+	t_wd0 = 'd0; t_wd1 = 'd0; t_wd2 = 'd0; t_wd3 = 'd0;
+	t_ck_v = 2'd0;
+	t_ck_pool[0] = 2'd0; t_ck_pool[1] = 2'd0;
+	t_ck_exp[0] = 'd0;   t_ck_exp[1] = 'd0;
+
+	if(r_busy)
+	  begin
+	     /* second cycle: the srcB read that collided with srcA's pool */
+	     t_re[f_pool(w_rbp)] = 1'b1;
+	     t_ck_v[0] = 1'b1;
+	     t_ck_pool[0] = f_pool(w_rbp);
+	     t_ck_exp[0] = w_rbv;
+	     case(f_pool(w_rbp))
+	       2'd0: begin t_ra0 = f_idx(w_rbp); end
+	       2'd1: begin t_ra1 = f_idx(w_rbp); end
+	       2'd2: begin t_ra2 = f_idx(w_rbp); end
+	       default: begin t_ra3 = f_idx(w_rbp); end
+	     endcase
+	  end
+	else if(~w_fempty)
+	  begin
+	     if(w_rw)
+	       begin
+		  t_we[f_pool(w_rwp)] = 1'b1;
+		  case(f_pool(w_rwp))
+		    2'd0: begin t_wa0 = f_idx(w_rwp); t_wd0 = {1'b1, w_rwd}; end
+		    2'd1: begin t_wa1 = f_idx(w_rwp); t_wd1 = {1'b1, w_rwd}; end
+		    2'd2: begin t_wa2 = f_idx(w_rwp); t_wd2 = {1'b1, w_rwd}; end
+		    default: begin t_wa3 = f_idx(w_rwp); t_wd3 = {1'b1, w_rwd}; end
+		  endcase
+	       end
+	     if(w_ra)
+	       begin
+		  t_re[f_pool(w_rap)] = 1'b1;
+		  t_ck_v[0] = 1'b1;
+		  t_ck_pool[0] = f_pool(w_rap);
+		  t_ck_exp[0] = w_rav;
+		  case(f_pool(w_rap))
+		    2'd0: begin t_ra0 = f_idx(w_rap); end
+		    2'd1: begin t_ra1 = f_idx(w_rap); end
+		    2'd2: begin t_ra2 = f_idx(w_rap); end
+		    default: begin t_ra3 = f_idx(w_rap); end
+		  endcase
+	       end
+	     /* srcB rides a DIFFERENT pool's read port in the same cycle */
+	     if(w_rb & (~w_need2))
+	       begin
+		  t_re[f_pool(w_rbp)] = 1'b1;
+		  t_ck_v[1] = 1'b1;
+		  t_ck_pool[1] = f_pool(w_rbp);
+		  t_ck_exp[1] = w_rbv;
+		  case(f_pool(w_rbp))
+		    2'd0: begin t_ra0 = f_idx(w_rbp); end
+		    2'd1: begin t_ra1 = f_idx(w_rbp); end
+		    2'd2: begin t_ra2 = f_idx(w_rbp); end
+		    default: begin t_ra3 = f_idx(w_rbp); end
+		  endcase
+	       end
+	  end
+     end // always_comb
+
+   /* four independent 1W+1R memories */
+   always_ff@(posedge clk)
+     begin
+	if(t_we[0]) begin r_pt0[t_wa0] <= t_wd0; end
+	if(t_we[1]) begin r_pt1[t_wa1] <= t_wd1; end
+	if(t_we[2]) begin r_pt2[t_wa2] <= t_wd2; end
+	if(t_we[3]) begin r_pt3[t_wa3] <= t_wd3; end
+	r_q0 <= r_pt0[t_ra0];
+	r_q1 <= r_pt1[t_ra1];
+	r_q2 <= r_pt2[t_ra2];
+	r_q3 <= r_pt3[t_ra3];
+     end
+
+   wire [`M_WIDTH:0] w_q [3:0];
+   assign w_q[0] = r_q0;
+   assign w_q[1] = r_q1;
+   assign w_q[2] = r_q2;
+   assign w_q[3] = r_q3;
+
+   wire w_hit0 = r_ck_v[0] & w_q[r_ck_pool[0]][`M_WIDTH] &
+	         (w_q[r_ck_pool[0]][`M_WIDTH-1:0] != r_ck_exp[0]);
+   wire w_hit1 = r_ck_v[1] & w_q[r_ck_pool[1]][`M_WIDTH] &
+	         (w_q[r_ck_pool[1]][`M_WIDTH-1:0] != r_ck_exp[1]);
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_fh <= 'd0; r_ft <= 'd0; r_busy <= 1'b0; r_cur <= 'd0;
+	     r_ck_v <= 2'd0;
+	     r_ck_pool[0] <= 2'd0; r_ck_pool[1] <= 2'd0;
+	     r_ck_exp[0] <= 'd0;   r_ck_exp[1] <= 'd0;
+	     r_rdchk_hit <= 1'b0; r_rdchk_degraded <= 1'b0; r_rdchk_checked <= 'd0;
+`ifdef VERILATOR
+	     r_pushed_reads <= 'd0; r_recs_in <= 'd0; r_recs_out <= 'd0; r_issued <= 'd0;
+	     r_maxocc <= 'd0; r_drops <= 'd0; r_hits <= 'd0; r_stallc <= 'd0;
+	     r_cur_pc <= 'd0; r_ck_pc <= 'd0;
+	     r_ck_ptr[0] <= 'd0; r_ck_ptr[1] <= 'd0;
+`endif
+	  end
+	else
+	  begin
+`ifdef VERILATOR
+	     if({26'd0,w_fcnt} > r_maxocc) begin r_maxocc <= {26'd0, w_fcnt}; end
+	     if(w_fnear) begin r_stallc <= r_stallc + 'd1; end
+`endif
+	     if(w_ffull & (w_push0 | w_push1))
+	       begin
+		  r_rdchk_degraded <= 1'b1;
+`ifdef VERILATOR
+		  r_drops <= r_drops + {31'd0,w_push0} + {31'd0,w_push1};
+		  if(r_drops == 'd0)
+		    begin
+		       $display("[RDCHK-DROP] cyc=%0d FIRST record dropped (fifo full, occ=%0d) -- every later check against a dropped producer is a FALSE POSITIVE",
+				r_cycle, w_fcnt);
+		    end
+`endif
+	       end
+	     else
+	       begin
+`ifdef VERILATOR
+		  /* candidate source reads actually accepted into the FIFO */
+		  if(w_push0) begin r_pushed_reads <= r_pushed_reads
+		     + {31'd0, (t_rob_head.chk_vals_valid & t_rob_head.srcA_rd)}
+		     + {31'd0, (t_rob_head.chk_vals_valid & t_rob_head.srcB_rd)}
+		     + {31'd0, (w_push1 & t_rob_next_head.chk_vals_valid & t_rob_next_head.srcA_rd)}
+		     + {31'd0, (w_push1 & t_rob_next_head.chk_vals_valid & t_rob_next_head.srcB_rd)}; end
+`endif
+`ifdef VERILATOR
+		  r_recs_in <= r_recs_in + {31'd0,w_push0} + {31'd0,w_push1};
+`endif
+		  /* the record data itself is written by the banked block above;
+		   * only the tail pointer moves here */
+		  if(w_push0 & w_push1)
+		    begin
+		       r_ft <= r_ft + 'd2;
+`ifdef VERILATOR
+		       r_fifo_pc[r_ft[LG_NF-1:0]] <= t_rob_head.pc;
+		       r_fifo_pc[r_ft[LG_NF-1:0] + 1'd1] <= t_rob_next_head.pc;
+`endif
+		    end
+		  else if(w_push0)
+		    begin
+		       r_ft <= r_ft + 'd1;
+`ifdef VERILATOR
+		       r_fifo_pc[r_ft[LG_NF-1:0]] <= t_rob_head.pc;
+`endif
+		    end
+	       end
+
+	     if(r_busy)
+	       begin
+		  r_busy <= 1'b0;
+	       end
+	     else if(~w_fempty)
+	       begin
+		  r_fh <= r_fh + 'd1;
+`ifdef VERILATOR
+		  r_recs_out <= r_recs_out + 'd1;
+`endif
+		  if(w_need2)
+		    begin
+		       r_busy <= 1'b1;
+		       r_cur <= w_rec;
+`ifdef VERILATOR
+		       r_cur_pc <= w_rec_pc;
+`endif
+		    end
+	       end
+
+`ifdef VERILATOR
+	     r_issued <= r_issued + {31'd0,t_ck_v[0]} + {31'd0,t_ck_v[1]};
+	     /* pipeline the diagnosis context alongside the compare it belongs to */
+	     r_ck_pc <= w_rec_pc;
+	     r_ck_ptr[0] <= r_busy ? w_rbp : w_rap;
+	     r_ck_ptr[1] <= w_rbp;
+`endif
+	     r_ck_v <= t_ck_v;
+	     r_ck_pool[0] <= t_ck_pool[0];
+	     r_ck_pool[1] <= t_ck_pool[1];
+	     r_ck_exp[0] <= t_ck_exp[0];
+	     r_ck_exp[1] <= t_ck_exp[1];
+	     /* ONE assignment: two sequential `<=` to the same reg would let the
+	      * last win, undercounting every cycle where both checks fire */
+	     r_rdchk_checked <= r_rdchk_checked + {31'd0, r_ck_v[0]} + {31'd0, r_ck_v[1]};
+	     if(w_hit0)
+	       begin
+		  r_rdchk_hit <= 1'b1;
+`ifdef VERILATOR
+		  if(r_hits < 'd64)
+		    begin
+		       $display("[RDCHK] cyc=%0d srcA pc=%x preg=%0d: producer logged %x, reader saw %x (degraded=%b drops=%0d)",
+				r_cycle, r_ck_pc, r_ck_ptr[0],
+				w_q[r_ck_pool[0]][`M_WIDTH-1:0], r_ck_exp[0],
+				r_rdchk_degraded, r_drops);
+		    end
+`endif
+	       end
+	     if(w_hit1)
+	       begin
+		  r_rdchk_hit <= 1'b1;
+`ifdef VERILATOR
+		  if(r_hits < 'd64)
+		    begin
+		       $display("[RDCHK] cyc=%0d srcB pc=%x preg=%0d: producer logged %x, reader saw %x (degraded=%b drops=%0d)",
+				r_cycle, r_ck_pc, r_ck_ptr[1],
+				w_q[r_ck_pool[1]][`M_WIDTH-1:0], r_ck_exp[1],
+				r_rdchk_degraded, r_drops);
+		    end
+`endif
+	       end
+`ifdef VERILATOR
+	     /* ONE assignment -- two sequential `<=` would let the last win */
+	     r_hits <= r_hits + {31'd0, w_hit0} + {31'd0, w_hit1};
+	     if((w_head_commit & t_rob_head.is_break) | (r_cycle[19:0] == 20'd0))
+	       begin
+		  $display("[RDCHK-COV] cyc=%0d checked=%0d issued=%0d pushed=%0d | recs %0d/%0d maxocc=%0d drops=%0d hits=%0d stallcyc=%0d degraded=%b",
+			   r_cycle, r_rdchk_checked, r_issued, r_pushed_reads,
+			   r_recs_in, r_recs_out, r_maxocc, r_drops, r_hits, r_stallc, r_rdchk_degraded);
+	       end
+`endif
+	  end
+     end // always_ff
+
+   assign w_rdchk_hit = r_rdchk_hit;
+   assign dbg_rdchk = {r_rdchk_checked[29:0], r_rdchk_degraded, r_rdchk_hit};
+   /* HOLD RETIREMENT rather than drop a record.  Dropping loses the producer's
+    * ptab WRITE, which leaves a stale entry that every later reader of that
+    * physreg is then compared against -- a false-positive factory, not a loss of
+    * coverage.  Measured on a Linux boot: first drop at cyc 840357, first (false)
+    * hit 49 cycles later, 261155 hits and 2.5% of records dropped by 2M cycles.
+    * Retire is 2-wide and the drain is 1 record/cycle, so a sustained dual-retire
+    * burst (memcpy) outruns any finite FIFO -- depth cannot fix this, only
+    * back-pressure can.  Deadlock-free: the drain never depends on retirement. */
+   assign w_rdchk_stall = w_fnear;
+`else
+   assign w_rdchk_hit = 1'b0;
+   assign dbg_rdchk = 32'd0;
+   assign w_rdchk_stall = 1'b0;
+`endif
    wire 	      w_null_target = w_null_tgt_head | w_null_tgt_two |
 				      w_null_pc_head | w_wild_restart |
 				      w_kernel_null_fault | w_wild_epc |
-				      w_user_break;
+				      w_user_break | w_rdchk_hit;
 
    /* The retire ring is a flight recorder: it NEVER back-pressures retirement.
     * (debug-infra defined this alongside its own ring; the merged tree uses the
     * r_rtrace ring, whose readback encoding is the one rtdump.cc decodes.) */
-   wire        w_rt_stall = 1'b0;
+   wire        w_rt_stall = w_rdchk_stall;
 
 `ifdef ENABLE_PC_TRACE
    /* ---- retire trace ring (rich) ---------------------------------------------
@@ -1207,7 +1660,10 @@ module core(clk,
     * reveal it via the frozen-ring bit, which nobody thinks to read. */
    always_ff@(posedge clk)
      begin
-	if(w_null_target)
+	/* only the FIRST event -- w_null_target is driven by sticky sources
+	 * (r_rdchk_hit among them), so an unqualified print emits every cycle
+	 * for the rest of the run (8.9GB of log in two minutes of a Linux boot). */
+	if(w_null_target & (~r_trace_frozen))
 	  begin
 	     if(w_wild_epc)
 	       begin
@@ -2823,6 +3279,15 @@ module core(clk,
 	/* renamed srcA + its arch name, for the retire trace's rename self-check */
 	t_rob_tail.srcA_ptr  = t_alloc_uop.srcA;
 	t_rob_tail.srcA_arch = t_uop.srcA[4:0];
+	/* retire-time reader-agreement check: renamed srcB, and whether this uop
+	 * really reads INTEGER sources (FP sources live in a different physreg
+	 * namespace and must not be looked up in the integer producer table). */
+	t_rob_tail.srcB_ptr  = t_alloc_uop.srcB;
+	t_rob_tail.srcA_rd   = t_alloc_uop.srcA_valid & (~t_alloc_uop.fp_srcA_valid);
+	t_rob_tail.srcB_rd   = t_alloc_uop.srcB_valid & (~t_alloc_uop.fp_srcB_valid);
+	t_rob_tail.chk_vals_valid = 1'b0;
+	t_rob_tail.chk_srcA_val = 'd0;
+	t_rob_tail.chk_srcB_val = 'd0;
 	t_rob_tail.post_restart = r_post_restart_arm;
 	t_rob_tail.pc = t_alloc_uop.pc;
 	/* carry the decode-time 64b-mode flag into the ROB (the P-mode-hazard guard at
@@ -2881,6 +3346,12 @@ module core(clk,
 	t_rob_next_tail.old_pdst  = 'd0;
 	t_rob_next_tail.srcA_ptr  = t_alloc_uop2.srcA;
 	t_rob_next_tail.srcA_arch = t_uop2.srcA[4:0];
+	t_rob_next_tail.srcB_ptr  = t_alloc_uop2.srcB;
+	t_rob_next_tail.srcA_rd   = t_alloc_uop2.srcA_valid & (~t_alloc_uop2.fp_srcA_valid);
+	t_rob_next_tail.srcB_rd   = t_alloc_uop2.srcB_valid & (~t_alloc_uop2.fp_srcB_valid);
+	t_rob_next_tail.chk_vals_valid = 1'b0;
+	t_rob_next_tail.chk_srcA_val = 'd0;
+	t_rob_next_tail.chk_srcB_val = 'd0;
 	t_rob_next_tail.post_restart = r_post_restart_arm & ~t_alloc;
 	t_rob_next_tail.pc = t_alloc_uop2.pc;
 	t_rob_next_tail.mode_when_fetched = t_alloc_uop2.mode_when_fetched;   /* see slot0 note above */
@@ -3181,6 +3652,9 @@ module core(clk,
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].fwd_selB <= t_complete_bundle_1.fwd_selB;
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].srcB_val <= t_complete_bundle_1.srcB_val;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].chk_srcA_val <= t_complete_bundle_1.chk_srcA_val;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].chk_srcB_val <= t_complete_bundle_1.chk_srcB_val;
+		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].chk_vals_valid <= t_complete_bundle_1.chk_vals_valid;
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].hi_nzA <= t_complete_bundle_1.hi_nzA;
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].hi_nzB <= t_complete_bundle_1.hi_nzB;
 		     r_rob_odd[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0];
@@ -3200,6 +3674,9 @@ module core(clk,
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].fwd_selB <= t_complete_bundle_1.fwd_selB;
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].srcB_val <= t_complete_bundle_1.srcB_val;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].chk_srcA_val <= t_complete_bundle_1.chk_srcA_val;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].chk_srcB_val <= t_complete_bundle_1.chk_srcB_val;
+		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].chk_vals_valid <= t_complete_bundle_1.chk_vals_valid;
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].hi_nzA <= t_complete_bundle_1.hi_nzA;
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].hi_nzB <= t_complete_bundle_1.hi_nzB;
 		     r_rob_even[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0];

@@ -1750,6 +1750,11 @@ module exec(clk,
 	complete_bundle_2.srcB_val <= 32'd0;
 	complete_bundle_2.hi_nzA <= 1'b0;
 	complete_bundle_2.hi_nzB <= 1'b0;
+	/* port 2 (mem/FP) never carries operand values -- say so explicitly, or the
+	 * ROB slot keeps the previous occupant's and the check reports a phantom. */
+	complete_bundle_2.chk_srcA_val <= 'd0;
+	complete_bundle_2.chk_srcB_val <= 'd0;
+	complete_bundle_2.chk_vals_valid <= 1'b0;
      end
 
    always_comb
@@ -4150,6 +4155,10 @@ module exec(clk,
 	     complete_bundle_1.srcB_val <= 32'd0;
 	     complete_bundle_1.hi_nzA <= 1'b0;
 	     complete_bundle_1.hi_nzB <= 1'b0;
+	     /* mul/div: the operands were consumed cycles ago, nothing to check */
+	     complete_bundle_1.chk_srcA_val <= 'd0;
+	     complete_bundle_1.chk_srcB_val <= 'd0;
+	     complete_bundle_1.chk_vals_valid <= 1'b0;
 	  end
 	else
 	  begin
@@ -4169,6 +4178,19 @@ module exec(clk,
 	     complete_bundle_1.srcB_val <= t_srcB[31:0];
 	     complete_bundle_1.hi_nzA <= |t_srcA[`M_WIDTH-1:32];
 	     complete_bundle_1.hi_nzB <= |t_srcB[`M_WIDTH-1:32];
+	     /* full-width operands for the retire-time reader-agreement check,
+	      * captured on the same edge as data/fwd_sel above */
+`ifdef RDCHK_POSCTRL
+	     /* POSITIVE CONTROL ONLY -- inject the exact defect being hunted (a
+	      * reader that saw a value its producer never wrote) on a rare, easily
+	      * counted schedule, so a quiet checker can be told apart from a blind
+	      * one.  Never enable outside a control run. */
+	     complete_bundle_1.chk_srcA_val <= (r_cycle[19:0] == 20'd0) ? (t_srcA ^ 'd1) : t_srcA;
+`else
+	     complete_bundle_1.chk_srcA_val <= t_srcA;
+`endif
+	     complete_bundle_1.chk_srcB_val <= t_srcB;
+	     complete_bundle_1.chk_vals_valid <= t_alu_valid;
 	  end
 	//(uq.rob_ptr == 'd5) ? 1'b1 : 1'b0;
      end
@@ -4331,6 +4353,7 @@ module exec(clk,
 	  end
      end // always_ff
 `endif
+
 
 
 endmodule

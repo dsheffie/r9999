@@ -35,6 +35,18 @@ typedef struct packed {
     * two without this. */
    logic [(`LG_PRF_ENTRIES-1):0] srcA_ptr;
    logic [4:0] 		         srcA_arch;
+   /* RETIRE-TIME READER-AGREEMENT CHECK: renamed srcB (srcA_ptr already above), the
+    * two "this uop really reads an INTEGER source" flags captured at ALLOC, and the
+    * operand values captured at COMPLETE.  chk_vals_valid is cleared at alloc and
+    * set only by completion port 1 -- port 2 does not carry operand values, so
+    * without that flag a mem-completing uop would be checked against whatever the
+    * previous occupant of this ROB slot left behind. */
+   logic [(`LG_PRF_ENTRIES-1):0] srcB_ptr;
+   logic 		         srcA_rd;
+   logic 		         srcB_rd;
+   logic [(`M_WIDTH-1):0]        chk_srcA_val;
+   logic [(`M_WIDTH-1):0]        chk_srcB_val;
+   logic 		         chk_vals_valid;
    logic [(`LG_PRF_ENTRIES-1):0] pdst;
    logic [(`LG_PRF_ENTRIES-1):0] old_pdst;
    logic [(`M_WIDTH-1):0] 	 pc;
@@ -112,6 +124,13 @@ typedef struct packed {
    logic [31:0] 	       srcB_val;
    logic 		       hi_nzA;
    logic 		       hi_nzB;
+   /* RETIRE-TIME READER-AGREEMENT CHECK (ENABLE_RDCHK).  Full-width operand values
+    * captured on the SAME edge as data/fwd_sel.  Deliberately separate from the
+    * 32-bit srcB_val above: that one feeds the 216-bit retire ring, whose layout is
+    * parsed by rtdump.cc on the board, so widening it would break every readback. */
+   logic [(`M_WIDTH-1):0]      chk_srcA_val;
+   logic [(`M_WIDTH-1):0]      chk_srcB_val;
+   logic 		       chk_vals_valid; /* the two above were actually captured */
 } complete_t;
 
 typedef struct packed {
