@@ -59,6 +59,10 @@ import "DPI-C" function void dirtydrop(input longint unsigned cycle, input longi
 `endif
 
 module l1d(clk,
+`ifdef FORMAL_DPRELOAD
+	   fml_pre_tag,
+	   fml_pre_data,
+`endif
 	   reset,
 	   asid,
 	   tlb_entry_in,
@@ -214,6 +218,29 @@ module l1d(clk,
    localparam TAG_LSB = (IDX_STOP < `LG_PG_SZ) ? IDX_STOP : `LG_PG_SZ;
    localparam LG_ALIAS_BITS = IDX_STOP - TAG_LSB;   // == max(0, IDX_STOP - LG_PG_SZ)
    localparam N_TAG_BITS = `PA_WIDTH - TAG_LSB;
+`ifdef FORMAL_DPRELOAD
+   /* FORMAL PRELOAD (d-side).  The flush walk normally writes valid=0 to every
+    * set; here it writes valid=1 and fills tag/data from these FREE inputs, so a
+    * load HITS immediately instead of needing a DRAM round trip.  Two payoffs:
+    *  (1) REACHABILITY -- no fill latency, so interesting states arrive in a
+    *      handful of cycles instead of the ~30 the DIVA controls needed.
+    *  (2) It makes `dst_valid` LIVE.  The response only carries dst_valid on a
+    *      CACHE-HIT reply (t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2),
+    *      and a harness that cannot manufacture a hit leaves every response-field
+    *      control CONSTANT-0 -- which is exactly why formal_l1d_rsp's c_dstv /
+    *      c_ptr / c_rob / c_dat are all dead and its bad_p0 "proof" is vacuous.
+    * These MUST be real ports, not undriven nets: the build does `setundef -zero`,
+    * which would silently tie them to 0 (the phantom mem_req_ack trap).
+    * OVER-APPROXIMATION: a free tag lets a line claim any address, so this admits
+    * cache states no real fill sequence produces.  UNSAT is therefore sound; a SAT
+    * counterexample must be checked for realizability before it is believed. */
+   input logic [N_TAG_BITS-1:0]      fml_pre_tag;
+   input logic [L1D_CL_LEN_BITS-1:0] fml_pre_data;
+   /* INIT_CACHE is the RESET walk (INITIALIZE -> INIT_CACHE -> ACTIVE) and needs no
+    * flush_req, so the preload happens automatically out of reset.  FLUSH_CACHE is
+    * included so an explicit flush re-preloads rather than emptying the cache. */
+   wire w_dpreload = ((r_state == INIT_CACHE) | (r_state == FLUSH_CACHE)) & t_mark_invalid;
+`endif
    localparam WORD_START = 2;
    localparam WORD_STOP = WORD_START+LG_WORDS_PER_CL;
    localparam DWORD_START = 3;
@@ -1185,9 +1212,15 @@ endfunction
       .clk(clk),
       .rd_addr0(t_cache_idx),
       .rd_addr1(t_cache_idx2),
+`ifdef FORMAL_DPRELOAD
+      .wr_addr(w_dpreload ? r_cache_idx : r_mem_req_addr[IDX_STOP-1:IDX_START]),
+      .wr_data(w_dpreload ? fml_pre_tag : r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
+      .wr_en(w_cacheable_mem_rsp_valid | w_dpreload),
+`else
       .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
       .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
       .wr_en(w_cacheable_mem_rsp_valid),
+`endif
       .rd_data0(r_tag_out),
       .rd_data1(r_tag_out2)
       );
@@ -1198,9 +1231,15 @@ endfunction
       .clk(clk),
       .rd_addr0(t_cache_idx),
       .rd_addr1(t_cache_idx2),
+`ifdef FORMAL_DPRELOAD
+      .wr_addr(w_dpreload ? r_cache_idx : t_array_wr_addr),
+      .wr_data(w_dpreload ? fml_pre_data : t_array_wr_data),
+      .wr_en(t_array_wr_en | w_dpreload),
+`else
       .wr_addr(t_array_wr_addr),
       .wr_data(t_array_wr_data),
       .wr_en(t_array_wr_en),
+`endif
       .rd_data0(r_array_out),
       .rd_data1(r_array_out2)
       );
@@ -1255,6 +1294,10 @@ endfunction
 	if(t_mark_invalid)
 	  begin
 	     t_write_valid_en = 1'b1;
+`ifdef FORMAL_DPRELOAD
+	     /* mark VALID instead of invalid, so the line is live after the walk */
+	     if(w_dpreload) begin t_valid_value = 1'b1; end
+`endif
 	  end
 	else if(w_cacheable_mem_rsp_valid)
 	  begin

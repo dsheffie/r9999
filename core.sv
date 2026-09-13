@@ -52,6 +52,7 @@ module core(clk,
 	    bp_wp_addr,
 	    bp_wp_val,
 	    bp_fault_only,
+	    rt_oneshot,
 	    reset,
 	    ip6,
 	    ip5,
@@ -203,6 +204,10 @@ module core(clk,
    input logic [31:0] bp_pc; /* debug: driver-programmable breakpoint PC (slv_reg9) */
    input logic [31:0] bp_wp_addr; /* debug: driver-programmable store-address watchpoint VA (slv_reg10) */
    input logic [31:0] bp_wp_val;  /* debug: expected corrupt store value to freeze on (slv_reg11) */
+   /* debug (ctrl bit22): rising edge rewinds + arms the retire ring for ONE
+    * full pass, after which it self-freezes -- a coherent dump with the core
+    * still RUNNING, so profiling never interrupts the soak. */
+   input logic rt_oneshot;
    input logic bp_fault_only;     /* debug (ctrl bit19): freeze ONLY on a FAULT at bp_pc, suppressing
                                    * every retire-match + routine-fatal-fault net.  For a HOT bp_pc
                                    * (e.g. 0e788bc0, a load that usually succeeds) whose crash is a
@@ -698,8 +703,16 @@ module core(clk,
     * into the run and made bp_enable unusable (arming bp_pc also arms this trap).
     * The remaining causes -- AdEL/AdES/IBE/DBE -- do not occur in healthy userspace,
     * so they are a real corruption signature. */
+   /* 2026-09-10: cause 10 (RI) was STILL in this list -- present since the debug
+    * interface landed (9e64731/ca2e5c7) -- even though the comment above says it is
+    * "deliberately NOT here".  The comment recorded the diagnosis; the fix was never
+    * applied.  Consequence, observed on silicon: arming bp_enable for an ARMSIG
+    * capture latched HDR-FAULT cause=10 EPC=77bef8cc within ~1s (RDHWR/TLS
+    * emulation), froze the core, and swapsoak then reprogrammed the PL -- so the
+    * retire-match at force_sig_info could never be reached.  Removing it makes the
+    * code match its own comment and is what makes bp_enable usable at all. */
    wire		w_fatal_cause = (n_cause == 5'd4) | (n_cause == 5'd5) | (n_cause == 5'd6) |
-		(n_cause == 5'd7) | (n_cause == 5'd10);
+		(n_cause == 5'd7);
    /* in fault-only mode the pipe freeze comes from w_bp_match (fault AT bp_pc); suppress the
     * general fatal-fault trap so routine cause-4/5 emulation faults elsewhere don't freeze. */
    wire		w_fault_match = bp_enable & ~bp_fault_only & ~r_fault_hit & t_arch_fault & w_fatal_cause & ~n_epc[31];
@@ -1390,6 +1403,19 @@ module core(clk,
 	     /* ONE assignment: two sequential `<=` to the same reg would let the
 	      * last win, undercounting every cycle where both checks fire */
 	     r_rdchk_checked <= r_rdchk_checked + {31'd0, r_ck_v[0]} + {31'd0, r_ck_v[1]};
+	     /* fault_clear (ctrl bit18) is documented as "clear the fault-trap latch +
+	      * re-arm + un-freeze", but r_rdchk_hit was RESET-ONLY.  Since w_rdchk_hit
+	      * is one of the eight w_null_target terms -- and the ONLY sticky one, the
+	      * other seven being single-cycle retire events -- leaving it latched held
+	      * w_null_target asserted forever, which re-froze the retire ring on the
+	      * cycle after any attempt to release it.  Placed BEFORE the hit terms so a
+	      * hit landing in the same cycle as the clear still wins (the last
+	      * non-blocking assignment to a reg is the one that takes effect). */
+	     if(fault_clear)
+	       begin
+		  r_rdchk_hit <= 1'b0;
+		  r_rdchk_degraded <= 1'b0;
+	       end
 	     if(w_hit0)
 	       begin
 		  r_rdchk_hit <= 1'b1;
@@ -1512,6 +1538,56 @@ module core(clk,
 	  end
      end // always_ff
 
+   /* ---- TIP-style stall ATTRIBUTION (3 bits, free) ----------------------
+    * r_rt_gap already gives the CYCLES chargeable to each instruction (the
+    * head-stall that preceded its retirement), so sum(gap)/insns reconciles to
+    * CPI.  What it lacks is the REASON, which is what turns a gap histogram
+    * into a time-proportional profile.  This adds the reason in the 3 bits that
+    * were already sitting as `3'd0` padding at the top of the record -- so the
+    * record stays 216b and the BRAM footprint does not change.
+    *
+    * Deliberately encodes only what CANNOT be recovered offline: the record
+    * already carries opcode/is_store/is_br/faulted, so mem-vs-muldiv-vs-alu is
+    * derived in post-processing by joining EXEC against opcode.  These codes
+    * cover WHY retirement was blocked, which is invisible after the fact.
+    *
+    * Latched on the FIRST stalled cycle of a gap (r_rt_gap==0 and not
+    * committing) and held, so the gap is attributed to what STARTED it rather
+    * than to whatever happened to be true when it finally drained. */
+   localparam [2:0] RT_ST_NONE  = 3'd0;  /* retired with no stall */
+   localparam [2:0] RT_ST_FLUSH = 3'd1;  /* machine not ACTIVE: mispredict recovery/drain/restart */
+   localparam [2:0] RT_ST_EMPTY = 3'd2;  /* ROB empty: FRONT-END starved (fetch/icache/TLB) */
+   localparam [2:0] RT_ST_BP    = 3'd3;  /* retire back-pressure (rdchk FIFO, single-step) */
+   localparam [2:0] RT_ST_EXEC  = 3'd4;  /* head present, NOT complete: join w/ opcode offline */
+   localparam [2:0] RT_ST_SER   = 3'd5;  /* serializing op in a faulted delay slot */
+   localparam [2:0] RT_ST_DS    = 3'd6;  /* faulted head waiting on its delay slot */
+   localparam [2:0] RT_ST_OTHER = 3'd7;  /* head complete but retire still gated */
+   logic [2:0] r_rt_stall, n_rt_stall;
+   wire [2:0]  w_rt_stall_cls = (r_state != ACTIVE)                     ? RT_ST_FLUSH :
+			        t_rob_empty                             ? RT_ST_EMPTY :
+			        w_rt_stall                              ? RT_ST_BP    :
+			        t_faulted_head_and_serializing_delay    ? RT_ST_SER   :
+			        (~t_rob_head_complete)                  ? RT_ST_EXEC  :
+			        (t_rob_head.faulted & t_rob_head.has_delay_slot) ? RT_ST_DS :
+			                                                  RT_ST_OTHER;
+   always_comb
+     begin
+	n_rt_stall = w_head_commit   ? RT_ST_NONE :
+		     (r_rt_gap == 'd0) ? w_rt_stall_cls :   /* first stalled cycle: latch */
+		                        r_rt_stall;         /* hold for the rest of the gap */
+     end // always_comb
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_rt_stall <= RT_ST_NONE;
+	  end
+	else
+	  begin
+	     r_rt_stall <= n_rt_stall;
+	  end
+     end // always_ff
+
    wire [31:0] 	       w_rt_flags = {25'd0,
 				     t_rob_head.is_store,
 				     t_rob_head.valid_dst,
@@ -1530,7 +1606,7 @@ module core(clk,
 				      t_rob_next_head.in_delay_slot,
 				      t_rob_next_head.faulted};
 
-   wire [215:0]        w_rt_rec_head = { 3'd0,
+   wire [215:0]        w_rt_rec_head = { r_rt_stall,
 					 t_rob_head.hi_nzB,
 					 t_rob_head.hi_nzA,
 					 r_rob_head_ptr[`LG_ROB_ENTRIES-1:0],
@@ -1556,7 +1632,7 @@ module core(clk,
 					 t_rob_head.target_pc[31:0],
 					 t_rob_head.pc[31:0] };
 
-   wire [215:0]        w_rt_rec_two  = { 3'd0,
+   wire [215:0]        w_rt_rec_two  = { r_rt_stall,
 					 t_rob_next_head.hi_nzB,
 					 t_rob_next_head.hi_nzA,
 					 r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0],
@@ -1587,24 +1663,72 @@ module core(clk,
     * op=ff and an odd slot is never mistaken for a retired instruction. */
    wire [215:0]        w_rt_rec_none = {216{1'b1}};
 
+   /* ---- ONE-SHOT capture mode (rt_oneshot, ctrl bit22) -------------------
+    * Default is a continuously-wrapping ring that freezes on w_null_target,
+    * i.e. "the last 1024 commits BEFORE a trigger".  Right for fault capture,
+    * wrong for profiling: the window is only ~82us at CPI 8, it always ENDS at
+    * the trigger, and a coherent dump requires HALTING the core because a live
+    * ring reads torn (three reads of one index return three different values).
+    *
+    * One-shot: a rising edge on rt_oneshot rewinds the ring and arms it; it
+    * records the next 1024 commits then freezes ITSELF.  The dump is then
+    * coherent WITH THE CORE STILL RUNNING -- so the soak is never interrupted
+    * and many independent windows can be sampled over time, which is what a
+    * time-proportional profile needs.  Costs two flops and a comparator. */
+   logic 	       r_rt_os_d, r_rt_os_arm;
+   wire 	       w_rt_os_edge = rt_oneshot & ~r_rt_os_d;
+   wire 	       w_rt_full    = (r_rtrace_ptr == {LG_RT_BANK{1'b1}});
+
    always_ff@(posedge clk)
      begin
 	if(reset)
 	  begin
 	     r_rtrace_ptr <= 'd0;
 	     r_rtrace_frozen <= 1'b0;
+	     r_rt_os_d <= 1'b0;
+	     r_rt_os_arm <= 1'b0;
 	  end
 	else
 	  begin
-	     if(w_null_target)
+	     r_rt_os_d <= rt_oneshot;
+	     if(w_rt_os_edge)
 	       begin
-		  r_rtrace_frozen <= 1'b1;
+		  /* rewind + arm: the window STARTS here instead of ending at a trigger */
+		  r_rtrace_ptr <= 'd0;
+		  r_rtrace_frozen <= 1'b0;
+		  r_rt_os_arm <= 1'b1;
 	       end
-	     if(w_head_commit & !r_rtrace_frozen)
+	     else
 	       begin
-		  r_rtrace_e[r_rtrace_ptr] <= w_rt_rec_head;
-		  r_rtrace_o[r_rtrace_ptr] <= t_retire_two ? w_rt_rec_two : w_rt_rec_none;
-		  r_rtrace_ptr <= r_rtrace_ptr + 'd1;
+		  /* fault_clear (ctrl bit18) releases the freeze and puts the ring
+		   * back into continuous wrapping mode.  Previously r_rtrace_frozen
+		   * cleared ONLY on reset or another one-shot edge, so a one-shot
+		   * profiling capture left FAULT capture blind for the rest of the
+		   * run and the only way back was a PL reprogram -- which restarts
+		   * the soak and destroys the very window being profiled.  Also
+		   * cancels a one-shot still in flight.  w_null_target is evaluated
+		   * AFTER this, so a trigger firing in the same cycle as the clear
+		   * still freezes and the capture is not lost. */
+		  if(fault_clear)
+		    begin
+		       r_rtrace_frozen <= 1'b0;
+		       r_rt_os_arm <= 1'b0;
+		    end
+		  if(w_null_target)
+		    begin
+		       r_rtrace_frozen <= 1'b1;
+		    end
+		  if(w_head_commit & !r_rtrace_frozen)
+		    begin
+		       r_rtrace_e[r_rtrace_ptr] <= w_rt_rec_head;
+		       r_rtrace_o[r_rtrace_ptr] <= t_retire_two ? w_rt_rec_two : w_rt_rec_none;
+		       r_rtrace_ptr <= r_rtrace_ptr + 'd1;
+		       if(r_rt_os_arm & w_rt_full)
+			 begin
+			    r_rtrace_frozen <= 1'b1;   /* buffer full: self-freeze */
+			    r_rt_os_arm <= 1'b0;
+			 end
+		    end
 	       end
 	  end
 	r_rtrace_row_e <= r_rtrace_e[dbg_trace_index[LG_RT_BANK:1]];

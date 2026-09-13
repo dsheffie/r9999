@@ -22,6 +22,15 @@ else
   exit 1
 fi
 
+echo "=== proof: bad4 = is_int & is_mem (L3a: queue steering) -- must be UNSAT ==="
+if yosys -p "$COMMON; sat -set bad4 1" 2>&1 | grep -qi "no model found"; then
+  echo "PASS: no encoding claims both queues (int pipe can never write a MEM-bank pdst)"
+else
+  echo "FAIL: counterexample below (insn hex)"
+  yosys -p "$COMMON; sat -set bad4 1 -show insn" 2>&1 | grep -A4 "insn" | head -8
+  exit 1
+fi
+
 echo "=== proof: bad3 = INT_WRITER & is_mem (bank-alias closure) -- must be UNSAT ==="
 if yosys -p "$COMMON; sat -set bad3 1" 2>&1 | grep -qi "no model found"; then
   echo "PASS: no encoding is an int-PRF writer with is_mem=1 (no MEM-bank preg can reach wen0)"

@@ -15,9 +15,15 @@ module formal_decode_p0(
    input logic [`LG_PHT_SZ-1:0] pht_idx,
    output logic 		active, // an INT_WRITER op decoded at all (vacuity check)
    output logic 		bad,    // INT_WRITER op with dst_valid=0 (must be unreachable)
-   output logic 		bad3    // INT_WRITER op with is_mem=1: alloc would hand it a MEM-bank preg
+   output logic 		bad3,   // INT_WRITER op with is_mem=1: alloc would hand it a MEM-bank preg
                                         // (>=64) and the exec-port write would alias r_ram_alu[preg-64] --
                                         // preg 64 lands ON p0's storage cell (must be unreachable)
+   output logic 		bad4    // L3a of the WRITE-BANK invariant.  exec.sv steers the two issue queues by
+                                        // DIFFERENT fields: t_push_*_int gates on is_int, t_push_*_mem on is_mem.
+                                        // A uop claiming BOTH is pushed to BOTH queues; the int pipe would then
+                                        // write it via wen0/int_uop.dst into r_ram_alu while its pdst came from
+                                        // the MEM pool (MSB=1), so every reader fetches it from r_ram_mem --
+                                        // a silently STALE operand (must be unreachable)
 );
    uop_t uop;
    decode_mips dec(
@@ -85,4 +91,5 @@ module formal_decode_p0(
    assign active = w_int_writer;
    assign bad    = w_int_writer & ~uop.dst_valid;
    assign bad3   = w_int_writer & uop.is_mem;
+   assign bad4   = uop.is_int & uop.is_mem;
 endmodule // formal_decode_p0
