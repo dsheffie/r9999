@@ -338,6 +338,13 @@ function logic is_store(opcode_t op);
        x = 1'b1;
      SCD:
        x = 1'b1;
+     SWC1:   /* FP stores are stores too -- exec.sv remaps SWC1->MEM_SW / SDC1->MEM_SD,
+              * but t_rob_tail.is_store and t_blocked_by_store use is_store() on the
+              * ORIGINAL op, so without these an sdc1/swc1 was is_store=0 in the ROB and
+              * did not block a younger load (FP interrupt-resume wedge suspect). */
+       x = 1'b1;
+     SDC1:
+       x = 1'b1;
      default:
        x = 1'b0;
    endcase // case (op)
@@ -370,6 +377,10 @@ function logic is_load(opcode_t op);
      LDR:
        x = 1'b1;
      LLD:
+       x = 1'b1;
+     LWC1:   /* FP loads are loads too (exec.sv remaps LWC1->MEM_LW / LDC1->MEM_LD) */
+       x = 1'b1;
+     LDC1:
        x = 1'b1;
      default:
        x = 1'b0;
