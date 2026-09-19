@@ -2672,12 +2672,18 @@ module core(clk,
 	     if(t_alloc)
 	       begin
 		  r_rob_complete[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_fold_uop;
-		  r_rob_sd_complete[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop.is_mem & t_uop.srcB_valid);
+		  /* must match exec.sv w_uop_has_sdata: an FP store's data operand is
+		   * fp_srcB (srcB_valid=0).  Without the fp term sdc1/swc1 retired
+		   * BEFORE their data half was read; the src physreg could then be
+		   * freed + reallocated (find-lowest free list) to a younger load that
+		   * sits behind the dataless graduated store in the L1D -> deadlock
+		   * (applu jacld_ wedge), or to an op that completes -> wrong store data. */
+		  r_rob_sd_complete[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop.is_mem & (t_uop.srcB_valid | (t_uop.fp_srcB_valid & t_uop.is_store)));
 	       end
 	     if(t_alloc_two)
 	       begin
 		  r_rob_complete[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_fold_uop2;
-		  r_rob_sd_complete[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop2.is_mem & t_uop2.srcB_valid);				    
+		  r_rob_sd_complete[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop2.is_mem & (t_uop2.srcB_valid | (t_uop2.fp_srcB_valid & t_uop2.is_store)));
 	       end
 	     if(t_complete_valid_1)
 	       begin
