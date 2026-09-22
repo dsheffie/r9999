@@ -42,8 +42,15 @@ module fpu_compare(clk, a, b, start, cond, fmt, y, fflags);
    wire 	b_is_nan = exp1_b & frac_nz_b;
    wire 	a_qbit = fmt ? a[51] : a[22];     // quiet bit = frac MSB
    wire 	b_qbit = fmt ? b[51] : b[22];
-   wire 	a_snan = a_is_nan & ~a_qbit;
-   wire 	b_snan = b_is_nan & ~b_qbit;
+/* MIPS legacy NaN semantics (the R4400 predates IEEE-754-2008 and has no FCSR.NAN2008 bit):
+ *   - a NaN is SIGNALING when its fraction MSB is SET (the inverse of the 2008 rule);
+ *   - default-NaN mode is always on: ANY NaN result is the architectural default NaN,
+ *     the input NaN's payload is NOT propagated;
+ *   - default NaN = 0x7FF7FFFFFFFFFFFF (double) / 0x7FBFFFFF (single): sign 0, exponent all
+ *     ones, fraction = 0 followed by all ones.
+ * Verified against a MIPS-legacy Berkeley SoftFloat specialization via TestFloat. */
+   wire 	a_snan = a_is_nan & a_qbit;
+   wire 	b_snan = b_is_nan & b_qbit;
    wire 	w_unordered = a_is_nan | b_is_nan;
    wire 	w_any_snan  = a_snan | b_snan;
 

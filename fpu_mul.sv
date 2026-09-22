@@ -46,19 +46,24 @@ module fpu_mul(/*AUTOARG*/
    wire 	b_is_nan = exp_all1_b & (frac_b != 'd0);
    wire 	a_is_inf = exp_all1_a & (frac_a == 'd0);
    wire 	b_is_inf = exp_all1_b & (frac_b == 'd0);
-   wire 	a_is_snan = a_is_nan & ~a[fmt ? 51 : 22];
-   wire 	b_is_snan = b_is_nan & ~b[fmt ? 51 : 22];
+/* MIPS legacy NaN semantics (the R4400 predates IEEE-754-2008 and has no FCSR.NAN2008 bit):
+ *   - a NaN is SIGNALING when its fraction MSB is SET (the inverse of the 2008 rule);
+ *   - default-NaN mode is always on: ANY NaN result is the architectural default NaN,
+ *     the input NaN's payload is NOT propagated;
+ *   - default NaN = 0x7FF7FFFFFFFFFFFF (double) / 0x7FBFFFFF (single): sign 0, exponent all
+ *     ones, fraction = 0 followed by all ones.
+ * Verified against a MIPS-legacy Berkeley SoftFloat specialization via TestFloat. */
+   wire 	a_is_snan = a_is_nan & a[fmt ? 51 : 22];
+   wire 	b_is_snan = b_is_nan & b[fmt ? 51 : 22];
    wire 	any_nan = a_is_nan | b_is_nan;
    wire 	special = any_nan | a_is_inf | b_is_inf;
    wire 	inf_x_zero = (a_is_inf & b_is_zero) | (b_is_inf & a_is_zero);
    wire 	s1_invalid = a_is_snan | b_is_snan | inf_x_zero;
    wire 	s1_in_denorm = ((exp_a == 'd0) & (frac_a != 'd0)) | ((exp_b == 'd0) & (frac_b != 'd0));
 
-   wire [63:0] 	DEF_NAN = fmt ? {1'b1, 11'h7ff, 1'b1, 51'd0} : {32'd0, 1'b1, 8'hff, 1'b1, 22'd0};
-   wire [63:0] 	nan_src = a_is_nan ? a : b;
-   wire [63:0] 	qnan = fmt ? {nan_src[63:52], 1'b1, nan_src[50:0]} : {32'd0, nan_src[31:23], 1'b1, nan_src[21:0]};
+   wire [63:0] 	DEF_NAN = fmt ? {1'b0, 11'h7ff, 1'b0, 51'h7ffffffffffff} : {32'd0, 1'b0, 8'hff, 1'b0, 22'h3fffff};
    wire [63:0] 	inf_y = fmt ? {w_sign, 11'h7ff, 52'd0} : {32'd0, w_sign, 8'hff, 23'd0};
-   wire [63:0] 	special_y = any_nan ? qnan : inf_x_zero ? DEF_NAN : inf_y;
+   wire [63:0] 	special_y = (any_nan | inf_x_zero) ? DEF_NAN : inf_y;
    wire [63:0] 	zero_y = fmt ? {w_sign, 63'd0} : {32'd0, w_sign, 31'd0};
    wire 	s1_early_valid = special | a_is_zero | b_is_zero;
    wire [63:0] 	s1_early_y = special ? special_y : zero_y;
