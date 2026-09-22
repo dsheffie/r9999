@@ -90,7 +90,28 @@ module core_l1d_l1i(clk,
 		    dbg_oldest_first_pending,
 		    dbg_trace_index,
 		    dbg_trace_data,
-		    dbg_trace_wptr
+		    dbg_trace_wptr,
+		    /* --- stable debug / co-sim interface: see the note by the
+		     * declarations below.  Declared UNCONDITIONALLY so an SoC
+		     * wrapper links regardless of which features are compiled in. */
+		    bp_fault_only,
+		    l2_nocache,
+		    asid,
+		    retire_load_addr,
+		    wf_epc,
+		    dbg_rdchk,
+		    retire_fp_reg_ptr,
+		    retire_fp_reg_data,
+		    retire_fp_reg_valid,
+		    retire_fp_reg_two_ptr,
+		    retire_fp_reg_two_data,
+		    retire_fp_reg_two_valid,
+		    retire_fcr_reg_ptr,
+		    retire_fcr_reg_data,
+		    retire_fcr_reg_valid,
+		    retire_fcr_reg_two_ptr,
+		    retire_fcr_reg_two_data,
+		    retire_fcr_reg_two_valid
 		    );
 
    localparam L1D_CL_LEN = 1 << `LG_L1D_CL_LEN;
@@ -231,6 +252,54 @@ module core_l1d_l1i(clk,
    input  logic [11:0]  dbg_trace_index;
    output logic [31:0]  dbg_trace_data;
    output logic [8:0]   dbg_trace_wptr;
+
+   /* ---- stable debug / co-sim interface ---------------------------------
+    * PORTS UNCONDITIONAL, INTERNALS DEFINE-GATED.  A port that disappears with
+    * a `define forces every instantiation to be `ifdef'ed in lockstep across
+    * repos; that is what made henry unbuildable against this core.  An unused
+    * input costs nothing and an output tied to 0 is trimmed, so declaring these
+    * always is strictly cheaper than keeping two interfaces.
+    *
+    * An SoC wrapper that wants none of this ties the inputs off and leaves the
+    * outputs empty; the instrumented wrapper connects them.  The retire_fp_*
+    * and retire_fcr_* groups are NOT debug -- they are the co-sim's view of FP
+    * and FCR architectural writes, which retire_reg_valid (int-only) cannot
+    * see.  They read 0 here until the tracing work that drives them lands. */
+   input  logic 		bp_fault_only;
+   input  logic 		l2_nocache;
+   output logic [7:0] 		asid;
+   output logic [31:0] 		retire_load_addr;
+   output logic [31:0] 		wf_epc;
+   output logic [31:0] 		dbg_rdchk;
+   output logic [4:0] 		retire_fp_reg_ptr;
+   output logic [`M_WIDTH-1:0] 	retire_fp_reg_data;
+   output logic 		retire_fp_reg_valid;
+   output logic [4:0] 		retire_fp_reg_two_ptr;
+   output logic [`M_WIDTH-1:0] 	retire_fp_reg_two_data;
+   output logic 		retire_fp_reg_two_valid;
+   output logic [4:0] 		retire_fcr_reg_ptr;
+   output logic [`M_WIDTH-1:0] 	retire_fcr_reg_data;
+   output logic 		retire_fcr_reg_valid;
+   output logic [4:0] 		retire_fcr_reg_two_ptr;
+   output logic [`M_WIDTH-1:0] 	retire_fcr_reg_two_data;
+   output logic 		retire_fcr_reg_two_valid;
+
+   assign asid                    = 'd0;
+   assign retire_load_addr        = 'd0;
+   assign wf_epc                  = 'd0;
+   assign dbg_rdchk               = 'd0;
+   assign retire_fp_reg_ptr       = 'd0;
+   assign retire_fp_reg_data      = 'd0;
+   assign retire_fp_reg_valid     = 1'b0;
+   assign retire_fp_reg_two_ptr   = 'd0;
+   assign retire_fp_reg_two_data  = 'd0;
+   assign retire_fp_reg_two_valid = 1'b0;
+   assign retire_fcr_reg_ptr      = 'd0;
+   assign retire_fcr_reg_data     = 'd0;
+   assign retire_fcr_reg_valid    = 1'b0;
+   assign retire_fcr_reg_two_ptr  = 'd0;
+   assign retire_fcr_reg_two_data = 'd0;
+   assign retire_fcr_reg_two_valid= 1'b0;
       
 
 
