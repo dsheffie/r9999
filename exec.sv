@@ -379,6 +379,14 @@ module exec(clk,
    logic [`LG_ROB_ENTRIES-1:0] t_div_rob_ptr_out;
    logic [(`M_WIDTH*2)-1:0] 	       t_div_result;
    logic [`LG_HILO_PRF_ENTRIES-1:0] t_div_hilo_prf_ptr_out;
+   /* unified divider, FP side (uni_divider.sv; all constant 0 without USE_UNI_DIVIDER).
+    * t_fdiv_pop = an FP div/sqrt pops from fp_uq THIS cycle (it starts NEXT cycle) */
+   logic 			    t_fdiv_pop, t_fdiv_start, t_fdiv_wb_used;
+   logic 			    w_fdiv_ready, w_fdiv_complete, w_fdiv_denorm;
+   logic [63:0] 		    w_fdiv_y;
+   logic [4:0] 			    w_fdiv_fflags;
+   logic [`LG_ROB_ENTRIES-1:0] 	    w_fdiv_rob_ptr;
+   logic [`LG_PRF_ENTRIES-1:0] 	    w_fdiv_dst_ptr;
    logic 			    t_div_complete;
 
    logic [N_ROB_ENTRIES-1:0] 	    r_uq_wait, r_mq_wait, r_fp_uq_wait;
@@ -1001,7 +1009,7 @@ module exec(clk,
 		//is_mult(r_alu_sched_uops[i].op);
 		
 		t_alu_entry_rdy[i] = r_alu_sched_valid[i] &&
-				     (is_div(r_alu_sched_uops[i].op) ?  t_div_ready :  (is_mult(r_alu_sched_uops[i].op) ?  !r_wb_bitvec[`MUL_LAT+2] : !r_wb_bitvec[1]))
+				     (is_div(r_alu_sched_uops[i].op) ?  (t_div_ready & !t_fdiv_pop) :  (is_mult(r_alu_sched_uops[i].op) ?  !r_wb_bitvec[`MUL_LAT+2] : !r_wb_bitvec[1]))
 				     ? (
 					(t_alu_srcA_match[i] |r_alu_srcA_rdy[i]) &
 					(t_alu_srcB_match[i] |r_alu_srcB_rdy[i]) &
@@ -1147,10 +1155,12 @@ module exec(clk,
     * two HILO writers are the multiplier (t_hilo_prf_ptr_val_out) and int->HILO
     * ops (r_start_int & t_wr_hilo). The DIV32/64_LAT reservation above is the
     * backstop that guarantees a free slot by the worst-case latency. */
-   nu_divider #(.LG_W(`LG_M_WIDTH))
+   uni_divider #(.LG_W(`LG_M_WIDTH))
    d0 (
        .clk(clk),
        .reset(reset),
+       /* ds_done: the delay slot (if any) has completed, so an op still in d0 is dead */
+       .flush(ds_done),
        /* defer the divide's WB drain for ANY int completion, not just HILO-writing
 	* ones: the divide shares the ROB completion port complete_bundle_1 with plain
 	* ALU ops (r_start_int & t_alu_valid), and div wins that mux -- so draining in
@@ -1169,7 +1179,22 @@ module exec(clk,
        .rob_ptr_out(t_div_rob_ptr_out),
        .hilo_prf_ptr_out(t_div_hilo_prf_ptr_out),
        .complete(t_div_complete),
-       .ready(t_div_ready)
+       .ready(t_div_ready),
+       .fp_opcode(r_fp_iss_uop.op),
+       .fp_start(t_fdiv_start),
+       .fp_src_a(w_fp_srcA),
+       .fp_src_b(w_fp_srcB),
+       .fp_rm(r_fcsr[1:0]),
+       .fp_rob_ptr_in(r_fp_iss_uop.rob_ptr),
+       .fp_dst_ptr_in(r_fp_iss_uop.dst),
+       .fp_wb_slot_used(t_fdiv_wb_used),
+       .fp_ready(w_fdiv_ready),
+       .fp_complete(w_fdiv_complete),
+       .fp_y(w_fdiv_y),
+       .fp_fflags(w_fdiv_fflags),
+       .fp_denorm(w_fdiv_denorm),
+       .fp_rob_ptr_out(w_fdiv_rob_ptr),
+       .fp_dst_ptr_out(w_fdiv_dst_ptr)
        );
    
    assign divide_ready = t_div_ready;
@@ -1330,11 +1355,11 @@ module exec(clk,
 	  .rdptr3(t_mem_dq.src_ptr),
 	  /* bank0 write port shared by fpu-arith result and single-cycle convert
 	   * (mutually exclusive by r_fp_wb_bitvec) */
-	  .wrptr0(w_fpu_result_valid ? w_fpu_dst_ptr : r_cvt_dst),
+	  .wrptr0(w_fdiv_complete ? w_fdiv_dst_ptr : w_fpu_result_valid ? w_fpu_dst_ptr : r_cvt_dst),
 	  .wrptr1(mem_rsp_dst_ptr),
-	  .wen0(w_fpu_result_valid | r_cvt_valid),
+	  .wen0(w_fdiv_complete | w_fpu_result_valid | r_cvt_valid),
 	  .wen1(mem_rsp_dst_valid & mem_rsp_fp_dst),
-	  .wr0(w_fpu_result_valid ? w_fpu_result : r_cvt_result),
+	  .wr0(w_fdiv_complete ? w_fdiv_y : w_fpu_result_valid ? w_fpu_result : r_cvt_result),
 	  /* FR=0 lwc1 merge: splice the loaded 32 into the fp_hi half, keep fp_pres. */
 	  .wr1(mem_rsp_fp_merge
 	       ? (mem_rsp_fp_hi ? {mem_rsp_load_data[31:0], mem_rsp_fp_pres}
@@ -1374,6 +1399,9 @@ module exec(clk,
 	     else
 	       n_prf_inflight[mem_rsp_dst_ptr] = 1'b0;
 	  end
+	/* the unified divider's FP result clears its FP-dst inflight bit */
+	if(w_fdiv_complete)
+	  n_fp_prf_inflight[w_fdiv_dst_ptr] = 1'b0;
 	/* FP arithmetic result clears the FP-dst inflight bit */
 	if(w_fpu_result_valid)
 	  n_fp_prf_inflight[w_fpu_dst_ptr] = 1'b0;
@@ -1465,6 +1493,10 @@ module exec(clk,
 			   (r_fp_iss_uop.op == SP_MOV) || (r_fp_iss_uop.op == DP_MOV);
    /* both convert and signop are single-cycle (bitvec dist 2, fpu bypassed) */
    wire w_head_is_sc = w_head_is_cvt | w_head_is_signop;
+   wire w_head_is_ds = (fp_uq.op == SP_DIV) || (fp_uq.op == DP_DIV) ||
+		       (fp_uq.op == SP_SQRT) || (fp_uq.op == DP_SQRT);
+   wire w_iss_is_ds  = (r_fp_iss_uop.op == SP_DIV) || (r_fp_iss_uop.op == DP_DIV) ||
+		       (r_fp_iss_uop.op == SP_SQRT) || (r_fp_iss_uop.op == DP_SQRT);
    wire w_iss_is_sc  = w_iss_is_cvt  | w_iss_is_signop;
    /* abs.* clears the sign, neg.* flips it, mov.* copies; single zero-extends low 32 */
    wire w_signop_dbl = (r_fp_iss_uop.op == DP_ABS) || (r_fp_iss_uop.op == DP_NEG) || (r_fp_iss_uop.op == DP_MOV);
@@ -1550,8 +1582,18 @@ module exec(clk,
 	t_fpu_srcs_rdy = t_fpu_srcA_rdy && t_fpu_srcB_rdy && t_fpu_fcr_rdy;
 	/* writeback slot for the head op (convert=2, fpu arith/compare=FPU_LAT+1 from pop)
 	 * must be free, else stall a cycle (mixed-latency shared FP writeback port). */
+	/* div.s/div.d/sqrt.s/sqrt.d run on the unified divider (d0), not fpu0.
+	 * Variable latency, one op in flight, shared with the INTEGER divides: the
+	 * head pops only when d0 is free (w_fdiv_ready), starts from the issue stage
+	 * the next cycle, and drains into the FP writeback port / complete_bundle_2
+	 * in the first cycle neither fpu0 nor the convert path is using them -- so it
+	 * takes no r_fp_wb_bitvec reservation. */
 	t_pop_fp_uq = !t_fp_uq_empty && !t_flash_clear && t_fpu_srcs_rdy &&
-		      !r_fp_wb_bitvec[w_head_is_sc ? 2 : (`FPU_LAT+1)];
+		      (w_head_is_ds ? w_fdiv_ready
+				    : !r_fp_wb_bitvec[w_head_is_sc ? 2 : (`FPU_LAT+1)]);
+	t_fdiv_pop     = t_pop_fp_uq & w_head_is_ds;
+	t_fdiv_start   = r_fp_iss_valid & w_iss_is_ds;
+	t_fdiv_wb_used = w_fpu_result_valid | w_fpu_fcr_valid | r_cvt_valid;
      end
 
    /* FP writeback reservation: shift down each cycle; on pop, reserve dist-1 (next-cycle
@@ -1604,7 +1646,7 @@ module exec(clk,
 	.reset(reset),
 	.pc(r_fp_iss_uop.pc),
 	.opcode(r_fp_iss_uop.op),
-	.start(r_fp_iss_valid & ~w_iss_is_sc),   /* converts + sign-ops bypass the fpu (single-cycle path) */
+	.start(r_fp_iss_valid & ~w_iss_is_sc & ~w_iss_is_ds),   /* converts + sign-ops bypass the fpu (single-cycle path); div/sqrt -> d0 */
 	.src_a(w_fp_srcA),
 	.src_b(w_fp_srcB),
 	.src_c({`M_WIDTH{1'b0}}),   /* no MADD: src_c unused */
@@ -1679,8 +1721,8 @@ module exec(clk,
     * ExcCode 15) iff denorm (Unimplemented E, always) OR an enabled IEEE flag
     * (fflags & FCSR.Enable[11:7]).  Routed via complete_bundle_2.faulted -> the
     * ROB is_fpe bit -> ARCH_FAULT.  (convert raises no denorm.) */
-   wire [4:0] w_fp_cmpl_fflags = (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_fflags : r_cvt_fflags;
-   wire       w_fp_cmpl_denorm = (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_denorm : r_cvt_denorm;
+   wire [4:0] w_fp_cmpl_fflags = w_fdiv_complete ? w_fdiv_fflags : (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_fflags : r_cvt_fflags;
+   wire       w_fp_cmpl_denorm = w_fdiv_complete ? w_fdiv_denorm : (w_fpu_result_valid | w_fpu_fcr_valid) ? w_fpu_denorm : r_cvt_denorm;
    wire       w_fp_fault = w_fp_cmpl_denorm | (|(w_fp_cmpl_fflags & r_fcsr[11:7]));
 
    // ---- FCR PRF: inflight tracking + write ----
@@ -1729,13 +1771,13 @@ module exec(clk,
 	   * EXCEPTION_DRAIN (ds_done held high the whole drain) so it clears its
 	   * r_rob_inflight bit -- otherwise the drain's r_rob_inflight==0 exit never fires
 	   * and the machine deadlocks.  Matches mipscore (FP complete has no ds_done gate). */
-	  complete_valid_2 <= (w_fpu_result_valid || w_fpu_fcr_valid || r_cvt_valid);
+	  complete_valid_2 <= (w_fpu_result_valid || w_fpu_fcr_valid || r_cvt_valid || w_fdiv_complete);
      end
    always_ff@(posedge clk)
      begin
 	/* port-2 source mux: fpu arith/compare, else the single-cycle convert.
 	 * r_fp_wb_bitvec guarantees these never assert in the same cycle. */
-	complete_bundle_2.rob_ptr <= (w_fpu_result_valid || w_fpu_fcr_valid) ? w_fpu_rob_ptr : r_cvt_rob;
+	complete_bundle_2.rob_ptr <= w_fdiv_complete ? w_fdiv_rob_ptr : (w_fpu_result_valid || w_fpu_fcr_valid) ? w_fpu_rob_ptr : r_cvt_rob;
 	complete_bundle_2.complete <= 1'b1;
 	complete_bundle_2.faulted <= w_fp_fault;   /* FP exception (denorm/enabled IEEE) -> is_fpe -> ExcCode 15 */
 	complete_bundle_2.restart_pc <= 'd0;
@@ -1744,7 +1786,7 @@ module exec(clk,
 	complete_bundle_2.overflow <= 1'b0;
 	complete_bundle_2.trap <= 1'b0;
 	complete_bundle_2.fp_flags <= {w_fp_cmpl_denorm, w_fp_cmpl_fflags};
-	complete_bundle_2.data <= (w_fpu_result_valid || w_fpu_fcr_valid) ? w_fpu_result : r_cvt_result;
+	complete_bundle_2.data <= w_fdiv_complete ? w_fdiv_y : (w_fpu_result_valid || w_fpu_fcr_valid) ? w_fpu_result : r_cvt_result;
      end
 
    always_comb
