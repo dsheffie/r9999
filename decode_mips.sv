@@ -1404,6 +1404,7 @@ module decode_mips(
 			 uop.srcA = fs;        /* carry the FCR number (NOT a PRF read) */
 			 uop.is_int = 1'b1;
 			 uop.oldest_first = 1'b1;
+			 uop.fcr_src_valid = 1'b1; /* read the renamed FCC to materialize FCSR */
 		      end
 		    else if((insn[25:21]==5'd6) && (insn[10:0] == 11'd0))
 		      begin /* ctc1: FCR[fs] <- GPR[rt] (only FCR31 is writable) */
@@ -1411,6 +1412,7 @@ module decode_mips(
 			 uop.dst = fs;         /* carry the FCR number (NOT a PRF write) */
 			 uop.srcA = rt;
 			 uop.srcA_valid = 1'b1;
+			 uop.fcr_dst_valid = 1'b1;  /* CTC1 writes all 8 CCs: full write */
 			 uop.is_int = 1'b1;
 			 uop.serializing_op = 1'b1;
 		      end

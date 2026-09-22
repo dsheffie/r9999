@@ -1738,9 +1738,15 @@ module core(clk,
 	    end
 	  ALLOC_FOR_SERIALIZE:
 	    begin
-	       t_alloc = !t_rob_full && !t_uq_full 
-			 && (r_prf_free != 'd0) 
-			   && !t_dq_empty;
+	       /* CTC1 now takes an FCR dst, so the serialize path must check the
+		* non-integer free lists too -- find_lowest_set_bit hands out index
+		* 0 on an empty bank, i.e. physreg 0. */
+	       t_alloc = !t_rob_full && !t_uq_full
+			 && !t_dq_empty
+			 && t_enough_iprfs
+			 && t_enough_hlprfs
+			 && t_enough_fprfs
+			 && t_enough_fcrprfs;
 	       n_state = t_alloc ? WAIT_FOR_SERIALIZE_AND_RESTART : ALLOC_FOR_SERIALIZE;
 	    end
 	  WAIT_FOR_SERIALIZE_AND_RESTART:
@@ -1994,9 +2000,15 @@ module core(clk,
 	    end
 	  SERIALIZE_IN_FAULTED_DELAY_SLOT:
 	    begin
-	       t_alloc = !t_rob_full && !t_uq_full 
-			 && (r_prf_free != 'd0) 
-			   && !t_dq_empty;
+	       /* CTC1 now takes an FCR dst, so the serialize path must check the
+		* non-integer free lists too -- find_lowest_set_bit hands out index
+		* 0 on an empty bank, i.e. physreg 0. */
+	       t_alloc = !t_rob_full && !t_uq_full
+			 && !t_dq_empty
+			 && t_enough_iprfs
+			 && t_enough_hlprfs
+			 && t_enough_fprfs
+			 && t_enough_fcrprfs;
 	       n_state = t_alloc ? WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT : 
 			 SERIALIZE_IN_FAULTED_DELAY_SLOT;
 	    end
@@ -2456,7 +2468,7 @@ module core(clk,
 	t_rob_next_tail.is_call = t_alloc_uop2.op == JAL || t_alloc_uop2.op == JALR || t_alloc_uop2.op == BAL;
 	t_rob_next_tail.is_irq = t_alloc_uop2.op == IRQ;
 	
-	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop.srcA == 'd31);
+	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop2.srcA == 'd31);
 	t_rob_next_tail.is_break = (t_alloc_uop2.op == BREAK);
 	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);
 	t_rob_next_tail.is_cache = t_alloc_uop2.is_cache;

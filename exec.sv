@@ -1406,6 +1406,15 @@ module exec(clk,
 
    /* renamed FCR (FP condition-code byte) physical register file */
    logic [7:0] r_fcr_prf[N_FCR_PRF_ENTRIES-1:0];
+   /* FP condition codes live ONLY here.  r_fcsr holds bits 23 and 31:25 at zero
+    * and CFC1 ORs the renamed vector back in, so the two cannot drift apart --
+    * which is how `ctc1 $t,$31; bc1t' came to read a stale condition code. */
+   localparam [31:0] FCC_MASK = {7'h7f, 1'b0, 1'b1, 23'd0};
+   function automatic logic [31:0] fcc_expand(input logic [7:0] cc);
+      begin
+	 fcc_expand = {cc[7:1], 1'b0, cc[0], 23'd0};
+      end
+   endfunction
    logic [N_FCR_PRF_ENTRIES-1:0] r_fcr_prf_inflight, n_fcr_prf_inflight;
 
    /* fpu outputs */
@@ -1684,6 +1693,11 @@ module exec(clk,
 	  n_fcr_prf_inflight[uq_uop_two.hilo_dst] = 1'b1;
 	if(w_fpu_fcr_valid)
 	  n_fcr_prf_inflight[w_fpu_fcr_ptr] = 1'b0;
+	/* CTC1 produces an FCR value from the INT pipe and must clear its own
+	 * inflight bit, or every later FCR reader waits for an FP completion
+	 * that never comes. */
+	if(r_start_int & t_wr_fcsr)
+	  n_fcr_prf_inflight[int_uop.hilo_dst] = 1'b0;
      end
    always_ff@(posedge clk)
      begin
@@ -1701,6 +1715,8 @@ module exec(clk,
 	  end
 	else if(w_fpu_fcr_valid)
 	  r_fcr_prf[w_fpu_fcr_ptr] <= w_fpu_result[7:0];
+	else if(r_start_int & t_wr_fcsr)
+	  r_fcr_prf[int_uop.hilo_dst] <= {t_srcA[31:25], t_srcA[23]};
      end
 
    // ---- FP completion -> ROB port 2 ----
@@ -2596,7 +2612,7 @@ module exec(clk,
 	       /* fs in srcA[4:0]: FCR0=FIR (read-only R4000 id), FCR31=FCSR */
 	       t_result = (int_uop.srcA[4:0] == 5'd0) ?
 			  sign_extend32(32'h00000500) : /* FIR: imp=0x05 (R4000 FPU), rev 0 */
-			  sign_extend32(r_fcsr);
+			  sign_extend32(r_fcsr | fcc_expand(r_fcr_prf[int_uop.hilo_src]));
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -3680,7 +3696,7 @@ module exec(clk,
 	 * a retiring FP op's Cause/Flags update (core_fcsr_we). */
 	n_fcsr = r_fcsr;
 	if(r_start_int & t_wr_fcsr)
-	  n_fcsr = t_srcA[31:0];
+	  n_fcsr = t_srcA[31:0] & ~FCC_MASK;   /* FCC lives in r_fcr_prf */
 	else if(core_fcsr_we)
 	  begin
 	     n_fcsr[17:12] = core_fcsr_cause6;          /* Cause = this op's exceptions */
@@ -3781,7 +3797,7 @@ module exec(clk,
 	   r_sr_cu0 <= s12[28];  r_sr_cu1 <= s12[29]; r_sr_fr  <= s12[26]; r_sr_bev <= s12[22];
 	   r_sr_ts  <= s12[21];  r_sr_im  <= s12[15:8];
 	   r_wired   <= c6[5:0];     r_random <= c1[5:0];     r_count <= loadcp0(9);  r_toggle <= 1'b0;
-	   r_compare <= loadcp0(11); r_fcsr   <= loadfcsr();
+	   r_compare <= loadcp0(11); r_fcsr   <= loadfcsr() & ~FCC_MASK;
 	   r_watchlo <= loadcp0(18); r_watchhi<= loadcp0(19); r_timer_ip <= 1'b0;
 	end
 	else begin
