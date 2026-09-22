@@ -111,7 +111,12 @@ module core_l1d_l1i(clk,
 		    retire_fcr_reg_valid,
 		    retire_fcr_reg_two_ptr,
 		    retire_fcr_reg_two_data,
-		    retire_fcr_reg_two_valid
+		    retire_fcr_reg_two_valid,
+		    dbg_rob_inflight,
+		    retire_load_addr_two,
+		    rt_oneshot,
+		    wf_badv,
+		    wf_stat
 		    );
 
    localparam L1D_CL_LEN = 1 << `LG_L1D_CL_LEN;
@@ -271,6 +276,11 @@ module core_l1d_l1i(clk,
    output logic [31:0] 		retire_load_addr;
    output logic [31:0] 		wf_epc;
    output logic [31:0] 		dbg_rdchk;
+   input  logic 		rt_oneshot;
+   output logic [31:0] 		dbg_rob_inflight;
+   output logic [31:0] 		retire_load_addr_two;
+   output logic [31:0] 		wf_badv;
+   output logic [31:0] 		wf_stat;
    output logic [4:0] 		retire_fp_reg_ptr;
    output logic [`M_WIDTH-1:0] 	retire_fp_reg_data;
    output logic 		retire_fp_reg_valid;
@@ -288,6 +298,10 @@ module core_l1d_l1i(clk,
    assign retire_load_addr        = 'd0;
    assign wf_epc                  = 'd0;
    assign dbg_rdchk               = 'd0;
+   assign dbg_rob_inflight        = 'd0;
+   assign retire_load_addr_two    = 'd0;
+   assign wf_badv                 = 'd0;
+   assign wf_stat                 = 'd0;
       
 
 
