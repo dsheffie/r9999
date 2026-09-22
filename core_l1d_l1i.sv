@@ -288,18 +288,6 @@ module core_l1d_l1i(clk,
    assign retire_load_addr        = 'd0;
    assign wf_epc                  = 'd0;
    assign dbg_rdchk               = 'd0;
-   assign retire_fp_reg_ptr       = 'd0;
-   assign retire_fp_reg_data      = 'd0;
-   assign retire_fp_reg_valid     = 1'b0;
-   assign retire_fp_reg_two_ptr   = 'd0;
-   assign retire_fp_reg_two_data  = 'd0;
-   assign retire_fp_reg_two_valid = 1'b0;
-   assign retire_fcr_reg_ptr      = 'd0;
-   assign retire_fcr_reg_data     = 'd0;
-   assign retire_fcr_reg_valid    = 1'b0;
-   assign retire_fcr_reg_two_ptr  = 'd0;
-   assign retire_fcr_reg_two_data = 'd0;
-   assign retire_fcr_reg_two_valid= 1'b0;
       
 
 
@@ -863,6 +851,18 @@ module core_l1d_l1i(clk,
 	     .retire_reg_two_ptr(retire_reg_two_ptr),
 	     .retire_reg_two_data(retire_reg_two_data),
 	     .retire_reg_two_valid(retire_reg_two_valid),
+	     .retire_fp_reg_ptr(retire_fp_reg_ptr),
+	     .retire_fp_reg_data(retire_fp_reg_data),
+	     .retire_fp_reg_valid(retire_fp_reg_valid),
+	     .retire_fp_reg_two_ptr(retire_fp_reg_two_ptr),
+	     .retire_fp_reg_two_data(retire_fp_reg_two_data),
+	     .retire_fp_reg_two_valid(retire_fp_reg_two_valid),
+	     .retire_fcr_reg_ptr(retire_fcr_reg_ptr),
+	     .retire_fcr_reg_data(retire_fcr_reg_data),
+	     .retire_fcr_reg_valid(retire_fcr_reg_valid),
+	     .retire_fcr_reg_two_ptr(retire_fcr_reg_two_ptr),
+	     .retire_fcr_reg_two_data(retire_fcr_reg_two_data),
+	     .retire_fcr_reg_two_valid(retire_fcr_reg_two_valid),
 	     .retire_valid(retire_valid),
 	     .retire_two_valid(retire_two_valid),
 	     .retire_delay_slot(t_retire_delay_slot),

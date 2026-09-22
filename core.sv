@@ -113,6 +113,18 @@ module core(clk,
 	    retire_reg_two_ptr,
 	    retire_reg_two_data,
 	    retire_reg_two_valid,
+	    retire_fp_reg_ptr,
+	    retire_fp_reg_data,
+	    retire_fp_reg_valid,
+	    retire_fp_reg_two_ptr,
+	    retire_fp_reg_two_data,
+	    retire_fp_reg_two_valid,
+	    retire_fcr_reg_ptr,
+	    retire_fcr_reg_data,
+	    retire_fcr_reg_valid,
+	    retire_fcr_reg_two_ptr,
+	    retire_fcr_reg_two_data,
+	    retire_fcr_reg_two_valid,
 	    retire_valid,
 	    retire_two_valid,
 	    retire_delay_slot,
@@ -252,6 +264,23 @@ module core(clk,
    output logic [4:0] 			  retire_reg_two_ptr;
    output logic [`M_WIDTH-1:0]		  retire_reg_two_data;
    output logic 			  retire_reg_two_valid;
+   /* FP and FCR architectural writes, for the co-sim.  retire_reg_valid tests
+    * only valid_dst, so an FP register write was invisible to the checker --
+    * every FP value bug stayed silent until it leaked through an mfc1/swc1.
+    * rob_entry_t.data already carries the FP result (complete_bundle_2 writes
+    * it), and for a compare data[7:0] is the condition-code vector. */
+   output logic [4:0] 		  retire_fp_reg_ptr;
+   output logic [`M_WIDTH-1:0] 	  retire_fp_reg_data;
+   output logic 		  retire_fp_reg_valid;
+   output logic [4:0] 		  retire_fp_reg_two_ptr;
+   output logic [`M_WIDTH-1:0] 	  retire_fp_reg_two_data;
+   output logic 		  retire_fp_reg_two_valid;
+   output logic [4:0] 		  retire_fcr_reg_ptr;
+   output logic [`M_WIDTH-1:0] 	  retire_fcr_reg_data;
+   output logic 		  retire_fcr_reg_valid;
+   output logic [4:0] 		  retire_fcr_reg_two_ptr;
+   output logic [`M_WIDTH-1:0] 	  retire_fcr_reg_two_data;
+   output logic 		  retire_fcr_reg_two_valid;
    
    output logic 			  retire_valid;
    output logic 			  retire_two_valid;
@@ -1121,6 +1150,18 @@ module core(clk,
    	     retire_reg_two_ptr <= 'd0;
    	     retire_reg_two_data <= 'd0;
    	     retire_reg_two_valid <= 1'b0;
+   	     retire_fp_reg_ptr <= 'd0;
+   	     retire_fp_reg_data <= 'd0;
+   	     retire_fp_reg_valid <= 1'b0;
+   	     retire_fp_reg_two_ptr <= 'd0;
+   	     retire_fp_reg_two_data <= 'd0;
+   	     retire_fp_reg_two_valid <= 1'b0;
+   	     retire_fcr_reg_ptr <= 'd0;
+   	     retire_fcr_reg_data <= 'd0;
+   	     retire_fcr_reg_valid <= 1'b0;
+   	     retire_fcr_reg_two_ptr <= 'd0;
+   	     retire_fcr_reg_two_data <= 'd0;
+   	     retire_fcr_reg_two_valid <= 1'b0;
    	     retire_valid <= 1'b0;
 	     retire_two_valid <= 1'b0;
 	     
@@ -1146,6 +1187,18 @@ module core(clk,
    	     retire_reg_two_ptr <= t_rob_next_head.ldst;
    	     retire_reg_two_data <= t_rob_next_head.data;
    	     retire_reg_two_valid <= t_rob_next_head.valid_dst && t_retire_two;
+   	     retire_fp_reg_ptr <= t_rob_head.ldst;
+   	     retire_fp_reg_data <= t_rob_head.data;
+   	     retire_fp_reg_valid <= t_rob_head.valid_fp_dst && t_retire;
+   	     retire_fp_reg_two_ptr <= t_rob_next_head.ldst;
+   	     retire_fp_reg_two_data <= t_rob_next_head.data;
+   	     retire_fp_reg_two_valid <= t_rob_next_head.valid_fp_dst && t_retire_two;
+   	     retire_fcr_reg_ptr <= t_rob_head.ldst;
+   	     retire_fcr_reg_data <= t_rob_head.data;
+   	     retire_fcr_reg_valid <= t_rob_head.valid_fcr_dst && t_retire;
+   	     retire_fcr_reg_two_ptr <= t_rob_next_head.ldst;
+   	     retire_fcr_reg_two_data <= t_rob_next_head.data;
+   	     retire_fcr_reg_two_valid <= t_rob_next_head.valid_fcr_dst && t_retire_two;
 	     
    	     retire_valid <= t_retire;
 	     retire_two_valid <= t_retire_two;
