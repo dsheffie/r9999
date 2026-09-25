@@ -2703,7 +2703,11 @@ endfunction
 		     * through to DRAM via MEM_WB -- L2 flushes its copy (or writes the
 		     * carried data straight to DRAM on an L2 miss) so the line actually
 		     * reaches memory instead of going dirty into L2 (the DMA-descriptor
-		     * coherence bug). */
+		     * coherence bug).  Invalidate the line too: Index_WB_Inv_D must
+		     * not leave it VALID+DIRTY, or a later DMA-in to that line is
+		     * shadowed by the stale copy (read hits it, eviction writes it
+		     * over the DMA data) -- ~/code/murphi/r9999_caches.m. */
+		    t_mark_invalid = 1'b1;
 		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_cacheable = 1'b1;
