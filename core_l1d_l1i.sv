@@ -378,7 +378,12 @@ module core_l1d_l1i(clk,
    logic 	r_ext_pend, n_ext_pend;      /* an external flush is outstanding */
    logic 	r_ext_cov,  n_ext_cov;       /* the IN-FLIGHT sequence started while pending */
    logic 	r_ext_done, n_ext_done;
-   assign ext_flush_done = r_ext_done;
+   /* the ARM's whole-cache flush now runs through the CORE, like an IRQ (decode
+    * injects a serializing whole-L1D CACHE op; see core.sv ext_flush_req), so the
+    * caches are never flushed under live core traffic.  The sequencer's own
+    * ext path below is no longer driven (r_ext_pend stays 0). */
+   wire 	w_core_ext_done;
+   assign ext_flush_done = w_core_ext_done;
 
    logic [7:0] r_ext_req_cnt, r_ext_done_cnt;
    always_ff@(posedge clk)
@@ -394,7 +399,7 @@ module core_l1d_l1i(clk,
 	       begin
 		  r_ext_req_cnt <= r_ext_req_cnt + 8'd1;
 	       end
-	     if(r_ext_done)
+	     if(w_core_ext_done)
 	       begin
 		  r_ext_done_cnt <= r_ext_done_cnt + 8'd1;
 	       end
@@ -517,7 +522,7 @@ module core_l1d_l1i(clk,
 	n_flush = r_flush;
 	n_flush_l2 = 1'b0;
 	/* accumulate the single-cycle req/complete pulses so no state can miss one */
-	n_ext_pend  = r_ext_pend | ext_flush_req;
+	n_ext_pend  = r_ext_pend;
 	n_ext_cov   = r_ext_cov;
 	n_ext_done  = 1'b0;
 	/* drive from the PENDING flag, not the request pulse: a request arriving
@@ -768,8 +773,8 @@ module core_l1d_l1i(clk,
 		* external request must be OR'd here TOO -- omitting it left the L2
 		* never starting and w_l2_flush_complete never asserting, hanging the
 		* sequence in FLUSH_L2 forever. */
-	       .l1i_flush_req(flush_req_l1i | ext_flush_req),
-	       .l1d_flush_req(flush_req_l1d | ext_flush_req),
+	       .l1i_flush_req(flush_req_l1i ),
+	       .l1d_flush_req(flush_req_l1d ),
 	       .l1i_flush_complete(l1i_flush_complete),
 	       .l1d_flush_complete(l1d_flush_complete),
 	       
@@ -859,7 +864,7 @@ module core_l1d_l1i(clk,
 		* completion from a cache that was never told to flush -> ext_flush_done
 		* never fired -> the SCSI IRQ was held forever and the disk never
 		* attached.  l1d/l1i latch flush_req stickily, so a pulse suffices. */
-	       .flush_req(flush_req_l1d | ext_flush_req),
+	       .flush_req(flush_req_l1d ),
 	       .flush_cl_req(flush_cl_req),
 	       .flush_cl_addr(flush_cl_addr),
 	       .flush_cl_inval(flush_cl_inval),
@@ -905,7 +910,7 @@ module core_l1d_l1i(clk,
 	      .in_64b_kernel_mode(w_in_64b_kernel_mode),
 	      .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 	      .in_64b_user_mode(w_in_64b_user_mode),
-	      .flush_req(flush_req_l1i | ext_flush_req),
+	      .flush_req(flush_req_l1i ),
 	      .flush_complete(l1i_flush_complete),
 	      .restart_pc(restart_pc),
 	      .restart_src_pc(restart_src_pc),
@@ -992,6 +997,8 @@ module core_l1d_l1i(clk,
 	     .l1d_flush_complete(l1d_flush_complete),
 	     .l1i_flush_complete(l1i_flush_complete),
 	     .l2_flush_complete(w_l2_flush_complete),
+	     .ext_flush_req(ext_flush_req),
+	     .ext_flush_done(w_core_ext_done),
 	     .insn(insn),
 	     .insn_valid(insn_valid),
 	     .insn_ack(insn_ack),

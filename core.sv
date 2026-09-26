@@ -89,6 +89,8 @@ module core(clk,
 	    l1d_flush_complete,
 	    l1i_flush_complete,
 	    l2_flush_complete,
+	    ext_flush_req,
+	    ext_flush_done,
 	    insn, 
 	    insn_valid,
 	    insn_ack,
@@ -228,6 +230,12 @@ module core(clk,
    input logic			 l1d_flush_complete;
    input logic			 l1i_flush_complete;
    input logic			 l2_flush_complete;
+   /* ARM-requested whole-cache flush (via core_l1d_l1i).  Handled like an IRQ:
+    * while pending, decode replaces a non-delay-slot instruction with a
+    * serializing whole-L1D CACHE op (cache_all); it flushes L1D then L2 with the
+    * core drained, restarts at its own pc, and pulses ext_flush_done. */
+   input logic			 ext_flush_req;
+   output logic			 ext_flush_done;
    
 	
    input 	insn_fetch_t insn;
@@ -553,6 +561,22 @@ module core(clk,
    logic 		     n_l1i_flush_complete, r_l1i_flush_complete;
    logic 		     n_l1d_flush_complete, r_l1d_flush_complete;
    logic 		     n_l2_flush_complete, r_l2_flush_complete;
+   logic 		     n_xflush_pend, r_xflush_pend;
+   logic 		     n_xflush_done, r_xflush_done;
+   assign ext_flush_done = r_xflush_done;
+`ifdef VERILATOR
+   /* an injected ext_flush uop must never land in a delay slot: it replaces the
+    * instruction, and a replaced delay slot is silently lost (the restart only
+    * re-runs .pc, and a delay slot re-run out of context is wrong). */
+   always_ff@(negedge clk)
+     begin
+	if(t_alloc & t_alloc_uop.cache_all & r_in_delay_slot)
+	  begin
+	     $display("XFLUSH IN DELAY SLOT: pc %x at cycle %d", t_alloc_uop.pc, r_cycle);
+	     $stop();
+	  end
+     end
+`endif
    
    logic [31:0] 	     r_arch_a0;
 
@@ -2002,6 +2026,8 @@ module core(clk,
 	     r_l1i_flush_complete <= 1'b0;
 	     r_l1d_flush_complete <= 1'b0;
 	     r_l2_flush_complete <= 1'b0;
+	     r_xflush_pend <= 1'b0;
+	     r_xflush_done <= 1'b0;
 	     r_ds_done <= 1'b0;
 	     drain_ds_complete <= 1'b0;
 	     r_epc <= 'd0;
@@ -2038,6 +2064,8 @@ module core(clk,
 	     r_l1i_flush_complete <= n_l1i_flush_complete;
 	     r_l1d_flush_complete <= n_l1d_flush_complete;
 	     r_l2_flush_complete <= n_l2_flush_complete;
+	     r_xflush_pend <= n_xflush_pend;
+	     r_xflush_done <= n_xflush_done;
 	     r_ds_done <= n_ds_done;
 	     drain_ds_complete <= r_ds_done;
 	     r_epc <= n_epc;
@@ -2143,7 +2171,11 @@ module core(clk,
    	     retire_reg_two_data <= t_rob_next_head.data;
    	     retire_reg_two_valid <= t_rob_next_head.valid_dst && t_retire_two;
 	     
-   	     retire_valid <= t_retire;
+   	     /* an injected ext_flush uop (cache_all) leaves the ROB like any CACHE op
+   	      * but is NOT an architectural instruction -- it replaced the insn at .pc,
+   	      * which the restart re-executes -- so it must not count as retired (an IRQ
+   	      * uop never retires either: it commits through the fault path). */
+   	     retire_valid <= t_retire & !t_rob_head.cache_all;
 	     retire_two_valid <= t_retire_two;
    	     retire_pc <= t_rob_head.pc;
 	     retire_two_pc <= t_rob_next_head.pc;
@@ -2421,6 +2453,8 @@ module core(clk,
 	n_l1i_flush_complete = r_l1i_flush_complete || l1i_flush_complete;
 	n_l1d_flush_complete = r_l1d_flush_complete || l1d_flush_complete;
 	n_l2_flush_complete = r_l2_flush_complete || l2_flush_complete;
+	n_xflush_pend = r_xflush_pend | ext_flush_req;
+	n_xflush_done = 1'b0;
 	
 	
 	if(r_state == ACTIVE)
@@ -2765,7 +2799,13 @@ module core(clk,
 			  * the completes of the caches we don't touch so CACHE_FLUSH's
 			  * uniform all-three wait still fires. Restart afterward to
 			  * refetch (mandatory once L1I is gone; harmless for D). */
-			 if(t_rob_head.cache_is_d)
+			 if(t_rob_head.cache_all)
+			   begin
+			      /* injected ext_flush: whole L1D; the sequencer chains the L2 */
+			      n_flush_req_l1d = 1'b1;
+			      n_l1i_flush_complete = 1'b1;          /* not flushing L1I */
+			   end
+			 else if(t_rob_head.cache_is_d)
 			   begin
 			      n_flush_cl_req  = 1'b1;
 			      /* EA = base+offset, masked to a physical address (kseg0/kseg1
@@ -2810,7 +2850,9 @@ module core(clk,
 	       if(n_l1i_flush_complete && n_l1d_flush_complete && n_l2_flush_complete)
 		 begin
 		    t_clr_dq = 1'b1;
-		    n_restart_pc = t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
+		    /* an injected ext_flush replaced the instruction at .pc: re-run it */
+		    n_restart_pc = t_rob_head.cache_all ? t_rob_head.pc :
+				   t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
 		    n_restart_src_pc = t_rob_head.pc;
 		    n_restart_src_is_indirect = 1'b0;
 		    n_restart_valid = 1'b1;
@@ -2820,6 +2862,11 @@ module core(clk,
 			 n_l1i_flush_complete = 1'b0;
 			 n_l1d_flush_complete = 1'b0;
 			 n_l2_flush_complete = 1'b0;
+			 if(t_rob_head.cache_all)
+			   begin
+			      n_xflush_pend = 1'b0;
+			      n_xflush_done = 1'b1;
+			   end
 			 n_state = ACTIVE;
 		      end
 		 end
@@ -3431,6 +3478,7 @@ module core(clk,
 	t_rob_tail.is_cache  = t_alloc_uop.is_cache;
 	t_rob_tail.cache_is_d = t_alloc_uop.cache_is_d;
 	t_rob_tail.cache_inval = t_alloc_uop.cache_inval;
+	t_rob_tail.cache_all = t_alloc_uop.cache_all;
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
 	t_rob_tail.is_tlbp = (t_alloc_uop.op == TLBP);
 	
@@ -3490,6 +3538,7 @@ module core(clk,
 	t_rob_next_tail.is_cache = t_alloc_uop2.is_cache;
 	t_rob_next_tail.cache_is_d = t_alloc_uop2.cache_is_d;
 	t_rob_next_tail.cache_inval = t_alloc_uop2.cache_inval;
+	t_rob_next_tail.cache_all = t_alloc_uop2.cache_all;
 	t_rob_next_tail.is_tlbp = (t_alloc_uop2.op == TLBP);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.is_fpe = 1'b0;
@@ -4321,7 +4370,13 @@ module core(clk,
 	  end
 	else
 	  begin
-	     r_dec_delay_slot <= t_clr_rob ? 1'b0 : n_dec_delay_slot;
+	     /* also reset when only the DQ is cleared (serialize / CACHE_FLUSH /
+	      * HALT / exception restarts, none of which restart INTO a delay slot):
+	      * a stale 1 made the refetched first branch look like a delay slot, so
+	      * ITS real delay slot looked like an ordinary insn and the irq/xflush
+	      * injection could replace it (caught on silicon: IRIX swtch lost a
+	      * delay-slot `lw s2` -> KERNEL FAULT badvaddr 0x1e8). */
+	     r_dec_delay_slot <= (t_clr_rob | t_clr_dq) ? 1'b0 : n_dec_delay_slot;
 	  end
      end // always_ff@ (posedge clk)
    //t_push_dq_one
@@ -4373,6 +4428,7 @@ module core(clk,
 		     .cu1(w_cu1),
 		     .fr(w_fr),
 		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0) `R4K_IRQ_G0),
+		     .xflush(r_xflush_pend & (t_dec0_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn.tlb_miss),
 		     .tlb_invalid(insn.tlb_invalid),
 		     .misaligned(insn.misaligned),
@@ -4397,6 +4453,7 @@ module core(clk,
 		     .cu1(w_cu1),
 		     .fr(w_fr),
 		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0) `R4K_IRQ_G1),
+		     .xflush(r_xflush_pend & (t_dec1_in_delay_slot == 1'b0)),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .tlb_invalid(insn_two.tlb_invalid),
 		     .misaligned(insn_two.misaligned),

@@ -12,6 +12,7 @@ module decode_mips(
 		   cu1,
 		   fr,
 		   irq,
+		   xflush,
 		   tlb_miss,
 		   tlb_invalid,
 		   misaligned,
@@ -34,6 +35,10 @@ module decode_mips(
    input logic			cu1;   /* Status.CU1 (coprocessor-1 / FPU enable) */
    input logic			fr;    /* Status.FR (FP register mode: 1=32x64b, 0=16 even/odd pairs) */
    input logic			irq;
+   /* an ARM-requested whole-cache flush is pending: replace this (non-delay-slot)
+    * instruction with a serializing whole-L1D CACHE op, exactly as an IRQ
+    * replaces it; the core restarts at this pc once the flush completes. */
+   input logic			xflush;
    input logic			tlb_miss;
    input logic			tlb_invalid;
    input logic			misaligned;
@@ -135,6 +140,7 @@ module decode_mips(
 	uop.is_cache = 1'b0;
 	uop.cache_is_d = 1'b0;
 	uop.cache_inval = 1'b0;
+	uop.cache_all = 1'b0;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 	uop.fetch_cycle = fetch_cycle;
 `endif
@@ -142,6 +148,17 @@ module decode_mips(
 	if(irq)
 	  begin
 	     uop.op = IRQ;
+	  end
+	else if(xflush)
+	  begin
+	     uop.op = CACHE_OP;
+	     uop.is_int = 1'b1;
+	     uop.serializing_op = 1'b1;
+	     uop.is_cache = 1'b1;
+	     uop.cache_is_d = 1'b1;
+	     uop.cache_all = 1'b1;
+	     uop.srcA = 'd0;
+	     uop.srcA_valid = 1'b1;
 	  end
 	else if(misaligned)
 	  begin

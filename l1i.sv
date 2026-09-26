@@ -1140,7 +1140,11 @@ endfunction
 	t_insn3.pred_target = 'd0;
 	t_insn3.pred = 1'b0;
 	t_insn3.pht_idx = r_pht_idx;
-	t_insn3.is_branch = 1'b0;
+	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
+	 * sit in slot 2, and a hardcoded 0 left ITS delay slot looking like an
+	 * ordinary insn to decode's delay-slot tracker -> irq/xflush injection
+	 * could replace a delay slot (IRIX swtch lost `lw s2` -> KERNEL FAULT). */
+	t_insn3.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd2) != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn3.fetch_cycle = r_cycle;
 `endif
@@ -1153,7 +1157,11 @@ endfunction
 	t_insn4.pred_target = 'd0;
 	t_insn4.pred = 1'b0;
 	t_insn4.pht_idx = r_pht_idx;
-	t_insn4.is_branch = 1'b0;
+	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
+	 * sit in slot 3, and a hardcoded 0 left ITS delay slot looking like an
+	 * ordinary insn to decode's delay-slot tracker -> irq/xflush injection
+	 * could replace a delay slot (IRIX swtch lost `lw s2` -> KERNEL FAULT). */
+	t_insn4.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd3) != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn4.fetch_cycle = r_cycle;
 `endif

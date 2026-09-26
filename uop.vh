@@ -420,6 +420,7 @@ typedef struct packed {
    logic 		       is_cache;   /* MIPS CACHE op (serializing flush) */
    logic 		       cache_is_d; /* CACHE targets D-cache (per-line WB) vs I-cache (whole nuke) */
    logic 		       cache_inval; /* CACHE Hit-Invalidate: drop the line WITHOUT writeback (DMA-in) */
+   logic 		       cache_all;   /* injected for an ARM ext_flush: whole L1D + L2 flush */
    logic 		       is_fp;   /* compute FP op (routes to the FP issue queue) */
    logic 		       cpu_ce1; /* CpU is for CP1 (Status.CU1=0) -> Cause.CE=1 (vs CP0 CpU = CE=0) */
    logic [`LG_PHT_SZ-1:0]      pht_idx;
