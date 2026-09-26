@@ -663,6 +663,21 @@ module l2(clk,
 			 n_rsp_valid = 1'b1;
 		      end
 		 end
+	       else if(r_opcode == MEM_PGDROP)
+		 begin
+		    /* injected page drop (L1D page walk, XPG_INV): the DMA deposit is in
+		     * DRAM, so drop the L2 copy WITHOUT a writeback (a writeback would
+		     * clobber the deposit).  Report a dirty hit in rsp_data[0]: the
+		     * pre-transfer XPG_WBINV cleaned the page, so dirty here is a bug. */
+		    if(w_hit)
+		      begin
+			 t_wr_valid = 1'b1; t_valid = 1'b0;
+			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
+		      end
+		    n_rsp_data = {127'd0, w_hit & w_dirty};
+		    n_state = IDLE;
+		    n_rsp_valid = 1'b1;
+		 end
 	       else if(r_opcode == MEM_SNOOP_INVL)
 		 begin
 		    /* DMA-coherence snoop discard: the SCSI DMA overwrote DRAM for this

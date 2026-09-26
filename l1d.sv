@@ -93,6 +93,8 @@ module l1d(clk,
 	   dma_inval_req,
 	   dma_inval_addr,
 	   dma_inval_ack,
+	   flush_pg_req,
+	   pg_drop_dirty_cnt,
 	   //inputs from core
 	   core_mem_req_valid,
 	   core_mem_req,
@@ -166,6 +168,18 @@ module l1d(clk,
    input logic 		      dma_inval_req;
    input logic [`PA_WIDTH-1:0] dma_inval_addr;
    output logic 	      dma_inval_ack;
+   /* injected page op (XPG_WBINV / XPG_INV): walk the page's lines at flush_cl_addr
+    * (page-aligned PA, held by the core like the CACHE-op address), flush_cl_inval =
+    * drop (XPG_INV).  Per line, L1D then L2 -- the core is drained at the ROB head, so
+    * the order is free (~/code/murphi/r9999_pagewalk.m):
+    *   WBINV: L1D dirty hit -> MEM_WB (to DRAM, L2 copy dropped); otherwise invalidate
+    *          an L1D hit and MEM_INVL (L2 writes back if dirty, then drops).
+    *   INV:   invalidate an L1D hit, MEM_PGDROP (L2 drops without writeback).
+    * One flush_complete pulse at the end of the page. */
+   input logic 		      flush_pg_req;
+   /* dirty lines found by XPG_INV walks (L1D + L2): a correctly cleaned page has none,
+    * so any nonzero count is a coherence bug (saturating). */
+   output logic [15:0] 	      pg_drop_dirty_cnt;
    input logic 		      flush_req;
    output logic 	      flush_complete;
 
@@ -384,6 +398,15 @@ endfunction
    logic 				  r_dma_inval_req, n_dma_inval_req;
    logic 				  r_dma_inval_ack, n_dma_inval_ack;
    logic 				  r_cl_is_dma, n_cl_is_dma;   /* owner of the in-flight FLUSH_CL */
+   logic 				  r_flush_pg_req, n_flush_pg_req;
+   localparam LG_PG_LINES = `LG_PG_SZ - `LG_L1D_CL_LEN;
+   logic [LG_PG_LINES-1:0] 		  r_pg_off, n_pg_off;
+   logic [15:0] 			  r_pg_dirty_cnt, n_pg_dirty_cnt;
+   assign pg_drop_dirty_cnt = r_pg_dirty_cnt;
+   wire [`PA_WIDTH-1:0] 		  w_pg_line = {flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ], r_pg_off, {`LG_L1D_CL_LEN{1'b0}}};
+   wire [`PA_WIDTH-1:0] 		  w_pg_line_nxt = {flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ], r_pg_off + 1'b1, {`LG_L1D_CL_LEN{1'b0}}};
+   wire [`PA_WIDTH-1:0] 		  w_pg_line0 = {flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ], {`LG_PG_SZ{1'b0}}};
+   wire 				  w_pg_hit = r_valid_out & (r_tag_out == w_pg_line[`PA_WIDTH-1:TAG_LSB]);
    assign dma_inval_ack = r_dma_inval_ack;
    /* arbitrated line address/op: the CPU CACHE-op wins; DMA is always invalidate */
    wire [`M_WIDTH-1:0] 			  w_cl_addr  = r_cl_is_dma ? {{(`M_WIDTH-`PA_WIDTH){1'b0}}, dma_inval_addr} : flush_cl_addr;
@@ -495,7 +518,11 @@ endfunction
 			      * CHOP_BEAT2 but for the whole-cache-flush path -- re-index to
 			      * set+1 and re-run FLUSH_CL so a 32B-stride Index_WB_Invalidate
 			      * covers both 16B lines. */
-			     FLUSH_CL_BEAT2_RD = 'd16
+			     FLUSH_CL_BEAT2_RD = 'd16,
+			     /* injected page op: one line of the page per visit (RAM
+			      * outputs are for w_pg_line), then wait for the L2 ack */
+			     FLUSH_PG = 'd17,
+			     FLUSH_PG_WAIT = 'd18
                              } state_t;
 
    
@@ -589,6 +616,32 @@ endfunction
                                         {`LG_L1D_CL_LEN{1'b0}}});
    logic r_sc_should_write;
 
+`ifdef VERILATOR
+   logic r_pg_wait2;
+   always_ff@(posedge clk)
+     begin
+	r_pg_wait2 <= reset ? 1'b0 : (r_state == FLUSH_PG_WAIT) & (n_state == FLUSH_PG_WAIT);
+     end
+   /* XPG_INV found a dirty line: the page was not cleaned before its DMA deposit */
+   always_ff@(negedge clk)
+     begin
+	if((r_state == FLUSH_PG) & flush_cl_inval & w_pg_hit & r_dirty_out)
+	  begin
+	     $display("[pgdrop-dirty] L1D cyc=%d pa=%x", r_cycle, w_pg_line);
+	  end
+	/* the walk held the index, so from the 2nd wait cycle on the RAM output is the
+	 * post-invalidate line: a page op must never leave a page line valid */
+	if((r_state == FLUSH_PG_WAIT) & r_pg_wait2 & w_pg_hit)
+	  begin
+	     $display("[pgwalk] LINE STILL VALID after page op: cyc=%d pa=%x", r_cycle, w_pg_line);
+	     $stop();
+	  end
+	if((r_state == FLUSH_PG_WAIT) & mem_rsp_valid & flush_cl_inval & mem_rsp_load_data[0])
+	  begin
+	     $display("[pgdrop-dirty] L2 cyc=%d pa=%x", r_cycle, w_pg_line);
+	  end
+     end // always_ff
+`endif
    logic t_reset_graduated;
    /* CACHE hit-type mem ops (MEM_CHWB/CHWBINV/CHINV): line ops with dtlb-translated
     * PAs, deferred to post-retirement via store graduation. */
@@ -1053,6 +1106,9 @@ endfunction
 	     r_dma_inval_req <= 1'b0;
 	     r_dma_inval_ack <= 1'b0;
 	     r_cl_is_dma <= 1'b0;
+	     r_flush_pg_req <= 1'b0;
+	     r_pg_off <= 'd0;
+	     r_pg_dirty_cnt <= 16'd0;
 	     r_chop_wait <= 1'b0;
 	     r_chop_beat <= 1'b0;
 	     r_flush_cl_beat <= 1'b0;
@@ -1110,6 +1166,9 @@ endfunction
 	     r_dma_inval_req <= n_dma_inval_req;
 	     r_dma_inval_ack <= n_dma_inval_ack;
 	     r_cl_is_dma <= n_cl_is_dma;
+	     r_flush_pg_req <= n_flush_pg_req;
+	     r_pg_off <= n_pg_off;
+	     r_pg_dirty_cnt <= n_pg_dirty_cnt;
 	     r_chop_wait <= n_chop_wait;
 	     r_chop_beat <= n_chop_beat;
 	     r_flush_cl_beat <= n_flush_cl_beat;
@@ -1968,6 +2027,9 @@ endfunction
 	n_dma_inval_req = r_dma_inval_req | dma_inval_req;
 	n_dma_inval_ack = 1'b0;
 	n_cl_is_dma = r_cl_is_dma;
+	n_flush_pg_req = r_flush_pg_req | flush_pg_req;
+	n_pg_off = r_pg_off;
+	n_pg_dirty_cnt = r_pg_dirty_cnt;
 	n_flush_complete = 1'b0;
 	t_addr = 'd0;
 	
@@ -2602,6 +2664,13 @@ endfunction
 		    n_cl_is_dma = 1'b0;
 		    n_state = FLUSH_CL;
 		 end
+	       else if(r_flush_pg_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
+		 begin
+		    t_cache_idx = w_pg_line0[IDX_STOP-1:IDX_START];
+		    n_flush_pg_req = 1'b0;
+		    n_pg_off = 'd0;
+		    n_state = FLUSH_PG;
+		 end
 	       else if(r_dma_inval_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
 		 begin
 		    /* DMA-completion invalidate of one line.  Lower priority than the
@@ -2835,6 +2904,56 @@ endfunction
 		    n_mem_req_valid = 1'b1;
 		    n_chop_wait = 1'b1;
 		    n_state = FLUSH_CL_WAIT;
+		 end
+	    end
+	  FLUSH_PG:
+	    begin
+	       t_cache_idx = r_cache_idx;
+	       n_mem_req_addr = w_pg_line;
+	       n_mem_req_cacheable = 1'b1;
+	       n_mem_req_mask = 16'hffff;
+	       n_mem_req_valid = 1'b1;
+	       n_state = FLUSH_PG_WAIT;
+	       if(w_pg_hit)
+		 begin
+		    t_mark_invalid = 1'b1;
+		 end
+	       if(!flush_cl_inval & w_pg_hit & r_dirty_out)
+		 begin
+		    n_mem_req_opcode = MEM_WB;
+		    n_mem_req_store_data = t_data;
+		    n_inhibit_write = 1'b1;
+		 end
+	       else
+		 begin
+		    n_mem_req_opcode = flush_cl_inval ? MEM_PGDROP : MEM_INVL;
+		 end
+	       if(flush_cl_inval & w_pg_hit & r_dirty_out & (r_pg_dirty_cnt != 16'hffff))
+		 begin
+		    n_pg_dirty_cnt = r_pg_dirty_cnt + 16'd1;
+		 end
+	    end
+	  FLUSH_PG_WAIT:
+	    begin
+	       t_cache_idx = r_cache_idx;
+	       if(mem_rsp_valid)
+		 begin
+		    n_inhibit_write = 1'b0;
+		    if(flush_cl_inval & mem_rsp_load_data[0] & (n_pg_dirty_cnt != 16'hffff))
+		      begin
+			 n_pg_dirty_cnt = n_pg_dirty_cnt + 16'd1;
+		      end
+		    if(r_pg_off == {LG_PG_LINES{1'b1}})
+		      begin
+			 n_flush_complete = 1'b1;
+			 n_state = ACTIVE;
+		      end
+		    else
+		      begin
+			 n_pg_off = r_pg_off + 'd1;
+			 t_cache_idx = w_pg_line_nxt[IDX_STOP-1:IDX_START];
+			 n_state = FLUSH_PG;
+		      end
 		 end
 	    end
 	  FLUSH_CACHE:

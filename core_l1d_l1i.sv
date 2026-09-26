@@ -99,6 +99,10 @@ module core_l1d_l1i(clk,
 		    l2_flush_done,
 		    ext_flush_req,
 		    ext_flush_done,
+		    ext_flush_ppn,
+		    ext_flush_whole,
+		    ext_flush_drop,
+		    ext_flush_dirty_cnt,
 		    dbg_flush,
 		    dma_inval_req,
 		    dma_inval_addr,
@@ -309,6 +313,17 @@ module core_l1d_l1i(clk,
     * the flush already finished, and drops the ordering guarantee silently.
     * Request -> wait for this pulse has no such gap. */
    output logic 	 ext_flush_done;
+   /* what the ARM-requested flush covers, sampled with ext_flush_req: the physical
+    * page, or (ext_flush_whole) the whole cache.  ext_flush_drop picks the page op:
+    * 1 = drop without write back (after a deposit), 0 = write back + invalidate. */
+   input logic [`PA_WIDTH-1:`LG_PG_SZ] ext_flush_ppn;
+   input logic 		 ext_flush_whole;
+   /* page mode only: 0 = write back + invalidate (before a transfer), 1 = drop
+    * (after a deposit) */
+   input logic 		 ext_flush_drop;
+   /* dirty lines an XPG_INV page drop found (L1D + L2, saturating): nonzero = a page
+    * was not cleaned before its DMA deposit, i.e. a coherence bug */
+   output logic [15:0] 	 ext_flush_dirty_cnt;
    /* On-silicon flush diagnostics, readable over AXI even when the CORE is wedged
     * (mips-axi reads registers on the ARM bus).  REQ != DONE counts => a flush is
     * outstanding, and [2:0] says which stage owns it.  Localising the L2 stall
@@ -351,6 +366,7 @@ module core_l1d_l1i(clk,
    logic 				  flush_cl_req;
    logic [`M_WIDTH-1:0] 		  flush_cl_addr;
    logic 				  flush_cl_inval;
+   logic 				  flush_pg_req;
    wire 				  l1d_flush_complete;
    wire 				  l1i_flush_complete;
 
@@ -871,6 +887,8 @@ module core_l1d_l1i(clk,
 	       .dma_inval_req(dma_inval_req),
 	       .dma_inval_addr(dma_inval_addr),
 	       .dma_inval_ack(dma_inval_ack),
+	       .flush_pg_req(flush_pg_req),
+	       .pg_drop_dirty_cnt(ext_flush_dirty_cnt),
 	       .flush_complete(l1d_flush_complete),
 	       .core_mem_req_valid(core_mem_req_valid),
 	       .core_mem_req(core_mem_req),
@@ -994,10 +1012,14 @@ module core_l1d_l1i(clk,
 	     .flush_cl_req(flush_cl_req),
 	     .flush_cl_addr(flush_cl_addr),
 	     .flush_cl_inval(flush_cl_inval),
+	     .flush_pg_req(flush_pg_req),
 	     .l1d_flush_complete(l1d_flush_complete),
 	     .l1i_flush_complete(l1i_flush_complete),
 	     .l2_flush_complete(w_l2_flush_complete),
 	     .ext_flush_req(ext_flush_req),
+	     .ext_flush_ppn(ext_flush_ppn),
+	     .ext_flush_whole(ext_flush_whole),
+	     .ext_flush_drop(ext_flush_drop),
 	     .ext_flush_done(w_core_ext_done),
 	     .insn(insn),
 	     .insn_valid(insn_valid),

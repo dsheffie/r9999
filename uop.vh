@@ -278,7 +278,13 @@ typedef enum logic [7:0]
     * "trap if negative": the overflow rule needs the result sign to differ from
     * the minuend's, and with a $0 minuend only 0x80000000 does that.  So the
     * whole overflow condition collapses to a single equality. */
-   NEGT
+   NEGT,
+   /* ARM-requested cache maintenance, injected by decode like an IRQ (see
+    * core.sv ext_flush_req); the page's physical address rides in {jmp_imm, imm}.
+    * Not architectural instructions: they never count as retired. */
+   XFLUSH,       /* whole L1D then L2: write back + invalidate */
+   XPG_WBINV,    /* one page, before a transfer: write back + invalidate (L1D, then L2) */
+   XPG_INV       /* one page, after a deposit: drop, no write back (L2, then L1D) */
    } opcode_t;
 
 function logic is_mult(opcode_t op);
@@ -297,6 +303,21 @@ function logic is_mult(opcode_t op);
    endcase
    return x;
 endfunction // is_mult
+
+function logic is_xflush(opcode_t op);
+   logic     x;
+   case(op)
+     XFLUSH:
+       x = 1'b1;
+     XPG_WBINV:
+       x = 1'b1;
+     XPG_INV:
+       x = 1'b1;
+     default:
+       x = 1'b0;
+   endcase
+   return x;
+endfunction // is_xflush
 
 function logic is_div(opcode_t op);
    logic     x;
@@ -420,7 +441,6 @@ typedef struct packed {
    logic 		       is_cache;   /* MIPS CACHE op (serializing flush) */
    logic 		       cache_is_d; /* CACHE targets D-cache (per-line WB) vs I-cache (whole nuke) */
    logic 		       cache_inval; /* CACHE Hit-Invalidate: drop the line WITHOUT writeback (DMA-in) */
-   logic 		       cache_all;   /* injected for an ARM ext_flush: whole L1D + L2 flush */
    logic 		       is_fp;   /* compute FP op (routes to the FP issue queue) */
    logic 		       cpu_ce1; /* CpU is for CP1 (Status.CU1=0) -> Cause.CE=1 (vs CP0 CpU = CE=0) */
    logic [`LG_PHT_SZ-1:0]      pht_idx;

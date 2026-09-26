@@ -86,11 +86,15 @@ module core(clk,
 	    flush_cl_req,
 	    flush_cl_addr,
 	    flush_cl_inval,
+	    flush_pg_req,
 	    l1d_flush_complete,
 	    l1i_flush_complete,
 	    l2_flush_complete,
 	    ext_flush_req,
 	    ext_flush_done,
+	    ext_flush_ppn,
+	    ext_flush_whole,
+	    ext_flush_drop,
 	    insn, 
 	    insn_valid,
 	    insn_ack,
@@ -226,16 +230,23 @@ module core(clk,
    output logic flush_cl_req;
    output logic [(`M_WIDTH-1):0] flush_cl_addr;
    output logic flush_cl_inval; /* per-line flush is an invalidate-no-writeback (DMA-in) */
+   /* injected page op: L1D walks the page at flush_cl_addr (flush_cl_inval = drop) */
+   output logic flush_pg_req;
 
    input logic			 l1d_flush_complete;
    input logic			 l1i_flush_complete;
    input logic			 l2_flush_complete;
    /* ARM-requested whole-cache flush (via core_l1d_l1i).  Handled like an IRQ:
     * while pending, decode replaces a non-delay-slot instruction with a
-    * serializing whole-L1D CACHE op (cache_all); it flushes L1D then L2 with the
+    * serializing XFLUSH/XPG_* uop; it flushes L1D then L2 with the
     * core drained, restarts at its own pc, and pulses ext_flush_done. */
    input logic			 ext_flush_req;
    output logic			 ext_flush_done;
+   /* sampled when the request is accepted and held until ext_flush_done: the page to
+    * flush, or the whole cache. */
+   input logic [`PA_WIDTH-1:`LG_PG_SZ] ext_flush_ppn;
+   input logic			 ext_flush_whole;
+   input logic			 ext_flush_drop;     /* page mode: 1 = drop, 0 = write back + invalidate */
    
 	
    input 	insn_fetch_t insn;
@@ -563,14 +574,27 @@ module core(clk,
    logic 		     n_l2_flush_complete, r_l2_flush_complete;
    logic 		     n_xflush_pend, r_xflush_pend;
    logic 		     n_xflush_done, r_xflush_done;
+   logic [`PA_WIDTH-1:`LG_PG_SZ] n_xflush_ppn, r_xflush_ppn;
+   logic 		     n_xflush_whole, r_xflush_whole;
+   logic 		     n_xflush_drop, r_xflush_drop;
    assign ext_flush_done = r_xflush_done;
+   /* the op and page address decode injects into the flush uop */
+   wire [`M_WIDTH-1:0] w_xflush_addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, r_xflush_ppn, {`LG_PG_SZ{1'b0}}};
+   wire opcode_t w_xflush_op = r_xflush_whole ? XFLUSH : (r_xflush_drop ? XPG_INV : XPG_WBINV);
 `ifdef VERILATOR
    /* an injected ext_flush uop must never land in a delay slot: it replaces the
     * instruction, and a replaced delay slot is silently lost (the restart only
     * re-runs .pc, and a delay slot re-run out of context is wrong). */
    always_ff@(negedge clk)
      begin
-	if(t_alloc & t_alloc_uop.cache_all & r_in_delay_slot)
+	/* the injected flush's page address must reach rob.data unchanged */
+	if((r_state == WAIT_FOR_SERIALIZE_AND_RESTART) & t_rob_head_complete & is_xflush(t_rob_head.opcode) &
+	   (t_rob_head.data != w_xflush_addr))
+	  begin
+	     $display("XFLUSH ADDRESS MISMATCH: rob.data %x expected %x at cycle %d", t_rob_head.data, w_xflush_addr, r_cycle);
+	     $stop();
+	  end
+	if(t_alloc & is_xflush(t_alloc_uop.op) & r_in_delay_slot)
 	  begin
 	     $display("XFLUSH IN DELAY SLOT: pc %x at cycle %d", t_alloc_uop.pc, r_cycle);
 	     $stop();
@@ -636,6 +660,7 @@ module core(clk,
    logic 		     n_flush_cl_req, r_flush_cl_req;
    logic [(`M_WIDTH-1):0]    n_flush_cl_addr, r_flush_cl_addr;
    logic 		     n_flush_cl_inval, r_flush_cl_inval;
+   logic 		     n_flush_pg_req, r_flush_pg_req;
    logic 		     r_ds_done, n_ds_done;
    
    logic 		     t_can_retire_rob_head;
@@ -863,6 +888,7 @@ module core(clk,
    assign flush_cl_req = r_flush_cl_req;
    assign flush_cl_addr = r_flush_cl_addr;
    assign flush_cl_inval = r_flush_cl_inval;
+   assign flush_pg_req = r_flush_pg_req;
 
    
    assign got_break = r_got_break;
@@ -2003,6 +2029,7 @@ module core(clk,
 	     r_flush_cl_req <= 1'b0;
 	     r_flush_cl_addr <= 'd0;
 	     r_flush_cl_inval <= 1'b0;
+	     r_flush_pg_req <= 1'b0;
 	     r_restart_pc <= 'd0;
 	     r_restart_src_pc <= 'd0;
 	     r_restart_src_is_indirect <= 1'b0;
@@ -2028,6 +2055,9 @@ module core(clk,
 	     r_l2_flush_complete <= 1'b0;
 	     r_xflush_pend <= 1'b0;
 	     r_xflush_done <= 1'b0;
+	     r_xflush_ppn <= 'd0;
+	     r_xflush_whole <= 1'b1;
+	     r_xflush_drop <= 1'b0;
 	     r_ds_done <= 1'b0;
 	     drain_ds_complete <= 1'b0;
 	     r_epc <= 'd0;
@@ -2041,6 +2071,7 @@ module core(clk,
 	     r_flush_cl_req <= n_flush_cl_req;
 	     r_flush_cl_addr <= n_flush_cl_addr;
 	     r_flush_cl_inval <= n_flush_cl_inval;
+	     r_flush_pg_req <= n_flush_pg_req;
 	     r_restart_pc <= n_restart_pc;
 	     r_restart_src_pc <= n_restart_src_pc;
 	     r_restart_src_is_indirect <= n_restart_src_is_indirect;
@@ -2066,6 +2097,9 @@ module core(clk,
 	     r_l2_flush_complete <= n_l2_flush_complete;
 	     r_xflush_pend <= n_xflush_pend;
 	     r_xflush_done <= n_xflush_done;
+	     r_xflush_ppn <= n_xflush_ppn;
+	     r_xflush_whole <= n_xflush_whole;
+	     r_xflush_drop <= n_xflush_drop;
 	     r_ds_done <= n_ds_done;
 	     drain_ds_complete <= r_ds_done;
 	     r_epc <= n_epc;
@@ -2171,11 +2205,11 @@ module core(clk,
    	     retire_reg_two_data <= t_rob_next_head.data;
    	     retire_reg_two_valid <= t_rob_next_head.valid_dst && t_retire_two;
 	     
-   	     /* an injected ext_flush uop (cache_all) leaves the ROB like any CACHE op
+   	     /* an injected ext_flush uop (XFLUSH/XPG_*) leaves the ROB like any CACHE op
    	      * but is NOT an architectural instruction -- it replaced the insn at .pc,
    	      * which the restart re-executes -- so it must not count as retired (an IRQ
    	      * uop never retires either: it commits through the fault path). */
-   	     retire_valid <= t_retire & !t_rob_head.cache_all;
+   	     retire_valid <= t_retire & !is_xflush(t_rob_head.opcode);
 	     retire_two_valid <= t_retire_two;
    	     retire_pc <= t_rob_head.pc;
 	     retire_two_pc <= t_rob_next_head.pc;
@@ -2442,6 +2476,7 @@ module core(clk,
 	n_flush_cl_req = 1'b0;
 	n_flush_cl_addr = r_flush_cl_addr;
 	n_flush_cl_inval = r_flush_cl_inval;
+	n_flush_pg_req = 1'b0;
 	n_got_break = r_got_break;
 	n_pending_break = r_pending_break;
 	n_pending_ud = r_pending_ud;
@@ -2454,6 +2489,15 @@ module core(clk,
 	n_l1d_flush_complete = r_l1d_flush_complete || l1d_flush_complete;
 	n_l2_flush_complete = r_l2_flush_complete || l2_flush_complete;
 	n_xflush_pend = r_xflush_pend | ext_flush_req;
+	n_xflush_ppn = r_xflush_ppn;
+	n_xflush_whole = r_xflush_whole;
+	n_xflush_drop = r_xflush_drop;
+	if(ext_flush_req & !r_xflush_pend)
+	  begin
+	     n_xflush_ppn = ext_flush_ppn;
+	     n_xflush_whole = ext_flush_whole;
+	     n_xflush_drop = ext_flush_drop;
+	  end
 	n_xflush_done = 1'b0;
 	
 	
@@ -2786,7 +2830,7 @@ module core(clk,
 	    begin
 	       if(t_rob_head_complete)
 		 begin
-		    if(t_rob_head.is_cache)
+		    if(t_rob_head.is_cache | is_xflush(t_rob_head.opcode))
 		      begin
 `ifdef IRIX_CACHE_TRACE
 			 $display("[cache] pc=%x is_d=%b inval=%b EA=%x",
@@ -2799,11 +2843,23 @@ module core(clk,
 			  * the completes of the caches we don't touch so CACHE_FLUSH's
 			  * uniform all-three wait still fires. Restart afterward to
 			  * refetch (mandatory once L1I is gone; harmless for D). */
-			 if(t_rob_head.cache_all)
+			 if(t_rob_head.opcode == XFLUSH)
 			   begin
-			      /* injected ext_flush: whole L1D; the sequencer chains the L2 */
+			      /* injected whole-cache ext_flush: the whole L1D, and the
+			       * sequencer chains the L2. */
 			      n_flush_req_l1d = 1'b1;
 			      n_l1i_flush_complete = 1'b1;          /* not flushing L1I */
+			   end
+			 else if(is_xflush(t_rob_head.opcode))
+			   begin
+			      /* injected page op (XPG_WBINV / XPG_INV): t_rob_head.data = the
+			       * page's physical address.  The L1D walks the page line by line
+			       * and carries each line to the L2 itself, so no L2 flush. */
+			      n_flush_pg_req = 1'b1;
+			      n_flush_cl_addr = t_rob_head.data;
+			      n_flush_cl_inval = (t_rob_head.opcode == XPG_INV);
+			      n_l1i_flush_complete = 1'b1;          /* not flushing L1I */
+			      n_l2_flush_complete  = 1'b1;          /* the page walk covers the L2 */
 			   end
 			 else if(t_rob_head.cache_is_d)
 			   begin
@@ -2851,7 +2907,7 @@ module core(clk,
 		 begin
 		    t_clr_dq = 1'b1;
 		    /* an injected ext_flush replaced the instruction at .pc: re-run it */
-		    n_restart_pc = t_rob_head.cache_all ? t_rob_head.pc :
+		    n_restart_pc = is_xflush(t_rob_head.opcode) ? t_rob_head.pc :
 				   t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
 		    n_restart_src_pc = t_rob_head.pc;
 		    n_restart_src_is_indirect = 1'b0;
@@ -2862,7 +2918,7 @@ module core(clk,
 			 n_l1i_flush_complete = 1'b0;
 			 n_l1d_flush_complete = 1'b0;
 			 n_l2_flush_complete = 1'b0;
-			 if(t_rob_head.cache_all)
+			 if(is_xflush(t_rob_head.opcode))
 			   begin
 			      n_xflush_pend = 1'b0;
 			      n_xflush_done = 1'b1;
@@ -3478,7 +3534,6 @@ module core(clk,
 	t_rob_tail.is_cache  = t_alloc_uop.is_cache;
 	t_rob_tail.cache_is_d = t_alloc_uop.cache_is_d;
 	t_rob_tail.cache_inval = t_alloc_uop.cache_inval;
-	t_rob_tail.cache_all = t_alloc_uop.cache_all;
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
 	t_rob_tail.is_tlbp = (t_alloc_uop.op == TLBP);
 	
@@ -3538,7 +3593,6 @@ module core(clk,
 	t_rob_next_tail.is_cache = t_alloc_uop2.is_cache;
 	t_rob_next_tail.cache_is_d = t_alloc_uop2.cache_is_d;
 	t_rob_next_tail.cache_inval = t_alloc_uop2.cache_inval;
-	t_rob_next_tail.cache_all = t_alloc_uop2.cache_all;
 	t_rob_next_tail.is_tlbp = (t_alloc_uop2.op == TLBP);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.is_fpe = 1'b0;
@@ -4429,6 +4483,8 @@ module core(clk,
 		     .fr(w_fr),
 		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0) `R4K_IRQ_G0),
 		     .xflush(r_xflush_pend & (t_dec0_in_delay_slot == 1'b0)),
+		     .xflush_addr(w_xflush_addr),
+		     .xflush_op(w_xflush_op),
 		     .tlb_miss(insn.tlb_miss),
 		     .tlb_invalid(insn.tlb_invalid),
 		     .misaligned(insn.misaligned),
@@ -4454,6 +4510,8 @@ module core(clk,
 		     .fr(w_fr),
 		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0) `R4K_IRQ_G1),
 		     .xflush(r_xflush_pend & (t_dec1_in_delay_slot == 1'b0)),
+		     .xflush_addr(w_xflush_addr),
+		     .xflush_op(w_xflush_op),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .tlb_invalid(insn_two.tlb_invalid),
 		     .misaligned(insn_two.misaligned),

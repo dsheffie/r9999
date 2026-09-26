@@ -2740,6 +2740,12 @@ module exec(clk,
 	       t_result = t_srcA + t_simm;
 	       t_alu_valid = 1'b1;
 	    end
+	  XFLUSH, XPG_WBINV, XPG_INV:
+	    begin
+	       /* injected ARM flush: pass the page address (the immediate) to rob.data */
+	       t_result = {int_uop.jmp_imm, int_uop.imm};
+	       t_alu_valid = 1'b1;
+	    end
 	  default:
 	    begin
 	       t_unimp_op = 1'b1;

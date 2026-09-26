@@ -345,9 +345,12 @@ typedef enum logic [4:0] {
    MEM_CHWB    = 5'd27, /* CACHE D Hit-Writeback: mem-pipe (dtlb-translated) per-line op */
    MEM_CHWBINV = 5'd28, /* CACHE D Hit-Writeback-Invalidate (mem-pipe) */
    MEM_CHINV   = 5'd29, /* CACHE D Hit-Invalidate, no WB (DMA-in drop; mem-pipe) */
-   MEM_SNOOP_INVL = 5'd30 /* DMA-coherence snoop: drop the L2 line, DISCARD even if dirty
+   MEM_SNOOP_INVL = 5'd30, /* DMA-coherence snoop: drop the L2 line, DISCARD even if dirty
                            * (a stale prior-owner dirty line must not clobber DMA data), and
                            * emit NO L1 response (the request came from the snoop FIFO, not an L1) */
+   MEM_PGDROP = 5'd31  /* injected page drop (XPG_INV, after a DMA deposit): drop the L2 line
+                        * WITHOUT writeback and ack the L1D; rsp_data[0] = the line was dirty
+                        * (never expected: the pre-transfer XPG_WBINV cleaned the page) */
 } mem_op_t;
 
 /* MIPS R10000 exception ordering 
