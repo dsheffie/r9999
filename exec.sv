@@ -335,14 +335,20 @@ module exec(clk,
    wire [`M_WIDTH-1:0] w_srcA, w_srcB;
    wire [`M_WIDTH-1:0] w_mem_srcA, w_mem_srcB;
    
-   logic [`M_WIDTH-1:0] r_mem_result, r_int_result;
+   /* forwarded operand DATA, captured on the same edge and under the same
+    * conditions as the r_fwd_* flags below.  The mux used to read r_int_result /
+    * r_mem_result, which reload every cycle: a flag set for one producer could be
+    * paired with the NEXT cycle's result (silicon: a consumer read a load value its
+    * producer never wrote).  Capturing the data with its flag makes them agree. */
+   logic [`M_WIDTH-1:0]     r_fwd_srcA_data, r_fwd_srcB_data;
+   logic [`M_WIDTH-1:0]     r_fwd_mem_srcA_data, r_fwd_mem_srcB_data;
    logic 	r_fwd_int_srcA, r_fwd_int_srcB;
    logic 	r_fwd_mem_srcA, r_fwd_mem_srcB;
 
    logic t_fwd_int_mem_srcA,t_fwd_int_mem_srcB,t_fwd_mem_mem_srcA,t_fwd_mem_mem_srcB;
    logic r_fwd_int_mem_srcA,r_fwd_int_mem_srcB,r_fwd_mem_mem_srcA,r_fwd_mem_mem_srcB;
    
-   logic [(`M_WIDTH*2)-1:0] r_int_hilo, r_mul_hilo, r_div_hilo;
+   logic [(`M_WIDTH*2)-1:0] r_fwd_hilo_data;
    logic [(`M_WIDTH*2)-1:0] r_src_hilo;
    logic 	r_fwd_hilo_int, r_fwd_hilo_mul, r_fwd_hilo_div;
       
@@ -820,25 +826,25 @@ module exec(clk,
    
    always_comb
      begin
-	t_srcA = r_fwd_int_srcA ? r_int_result :
-		 r_fwd_mem_srcA ? r_mem_result :
+	t_srcA = r_fwd_int_srcA ? r_fwd_srcA_data :
+		 r_fwd_mem_srcA ? r_fwd_srcA_data :
 		 w_srcA;
 	
-	t_srcB = r_fwd_int_srcB ? r_int_result :
-		 r_fwd_mem_srcB ? r_mem_result :
+	t_srcB = r_fwd_int_srcB ? r_fwd_srcB_data :
+		 r_fwd_mem_srcB ? r_fwd_srcB_data :
 		 w_srcB;
 
-	t_mem_srcA = r_fwd_int_mem_srcA ? r_int_result :
-		     r_fwd_mem_mem_srcA ? r_mem_result :
+	t_mem_srcA = r_fwd_int_mem_srcA ? r_fwd_mem_srcA_data :
+		     r_fwd_mem_mem_srcA ? r_fwd_mem_srcA_data :
 		     w_mem_srcA;
 
-	t_mem_srcB = r_fwd_int_mem_srcB ? r_int_result :
-		     r_fwd_mem_mem_srcB ? r_mem_result :
+	t_mem_srcB = r_fwd_int_mem_srcB ? r_fwd_mem_srcB_data :
+		     r_fwd_mem_mem_srcB ? r_fwd_mem_srcB_data :
 		     w_mem_srcB;
 	
-	t_src_hilo = r_fwd_hilo_int ? r_int_hilo :
-		     r_fwd_hilo_mul ? r_mul_hilo :
-		     r_fwd_hilo_div ? r_div_hilo :
+	t_src_hilo = r_fwd_hilo_int ? r_fwd_hilo_data :
+		     r_fwd_hilo_mul ? r_fwd_hilo_data :
+		     r_fwd_hilo_div ? r_fwd_hilo_data :
 		     r_src_hilo;
      end // always_comb
 
@@ -3181,14 +3187,55 @@ module exec(clk,
      end // always_comb
    
 
+   /* forwarded data: each register loads under EXACTLY the condition (and in the
+    * same priority order) as the flag the operand mux selects it with */
    always_ff@(posedge clk)
      begin
-	r_int_result <= t_result;
-	r_mem_result <= mem_rsp_load_data;
-	r_int_hilo <= t_hilo_result;
-	r_mul_hilo <= t_mul_result;
-	r_div_hilo <= t_div_result;
-     end
+	if(t_fwd_int_mem_srcA)
+	  begin
+	     r_fwd_mem_srcA_data <= t_result;
+	  end
+	else if(t_fwd_mem_mem_srcA)
+	  begin
+	     r_fwd_mem_srcA_data <= mem_rsp_load_data[`M_WIDTH-1:0];
+	  end
+	if(t_fwd_int_mem_srcB)
+	  begin
+	     r_fwd_mem_srcB_data <= t_result;
+	  end
+	else if(t_fwd_mem_mem_srcB)
+	  begin
+	     r_fwd_mem_srcB_data <= mem_rsp_load_data[`M_WIDTH-1:0];
+	  end
+	if(r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst))
+	  begin
+	     r_fwd_srcA_data <= t_result;
+	  end
+	else if(w_mem_rsp_int_valid && (t_picked_uop.srcA == mem_rsp_dst_ptr))
+	  begin
+	     r_fwd_srcA_data <= mem_rsp_load_data[`M_WIDTH-1:0];
+	  end
+	if(r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcB == int_uop.dst))
+	  begin
+	     r_fwd_srcB_data <= t_result;
+	  end
+	else if(w_mem_rsp_int_valid && (t_picked_uop.srcB == mem_rsp_dst_ptr))
+	  begin
+	     r_fwd_srcB_data <= mem_rsp_load_data[`M_WIDTH-1:0];
+	  end
+	if(r_start_int && t_wr_hilo && (t_picked_uop.hilo_src == int_uop.hilo_dst))
+	  begin
+	     r_fwd_hilo_data <= t_hilo_result;
+	  end
+	else if(t_hilo_prf_ptr_val_out && (t_picked_uop.hilo_src == t_hilo_prf_ptr_out))
+	  begin
+	     r_fwd_hilo_data <= t_mul_result;
+	  end
+	else if(t_div_complete && (t_picked_uop.hilo_src == t_div_hilo_prf_ptr_out))
+	  begin
+	     r_fwd_hilo_data <= t_div_result;
+	  end
+     end // always_ff
 
    always_comb
      begin
