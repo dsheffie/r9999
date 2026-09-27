@@ -3327,7 +3327,13 @@ module core(clk,
 	  end
 	else
 	  begin
-	     r_dec_delay_slot <= t_clr_rob ? 1'b0 : n_dec_delay_slot;
+	     /* also reset when only the DQ is cleared (serialize / CACHE_FLUSH /
+	      * HALT / exception restarts, none of which restart INTO a delay slot):
+	      * a stale 1 made the refetched first branch look like a delay slot, so
+	      * ITS real delay slot looked like an ordinary insn and the irq
+	      * injection could replace it (caught on silicon: IRIX swtch lost a
+	      * delay-slot `lw s2` -> KERNEL FAULT badvaddr 0x1e8). */
+	     r_dec_delay_slot <= (t_clr_rob | t_clr_dq) ? 1'b0 : n_dec_delay_slot;
 	  end
      end // always_ff@ (posedge clk)
    //t_push_dq_one
