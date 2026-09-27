@@ -487,8 +487,14 @@ endfunction
    assign mem_req_cacheable = r_mem_req_cacheable;
    assign mem_req_mask = r_mem_req_mask;
 
+`ifdef REG_L1D_RSP
+   /* registered response -- matches rv64core; see REG_L1D_RSP in machine.vh */
+   assign core_mem_rsp_valid = r_core_mem_rsp_valid;
+   assign core_mem_rsp = r_core_mem_rsp;
+`else
    assign core_mem_rsp_valid = n_core_mem_rsp_valid;
    assign core_mem_rsp = n_core_mem_rsp;
+`endif
    
    assign cache_accesses = r_cache_accesses;
    assign cache_hits = r_cache_hits;

@@ -40,6 +40,20 @@
 
 //`define ENABLE_L1D_SKID 1
 
+/* Register the L1D -> core response instead of driving it combinationally.
+ *
+ * rv64core does this unconditionally (l1d.sv: BOTH arms of its `ifdef FOUR_CYCLE_L1D
+ * use r_core_mem_rsp*), r9999 did not.  Two reasons to follow it:
+ *   TIMING: core_mem_rsp is a wide combinational output of the L1D that feeds the
+ *   PRF write port and the load-data forward, and closed inside its own noise floor.
+ *   CORRECTNESS: those consumers must AGREE.  If the path is marginal they can latch
+ *   inconsistent values -- the forward flag set while the data is stale -- which is
+ *   the 2026-09-02 silicon symptom (a consumer read a value its producer never
+ *   wrote), and the kind of thing Verilator, having no delays, can never reproduce.
+ * Costs one cycle of load-use latency.  r_core_mem_rsp/_valid are already maintained
+ * in l1d.sv -- this only changes which one drives the output. */
+`define REG_L1D_RSP 1
+
 `define LG_M_WIDTH 6
 
 `define BIG_ENDIAN 1
