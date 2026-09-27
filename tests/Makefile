@@ -30,6 +30,7 @@ TESTS := hello/hello.elf \
          except/test_except.elf \
          except/test_bgezall_ds_fault.elf \
          except/test_regimm_link.elf \
+         except/test_likely_nullify.elf \
          except/test_overflow.elf \
          except/test_traps.elf \
          except/test_ifetch_adel.elf \
@@ -113,6 +114,10 @@ except/test_regimm_link.elf: except/test_regimm_link.S $(COMMON)/sim.h $(COMMON)
 	$(LD) $(LDFLAGS) except/test_regimm_link.o -o $@
 
 # bgezall whose delay slot takes a TLB refill: the target must not commit twice
+except/test_likely_nullify.elf: except/test_likely_nullify.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_likely_nullify.S -o except/test_likely_nullify.o
+	$(LD) $(LDFLAGS) except/test_likely_nullify.o -o $@
+
 except/test_bgezall_ds_fault.elf: except/test_bgezall_ds_fault.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c except/test_bgezall_ds_fault.S -o except/test_bgezall_ds_fault.o
 	$(LD) $(LDFLAGS) except/test_bgezall_ds_fault.o -o $@

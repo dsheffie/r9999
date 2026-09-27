@@ -122,7 +122,8 @@ module core_l1d_l1i(clk,
 		    dbg_trace_index,
 		    dbg_trace_data,
 		    dbg_trace_wptr,
-		    dbg_rdchk
+		    dbg_rdchk,
+		    dbg_rob_inflight
 		    );
 
    localparam L1D_CL_LEN = 1 << `LG_L1D_CL_LEN;
@@ -348,6 +349,10 @@ module core_l1d_l1i(clk,
    output logic [31:0]  dbg_trace_data;
    output logic [15:0]  dbg_trace_wptr;
    output logic [31:0]  dbg_rdchk;   /* reader-agreement checker status -> AXI 0x1B */
+   /* main's stable debug / co-sim interface (PORTS UNCONDITIONAL): every other port
+    * of it is already declared and driven on this branch; this one reads 0 here */
+   output logic [31:0]  dbg_rob_inflight;
+   assign dbg_rob_inflight = 'd0;
       
 
 
@@ -1056,6 +1061,18 @@ module core_l1d_l1i(clk,
 	     .retire_reg_two_ptr(retire_reg_two_ptr),
 	     .retire_reg_two_data(retire_reg_two_data),
 	     .retire_reg_two_valid(retire_reg_two_valid),
+	     .retire_fp_reg_ptr(retire_fp_reg_ptr),
+	     .retire_fp_reg_data(retire_fp_reg_data),
+	     .retire_fp_reg_valid(retire_fp_reg_valid),
+	     .retire_fp_reg_two_ptr(retire_fp_reg_two_ptr),
+	     .retire_fp_reg_two_data(retire_fp_reg_two_data),
+	     .retire_fp_reg_two_valid(retire_fp_reg_two_valid),
+	     .retire_fcr_reg_ptr(retire_fcr_reg_ptr),
+	     .retire_fcr_reg_data(retire_fcr_reg_data),
+	     .retire_fcr_reg_valid(retire_fcr_reg_valid),
+	     .retire_fcr_reg_two_ptr(retire_fcr_reg_two_ptr),
+	     .retire_fcr_reg_two_data(retire_fcr_reg_two_data),
+	     .retire_fcr_reg_two_valid(retire_fcr_reg_two_valid),
 	     .retire_valid(retire_valid),
 	     .retire_two_valid(retire_two_valid),
 	     .retire_delay_slot(t_retire_delay_slot),

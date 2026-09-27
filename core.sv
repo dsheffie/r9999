@@ -130,6 +130,18 @@ module core(clk,
 	    retire_reg_two_ptr,
 	    retire_reg_two_data,
 	    retire_reg_two_valid,
+	    retire_fp_reg_ptr,
+	    retire_fp_reg_data,
+	    retire_fp_reg_valid,
+	    retire_fp_reg_two_ptr,
+	    retire_fp_reg_two_data,
+	    retire_fp_reg_two_valid,
+	    retire_fcr_reg_ptr,
+	    retire_fcr_reg_data,
+	    retire_fcr_reg_valid,
+	    retire_fcr_reg_two_ptr,
+	    retire_fcr_reg_two_data,
+	    retire_fcr_reg_two_valid,
 	    retire_valid,
 	    retire_two_valid,
 	    retire_delay_slot,
@@ -291,6 +303,23 @@ module core(clk,
    output logic [4:0] 			  retire_reg_two_ptr;
    output logic [`M_WIDTH-1:0]		  retire_reg_two_data;
    output logic 			  retire_reg_two_valid;
+   /* FP and FCR architectural writes, for the co-sim.  retire_reg_valid tests
+    * only valid_dst, so an FP register write was invisible to the checker --
+    * every FP value bug stayed silent until it leaked through an mfc1/swc1.
+    * rob_entry_t.data already carries the FP result (complete_bundle_2 writes
+    * it), and for a compare data[7:0] is the condition-code vector. */
+   output logic [4:0] 		  retire_fp_reg_ptr;
+   output logic [`M_WIDTH-1:0] 	  retire_fp_reg_data;
+   output logic 		  retire_fp_reg_valid;
+   output logic [4:0] 		  retire_fp_reg_two_ptr;
+   output logic [`M_WIDTH-1:0] 	  retire_fp_reg_two_data;
+   output logic 		  retire_fp_reg_two_valid;
+   output logic [4:0] 		  retire_fcr_reg_ptr;
+   output logic [`M_WIDTH-1:0] 	  retire_fcr_reg_data;
+   output logic 		  retire_fcr_reg_valid;
+   output logic [4:0] 		  retire_fcr_reg_two_ptr;
+   output logic [`M_WIDTH-1:0] 	  retire_fcr_reg_two_data;
+   output logic 		  retire_fcr_reg_two_valid;
    
    output logic 			  retire_valid;
    output logic 			  retire_two_valid;
@@ -2179,6 +2208,18 @@ module core(clk,
    	     retire_reg_two_ptr <= 'd0;
    	     retire_reg_two_data <= 'd0;
    	     retire_reg_two_valid <= 1'b0;
+   	     retire_fp_reg_ptr <= 'd0;
+   	     retire_fp_reg_data <= 'd0;
+   	     retire_fp_reg_valid <= 1'b0;
+   	     retire_fp_reg_two_ptr <= 'd0;
+   	     retire_fp_reg_two_data <= 'd0;
+   	     retire_fp_reg_two_valid <= 1'b0;
+   	     retire_fcr_reg_ptr <= 'd0;
+   	     retire_fcr_reg_data <= 'd0;
+   	     retire_fcr_reg_valid <= 1'b0;
+   	     retire_fcr_reg_two_ptr <= 'd0;
+   	     retire_fcr_reg_two_data <= 'd0;
+   	     retire_fcr_reg_two_valid <= 1'b0;
    	     retire_valid <= 1'b0;
 	     retire_two_valid <= 1'b0;
 	     
@@ -2204,6 +2245,18 @@ module core(clk,
    	     retire_reg_two_ptr <= t_rob_next_head.ldst;
    	     retire_reg_two_data <= t_rob_next_head.data;
    	     retire_reg_two_valid <= t_rob_next_head.valid_dst && t_retire_two;
+   	     retire_fp_reg_ptr <= t_rob_head.ldst;
+   	     retire_fp_reg_data <= t_rob_head.data;
+   	     retire_fp_reg_valid <= t_rob_head.valid_fp_dst && t_retire;
+   	     retire_fp_reg_two_ptr <= t_rob_next_head.ldst;
+   	     retire_fp_reg_two_data <= t_rob_next_head.data;
+   	     retire_fp_reg_two_valid <= t_rob_next_head.valid_fp_dst && t_retire_two;
+   	     retire_fcr_reg_ptr <= t_rob_head.ldst;
+   	     retire_fcr_reg_data <= t_rob_head.data;
+   	     retire_fcr_reg_valid <= t_rob_head.valid_fcr_dst && t_retire;
+   	     retire_fcr_reg_two_ptr <= t_rob_next_head.ldst;
+   	     retire_fcr_reg_two_data <= t_rob_next_head.data;
+   	     retire_fcr_reg_two_valid <= t_rob_next_head.valid_fcr_dst && t_retire_two;
 	     
    	     /* an injected ext_flush uop (XFLUSH/XPG_*) leaves the ROB like any CACHE op
    	      * but is NOT an architectural instruction -- it replaced the insn at .pc,
@@ -2821,9 +2874,15 @@ module core(clk,
 	    end
 	  ALLOC_FOR_SERIALIZE:
 	    begin
-	       t_alloc = !t_rob_full && !t_uq_full 
-			 && (r_prf_free != 'd0) 
-			   && !t_dq_empty;
+	       /* CTC1 now takes an FCR dst, so the serialize path must check the
+		* non-integer free lists too -- find_lowest_set_bit hands out index
+		* 0 on an empty bank, i.e. physreg 0. */
+	       t_alloc = !t_rob_full && !t_uq_full
+			 && !t_dq_empty
+			 && t_enough_iprfs
+			 && t_enough_hlprfs
+			 && t_enough_fprfs
+			 && t_enough_fcrprfs;
 	       n_state = t_alloc ? WAIT_FOR_SERIALIZE_AND_RESTART : ALLOC_FOR_SERIALIZE;
 	    end
 	  WAIT_FOR_SERIALIZE_AND_RESTART:
@@ -3102,9 +3161,15 @@ module core(clk,
 	    end
 	  SERIALIZE_IN_FAULTED_DELAY_SLOT:
 	    begin
-	       t_alloc = !t_rob_full && !t_uq_full 
-			 && (r_prf_free != 'd0) 
-			   && !t_dq_empty;
+	       /* CTC1 now takes an FCR dst, so the serialize path must check the
+		* non-integer free lists too -- find_lowest_set_bit hands out index
+		* 0 on an empty bank, i.e. physreg 0. */
+	       t_alloc = !t_rob_full && !t_uq_full
+			 && !t_dq_empty
+			 && t_enough_iprfs
+			 && t_enough_hlprfs
+			 && t_enough_fprfs
+			 && t_enough_fcrprfs;
 	       n_state = t_alloc ? WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT : 
 			 SERIALIZE_IN_FAULTED_DELAY_SLOT;
 	    end
@@ -3587,7 +3652,7 @@ module core(clk,
 	t_rob_next_tail.is_call = t_alloc_uop2.op == JAL || t_alloc_uop2.op == JALR || t_alloc_uop2.op == BAL;
 	t_rob_next_tail.is_irq = t_alloc_uop2.op == IRQ;
 	
-	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop.srcA == 'd31);
+	t_rob_next_tail.is_ret = (t_alloc_uop2.op == JR) && (t_uop2.srcA == 'd31);
 	t_rob_next_tail.is_break = (t_alloc_uop2.op == BREAK);
 	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);
 	t_rob_next_tail.is_cache = t_alloc_uop2.is_cache;
@@ -3804,12 +3869,18 @@ module core(clk,
 	     if(t_alloc)
 	       begin
 		  r_rob_complete[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_fold_uop;
-		  r_rob_sd_complete[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop.is_mem & t_uop.srcB_valid);
+		  /* must match exec.sv w_uop_has_sdata: an FP store's data operand is
+		   * fp_srcB (srcB_valid=0).  Without the fp term sdc1/swc1 retired
+		   * BEFORE their data half was read; the src physreg could then be
+		   * freed + reallocated (find-lowest free list) to a younger load that
+		   * sits behind the dataless graduated store in the L1D -> deadlock
+		   * (applu jacld_ wedge), or to an op that completes -> wrong store data. */
+		  r_rob_sd_complete[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop.is_mem & (t_uop.srcB_valid | (t_uop.fp_srcB_valid & t_uop.is_store)));
 	       end
 	     if(t_alloc_two)
 	       begin
 		  r_rob_complete[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_fold_uop2;
-		  r_rob_sd_complete[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop2.is_mem & t_uop2.srcB_valid);				    
+		  r_rob_sd_complete[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop2.is_mem & (t_uop2.srcB_valid | (t_uop2.fp_srcB_valid & t_uop2.is_store)));
 	       end
 	     if(t_complete_valid_1)
 	       begin

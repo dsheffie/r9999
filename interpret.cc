@@ -354,8 +354,25 @@ void raise_int(state_t *s, uint32_t epc, uint32_t ip) {
   s->pc = sext32(exc_vector_general(s));
 }
 
+static inline uint32_t fcc_bit(uint32_t cc) { return (cc == 0) ? 23u : (24u + cc); }
+
+static inline void fcc_mirror_to_fccr(state_t *s) {
+  uint32_t f = s->fcr1[CP1_CR31], v = (f >> 23) & 1u;
+  for(uint32_t c = 1; c < 8; c++) { v |= ((f >> (24u + c)) & 1u) << c; }
+  s->fcr1[CP1_CR25] = v;
+}
+
+static inline void fcc_mirror_from_fccr(state_t *s) {
+  uint32_t v = s->fcr1[CP1_CR25];
+  uint32_t f = s->fcr1[CP1_CR31] & ~((1u<<23) | 0xfe000000u);
+  f |= (v & 1u) << 23;
+  for(uint32_t c = 1; c < 8; c++) { f |= ((v >> c) & 1u) << (24u + c); }
+  s->fcr1[CP1_CR31] = f;
+}
+
+/* FCC is architecturally in FCSR (bit 23 = FCC0); FCCR is an alternate view. */
 static uint32_t getConditionCode(state_t *s, uint32_t cc) {
-  return ((s->fcr1[CP1_CR25] & (1U<<cc)) >> cc) & 0x1;
+  return (s->fcr1[CP1_CR31] >> fcc_bit(cc)) & 0x1u;
 }
 
 /* ===== TLB address translation (forward-ported from interp_mips) ===========
@@ -557,7 +574,10 @@ static void setConditionCode(state_t *s, uint32_t v, uint32_t cc) {
   m0 = 1U<<cc;
   m1 = ~m0;
   m2 = ~(v-1);
-  s->fcr1[CP1_CR25] = (s->fcr1[CP1_CR25] & m1) | ((1U<<cc) & m2);
+  (void)m0; (void)m1; (void)m2;
+  uint32_t b = fcc_bit(cc);
+  if(v) { s->fcr1[CP1_CR31] |= (1u << b); } else { s->fcr1[CP1_CR31] &= ~(1u << b); }
+  fcc_mirror_to_fccr(s);
 }
 
 
@@ -1098,8 +1118,11 @@ static void _ctc1(uint32_t inst, state_t *s) {
   uint32_t cr = (inst>>11) & 31;
   uint32_t rt = (inst>>16) & 31;
   /* FCR[cr] = GPR[rt][31:0]; FCR0 (FIR) is read-only */
-  if(cr != 0)
+  if(cr != 0) {
     s->fcr1[fcr_index(cr)] = (uint32_t)s->gpr[rt];
+    if(cr == 31)      { fcc_mirror_to_fccr(s); }
+    else if(cr == 25) { fcc_mirror_from_fccr(s); }
+  }
   s->pc += 4;
   s->insn_histo[mipsInsn::CTC1]++;
 }
@@ -1709,7 +1732,7 @@ static void fpCmp(uint32_t inst, state_t *s) {
     bool lt = (Tfs <  Tft);
     bool eq = (Tfs == Tft);
     v = (((cond & 4) && lt) || ((cond & 2) && eq) || ((cond & 1) && un)) ? 1u : 0u;
-    s->fcr1[CP1_CR25] = setBit(s->fcr1[CP1_CR25],v,cc);
+    setConditionCode(s, v, cc);
   }
   if(globals::trace_retirement) {
     std::cout << std::hex
