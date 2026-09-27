@@ -2471,7 +2471,11 @@ module exec(clk,
 	  BNEL:
 	    begin
 	       t_take_br = (t_srcA  != t_srcB);
-	       t_mispred_br = (int_uop.br_pred != t_take_br) /* || !t_take_br */;
+	       /* branch-likely: a not-taken BNEL must nullify its delay slot, which the
+	        * `|| !t_take_br' restart does, as for every other likely form.  It was
+	        * commented out since the initial import and only masked because l1i
+	        * predicts every branch-likely taken (tests/except/test_likely_nullify.S). */
+	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
 	       t_alu_valid = 1'b1;
 	    end
