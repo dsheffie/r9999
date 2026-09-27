@@ -399,6 +399,9 @@ module exec(clk,
    /* non mem uop queue */
    uop_t r_uq[N_UQ_ENTRIES];
    uop_t uq, int_uop;
+   /* ENABLE_UQ_DUAL_POP: second uq entry written into a second free entry */
+   uop_t uq2;
+   logic t_pop_uq2;
    logic 			    r_start_int;
    
    
@@ -726,6 +729,7 @@ module exec(clk,
 	t_push_one_int = ((uq_push && uq_uop.is_int) || (uq_push_two && uq_uop_two.is_int)) && !t_push_two_int;
 	
 	uq = r_uq[r_uq_head_ptr[`LG_UQ_ENTRIES-1:0]];
+	uq2 = r_uq[r_uq_next_head_ptr[`LG_UQ_ENTRIES-1:0]];
 	
 	if(t_push_two_int)
 	  begin	     
@@ -739,9 +743,15 @@ module exec(clk,
 	  end
 
 	
-	if(t_pop_uq)
+	if(t_pop_uq2)
+	  begin
+	     n_uq_head_ptr = r_uq_head_ptr + 'd2;
+	     n_uq_next_head_ptr = r_uq_next_head_ptr + 'd2;
+	  end
+	else if(t_pop_uq)
 	  begin
 	     n_uq_head_ptr = r_uq_head_ptr + 'd1;
+	     n_uq_next_head_ptr = r_uq_next_head_ptr + 'd1;
 	  end
      end // always_comb
 
@@ -855,6 +865,15 @@ module exec(clk,
    logic [N_INT_SCHED_ENTRIES-1:0] r_alu_sched_valid;
    logic [`LG_INT_SCHED_ENTRIES:0] t_alu_sched_alloc_ptr;
    logic 			  t_alu_sched_full;
+   /* ENABLE_SCHED_BYPASS: uq head issues straight to the ALU this cycle */
+   logic 			  t_uq_bypass;
+   logic [`LG_INT_SCHED_ENTRIES:0] t_alu_sched_alloc2_ptr;
+   logic [N_INT_SCHED_ENTRIES-1:0] t_alu_alloc2_entry;
+   logic [N_INT_SCHED_ENTRIES-1:0] t_alu_sched_free2;
+   logic t_alu_alloc2_srcA_match,
+	 t_alu_alloc2_srcB_match,
+	 t_alu_alloc2_hilo_match,
+	 t_alu_alloc2_fcr_match;
    
    logic [N_INT_SCHED_ENTRIES-1:0] t_alu_alloc_entry, t_alu_select_entry;
 
@@ -888,6 +907,9 @@ module exec(clk,
    find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc( .in(~r_alu_sched_valid),
 							      .y(t_alu_sched_alloc_ptr));
 
+   find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc2( .in(t_alu_sched_free2),
+							       .y(t_alu_sched_alloc2_ptr));
+
    find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_select( .in(w_alu_sched_oldest_ready),
 								.y(t_alu_sched_select_ptr));
 
@@ -896,10 +918,15 @@ module exec(clk,
    always_comb
      begin
 	t_alu_alloc_entry = 'd0;
+	t_alu_alloc2_entry = 'd0;
 	t_alu_select_entry = 'd0;
-	if(t_pop_uq)
+	if(t_pop_uq && !t_uq_bypass)
 	  begin
 	     t_alu_alloc_entry[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]] = 1'b1;
+	  end
+	if(t_pop_uq2)
+	  begin
+	     t_alu_alloc2_entry[t_alu_sched_alloc2_ptr[`LG_INT_SCHED_ENTRIES-1:0]] = 1'b1;
 	  end
 	if(t_alu_entry_rdy != 'd0)
 	  begin
@@ -912,7 +939,7 @@ module exec(clk,
 
    always_comb
      begin
-	t_picked_uop = r_alu_sched_uops[t_alu_sched_select_ptr[`LG_INT_SCHED_ENTRIES-1:0]];
+	t_picked_uop = t_uq_bypass ? uq : r_alu_sched_uops[t_alu_sched_select_ptr[`LG_INT_SCHED_ENTRIES-1:0]];
      end
    
    always_ff@(posedge clk)
@@ -920,9 +947,37 @@ module exec(clk,
 	int_uop <= t_picked_uop;
      end
 
+`ifdef TOPDOWN
+   /* per-uop stage stamps (see core.sv TOPDOWN): 1 = enters the ALU scheduler,
+    * 2 = ALU execute starts, 3 = memory uop dispatched to address generation */
+   import "DPI-C" function void topdown_uop(input int ev, input int rob_ptr);
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     if(t_pop_uq)
+	       begin
+		  topdown_uop(1, {{(32-`LG_ROB_ENTRIES){1'b0}}, uq.rob_ptr});
+	       end
+	     if(t_pop_uq2)
+	       begin
+		  topdown_uop(1, {{(32-`LG_ROB_ENTRIES){1'b0}}, uq2.rob_ptr});
+	       end
+	     if(r_start_int)
+	       begin
+		  topdown_uop(2, {{(32-`LG_ROB_ENTRIES){1'b0}}, int_uop.rob_ptr});
+	       end
+	     if(t_pop_mem_uq)
+	       begin
+		  topdown_uop(3, {{(32-`LG_ROB_ENTRIES){1'b0}}, t_mem_uq.rob_ptr});
+	       end
+	  end
+     end // always_ff
+`endif
+
    always_ff@(posedge clk)
      begin
-	r_start_int <= reset ? 1'b0 : ((t_alu_entry_rdy != 'd0) & !ds_done);
+	r_start_int <= reset ? 1'b0 : (((t_alu_entry_rdy != 'd0) | t_uq_bypass) & !ds_done);
      end // always_comb
 
    
@@ -947,6 +1002,22 @@ module exec(clk,
 	/* FCR source (BC1x): wakes on the fpu compare writing the same FCR phys reg */
 	t_alu_alloc_fcr_match = uq.fcr_src_valid &&
 				(w_fpu_fcr_valid & (w_fpu_fcr_ptr == uq.hilo_src));
+
+	t_alu_alloc2_srcA_match = uq2.srcA_valid && (
+						     (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq2.srcA)) ||
+						     (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == uq2.srcA))
+						     );
+	t_alu_alloc2_srcB_match = uq2.srcB_valid && (
+						     (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq2.srcB)) ||
+						     (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == uq2.srcB))
+						     );
+	t_alu_alloc2_hilo_match = uq2.hilo_src_valid && (
+							 (t_hilo_prf_ptr_val_out & (t_hilo_prf_ptr_out == uq2.hilo_src)) ||
+							 (t_div_complete && (t_div_hilo_prf_ptr_out == uq2.hilo_src)) ||
+							 (r_start_int && t_wr_hilo && (int_uop.hilo_dst == uq2.hilo_src))
+							 );
+	t_alu_alloc2_fcr_match = uq2.fcr_src_valid &&
+				 (w_fpu_fcr_valid & (w_fpu_fcr_ptr == uq2.hilo_src));
 
      end // always_comb
   
@@ -973,6 +1044,10 @@ module exec(clk,
 		else if(t_alu_alloc_entry[i])
 		  begin
 		     r_alu_sched_matrix[i] <= t_alu_sched_mask_valid;
+		  end
+		else if(t_alu_alloc2_entry[i])
+		  begin
+		     r_alu_sched_matrix[i] <= t_alu_sched_mask_valid | t_alu_alloc_entry;
 		  end
 		else if(t_alu_entry_rdy != 'd0)
 		  begin
@@ -1053,6 +1128,13 @@ module exec(clk,
 			  r_alu_hilo_rdy[i] <= uq.hilo_src_valid ? (!r_hilo_inflight[uq.hilo_src] | t_alu_alloc_hilo_match) : 1'b1;
 			  r_alu_fcr_rdy[i] <= uq.fcr_src_valid ? (!r_fcr_prf_inflight[uq.hilo_src] | t_alu_alloc_fcr_match) : 1'b1;
 		       end
+		     else if(t_alu_alloc2_entry[i])
+		       begin
+			  r_alu_srcA_rdy[i] <= uq2.srcA_valid ? (!r_prf_inflight[uq2.srcA] | t_alu_alloc2_srcA_match) : 1'b1;
+			  r_alu_srcB_rdy[i] <= uq2.srcB_valid ? (!r_prf_inflight[uq2.srcB] | t_alu_alloc2_srcB_match) : 1'b1;
+			  r_alu_hilo_rdy[i] <= uq2.hilo_src_valid ? (!r_hilo_inflight[uq2.hilo_src] | t_alu_alloc2_hilo_match) : 1'b1;
+			  r_alu_fcr_rdy[i] <= uq2.fcr_src_valid ? (!r_fcr_prf_inflight[uq2.hilo_src] | t_alu_alloc2_fcr_match) : 1'b1;
+		       end
 		     else if(t_alu_select_entry[i])
 		       begin
 			  r_alu_srcA_rdy[i] <= 1'b0;
@@ -1075,11 +1157,42 @@ module exec(clk,
    
    
    
+   /* second free entry: any free entry other than the first allocation's */
+   always_comb
+     begin
+	t_alu_sched_free2 = ~r_alu_sched_valid;
+	t_alu_sched_free2[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]] = 1'b0;
+     end
+
    always_comb
      begin
 	t_pop_uq = 1'b0;
+	t_uq_bypass = 1'b0;
 	t_alu_sched_full = (&r_alu_sched_valid);
-	t_pop_uq = !(t_flash_clear || t_uq_empty ||t_alu_sched_full);
+`ifdef ENABLE_SCHED_BYPASS
+	/* An entry written into the scheduler is not selectable until the next
+	 * cycle, so a uq-head uop whose operands are already ready would wait a
+	 * cycle for nothing.  When no scheduler entry is ready (so oldest-ready
+	 * priority is unaffected), issue the uq head directly.  Readiness is the
+	 * same !inflight|alloc-match test used when the uop is written into an
+	 * entry; the operand read and the r_fwd_* capture follow t_picked_uop.
+	 * div/mult/oldest_first keep the normal path. */
+	t_uq_bypass = !(t_flash_clear || t_uq_empty) && (t_alu_entry_rdy == 'd0) &&
+		      !is_div(uq.op) && !is_mult(uq.op) && !uq.oldest_first && !r_wb_bitvec[1] &&
+		      (uq.srcA_valid ? (!r_prf_inflight[uq.srcA] | t_alu_alloc_srcA_match) : 1'b1) &&
+		      (uq.srcB_valid ? (!r_prf_inflight[uq.srcB] | t_alu_alloc_srcB_match) : 1'b1) &&
+		      (uq.hilo_src_valid ? (!r_hilo_inflight[uq.hilo_src] | t_alu_alloc_hilo_match) : 1'b1) &&
+		      (uq.fcr_src_valid ? (!r_fcr_prf_inflight[uq.hilo_src] | t_alu_alloc_fcr_match) : 1'b1);
+`endif
+	t_pop_uq = !(t_flash_clear || t_uq_empty ||t_alu_sched_full) || t_uq_bypass;
+	t_pop_uq2 = 1'b0;
+`ifdef ENABLE_UQ_DUAL_POP
+	/* The uq pops one uop per cycle but allocation pushes up to two, so
+	 * back-to-back int pairs queue here.  Pop the second uq entry into a
+	 * second free scheduler entry.  Both uops were pushed in earlier cycles,
+	 * so their inflight bits already reflect each other (no pair hazard). */
+	t_pop_uq2 = t_pop_uq && (r_uq_next_head_ptr != r_uq_tail_ptr) && (t_alu_sched_free2 != 'd0);
+`endif
      end
    
    always_ff@(posedge clk)
@@ -1090,10 +1203,15 @@ module exec(clk,
 	  end
 	else
 	  begin
-	     if(t_pop_uq)
+	     if(t_pop_uq && !t_uq_bypass)
 	       begin
 		  r_alu_sched_valid[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= 1'b1;
 		  r_alu_sched_uops[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= uq;
+	       end
+	     if(t_pop_uq2)
+	       begin
+		  r_alu_sched_valid[t_alu_sched_alloc2_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= 1'b1;
+		  r_alu_sched_uops[t_alu_sched_alloc2_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= uq2;
 	       end
 	     if(t_alu_entry_rdy != 'd0)
 	       begin

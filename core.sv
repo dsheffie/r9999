@@ -3682,6 +3682,83 @@ module core(clk,
 
    assign t_next_head_br = t_retire_two & t_rob_next_head.is_br;
 
+`ifdef TOPDOWN
+   /* TOP-DOWN accounting (Verilator-only; +define+TOPDOWN, top.cc --topdown).  The
+    * allocation stage is the dispatch point: 2 slots per cycle.  Each cycle report
+    * the state, how many uops the decode queue OFFERS (0/1/2), how many allocated
+    * and retired, and WHY an offered slot did not allocate:
+    *   1 ROB full  2 uop queue full  3 PRF/HILO/FP/FCR free list short
+    *   4 oldest-first pending  5 pending fault  6 other  7 pairing rule (slot 1 only:
+    *   two branches, oldest-first or serializing second uop)
+    * top.cc turns that into retiring / bad speculation / frontend / backend. */
+   import "DPI-C" function void topdown_cycle(input int st, input int avail, input int nalloc,
+					      input int nret, input int be0, input int be1);
+   wire [1:0] w_td_avail = t_dq_empty ? 2'd0 : (t_dq_next_empty ? 2'd1 : 2'd2);
+   logic [2:0] t_td_be0, t_td_be1;
+   always_comb
+     begin
+	t_td_be0 = 3'd0;
+	t_td_be1 = 3'd0;
+	if((w_td_avail != 2'd0) & !t_alloc)
+	  begin
+	     t_td_be0 = t_rob_full ? 3'd1 :
+			t_uq_full ? 3'd2 :
+			!(t_enough_iprfs & t_enough_hlprfs & t_enough_fprfs & t_enough_fcrprfs) ? 3'd3 :
+			r_oldest_first_pending ? 3'd4 :
+			r_pending_fault ? 3'd5 : 3'd6;
+	  end
+	if((w_td_avail == 2'd2) & t_alloc & !t_alloc_two)
+	  begin
+	     t_td_be1 = t_rob_next_full ? 3'd1 :
+			t_uq_next_full ? 3'd2 :
+			!(t_enough_next_iprfs & t_enough_next_hlprfs & t_enough_next_fprfs & t_enough_next_fcrprfs) ? 3'd3 :
+			((t_uop.is_br & t_uop2.is_br) | t_uop.oldest_first | t_uop2.oldest_first | t_uop2.serializing_op) ? 3'd7 : 3'd6;
+	  end
+     end // always_comb
+   /* per-uop stage stamps: allocation here, scheduler entry / issue in exec.sv,
+    * joined in top.cc by rob index at retirement */
+   import "DPI-C" function void topdown_uop(input int ev, input int rob_ptr);
+   import "DPI-C" function void topdown_retire_uop(input int rob_ptr, input longint alloc_c,
+						   input longint complete_c, input longint retire_c,
+						   input int is_br, input int is_store);
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     if(t_alloc)
+	       begin
+		  topdown_uop(0, {{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]});
+	       end
+	     if(t_alloc & t_alloc_two)
+	       begin
+		  topdown_uop(0, {{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]});
+	       end
+	     if(t_retire)
+	       begin
+		  topdown_retire_uop({{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]},
+				     t_rob_head.alloc_cycle, t_rob_head.complete_cycle, r_cycle,
+				     {31'd0, t_rob_head.is_br}, {31'd0, t_rob_head.is_store});
+	       end
+	     if(t_retire & t_retire_two)
+	       begin
+		  topdown_retire_uop({{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]},
+				     t_rob_next_head.alloc_cycle, t_rob_next_head.complete_cycle, r_cycle,
+				     {31'd0, t_rob_next_head.is_br}, {31'd0, t_rob_next_head.is_store});
+	       end
+	  end
+     end // always_ff
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     topdown_cycle({27'd0, r_state}, {30'd0, w_td_avail},
+			   t_alloc ? (t_alloc_two ? 32'd2 : 32'd1) : 32'd0,
+			   t_retire ? (t_retire_two ? 32'd2 : 32'd1) : 32'd0,
+			   {29'd0, t_td_be0}, {29'd0, t_td_be1});
+	  end
+     end // always_ff
+`endif
+
    /* Case 2: latch the resolved target of the most-recently-retired branch.
     * A serializing op restarts only once it is the ROB head (oldest), by which
     * point its delay-slot parent branch has retired -- so this holds that
