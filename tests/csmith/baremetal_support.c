@@ -156,6 +156,35 @@ int exc_handler(uint64_t *regs) {
         return 1;
     }
 
+    if (exccode == 15u) {
+        /* FPE: div.d/sqrt.d unimplemented -> soft-float "emulation" stand-in.
+         * The real IRIX handler reads the operands, computes in integer, and
+         * writes the result -- a burst of mfc1/mtc1 (each a MEM_MOV through the
+         * L1D) with data-dependent branches (mispredicts inside the handler).
+         * We reproduce that traffic (not the math) and skip the faulting op.
+         * bd=1 => the div is in a delay slot; skip resumes at EPC+8, else EPC+4. */
+        uint32_t bd = (cause >> 31) & 1u;
+        uint32_t a, b, t;
+        __asm__ volatile(
+            "mfc1 %0, $f0\n\t"          /* read operand A (MEM_MOV) */
+            "mfc1 %1, $f2\n\t"          /* read operand B (MEM_MOV) */
+            "xor  %2, %0, %1\n\t"
+            "andi $8, %2, 1\n\t"        /* data-dependent, ~50% mispredict */
+            "beq  $8, $zero, 1f\n\t"
+            "nop\n\t"
+            "mtc1 %2, $f4\n\t"          /* speculative MEM_MOV burst */
+            "mfc1 %0, $f4\n\t"
+            "mtc1 %1, $f6\n\t"
+            "mfc1 %0, $f6\n\t"
+            "mtc1 %2, $f8\n\t"
+            "mfc1 %1, $f8\n\t"
+            "1:\n\t"
+            "mtc1 %2, $f0\n\t"          /* write "result" back (MEM_MOV) */
+            : "=&r"(a), "=&r"(b), "=&r"(t) : : "$8", "$f4", "$f6", "$f8");
+        __asm__ volatile("mtc0 %0, $14" : : "r"(epc + (bd ? 8u : 4u)));
+        return 1;                        /* ERET past the div */
+    }
+
     if (exccode == 9u || exccode == 10u || exccode == 13u) {
         *SIM_HALT_ADDR = 1u;
         return 0;
