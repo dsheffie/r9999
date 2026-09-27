@@ -161,6 +161,7 @@ module core(clk,
 	    got_bad_addr,
 	    core_state,
 	    inflight,
+	    dbg_rob_inflight,
 	    epc,
 	    status_reg,
 	    badvaddr,
@@ -346,6 +347,7 @@ module core(clk,
    output logic 			  got_ud;
    output logic 			  got_bad_addr;
    output logic [`LG_ROB_ENTRIES:0] 	  inflight;
+   output logic [N_ROB_ENTRIES-1:0] dbg_rob_inflight;
    output logic [4:0]			  core_state;
    
    output logic [`M_WIDTH-1:0]		  epc;
@@ -551,6 +553,8 @@ module core(clk,
    logic [4:0]			   core_fcsr_flags5;
 
    logic [N_ROB_ENTRIES-1:0] 	    uq_wait, mq_wait, fp_uq_wait;
+   /* DEBUG: ROB-indexed mem-op PC readback from exec (dbg_trace_index[14]=1 mode). */
+   wire [31:0] 			    w_dbg_memop_pc;
    
 
    
@@ -578,6 +582,20 @@ module core(clk,
    logic [(`M_WIDTH-1):0]    n_restart_pc, r_restart_pc;
    logic [(`M_WIDTH-1):0]    n_restart_src_pc, r_restart_src_pc;
    logic 		     n_restart_src_is_indirect, r_restart_src_is_indirect;
+   /* DEBUG last-restart record (see dbg_trace_data, index[14]&index[4]).  The
+    * retire ring only sees restarts that are FOLLOWED by a retire; this holds
+    * the last one even when the machine wedges right after it. */
+   localparam RST_WHY_NONE = 3'd0;
+   localparam RST_WHY_MISPREDICT = 3'd1;
+   localparam RST_WHY_EXCEPTION = 3'd2;
+   localparam RST_WHY_SERIALIZE = 3'd3;
+   localparam RST_WHY_CACHE_FLUSH = 3'd4;
+   localparam RST_WHY_RESUME = 3'd5;
+   logic [2:0] 		     n_restart_why, r_restart_why;
+   logic [`LG_ROB_ENTRIES-1:0] n_restart_head_ptr, r_restart_head_ptr;
+   logic [31:0] 	     r_restart_cycle;
+   logic [31:0] 	     r_restart_count;
+   logic [31:0] 	     r_restart_retired;
    
    logic [(`M_WIDTH-1):0]    n_branch_pc, r_branch_pc;
    logic 		     n_took_branch, r_took_branch;
@@ -1821,7 +1839,23 @@ module core(clk,
    /* 216b record = 7 words.  Word select is {index[18], index[16:15]} so index[17]
     * stays free for the GHR readback in core_l1d_l1i (w_hist_sel = index[17:15]>=4). */
    wire [2:0] w_rt_word = {dbg_trace_index[18], dbg_trace_index[16:15]};
-   assign dbg_trace_data = (w_rt_word == 3'd4) ? w_rtrace_row[159:128] :
+   /* DEBUG: index[14]=1 snarfs the ROB-indexed mem-op PC shadow (rob slot in
+    * index[3:0]) instead of a ring word.  index[14] is unused by ring reads (row
+    * = index[10:1] at LG_RTRACE_ENTRIES<=11, word = index[18]/[16:15]), and with
+    * index[17:15]<4 and index[19]=0 the outer core_l1d_l1i mux passes it through. */
+   /* DEBUG: index[14]&index[4] snarfs the last-restart record, word = index[2:0].
+    * word0's 0x5A top byte is the live-probe discriminator. */
+   wire w_rst_sel = dbg_trace_index[14] & dbg_trace_index[4];
+   wire [31:0] w_rst_word0 = {8'h5A, 8'd0, {(8-`LG_ROB_ENTRIES){1'b0}}, r_restart_head_ptr, r_cause, r_restart_why};
+   wire [31:0] w_rst_word = (dbg_trace_index[2:0] == 3'd0) ? w_rst_word0 :
+			    (dbg_trace_index[2:0] == 3'd1) ? r_restart_pc[31:0] :
+			    (dbg_trace_index[2:0] == 3'd2) ? r_restart_src_pc[31:0] :
+			    (dbg_trace_index[2:0] == 3'd3) ? r_restart_cycle :
+			    (dbg_trace_index[2:0] == 3'd4) ? r_restart_count :
+			    r_restart_retired;
+   assign dbg_trace_data = w_rst_sel ? w_rst_word :
+			   dbg_trace_index[14] ? w_dbg_memop_pc :
+			   (w_rt_word == 3'd4) ? w_rtrace_row[159:128] :
 			   (w_rt_word == 3'd5) ? w_rtrace_row[191:160] :
 			   (w_rt_word == 3'd6) ? {8'd0, w_rtrace_row[215:192]} :
 			   (w_rt_word == 3'd7) ? 32'd0 :
@@ -1925,6 +1959,7 @@ module core(clk,
    assign l1d_flush_done = n_l1d_flush_complete;
    assign l2_flush_done = n_l2_flush_complete;
    
+   assign dbg_rob_inflight = r_rob_inflight;
    popcount #(`LG_ROB_ENTRIES) inflight0 (.in(r_rob_inflight), 
 					  .out(inflight));
 
@@ -1969,6 +2004,18 @@ module core(clk,
 	r_cycle <= reset ? 'd0 : r_cycle + 'd1;
 
      end
+
+   /* DEBUG last-restart record: stamp the cycle + count on the restart edge
+    * (restart_valid is held until acked in the serialize/flush states), and
+    * count retires since -- 0 retired = wedged straight out of the restart. */
+   wire w_restart_edge = n_restart_valid & !r_restart_valid;
+   always_ff@(posedge clk)
+     begin
+	r_restart_cycle <= reset ? 'd0 : w_restart_edge ? r_cycle[31:0] : r_restart_cycle;
+	r_restart_count <= reset ? 'd0 : w_restart_edge ? (r_restart_count + 'd1) : r_restart_count;
+	r_restart_retired <= (reset | w_restart_edge) ? 'd0 :
+			     (r_restart_retired + {30'd0, t_retire_two, t_retire & !t_retire_two});
+     end // always_ff@ (posedge clk)
 
 `ifdef VERILATOR
    // race probe: stamp when 64b-mode (KX) flips and when the kernel_entry
@@ -2056,6 +2103,8 @@ module core(clk,
 	     r_restart_pc <= 'd0;
 	     r_restart_src_pc <= 'd0;
 	     r_restart_src_is_indirect <= 1'b0;
+	     r_restart_why <= RST_WHY_NONE;
+	     r_restart_head_ptr <= 'd0;
 	     r_branch_pc <= 'd0;
 	     r_took_branch <= 1'b0;
 	     r_branch_valid <= 1'b0;
@@ -2098,6 +2147,8 @@ module core(clk,
 	     r_restart_pc <= n_restart_pc;
 	     r_restart_src_pc <= n_restart_src_pc;
 	     r_restart_src_is_indirect <= n_restart_src_is_indirect;
+	     r_restart_why <= n_restart_why;
+	     r_restart_head_ptr <= n_restart_head_ptr;
 	     r_branch_pc <= n_branch_pc;
 	     r_took_branch <= n_took_branch;
 	     r_branch_valid <= n_branch_valid;
@@ -2469,6 +2520,8 @@ module core(clk,
 	n_restart_pc = r_restart_pc;
 	n_restart_src_pc = r_restart_src_pc;
 	n_restart_src_is_indirect = r_restart_src_is_indirect;
+	n_restart_why = r_restart_why;
+	n_restart_head_ptr = r_restart_head_ptr;
 	n_restart_valid = 1'b0;
 	n_has_delay_slot = r_has_delay_slot;
 	n_has_nullifying_delay_slot = r_has_nullifying_delay_slot;
@@ -2628,6 +2681,8 @@ module core(clk,
 			      n_state = DRAIN;
 			      n_restart_cycles = 'd1;
 			      n_restart_valid = 1'b1;
+			      n_restart_why = RST_WHY_MISPREDICT;
+			      n_restart_head_ptr = r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
 			      t_bump_rob_head = 1'b1;			      
 			   end // else: !if(t_rob_head.is_ii)
 			 n_machine_clr = 1'b1;
@@ -2937,6 +2992,8 @@ module core(clk,
 			 t_clr_dq = 1'b1;
 			 n_restart_pc = t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
 			 n_restart_src_pc = t_rob_head.pc;
+			 n_restart_why = RST_WHY_SERIALIZE;
+			 n_restart_head_ptr = r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
 			 n_restart_src_is_indirect = 1'b0;
 			 n_restart_valid = 1'b1;
 			 n_pending_fault = 1'b0;
@@ -2963,6 +3020,8 @@ module core(clk,
 		    n_restart_pc = is_xflush(t_rob_head.opcode) ? t_rob_head.pc :
 				   t_rob_head.in_delay_slot ? r_last_branch_target : t_rob_head.target_pc;
 		    n_restart_src_pc = t_rob_head.pc;
+		    n_restart_why = RST_WHY_CACHE_FLUSH;
+		    n_restart_head_ptr = r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
 		    n_restart_src_is_indirect = 1'b0;
 		    n_restart_valid = 1'b1;
 		    n_pending_fault = 1'b0;
@@ -3004,6 +3063,8 @@ module core(clk,
 		 begin
 		    n_restart_pc = resume_pc;
 		    n_restart_src_pc = t_rob_head.pc;
+		    n_restart_why = RST_WHY_RESUME;
+		    n_restart_head_ptr = r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
 		    n_restart_src_is_indirect = 1'b0;
 		    n_restart_valid = 1'b1;
 		    n_state = HALT_WAIT_FOR_RESTART;
@@ -3144,6 +3205,8 @@ module core(clk,
 	       n_restart_pc = sign_extend32((w_sr_bev ? 32'hbfc00200 : 32'h80000000) |
 					    (r_tlb_refill ? (r_xtlb_refill ? 32'h80 : 32'h0) : 32'h180));
 	       n_restart_src_pc = 'd0;
+	       n_restart_why = RST_WHY_EXCEPTION;
+	       n_restart_head_ptr = r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
 	       n_restart_src_is_indirect = 1'b0;
 	       n_restart_valid = 1'b1;
 
@@ -4686,6 +4749,8 @@ module core(clk,
 	   .mq_wait(mq_wait),
 	   .uq_wait(uq_wait),
 	   .fp_uq_wait(fp_uq_wait),
+	   .dbg_memop_idx(dbg_trace_index[`LG_ROB_ENTRIES-1:0]),
+	   .dbg_memop_pc(w_dbg_memop_pc),
 	   .uq_full(t_uq_full),
 	   .uq_next_full(t_uq_next_full),
 	   .uq_uop(t_push_1 ? t_alloc_uop : t_alloc_uop2),

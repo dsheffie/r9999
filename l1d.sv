@@ -83,6 +83,7 @@ module l1d(clk,
 	   restart_valid,
 	   clr_link_reg,
 	   memq_empty,
+	   dbg_rob_inflight,
 	   drain_ds_complete,
 	   dead_rob_mask,
 	   flush_req,
@@ -150,6 +151,7 @@ module l1d(clk,
    input logic 			     restart_valid;
    input logic			     clr_link_reg;
    output logic			     memq_empty;
+   output logic [N_ROB_ENTRIES-1:0] dbg_rob_inflight;
    input logic 			     drain_ds_complete;
    input logic [(1<<`LG_ROB_ENTRIES)-1:0] dead_rob_mask;
    
@@ -537,6 +539,7 @@ endfunction
     * FLUSH_CL_BEAT2_RD=16 aliases INITIALIZE=0 in the trace -- a transient
     * 1-cycle re-index state, acceptable to lose in observability. */
    assign state = r_state[3:0];
+   assign dbg_rob_inflight = r_rob_inflight;
    
    logic	r_mem_req_cacheable, n_mem_req_cacheable;
    logic [15:0]	t_mem_req_mask, r_mem_req_mask, n_mem_req_mask;

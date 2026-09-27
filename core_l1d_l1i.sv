@@ -87,6 +87,7 @@ module core_l1d_l1i(clk,
 		    l2_state,
 		    l2_rsp_state,
 		    inflight,
+		    dbg_rob_inflight,
 		    epc,
 		    status_reg,
 		    badvaddr,
@@ -122,8 +123,7 @@ module core_l1d_l1i(clk,
 		    dbg_trace_index,
 		    dbg_trace_data,
 		    dbg_trace_wptr,
-		    dbg_rdchk,
-		    dbg_rob_inflight
+		    dbg_rdchk
 		    );
 
    localparam L1D_CL_LEN = 1 << `LG_L1D_CL_LEN;
@@ -279,6 +279,9 @@ module core_l1d_l1i(clk,
    output logic 			  got_bad_addr;
    
    output logic [`LG_ROB_ENTRIES:0] 	  inflight;
+   output logic [31:0]                    dbg_rob_inflight;
+   wire [(1<<`LG_ROB_ENTRIES)-1:0] w_core_dbg_rob, w_l1d_dbg_rob;
+   assign dbg_rob_inflight = {w_l1d_dbg_rob, w_core_dbg_rob};
    output logic [4:0]			  core_state; 
    output logic [3:0]			  l1i_state;
    output logic [3:0]			  l1d_state;
@@ -349,10 +352,6 @@ module core_l1d_l1i(clk,
    output logic [31:0]  dbg_trace_data;
    output logic [15:0]  dbg_trace_wptr;
    output logic [31:0]  dbg_rdchk;   /* reader-agreement checker status -> AXI 0x1B */
-   /* main's stable debug / co-sim interface (PORTS UNCONDITIONAL): every other port
-    * of it is already declared and driven on this branch; this one reads 0 here */
-   output logic [31:0]  dbg_rob_inflight;
-   assign dbg_rob_inflight = 'd0;
       
 
 
@@ -877,6 +876,7 @@ module core_l1d_l1i(clk,
 	       .restart_valid(restart_valid),
 	       .clr_link_reg(clr_link_reg),
 	       .memq_empty(memq_empty),
+	       .dbg_rob_inflight(w_l1d_dbg_rob),
 	       .drain_ds_complete(drain_ds_complete),
 	       .dead_rob_mask(dead_rob_mask),
 	       /* BUGFIX: the external (DMA-completion) request must reach the CACHE
@@ -1091,6 +1091,7 @@ module core_l1d_l1i(clk,
 	     .got_bad_addr(got_bad_addr),
 	     .core_state(core_state),
 	     .inflight(inflight),
+	     .dbg_rob_inflight(w_core_dbg_rob),
 	     .epc(epc),
 	     .status_reg(status_reg),
 	     .badvaddr(badvaddr),

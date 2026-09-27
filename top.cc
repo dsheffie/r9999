@@ -1204,6 +1204,24 @@ int main(int argc, char **argv) {
     }
   }
 
+  /* last-restart record (core.sv: dbg_trace_index[14]&[4], word = index[2:0]).
+   * Same readback the board does with devmem; word0 top byte must be 0x5a. */
+  {
+    static const char *why_names[8] = {"none","mispredict","exception","serialize",
+                                       "cache_flush","resume","?","?"};
+    uint32_t rec[6];
+    for(uint32_t w = 0; w < 6; w++) {
+      tb->dbg_trace_index = 0x4010 | w;
+      tb->eval();
+      rec[w] = tb->dbg_trace_data;
+    }
+    if((rec[0]>>24) == 0x5a) { /* only the ENABLE_PC_TRACE build muxes it out */
+    printf("=== LAST RESTART: magic=%02x why=%s cause=%u head_slot=%u pc=%08x src_pc=%08x cycle=%u count=%u retired_since=%u\n",
+           rec[0]>>24, why_names[rec[0]&7], (rec[0]>>3)&0x1f, (rec[0]>>8)&0xff,
+           rec[1], rec[2], rec[3], rec[4], rec[5]);
+    }
+  }
+
   tb->final();
   t0 = timestamp() - t0;
 

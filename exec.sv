@@ -80,6 +80,8 @@ module exec(clk,
 	    uq_wait,
 	    mq_wait,
 	    fp_uq_wait,
+	    dbg_memop_idx,
+	    dbg_memop_pc,
 	    uq_full,
 	    uq_next_full,
 	    uq_uop,
@@ -185,6 +187,13 @@ module exec(clk,
    output logic [N_ROB_ENTRIES-1:0]  uq_wait;
    output logic [N_ROB_ENTRIES-1:0]  mq_wait;
    output logic [N_ROB_ENTRIES-1:0]  fp_uq_wait;
+   /* DEBUG: ROB-indexed PC of the last memory op scheduled into each ROB slot.
+    * Written at the one-mem-op-per-cycle schedule point (t_pop_mem_uq); survives
+    * squash (only overwritten when the slot is reused).  Snarfed by rob index to
+    * identify a memory op that stranded its L1D r_rob_inflight bit but never
+    * retired (the applu FP-wedge orphan). */
+   input logic [`LG_ROB_ENTRIES-1:0] dbg_memop_idx;
+   output logic [31:0] 		     dbg_memop_pc;
    
    output logic 			     uq_full;
    output logic 			     uq_next_full;
@@ -404,6 +413,8 @@ module exec(clk,
    logic 			    t_div_complete;
 
    logic [N_ROB_ENTRIES-1:0] 	    r_uq_wait, r_mq_wait, r_fp_uq_wait;
+   /* DEBUG mem-op PC shadow, ROB-indexed (see dbg_memop_pc port). */
+   logic [31:0] 		    r_memop_pc [N_ROB_ENTRIES-1:0];
    /* non mem uop queue */
    uop_t r_uq[N_UQ_ENTRIES];
    uop_t uq, int_uop;
@@ -629,7 +640,8 @@ module exec(clk,
 	       end
 	     if(t_pop_mem_uq)
 	       begin
-		  r_mq_wait[t_mem_uq.rob_ptr] <= 1'b0;		  
+		  r_mq_wait[t_mem_uq.rob_ptr] <= 1'b0;
+		  r_memop_pc[t_mem_uq.rob_ptr] <= t_mem_uq.pc[31:0];
 	       end
 	     
 	     //int port
@@ -1321,6 +1333,7 @@ module exec(clk,
 `endif
    assign uq_wait = r_uq_wait;
    assign mq_wait = r_mq_wait;
+   assign dbg_memop_pc = r_memop_pc[dbg_memop_idx];
    assign fp_uq_wait = r_fp_uq_wait;
    assign core_store_data_valid = !mem_mdq_empty;
    

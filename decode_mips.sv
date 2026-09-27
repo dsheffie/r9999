@@ -1430,7 +1430,7 @@ module decode_mips(
 		    else if((insn[25:21]==5'd6) && (insn[10:0] == 11'd0))
 		      begin /* ctc1: FCR[fs] <- GPR[rt] (only FCR31 is writable) */
 			 uop.op = CTC1;
-			 uop.dst = fs;         /* carry the FCR number (NOT a PRF write) */
+			 uop.dst = fs;         /* the FCR number, for the FCSR-field write */
 			 uop.srcA = rt;
 			 uop.srcA_valid = 1'b1;
 			 uop.fcr_dst_valid = 1'b1;  /* CTC1 writes all 8 CCs: full write */
