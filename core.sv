@@ -504,6 +504,7 @@ module core(clk,
 
    
    
+   wire 		     t_next_head_br;   /* the second retiring slot is a branch */
    logic 		     t_alloc, t_alloc_two, t_retire, t_retire_two,
 			     t_rat_copy, t_clr_rob;
 
@@ -1603,7 +1604,7 @@ module core(clk,
 
 
 			      t_alloc_two = t_alloc
-					    && !t_uop.is_br
+					    && (t_uop.is_br ? !t_uop2.is_br : 1'b1)   /* one branch per cycle; a branch may pair with its delay slot (rob tail flags it via t_uop.has_delay_slot) */
 					    && !t_uop.oldest_first
 					    && !t_uop2.serializing_op
 					    && !t_uop2.oldest_first
@@ -1624,7 +1625,12 @@ module core(clk,
 		    		   & !t_rob_next_head.faulted 				    
 		    		   & t_rob_head_complete
 		    		   & t_rob_next_head_complete				    
-				   & !t_rob_head.is_br
+				   /* one branch per cycle (the predictor/history update has one
+				    * port), as rv64core: a correctly-predicted branch at the head now
+				    * retires WITH its delay slot.  Mispredicted ones are faulted and
+				    * already excluded above, which covers the restart / drain paths
+				    * and a not-taken branch-likely. */
+				   & (t_rob_head.is_br ? !t_rob_next_head.is_br : 1'b1)
 				   & !t_rob_next_head.is_ret
 				   & !t_rob_next_head.is_call
 		    		   & !t_rob_next_head.valid_hilo_dst
@@ -1672,7 +1678,7 @@ module core(clk,
 			 //$display("r_cycle = %d, can alloc %b, r_pending %b, delay %b", r_cycle, t_alloc, r_pending_fault, r_in_delay_slot);
 
 			 t_alloc_two = t_alloc
-				       && !t_uop.is_br
+				       && (t_uop.is_br ? !t_uop2.is_br : 1'b1)   /* one branch per cycle; a branch may pair with its delay slot (rob tail flags it via t_uop.has_delay_slot) */
 				       && !t_uop.oldest_first
 				       && !t_uop2.serializing_op
 				       && !t_uop2.oldest_first
@@ -2440,11 +2446,14 @@ module core(clk,
 		  n_retire_fp_prf_free[t_rob_next_head.old_pdst] = 1'b1;
 	       end
 
-	     n_branch_pc = t_retire_two ? t_rob_next_head.pc : t_rob_head.pc;
-	     n_took_branch = t_retire_two ? t_rob_next_head.take_br : t_rob_head.take_br;
-	     n_branch_valid = t_retire_two ? t_rob_next_head.is_br :  t_rob_head.is_br;
+	     /* train on whichever retiring slot holds the branch: with a branch and its
+	      * delay slot retiring together the branch is in the HEAD slot (at most one
+	      * branch retires per cycle -- see t_retire_two) */
+	     n_branch_pc = t_next_head_br ? t_rob_next_head.pc : t_rob_head.pc;
+	     n_took_branch = t_next_head_br ? t_rob_next_head.take_br : t_rob_head.take_br;
+	     n_branch_valid = t_next_head_br ? t_rob_next_head.is_br :  t_rob_head.is_br;
 	     n_branch_fault = t_rob_head.faulted;
-	     n_branch_pht_idx = t_retire_two ? t_rob_next_head.pht_idx : t_rob_head.pht_idx;
+	     n_branch_pht_idx = t_next_head_br ? t_rob_next_head.pht_idx : t_rob_head.pht_idx;
 	  end // if (t_retire)
 	
      end // always_comb
@@ -3670,6 +3679,8 @@ module core(clk,
 	  end
      end // always_comb
    
+
+   assign t_next_head_br = t_retire_two & t_rob_next_head.is_br;
 
    /* Case 2: latch the resolved target of the most-recently-retired branch.
     * A serializing op restarts only once it is the ROB head (oldest), by which
