@@ -13,7 +13,6 @@ module decode_mips(
 		   fr,
 		   irq,
 		   xflush,
-		   xflush_addr,
 		   xflush_op,
 		   tlb_miss,
 		   tlb_invalid,
@@ -41,10 +40,9 @@ module decode_mips(
     * instruction with a serializing whole-L1D CACHE op, exactly as an IRQ
     * replaces it; the core restarts at this pc once the flush completes. */
    input logic			xflush;
-   /* the injected flush: its op (XFLUSH / XPG_WBINV / XPG_INV) and the page's
-    * physical address, carried in the 64-bit immediate {jmp_imm, imm}; exec passes
-    * it through, so it reaches rob.data like a decoded CACHE op's address. */
-   input logic [`M_WIDTH-1:0]	xflush_addr;
+   /* the injected flush's op (XFLUSH / XPG_WBINV / XPG_INV).  The page it names is
+    * NOT carried in the uop: only one ext flush is pending at a time, so the core
+    * reads it from its latched request at the ROB head. */
    input opcode_t		xflush_op;
    input logic			tlb_miss;
    input logic			tlb_invalid;
@@ -162,7 +160,6 @@ module decode_mips(
 	     uop.serializing_op = 1'b1;
 	     uop.srcA = 'd0;
 	     uop.srcA_valid = 1'b1;
-	     {uop.jmp_imm, uop.imm} = xflush_addr;
 	  end
 	else if(misaligned)
 	  begin

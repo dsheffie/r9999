@@ -2804,8 +2804,7 @@ module exec(clk,
 	    end
 	  XFLUSH, XPG_WBINV, XPG_INV:
 	    begin
-	       /* injected ARM flush: pass the page address (the immediate) to rob.data */
-	       t_result = {int_uop.jmp_imm, int_uop.imm};
+	       /* injected ARM flush: nothing to compute (the core holds the page) */
 	       t_alu_valid = 1'b1;
 	    end
 	  default:

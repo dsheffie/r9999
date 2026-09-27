@@ -607,7 +607,8 @@ module core(clk,
    logic 		     n_xflush_whole, r_xflush_whole;
    logic 		     n_xflush_drop, r_xflush_drop;
    assign ext_flush_done = r_xflush_done;
-   /* the op and page address decode injects into the flush uop */
+   /* the op decode injects into the flush uop, and the page the L1D walks (read at the
+    * ROB head; held here until ext_flush_done) */
    wire [`M_WIDTH-1:0] w_xflush_addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, r_xflush_ppn, {`LG_PG_SZ{1'b0}}};
    wire opcode_t w_xflush_op = r_xflush_whole ? XFLUSH : (r_xflush_drop ? XPG_INV : XPG_WBINV);
 `ifdef VERILATOR
@@ -616,13 +617,6 @@ module core(clk,
     * re-runs .pc, and a delay slot re-run out of context is wrong). */
    always_ff@(negedge clk)
      begin
-	/* the injected flush's page address must reach rob.data unchanged */
-	if((r_state == WAIT_FOR_SERIALIZE_AND_RESTART) & t_rob_head_complete & is_xflush(t_rob_head.opcode) &
-	   (t_rob_head.data != w_xflush_addr))
-	  begin
-	     $display("XFLUSH ADDRESS MISMATCH: rob.data %x expected %x at cycle %d", t_rob_head.data, w_xflush_addr, r_cycle);
-	     $stop();
-	  end
 	if(t_alloc & is_xflush(t_alloc_uop.op) & r_in_delay_slot)
 	  begin
 	     $display("XFLUSH IN DELAY SLOT: pc %x at cycle %d", t_alloc_uop.pc, r_cycle);
@@ -2911,11 +2905,11 @@ module core(clk,
 			   end
 			 else if(is_xflush(t_rob_head.opcode))
 			   begin
-			      /* injected page op (XPG_WBINV / XPG_INV): t_rob_head.data = the
-			       * page's physical address.  The L1D walks the page line by line
-			       * and carries each line to the L2 itself, so no L2 flush. */
+			      /* injected page op (XPG_WBINV / XPG_INV) on the page latched with
+			       * the request (one pending at a time).  The L1D walks the page line
+			       * by line and carries each line to the L2 itself, so no L2 flush. */
 			      n_flush_pg_req = 1'b1;
-			      n_flush_cl_addr = t_rob_head.data;
+			      n_flush_cl_addr = w_xflush_addr;
 			      n_flush_cl_inval = (t_rob_head.opcode == XPG_INV);
 			      n_l1i_flush_complete = 1'b1;          /* not flushing L1I */
 			      n_l2_flush_complete  = 1'b1;          /* the page walk covers the L2 */
@@ -4554,7 +4548,6 @@ module core(clk,
 		     .fr(w_fr),
 		     .irq(w_irq_pending & (t_dec0_in_delay_slot == 1'b0) `R4K_IRQ_G0),
 		     .xflush(r_xflush_pend & (t_dec0_in_delay_slot == 1'b0)),
-		     .xflush_addr(w_xflush_addr),
 		     .xflush_op(w_xflush_op),
 		     .tlb_miss(insn.tlb_miss),
 		     .tlb_invalid(insn.tlb_invalid),
@@ -4581,7 +4574,6 @@ module core(clk,
 		     .fr(w_fr),
 		     .irq(w_irq_pending & (t_dec1_in_delay_slot == 1'b0) `R4K_IRQ_G1),
 		     .xflush(r_xflush_pend & (t_dec1_in_delay_slot == 1'b0)),
-		     .xflush_addr(w_xflush_addr),
 		     .xflush_op(w_xflush_op),
 		     .tlb_miss(insn_two.tlb_miss),
 		     .tlb_invalid(insn_two.tlb_invalid),
