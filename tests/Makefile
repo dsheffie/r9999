@@ -27,6 +27,7 @@ TESTS := hello/hello.elf \
          cp0/test_cp0.elf \
          tlb/test_tlb.elf \
          dside_tlb/test_dside_tlb.elf \
+         dside_tlb/test_uncached_tlb_load.elf \
          except/test_except.elf \
          except/test_bgezall_ds_fault.elf \
          except/test_regimm_link.elf \
@@ -344,6 +345,10 @@ dside_tlb/test_dside_tlb.elf: dside_tlb/test_dside_tlb.S $(STARTUP) $(COMMON)/si
 
 run-dside-tlb: dside_tlb/test_dside_tlb.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
+
+dside_tlb/test_uncached_tlb_load.elf: dside_tlb/test_uncached_tlb_load.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c dside_tlb/test_uncached_tlb_load.S -o dside_tlb/test_uncached_tlb_load.o
+	$(LD) $(LDFLAGS) $(STARTUP) dside_tlb/test_uncached_tlb_load.o -o $@
 
 dside_tlb/test_vipt_alias.elf: dside_tlb/test_vipt_alias.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c dside_tlb/test_vipt_alias.S -o dside_tlb/test_vipt_alias.o

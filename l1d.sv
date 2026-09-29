@@ -457,6 +457,7 @@ endfunction
    logic 				  t_got_non_mem, r_got_non_mem;
 
    logic                                  t_incr_busy,t_force_clear_busy;
+   logic 				  t_ucld_dead_drop;
    logic 				  n_stall_store, r_stall_store;
       
    logic 				  n_is_retry, r_is_retry;
@@ -873,6 +874,10 @@ endfunction
 	       begin
 		  r_rob_inflight[t_mem_head.rob_ptr] <= 1'b0;
 	       end
+	     if(t_ucld_dead_drop)
+	       begin
+		  r_rob_inflight[r_req.rob_ptr] <= 1'b0;
+	       end
 	     /* a CACHE hit-op retry completes the op on THIS pass whether it hits,
 	      * misses, or tag-mismatches (the line op / L2 scrub is issued either
 	      * way) -- clear its inflight bit unconditionally, else a miss/mismatch
@@ -906,6 +911,22 @@ endfunction
 	 * does NOT translate it a second time. */
 	t_remapped_req2.mapped = 1'b0;
      end
+
+`ifdef VERILATOR
+   /* an uncached LOAD must reach memory only when non-speculative (at the ROB
+    * head, the head's committable delay slot, or draining dead ops, which the
+    * t_ucld_dead_drop arm answers without an access) */
+   always_ff@(posedge clk)
+     begin
+	if(!reset && (r_state == ACTIVE) && (n_state == INJECT_UNCACHE_LOAD) &&
+	   !(head_of_rob_ptr_valid && (head_of_rob_ptr == r_req.rob_ptr)) &&
+	   !(head_of_rob_ds_committable && (next_head_of_rob_ptr == r_req.rob_ptr)))
+	  begin
+	     $display("[UCSPEC] cyc=%0d speculative uncached load pa=%x rob_ptr=%0d head=%0d",
+		      r_cycle, r_req.addr, r_req.rob_ptr, head_of_rob_ptr);
+	  end
+     end // always_ff@ (posedge clk)
+`endif
 
 `ifdef SCSI_CLOBBER_TRACE
    // SCSI INQUIRY-clobber debug (address-hardwired to 0x0841d / 0x083dcb). Was under
@@ -1894,6 +1915,11 @@ endfunction
 `else
    wire w_serialize_all = 1'b0;
 `endif
+   /* the queued head op is non-speculative: at the ROB head, a committable delay
+    * slot of the head, or everything left is dead (drain) */
+   wire	w_mq_head_nonspec = (head_of_rob_ptr_valid ? (head_of_rob_ptr == t_mem_head.rob_ptr) : 1'b0) |
+			    drain_ds_complete |
+			    (head_of_rob_ds_committable & (next_head_of_rob_ptr == t_mem_head.rob_ptr));
    wire	w_uncachable_req = (core_mem_req_valid & ((core_mem_req.cached==1'b0) | w_fence_load | w_serialize_all)) ?
 	(((head_of_rob_ptr_valid ? (head_of_rob_ptr == core_mem_req.rob_ptr) : 1'b0) | drain_ds_complete | w_uncached_ds_ok)): 1'b1;
 
@@ -2045,6 +2071,7 @@ endfunction
 	n_chop_beat = r_chop_beat;
 	n_flush_cl_beat = r_flush_cl_beat;
 	t_force_clear_busy = 1'b0;
+	t_ucld_dead_drop = 1'b0;
 	
 	t_incr_busy = 1'b0;
 
@@ -2245,7 +2272,11 @@ endfunction
 		     * reuses an exercised path rather than a new one -- and unlike
 		     * L1D_ONE_MEMOP it never REFUSES a request, which is what wedged
 		     * retirement on silicon in the 2026-07-26 attempt. */
-		    else if(t_port2_hit_cache && !r_hit_busy_addr2 && !w_p2_force_miss)
+		    /* An access the TLB maps UNCACHED (t_remapped_req2.cached, the page's C
+		     * field) must not fast-hit: w_uncachable_req only saw the segment's
+		     * cacheability, and user segments (kuseg/xkuseg) are "cached" there.
+		     * It falls to the miss queue, where it waits for the ROB head. */
+		    else if(t_port2_hit_cache && !r_hit_busy_addr2 && !w_p2_force_miss && t_remapped_req2.cached)
 		      begin
 `ifdef P2_FASTHIT_PROBE
 			 $display("[P2FH] port2 fast-hit reply");
@@ -2338,6 +2369,16 @@ endfunction
 			      n_chop_beat = 1'b1;
 			      n_state = CHOP_BEAT2_RD;
 			   end
+		      end
+		    else if((r_req.cached == 1'b0) && !r_req.is_store && drain_ds_complete && dead_rob_mask[r_req.rob_ptr])
+		      begin
+			 /* dead uncached load (younger than a mispredict/fault, parked in the
+			  * queue waiting for a ROB head it will never reach): complete it with
+			  * no memory access so the inflight counts drain */
+			 t_ucld_dead_drop = 1'b1;
+			 n_core_mem_rsp.dst_valid = r_req.dst_valid;
+			 n_core_mem_rsp.bad_addr = r_req.bad_addr;
+			 n_core_mem_rsp_valid = 1'b1;
 		      end
 		    else if(r_req.cached == 1'b0)
 		      begin
@@ -2573,8 +2614,12 @@ endfunction
 				 t_got_rd_retry = 1'b1;
 			      end
 			 end
-		       else
+		       else if(t_mem_head.cached || w_mq_head_nonspec)
 			 begin
+			    /* an uncached load (TLB C bit, carried in the queued req) is
+			     * released only when non-speculative, like w_uncachable_req at
+			     * admission; a dead one reaching drain is answered without the
+			     * device access by the port-1 uncached arm */
 			    t_pop_mq = 1'b1;
 			    n_req = t_mem_head;
 			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
