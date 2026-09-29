@@ -275,6 +275,7 @@ module itlb(clk,
    localparam LG_NU = $clog2(NU);
 
    logic [26:0]           r_u_vpn  [NU-1:0];
+   logic [11:0]           r_u_pm   [NU-1:0];   /* PageMask[24:13] of the cached entry */
    logic [1:0]            r_u_r    [NU-1:0];
    logic [7:0]            r_u_asid [NU-1:0];
    logic                  r_u_g    [NU-1:0];
@@ -298,7 +299,7 @@ module itlb(clk,
       for(genvar u = 0; u < NU; u = u + 1)
 	begin : u_hits
 	   assign w_u_hits[u] = r_u_valid[u]
-	                        & (r_u_vpn[u] == va[39:13])
+	                        & (((r_u_vpn[u] ^ va[39:13]) & {15'h7fff, ~r_u_pm[u]}) == 27'd0)
 	                        & (r_u_r[u]   == va[63:62])
 	                        & ((r_u_asid[u] == asid) | r_u_g[u]);
 	end
@@ -308,12 +309,14 @@ module itlb(clk,
    /* one-hot select the matched entry's per-page fields */
    logic [`PFN_WIDTH-1:0] t_u_pfn0, t_u_pfn1;
    logic 		  t_u_v0, t_u_v1;
+   logic [11:0] 	  t_u_pm;
    always_comb
      begin
 	t_u_pfn0 = '0;
 	t_u_pfn1 = '0;
 	t_u_v0   = 1'b0;
 	t_u_v1   = 1'b0;
+	t_u_pm   = 12'd0;
 	for(uu = 0; uu < NU; uu = uu + 1)
 	  begin
 	     if(w_u_hits[uu])
@@ -322,13 +325,29 @@ module itlb(clk,
 		  t_u_pfn1 = r_u_pfn1[uu];
 		  t_u_v0   = r_u_v0[uu];
 		  t_u_v1   = r_u_v1[uu];
+		  t_u_pm   = r_u_pm[uu];
 	       end
 	  end
      end // always_comb
 
-   wire                   w_u_odd = va[12];
+   /* variable page size: same size index / odd-page bit / PA offset width as the
+    * 48-way above (was hardwired to 4K, which fetched from the wrong PA on any
+    * larger instruction page) */
+   wire [2:0]             w_u_pgsz = (t_u_pm==12'h000) ? 3'd0 : (t_u_pm==12'h003) ? 3'd1 :
+                                     (t_u_pm==12'h00f) ? 3'd2 : (t_u_pm==12'h03f) ? 3'd3 :
+                                     (t_u_pm==12'h0ff) ? 3'd4 : (t_u_pm==12'h3ff) ? 3'd5 : 3'd6;
+   wire                   w_u_odd = (w_u_pgsz==3'd0) ? va[12] : (w_u_pgsz==3'd1) ? va[14] :
+                                    (w_u_pgsz==3'd2) ? va[16] : (w_u_pgsz==3'd3) ? va[18] :
+                                    (w_u_pgsz==3'd4) ? va[20] : (w_u_pgsz==3'd5) ? va[22] : va[24];
    wire [`PFN_WIDTH-1:0]  w_u_pfn = w_u_odd ? t_u_pfn1 : t_u_pfn0;
-   wire [`PFN_WIDTH+11:0] w_u_pa_full = {w_u_pfn, va[11:0]};
+   wire [`PFN_WIDTH+11:0] w_u_pa_full =
+        (w_u_pgsz==3'd0) ? {w_u_pfn,                  va[11:0]} :
+        (w_u_pgsz==3'd1) ? {w_u_pfn[`PFN_WIDTH-1:2],  va[13:0]} :
+        (w_u_pgsz==3'd2) ? {w_u_pfn[`PFN_WIDTH-1:4],  va[15:0]} :
+        (w_u_pgsz==3'd3) ? {w_u_pfn[`PFN_WIDTH-1:6],  va[17:0]} :
+        (w_u_pgsz==3'd4) ? {w_u_pfn[`PFN_WIDTH-1:8],  va[19:0]} :
+        (w_u_pgsz==3'd5) ? {w_u_pfn[`PFN_WIDTH-1:10], va[21:0]} :
+                           {w_u_pfn[`PFN_WIDTH-1:12], va[23:0]};
 
    assign ufast_hit   = active & req & w_u_any;
    assign ufast_pa    = w_u_pa_full[`PA_WIDTH-1:0];
@@ -346,6 +365,7 @@ module itlb(clk,
 	else if(install_en & hit)   /* 48-way prime landed a hit: cache r_tlb[hit_index] */
 	  begin
 	     r_u_vpn[w_u_repl]   <= r_tlb[hit_index].vpn[26:0];
+	     r_u_pm[w_u_repl]    <= r_tlb[hit_index].pagemask;
 	     r_u_r[w_u_repl]     <= r_tlb[hit_index].r;
 	     r_u_asid[w_u_repl]  <= r_tlb[hit_index].asid;
 	     r_u_g[w_u_repl]     <= r_tlb[hit_index].g0 & r_tlb[hit_index].g1;
