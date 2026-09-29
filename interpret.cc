@@ -1189,7 +1189,7 @@ void _lwl(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
   
-  uint32_t ea = va_translate(s, (uint32_t)s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   uint32_t u_ea = ea;
   uint32_t ma = ea & 3;
   ea &= 0xfffffffc;
@@ -1227,7 +1227,7 @@ void _lwr(uint32_t inst, state_t *s) {
   int16_t himm = (int16_t)(inst & ((1<<16) - 1));
   int32_t imm = (int32_t)himm;
  
-  uint32_t ea = va_translate(s, (uint32_t)s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
+  uint32_t ea = va_translate(s, s->gpr[rs] + imm, tlb_op::load); if(s->tlb_fault) return;
   uint32_t u_ea = ea;
   uint32_t ma = ea & 3;
   ea &= 0xfffffffc;
@@ -1803,12 +1803,9 @@ static void execFP(uint32_t inst, state_t *s) {
       s->insn_histo[select_fp_insn<T>(mipsInsn::DP_MUL, mipsInsn::SP_MUL)]++;      
       break;
     case fpOperation::div:
-      if(_ft==0.0) {
-	_fd = std::numeric_limits<T>::max();
-      }
-      else {
-	_fd = _fs / _ft;
-      }
+      /* IEEE: x/0 -> +-Inf, 0/0 -> NaN.  Returning DBL_MAX here also threw away
+       * the sign of both the zero and the dividend. */
+      _fd = _fs / _ft;
       s->insn_histo[select_fp_insn<T>(mipsInsn::DP_DIV, mipsInsn::SP_DIV)]++;       
       break;
     case fpOperation::sqrt:
@@ -2811,11 +2808,25 @@ void execMips(state_t *s) {
       case 0x07:
 	branch<EL,branch_type::bgtz>(inst, s); 
 	break;
-      case 0x08: /* addi */
-	s->gpr[rt] = s->gpr[rs] + simm32;  
+      case 0x08: { /* addi: 32-bit add, sign-extended, TRAPS on overflow */
+	/* This used to be a bare 64-bit `gpr[rs] + simm32' with no overflow
+	 * check, while ADD (0x20) right above does it correctly.  The RTL is
+	 * right (exec.sv ADDI: t_result = sign_extend32(w_add32);
+	 * t_fault = w_add32_overflow), so the GOLDEN was wrong -- an overflowing
+	 * or 64-bit-operand addi made the co-sim report a divergence against a
+	 * correct RTL. */
+	uint32_t u_rs = (uint32_t)s->gpr[rs];
+	uint32_t u_imm = (uint32_t)simm32;
+	uint32_t result = u_rs + u_imm;
+	if(((result >> 31) != (u_imm >> 31)) && ((u_rs >> 31) == (u_imm >> 31))) {
+	  raise_overflow(s);
+	  break;
+	}
+	s->gpr[rt] = sext64(result);
 	s->pc+=4;
 	s->insn_histo[mipsInsn::ADDI]++;
 	break;
+      }
       case 0x09: /* addiu: 32-bit add, result sign-extended (MIPS64) */
 	tmp = sext64((uint32_t)(s->gpr[rs] + simm32));
 	s->gpr[rt] = tmp;

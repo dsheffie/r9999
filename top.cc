@@ -222,6 +222,215 @@ int check_insn_bytes(long long pc, int data) {
 static long long lrc = -1;
 static uint64_t record_insns_retired = 0;
 
+/* TOP-DOWN accounting (core.sv `ifdef TOPDOWN, --topdown).  core.sv reports, every
+ * cycle, the state, how many uops the decode queue offered (0/1/2), how many
+ * allocated and retired, and why an offered slot did not allocate.  Accumulated
+ * only inside the --pipestart/--pipeend retired-insn window. */
+namespace topdown {
+  static bool enabled = false;
+  static uint64_t cycles = 0, retired = 0, allocated = 0;
+  static uint64_t fe_lat = 0, fe_bw = 0;        /* 0 offered / 1 offered (slots) */
+  static uint64_t be[8] = {0};                  /* offered-not-allocated slots by reason */
+  static uint64_t state_cyc[32] = {0};          /* cycles by core state */
+}
+extern "C" void topdown_cycle(int st, int avail, int nalloc, int nret, int be0, int be1) {
+  if(!topdown::enabled || record_insns_retired < pipestart || record_insns_retired >= pipeend) {
+    return;
+  }
+  topdown::cycles++;
+  topdown::retired += nret;
+  topdown::allocated += nalloc;
+  topdown::state_cyc[st & 31]++;
+  if(st == 2) {                                 /* ACTIVE: classify the 2 slots */
+    if(avail == 0) {
+      topdown::fe_lat += 2;
+    }
+    else if(avail == 1) {
+      topdown::fe_bw += 1;
+    }
+    if(be0) {
+      topdown::be[be0 & 7] += avail;            /* nothing allocated: every offered slot */
+    }
+    if(be1) {
+      topdown::be[be1 & 7] += 1;
+    }
+  }
+}
+/* fetch groups (l1i.sv TOPDOWN): insns pushed into the fetch queue per cycle,
+ * why the group ended, and fetch queue occupancy */
+namespace topdown {
+  static uint64_t f_cyc = 0, f_insns = 0;
+  static uint64_t f_why_cyc[16] = {0}, f_why_insns[16] = {0};
+  static uint64_t f_npush[8] = {0}, f_fqcnt[64] = {0};
+}
+extern "C" void topdown_fetch(int npush, int why, int fq_cnt) {
+  if(!topdown::enabled || record_insns_retired < pipestart || record_insns_retired >= pipeend) {
+    return;
+  }
+  topdown::f_cyc++;
+  topdown::f_insns += npush;
+  topdown::f_why_cyc[why & 15]++;
+  topdown::f_why_insns[why & 15] += npush;
+  topdown::f_npush[npush & 7]++;
+  topdown::f_fqcnt[fq_cnt & 63]++;
+}
+/* per-uop stage stamps (core.sv / exec.sv TOPDOWN), keyed by rob index.  All in
+ * globals::cycle; the ROB's completion stamp is on the core's own r_cycle and is
+ * converted with the offset measured at retirement. */
+namespace topdown {
+  struct stamp_t { uint64_t a = 0, q = 0, i = 0, m = 0; };
+  static stamp_t slot[64];
+  /* per class (0 alu, 1 branch, 2 load, 3 store): n, and sums of alloc->sched,
+   * sched->issue, issue->complete, alloc->complete, complete->retire */
+  static uint64_t cls_n[4] = {0};
+  static double cls_seg[4][5] = {{0}};
+  static uint64_t cls_min[4][5];
+  static bool min_init = false;
+}
+extern "C" void topdown_uop(int ev, int rob_ptr) {
+  if(!topdown::enabled) {
+    return;
+  }
+  topdown::stamp_t &e = topdown::slot[rob_ptr & 63];
+  const uint64_t c = globals::cycle;
+  switch(ev)
+    {
+    case 0: e = topdown::stamp_t(); e.a = c; break;   /* allocation: a fresh entry */
+    case 1: e.q = c; break;                           /* enters the ALU scheduler */
+    case 2: e.i = c; break;                           /* ALU execute starts */
+    case 3: e.m = c; break;                           /* memory uop to address gen */
+    default: break;
+    }
+}
+extern "C" void topdown_retire_uop(int rob_ptr, long long alloc_c, long long complete_c,
+                                   long long retire_c, int is_br, int is_store) {
+  using namespace topdown;
+  if(!enabled || record_insns_retired < pipestart || record_insns_retired >= pipeend) {
+    return;
+  }
+  if(!min_init) {
+    for(auto &r : cls_min) { for(auto &x : r) { x = ~0ull; } }
+    min_init = true;
+  }
+  const stamp_t &e = slot[rob_ptr & 63];
+  const long long off = (long long)globals::cycle - retire_c;     /* core r_cycle -> globals::cycle */
+  const uint64_t c = (uint64_t)(complete_c + off), r = globals::cycle;
+  if(e.a == 0 || c < e.a) {
+    return;                                        /* no allocation stamp (window edge) */
+  }
+  int k;
+  uint64_t start;                                  /* when it left the queue for execution */
+  if(e.m) {
+    k = is_store ? 3 : 2;
+    start = e.m;
+  }
+  else if(e.i) {
+    k = is_br ? 1 : 0;
+    start = e.i;
+  }
+  else {
+    return;                                        /* nop / never issued: skip */
+  }
+  const uint64_t q = e.m ? e.m : (e.q ? e.q : start);
+  const uint64_t seg[5] = {q - e.a, start - q, c - start, c - e.a, r - c};
+  cls_n[k]++;
+  for(int j = 0; j < 5; j++) {
+    cls_seg[k][j] += seg[j];
+    cls_min[k][j] = std::min(cls_min[k][j], seg[j]);
+  }
+}
+static void topdown_report() {
+  using namespace topdown;
+  static const char *st_name[16] = {"FLUSH_FOR_HALT","HALT","ACTIVE","DRAIN","RAT","DELAY_SLOT",
+    "ALLOC_FOR_SERIALIZE","HALT_WAIT_FOR_RESTART","WAIT_FOR_SERIALIZE_AND_RESTART","ARCH_FAULT",
+    "WRITE_EPC","EXCEPTION_DRAIN","SERIALIZE_IN_FAULTED_DELAY_SLOT",
+    "WAIT_FOR_SERIALIZE_IN_FAULTED_DELAY_SLOT","CACHE_FLUSH","DEAD"};
+  static const char *be_name[8] = {"-","ROB full","uop queue full","free list short",
+    "oldest-first pending","pending fault","other","pairing rule"};
+  const double slots = 2.0 * cycles;
+  if(cycles == 0) {
+    std::cout << "topdown: no cycles in window\n";
+    return;
+  }
+  /* non-ACTIVE cycles: recovery after a mispredict/exception = bad speculation,
+   * serialization = backend */
+  uint64_t recov = 0, serial = 0;
+  for(int i = 0; i < 16; i++) {
+    if(i == 3 || i == 4 || i == 5 || i == 9 || i == 10 || i == 11 || i == 12 || i == 13) {
+      recov += state_cyc[i];
+    }
+    else if(i != 2) {
+      serial += state_cyc[i];
+    }
+  }
+  uint64_t be_sum = 0;
+  for(int i = 1; i < 8; i++) {
+    be_sum += be[i];
+  }
+  const double squashed = (allocated > retired) ? (double)(allocated - retired) : 0.0;
+  const double t_ret = retired / slots, t_bad = (squashed + 2.0 * recov) / slots;
+  const double t_fe = (fe_lat + fe_bw) / slots, t_be = (be_sum + 2.0 * serial) / slots;
+  std::cout << "==== TOP-DOWN (retired-insn window " << pipestart << ".." << pipeend
+            << ", " << cycles << " cycles, " << (uint64_t)slots << " slots, IPC "
+            << (double)retired / cycles << ") ====\n";
+  printf("  retiring        %5.1f%%\n", 100 * t_ret);
+  printf("  bad speculation %5.1f%%   (squashed uops %.0f + recovery %lu cyc)\n", 100 * t_bad, squashed, (unsigned long)recov);
+  printf("  frontend bound  %5.1f%%   (latency: nothing offered %5.1f%%, bandwidth: 1 of 2 offered %5.1f%%)\n",
+         100 * t_fe, 100 * fe_lat / slots, 100 * fe_bw / slots);
+  printf("  backend bound   %5.1f%%   (serializing states %lu cyc)\n", 100 * t_be, (unsigned long)serial);
+  for(int i = 1; i < 8; i++) {
+    if(be[i]) {
+      printf("      %-22s %5.1f%%\n", be_name[i], 100 * be[i] / slots);
+    }
+  }
+  static const char *cls_name[4] = {"alu", "branch", "load", "store"};
+  printf("  stage latency, mean (min) cycles:   alloc->sched   sched->issue   issue->complete   alloc->complete   complete->retire\n");
+  for(int k = 0; k < 4; k++) {
+    if(cls_n[k] == 0) {
+      continue;
+    }
+    printf("    %-7s n=%-6lu", cls_name[k], (unsigned long)cls_n[k]);
+    for(int j = 0; j < 5; j++) {
+      printf("   %6.2f (%2lu)", cls_seg[k][j] / cls_n[k], (unsigned long)cls_min[k][j]);
+    }
+    printf("\n");
+  }
+  printf("    (memory ops: 'sched' = dispatch from the memory uop queue to address generation)\n");
+  printf("  (sum %.1f%%)  cycles by state:", 100 * (t_ret + t_bad + t_fe + t_be));
+  for(int i = 0; i < 16; i++) {
+    if(state_cyc[i]) {
+      printf(" %s=%lu", st_name[i], (unsigned long)state_cyc[i]);
+    }
+  }
+  printf("\n");
+  if(f_cyc) {
+    static const char *why_name[10] = {"full group of 4","cut at 16B line end","cut before taken cflow",
+      "cflow insn alone","delay slot alone","fetch queue full","resteer bubble","miss/tlb/other state",
+      "restart/flush","group + taken br + ds"};
+    printf("  fetch: %.3f insns/cycle over %lu cycles; group size hist:", (double)f_insns / f_cyc,
+           (unsigned long)f_cyc);
+    for(int i = 0; i <= 4; i++) {
+      printf(" %d=%.1f%%", i, 100.0 * f_npush[i] / f_cyc);
+    }
+    printf("\n    why the group ended      %%cycles   insns/group\n");
+    for(int i = 0; i < 10; i++) {
+      if(f_why_cyc[i]) {
+        printf("    %-24s %6.1f%%   %.2f\n", why_name[i], 100.0 * f_why_cyc[i] / f_cyc,
+               (double)f_why_insns[i] / f_why_cyc[i]);
+      }
+    }
+    double occ = 0;
+    printf("    fetch queue occupancy:");
+    for(int i = 0; i < 64; i++) {
+      occ += (double)i * f_fqcnt[i];
+      if(f_fqcnt[i]) {
+        printf(" %d=%.1f%%", i, 100.0 * f_fqcnt[i] / f_cyc);
+      }
+    }
+    printf("  (mean %.2f)\n", occ / f_cyc);
+  }
+}
+
 void record_retirement(long long pc, long long fetch_cycle, long long alloc_cycle, long long complete_cycle, long long retire_cycle,
 		       int faulted , int is_mem, int is_fp, int missed_l1d) {
 
@@ -435,6 +644,7 @@ int main(int argc, char **argv) {
       ("pipelog,p", po::value<std::string>(&pipelog), "log for pipeline tracing")
       ("pipestart", po::value<uint64_t>(&pipestart)->default_value(0), "when to start logging")
       ("pipeend", po::value<uint64_t>(&pipeend)->default_value(~0UL), "when to stop logging")      
+      ("topdown", po::value<bool>(&topdown::enabled)->default_value(false), "top-down slot accounting over the pipestart..pipeend window (build with +define+TOPDOWN)")
       ("maxcycle", po::value<uint64_t>(&max_cycle)->default_value(1UL<<34), "maximum cycles")
       ("maxicnt", po::value<uint64_t>(&max_icnt)->default_value(1UL<<50), "maximum icnt")
       ("singlestep", po::value<bool>(&single_step)->default_value(false), "single-step the core (one retire per step pulse)")
@@ -1441,6 +1651,9 @@ int main(int argc, char **argv) {
     if(tb->l1d_cache_accesses) std::cout << " (" << (100.0*tb->l1d_cache_hits)/tb->l1d_cache_accesses << "%)";
     std::cout << "\n[ctr] l1i acc=" << tb->l1i_cache_accesses << " hit=" << tb->l1i_cache_hits;
     std::cout << "\n[ctr] l2  acc=" << tb->l2_cache_accesses  << " hit=" << tb->l2_cache_hits << "\n";
+    if(topdown::enabled) {
+      topdown_report();
+    }
 
     uint64_t total_histo = 0;
     for(auto &p : ss->insn_histo) {

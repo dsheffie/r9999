@@ -53,6 +53,19 @@
 
 //`define ENABLE_L1D_SKID 1
 
+/* Pipeline performance knobs (PERF_TOPDOWN.md has the measurements).  All off by
+ * default; area/timing cost not yet characterized.
+ *   ENABLE_FETCH_BR_GROUP: a predicted-taken direct branch in fetch slot 1/2 is
+ *     pushed with the insns before it and its delay slot, then one resteer bubble
+ *     (was: branch alone, delay slot alone).  dhrystone -6.5%.
+ *   ENABLE_SCHED_BYPASS: when no ALU scheduler entry is ready, a ready uop-queue
+ *     head issues directly instead of spending a cycle in the scheduler.
+ *   ENABLE_UQ_DUAL_POP: move up to two uops/cycle from the uop queue into the
+ *     ALU scheduler (allocation pushes two, the queue used to pop one). */
+//`define ENABLE_FETCH_BR_GROUP 1
+//`define ENABLE_SCHED_BYPASS 1
+//`define ENABLE_UQ_DUAL_POP 1
+
 /* Register the L1D -> core response instead of driving it combinationally.
  *
  * rv64core does this unconditionally (l1d.sv: BOTH arms of its `ifdef FOUR_CYCLE_L1D
@@ -83,7 +96,11 @@
  `define LG_PHT_SZ 14
 `endif
 
-`define GBL_HIST_LEN 64
+/* history length == index width: a plain gshare XORs the newest LG_PHT_SZ outcomes
+ * into the index.  Folding a longer (64) history into 14 bits tripled compress
+ * mispredicts (29 -> 10.8 /kinsn with the short history, CPI -13%): random-outcome
+ * branches pollute the index so the predictable ones never train. */
+`define GBL_HIST_LEN `LG_PHT_SZ
 
 //page size
 `define LG_PG_SZ 12

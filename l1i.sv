@@ -18,13 +18,10 @@ module compute_pht_idx(pc, hist, idx);
    input logic [`GBL_HIST_LEN-1:0] hist;
    output logic [`LG_PHT_SZ-1:0]   idx;
 
-   wire [31:0] 			   w_fold_0 = hist[31:0] ^ hist[63:32];
-   wire [15:0] 			   w_fold_1 = w_fold_0[31:16] ^ w_fold_0[15:0];
-
    /* index per 16B LINE (bit 4 up): the entry now holds a counter for each of the
     * 4 slots, so the low bits that used to select between adjacent instructions
     * are supplied by the slot mux instead. */
-   assign idx = w_fold_1[`LG_PHT_SZ-1:0]  ^ pc[`LG_PHT_SZ+3:4];
+   assign idx = hist ^ pc[`LG_PHT_SZ+3:4];
    
 endmodule
 
@@ -247,8 +244,8 @@ module l1i(clk,
    
    logic [`GBL_HIST_LEN-1:0] 	     n_arch_gbl_hist, r_arch_gbl_hist;
    logic [`GBL_HIST_LEN-1:0] 	     n_spec_gbl_hist, r_spec_gbl_hist;
-   assign dbg_arch_hist = r_arch_gbl_hist;
-   assign dbg_spec_hist = r_spec_gbl_hist;
+   assign dbg_arch_hist = {{(64-`GBL_HIST_LEN){1'b0}}, r_arch_gbl_hist};
+   assign dbg_spec_hist = {{(64-`GBL_HIST_LEN){1'b0}}, r_spec_gbl_hist};
 
    logic [`GBL_HIST_LEN-1:0] 	     r_last_spec_gbl_hist;
    
@@ -341,6 +338,13 @@ endfunction
    logic [2:0] 		  t_branch_cnt;
    logic [4:0] 		  t_branch_marker, t_spec_branch_marker;
    logic [2:0] 		  t_first_branch;
+   /* ENABLE_FETCH_BR_GROUP: a predicted-taken direct branch in slot 1/2 of the
+    * fetch group is pushed together with the insns before it and its delay slot */
+   logic [3:0] 		  t_gb_pd1, t_gb_pd2;
+   logic 		  t_gb_ok1, t_gb_ok2;
+   logic 		  t_gb_take1, t_gb_take2;
+   logic [`M_WIDTH-1:0]   t_gb_pc1, t_gb_pc2, t_gb_target1, t_gb_target2;
+   logic [`M_WIDTH-1:0]   t_gb_simm1, t_gb_simm2;
 
    logic 		  t_init_pht;
    logic [`LG_PHT_SZ-1:0] r_init_pht_idx, n_init_pht_idx;
@@ -699,6 +703,31 @@ endfunction
 	    t_first_branch = 'd7;
 	endcase
 
+	/* in-group taken branch at slot 1 or 2 (relative to t_insn_idx): only
+	 * direct targets -- conditional (1, predicted taken by the same counter
+	 * t_tcb* used), likely (2), j (3), b (8).  Calls (5/9) push the return
+	 * stack with their own pc and BTB/return targets (4/6/7) are looked up
+	 * for the head slot, so those keep the branch-alone path.  The delay slot
+	 * must be in the same 16B line (idx + k + 1 <= 3). */
+	t_gb_pd1 = select_pd(r_jump_out, t_insn_idx + 2'd1);
+	t_gb_pd2 = select_pd(r_jump_out, t_insn_idx + 2'd2);
+	t_gb_pc1 = r_cache_pc + 'd4;
+	t_gb_pc2 = r_cache_pc + 'd8;
+	t_gb_simm1 = {{SEXT{t_insn_data2[15]}},t_insn_data2[15:0]};
+	t_gb_simm2 = {{SEXT{t_insn_data3[15]}},t_insn_data3[15:0]};
+	t_gb_target1 = (t_gb_pd1 == 4'd3) ? {t_gb_pc1[`M_WIDTH-1:28], t_insn_data2[25:0], 2'd0} :
+		       ((t_gb_pc1 + 'd4) + {t_gb_simm1[`M_WIDTH-3:0], 2'd0});
+	t_gb_target2 = (t_gb_pd2 == 4'd3) ? {t_gb_pc2[`M_WIDTH-1:28], t_insn_data3[25:0], 2'd0} :
+		       ((t_gb_pc2 + 'd4) + {t_gb_simm2[`M_WIDTH-3:0], 2'd0});
+	t_gb_ok1 = 1'b0;
+	t_gb_ok2 = 1'b0;
+`ifdef ENABLE_FETCH_BR_GROUP
+	t_gb_ok1 = (t_first_branch == 'd1) && (t_insn_idx <= 2'd1) && !fq_full3 &&
+		   ((t_gb_pd1 == 4'd1) || (t_gb_pd1 == 4'd2) || (t_gb_pd1 == 4'd3) || (t_gb_pd1 == 4'd8));
+	t_gb_ok2 = (t_first_branch == 'd2) && (t_insn_idx == 2'd0) && !fq_full4 &&
+		   ((t_gb_pd2 == 4'd1) || (t_gb_pd2 == 4'd2) || (t_gb_pd2 == 4'd3) || (t_gb_pd2 == 4'd8));
+`endif
+
 	t_branch_cnt = {2'd0, select_pd(r_jump_out, 'd0) != 4'd0} +
 		       {2'd0, select_pd(r_jump_out, 'd1) != 4'd0} +
 		       {2'd0, select_pd(r_jump_out, 'd2) != 4'd0} +
@@ -713,6 +742,8 @@ endfunction
 	t_push_insn4 = 1'b0;
 	t_take_br = 1'b0;
 	t_is_cflow = 1'b0;
+	t_gb_take1 = 1'b0;
+	t_gb_take2 = 1'b0;
 	t_update_spec_hist = 1'b0;
 	t_is_call = 1'b0;
 	t_is_ret = 1'b0;
@@ -906,7 +937,26 @@ endfunction
 		    //initial push multiple logic
 		    if(!(t_is_cflow || r_delay_slot))
 		      begin
-			 if(t_first_branch == 'd4 && !fq_full4)
+			 /* the array was read sequentially this cycle, so the target
+			  * costs one resteer bubble (vs. two single-insn cycles for
+			  * the branch and its delay slot on the branch-alone path) */
+			 if(t_gb_ok2)
+			   begin
+			      t_push_insn4 = 1'b1;
+			      t_gb_take2 = 1'b1;
+			      t_update_spec_hist = 1'b1;
+			      n_pc = t_gb_target2;
+			      n_resteer_bubble = 1'b1;
+			   end
+			 else if(t_gb_ok1)
+			   begin
+			      t_push_insn3 = 1'b1;
+			      t_gb_take1 = 1'b1;
+			      t_update_spec_hist = 1'b1;
+			      n_pc = t_gb_target1;
+			      n_resteer_bubble = 1'b1;
+			   end
+			 else if(t_first_branch == 'd4 && !fq_full4)
 			   begin
 			      t_push_insn4 = 1'b1;
 			      t_cache_idx = r_cache_idx + 'd1;
@@ -1119,8 +1169,8 @@ endfunction
 	t_insn2.tlb_invalid = 1'b0;
 	t_insn2.bad_va = 1'b0;
 	t_insn2.pc = r_cache_pc + 'd4;
-	t_insn2.pred_target = 'd0;
-	t_insn2.pred = 1'b0;
+	t_insn2.pred_target = t_gb_take1 ? n_pc : 'd0;
+	t_insn2.pred = t_gb_take1;
 	/* same 16B line as slot 0 -> SAME PHT entry (the slot is disambiguated at
 	 * retire by branch_pc[3:2]).  Was 'd0: harmless while the fetch group
 	 * truncated at any branch (slots 2-4 could never BE branches), but with
@@ -1137,8 +1187,8 @@ endfunction
 	t_insn3.tlb_invalid = 1'b0;
 	t_insn3.bad_va = 1'b0;
 	t_insn3.pc = r_cache_pc + 'd8;
-	t_insn3.pred_target = 'd0;
-	t_insn3.pred = 1'b0;
+	t_insn3.pred_target = t_gb_take2 ? n_pc : 'd0;
+	t_insn3.pred = t_gb_take2;
 	t_insn3.pht_idx = r_pht_idx;
 	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
 	 * sit in slot 2, and a hardcoded 0 left ITS delay slot looking like an
@@ -1278,6 +1328,78 @@ endfunction
 	     r_pd <= t_pd;
 	  end
      end // always_ff@
+
+`ifdef TOPDOWN
+   /* per-cycle fetch group size and why the group ended (top.cc topdown_fetch):
+    * 0 full 4, 1 cut at the 16B line end, 2 cut before a predicted-taken cflow,
+    * 3 the cflow insn alone, 4 its delay slot alone, 5 fetch queue full,
+    * 6 resteer bubble, 7 miss/tlb/other state, 8 restart/flush redirect,
+    * 9 group ending in a taken branch + its delay slot (ENABLE_FETCH_BR_GROUP) */
+   import "DPI-C" function void topdown_fetch(input int npush, input int why, input int fq_cnt);
+   logic [3:0] t_td_why;
+   logic [2:0] t_td_n;
+   always_comb
+     begin
+	t_td_n = t_push_insn4 ? 3'd4 : t_push_insn3 ? 3'd3 : t_push_insn2 ? 3'd2 : t_push_insn ? 3'd1 : 3'd0;
+	t_td_why = 4'd7;
+	if(r_state != ACTIVE)
+	  begin
+	     t_td_why = 4'd7;
+	  end
+	else if(r_resteer_bubble)
+	  begin
+	     t_td_why = 4'd6;
+	  end
+	else if(t_clear_fq)
+	  begin
+	     t_td_why = 4'd8;
+	  end
+	else if(!t_hit)
+	  begin
+	     t_td_why = 4'd7;
+	  end
+	else if(fq_full)
+	  begin
+	     t_td_why = 4'd5;
+	  end
+	else if(r_delay_slot)
+	  begin
+	     t_td_why = 4'd4;
+	  end
+	else if(t_is_cflow)
+	  begin
+	     t_td_why = 4'd3;
+	  end
+	else if(t_gb_take1 | t_gb_take2)
+	  begin
+	     t_td_why = 4'd9;
+	  end
+	else if(t_td_n == 3'd4)
+	  begin
+	     t_td_why = 4'd0;
+	  end
+	else if({1'b0, t_td_n} < {1'b0, t_first_branch})
+	  begin
+	     t_td_why = 4'd5;
+	  end
+	else if(({1'b0, t_first_branch} + {2'b0, t_insn_idx}) == 4'd4)
+	  begin
+	     t_td_why = 4'd1;
+	  end
+	else
+	  begin
+	     t_td_why = 4'd2;
+	  end
+     end // always_comb
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     topdown_fetch({29'd0, t_td_n}, {28'd0, t_td_why},
+			   {{(31-`LG_FQ_ENTRIES){1'b0}}, r_fq_tail_ptr - r_fq_head_ptr});
+	  end
+     end
+`endif
 
 `ifdef VERILATOR
    localparam ZP = (64-`M_WIDTH);   
@@ -1422,7 +1544,7 @@ endfunction
 	  end
 	else if(t_update_spec_hist)
 	  begin
-	     n_spec_gbl_hist = {r_spec_gbl_hist[`GBL_HIST_LEN-2:0], t_take_br};
+	     n_spec_gbl_hist = {r_spec_gbl_hist[`GBL_HIST_LEN-2:0], t_take_br | t_gb_take1 | t_gb_take2};
 	  end
      end // always_comb
 

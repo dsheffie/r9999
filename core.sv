@@ -460,8 +460,164 @@ module core(clk,
     * entries (tail, tail+1) which always differ in bit0 -> one to each bank, so each
     * bank sees a single alloc write (instead of 2 write ports on one wide array).
     * Retire reads head + head+1 -> one from each bank.  Bank index = rob_ptr[hi:1]. */
-   rob_entry_t r_rob_even[(N_ROB_ENTRIES/2)-1:0];
-   rob_entry_t r_rob_odd[(N_ROB_ENTRIES/2)-1:0];
+   /* completion-written fields (multi-ported flops) */
+   crob_entry_t r_rob_even[(N_ROB_ENTRIES/2)-1:0];
+   crob_entry_t r_rob_odd[(N_ROB_ENTRIES/2)-1:0];
+   /* alloc-only fields: one write port per bank, no reset (LUTRAM-able) */
+   mrob_entry_t r_mrob_even[(N_ROB_ENTRIES/2)-1:0];
+   mrob_entry_t r_mrob_odd[(N_ROB_ENTRIES/2)-1:0];
+   logic 	t_mrob_even_we, t_mrob_odd_we;
+   logic [`LG_ROB_ENTRIES-2:0] t_mrob_even_addr, t_mrob_odd_addr;
+   mrob_entry_t t_mrob_even_data, t_mrob_odd_data;
+
+   function automatic mrob_entry_t rob_to_mrob(input rob_entry_t e);
+      mrob_entry_t r;
+      r.is_cpu = e.is_cpu;
+      r.cpu_ce1 = e.cpu_ce1;
+      r.is_ret = e.is_ret;
+      r.is_call = e.is_call;
+      r.is_irq = e.is_irq;
+      r.is_store = e.is_store;
+      r.is_tlbp = e.is_tlbp;
+      r.valid_dst = e.valid_dst;
+      r.valid_hilo_dst = e.valid_hilo_dst;
+      r.valid_fp_dst = e.valid_fp_dst;
+      r.valid_fcr_dst = e.valid_fcr_dst;
+      r.has_delay_slot = e.has_delay_slot;
+      r.has_nullifying_delay_slot = e.has_nullifying_delay_slot;
+      r.in_delay_slot = e.in_delay_slot;
+      r.ldst = e.ldst;
+      r.srcA_ptr = e.srcA_ptr;
+      r.srcA_arch = e.srcA_arch;
+      r.srcB_ptr = e.srcB_ptr;
+      r.srcA_rd = e.srcA_rd;
+      r.srcB_rd = e.srcB_rd;
+      r.pdst = e.pdst;
+      r.old_pdst = e.old_pdst;
+      r.pc = e.pc;
+      r.is_br = e.is_br;
+      r.is_indirect = e.is_indirect;
+      r.is_break = e.is_break;
+      r.is_syscall = e.is_syscall;
+      r.is_cache = e.is_cache;
+      r.cache_is_d = e.cache_is_d;
+      r.cache_inval = e.cache_inval;
+      r.opcode = e.opcode;
+      r.pht_idx = e.pht_idx;
+      r.br_pred = e.br_pred;
+      r.oldest_first = e.oldest_first;
+      r.mode_when_fetched = e.mode_when_fetched;
+      r.post_restart = e.post_restart;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+      r.fetch_cycle = e.fetch_cycle;
+      r.alloc_cycle = e.alloc_cycle;
+`endif
+      return r;
+   endfunction // rob_to_mrob
+
+   function automatic crob_entry_t rob_to_crob(input rob_entry_t e);
+      crob_entry_t r;
+      r.faulted = e.faulted;
+      r.is_ii = e.is_ii;
+      r.is_fpe = e.is_fpe;
+      r.fp_set_flags = e.fp_set_flags;
+      r.overflow = e.overflow;
+      r.trap = e.trap;
+      r.is_bad_addr = e.is_bad_addr;
+      r.chk_srcA_val = e.chk_srcA_val;
+      r.chk_srcB_val = e.chk_srcB_val;
+      r.chk_vals_valid = e.chk_vals_valid;
+      r.target_pc = e.target_pc;
+      r.take_br = e.take_br;
+      r.data = e.data;
+      r.tlb_refill = e.tlb_refill;
+      r.tlb_invalid = e.tlb_invalid;
+      r.tlb_modified = e.tlb_modified;
+      r.tlb_hit = e.tlb_hit;
+      r.tlb_index = e.tlb_index;
+      r.exec_cycle = e.exec_cycle;
+      r.fwd_sel = e.fwd_sel;
+      r.fwd_selB = e.fwd_selB;
+      r.srcB_val = e.srcB_val;
+      r.hi_nzA = e.hi_nzA;
+      r.hi_nzB = e.hi_nzB;
+      r.wr_echo = e.wr_echo;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+      r.complete_cycle = e.complete_cycle;
+`endif
+      return r;
+   endfunction // rob_to_crob
+
+   function automatic rob_entry_t rob_merge(input mrob_entry_t m, input crob_entry_t c);
+      rob_entry_t r;
+      r.faulted = c.faulted;
+      r.is_ii = c.is_ii;
+      r.is_cpu = m.is_cpu;
+      r.cpu_ce1 = m.cpu_ce1;
+      r.is_fpe = c.is_fpe;
+      r.fp_set_flags = c.fp_set_flags;
+      r.overflow = c.overflow;
+      r.trap = c.trap;
+      r.is_bad_addr = c.is_bad_addr;
+      r.is_ret = m.is_ret;
+      r.is_call = m.is_call;
+      r.is_irq = m.is_irq;
+      r.is_store = m.is_store;
+      r.is_tlbp = m.is_tlbp;
+      r.valid_dst = m.valid_dst;
+      r.valid_hilo_dst = m.valid_hilo_dst;
+      r.valid_fp_dst = m.valid_fp_dst;
+      r.valid_fcr_dst = m.valid_fcr_dst;
+      r.has_delay_slot = m.has_delay_slot;
+      r.has_nullifying_delay_slot = m.has_nullifying_delay_slot;
+      r.in_delay_slot = m.in_delay_slot;
+      r.ldst = m.ldst;
+      r.srcA_ptr = m.srcA_ptr;
+      r.srcA_arch = m.srcA_arch;
+      r.srcB_ptr = m.srcB_ptr;
+      r.srcA_rd = m.srcA_rd;
+      r.srcB_rd = m.srcB_rd;
+      r.chk_srcA_val = c.chk_srcA_val;
+      r.chk_srcB_val = c.chk_srcB_val;
+      r.chk_vals_valid = c.chk_vals_valid;
+      r.pdst = m.pdst;
+      r.old_pdst = m.old_pdst;
+      r.pc = m.pc;
+      r.target_pc = c.target_pc;
+      r.is_br = m.is_br;
+      r.is_indirect = m.is_indirect;
+      r.take_br = c.take_br;
+      r.is_break = m.is_break;
+      r.is_syscall = m.is_syscall;
+      r.is_cache = m.is_cache;
+      r.cache_is_d = m.cache_is_d;
+      r.cache_inval = m.cache_inval;
+      r.data = c.data;
+      r.opcode = m.opcode;
+      r.pht_idx = m.pht_idx;
+      r.br_pred = m.br_pred;
+      r.oldest_first = m.oldest_first;
+      r.tlb_refill = c.tlb_refill;
+      r.tlb_invalid = c.tlb_invalid;
+      r.tlb_modified = c.tlb_modified;
+      r.tlb_hit = c.tlb_hit;
+      r.tlb_index = c.tlb_index;
+      r.mode_when_fetched = m.mode_when_fetched;
+      r.exec_cycle = c.exec_cycle;
+      r.fwd_sel = c.fwd_sel;
+      r.fwd_selB = c.fwd_selB;
+      r.srcB_val = c.srcB_val;
+      r.hi_nzA = c.hi_nzA;
+      r.hi_nzB = c.hi_nzB;
+      r.wr_echo = c.wr_echo;
+      r.post_restart = m.post_restart;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+      r.fetch_cycle = m.fetch_cycle;
+      r.alloc_cycle = m.alloc_cycle;
+      r.complete_cycle = c.complete_cycle;
+`endif
+      return r;
+   endfunction // rob_merge
    logic [`M_WIDTH-1:0 ] r_addrs[N_ROB_ENTRIES-1:0];
    /* FP IEEE flags side-band (1W at FP completion / 2R at retire), mirroring
     * r_addrs: {denorm(E), V,Z,O,U,I} of each completed FP op, indexed by ROB ptr.
@@ -559,6 +715,7 @@ module core(clk,
 
    
    
+   wire 		     t_next_head_br;   /* the second retiring slot is a branch */
    logic 		     t_alloc, t_alloc_two, t_retire, t_retire_two,
 			     t_rat_copy, t_clr_rob;
 
@@ -2414,7 +2571,8 @@ module core(clk,
 	t_dbg_rob = '0;
 	for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
 	  begin
-	     t_dbg_rob = i[0] ? r_rob_odd[i[`LG_ROB_ENTRIES-1:1]] : r_rob_even[i[`LG_ROB_ENTRIES-1:1]];
+	     t_dbg_rob = i[0] ? rob_merge(r_mrob_odd[i[`LG_ROB_ENTRIES-1:1]], r_rob_odd[i[`LG_ROB_ENTRIES-1:1]]) :
+		  rob_merge(r_mrob_even[i[`LG_ROB_ENTRIES-1:1]], r_rob_even[i[`LG_ROB_ENTRIES-1:1]]);
 	     if(r_rob_complete[i[`LG_ROB_ENTRIES-1:0]]  && t_dbg_rob.faulted)
 	       begin
 		  t_faults = t_faults + 'd1;
@@ -2457,7 +2615,8 @@ module core(clk,
 
 	     for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
 	       begin
-		  t_dbg_dump = i[0] ? r_rob_odd[i[`LG_ROB_ENTRIES-1:1]] : r_rob_even[i[`LG_ROB_ENTRIES-1:1]];
+		  t_dbg_dump = i[0] ? rob_merge(r_mrob_odd[i[`LG_ROB_ENTRIES-1:1]], r_rob_odd[i[`LG_ROB_ENTRIES-1:1]]) :
+		  rob_merge(r_mrob_even[i[`LG_ROB_ENTRIES-1:1]], r_rob_even[i[`LG_ROB_ENTRIES-1:1]]);
 		  $display("\trob entry %d, pc %x, complete %b, is br %b, faulted %b",
 			   i[`LG_ROB_ENTRIES-1:0],
 			   t_dbg_dump.pc,
@@ -2726,7 +2885,7 @@ module core(clk,
 
 
 			      t_alloc_two = t_alloc
-					    && !t_uop.is_br
+					    && (t_uop.is_br ? !t_uop2.is_br : 1'b1)   /* one branch per cycle; a branch may pair with its delay slot (rob tail flags it via t_uop.has_delay_slot) */
 					    && !t_uop.oldest_first
 					    && !t_uop2.serializing_op
 					    && !t_uop2.oldest_first
@@ -2755,7 +2914,12 @@ module core(clk,
 		    		   & !t_rob_next_head.faulted 				    
 		    		   & t_rob_head_complete
 		    		   & t_rob_next_head_complete				    
-				   & !t_rob_head.is_br
+				   /* one branch per cycle (the predictor/history update has one
+				    * port), as rv64core: a correctly-predicted branch at the head now
+				    * retires WITH its delay slot.  Mispredicted ones are faulted and
+				    * already excluded above, which covers the restart / drain paths
+				    * and a not-taken branch-likely. */
+				   & (t_rob_head.is_br ? !t_rob_next_head.is_br : 1'b1)
 				   & !t_rob_next_head.is_ret
 				   & !t_rob_next_head.is_call
 		    		   & !t_rob_next_head.valid_hilo_dst
@@ -2804,7 +2968,7 @@ module core(clk,
 			 //$display("r_cycle = %d, can alloc %b, r_pending %b, delay %b", r_cycle, t_alloc, r_pending_fault, r_in_delay_slot);
 
 			 t_alloc_two = t_alloc
-				       && !t_uop.is_br
+				       && (t_uop.is_br ? !t_uop2.is_br : 1'b1)   /* one branch per cycle; a branch may pair with its delay slot (rob tail flags it via t_uop.has_delay_slot) */
 				       && !t_uop.oldest_first
 				       && !t_uop2.serializing_op
 				       && !t_uop2.oldest_first
@@ -3605,11 +3769,14 @@ module core(clk,
 		  n_retire_fp_prf_free[t_rob_next_head.old_pdst] = 1'b1;
 	       end
 
-	     n_branch_pc = t_retire_two ? t_rob_next_head.pc : t_rob_head.pc;
-	     n_took_branch = t_retire_two ? t_rob_next_head.take_br : t_rob_head.take_br;
-	     n_branch_valid = t_retire_two ? t_rob_next_head.is_br :  t_rob_head.is_br;
+	     /* train on whichever retiring slot holds the branch: with a branch and its
+	      * delay slot retiring together the branch is in the HEAD slot (at most one
+	      * branch retires per cycle -- see t_retire_two) */
+	     n_branch_pc = t_next_head_br ? t_rob_next_head.pc : t_rob_head.pc;
+	     n_took_branch = t_next_head_br ? t_rob_next_head.take_br : t_rob_head.take_br;
+	     n_branch_valid = t_next_head_br ? t_rob_next_head.is_br :  t_rob_head.is_br;
 	     n_branch_fault = t_rob_head.faulted;
-	     n_branch_pht_idx = t_retire_two ? t_rob_next_head.pht_idx : t_rob_head.pht_idx;
+	     n_branch_pht_idx = t_next_head_br ? t_rob_next_head.pht_idx : t_rob_head.pht_idx;
 	  end // if (t_retire)
 	
      end // always_comb
@@ -3962,6 +4129,57 @@ module core(clk,
 	  end
      end // always_ff@ (posedge clk)
    
+   always_comb
+     begin
+	t_mrob_even_we = 1'b0;
+	t_mrob_odd_we = 1'b0;
+	t_mrob_even_addr = r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1];
+	t_mrob_odd_addr = r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1];
+	t_mrob_even_data = rob_to_mrob(t_rob_tail);
+	t_mrob_odd_data = rob_to_mrob(t_rob_tail);
+	if(!(reset || t_clr_rob))
+	  begin
+	     if(t_alloc)
+	       begin
+		  if(r_rob_tail_ptr[0])
+		    begin
+		       t_mrob_odd_we = 1'b1;
+		    end
+		  else
+		    begin
+		       t_mrob_even_we = 1'b1;
+		    end
+	       end
+	     if(t_alloc_two)
+	       begin
+		  if(r_rob_next_tail_ptr[0])
+		    begin
+		       t_mrob_odd_we = 1'b1;
+		       t_mrob_odd_addr = r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1];
+		       t_mrob_odd_data = rob_to_mrob(t_rob_next_tail);
+		    end
+		  else
+		    begin
+		       t_mrob_even_we = 1'b1;
+		       t_mrob_even_addr = r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1];
+		       t_mrob_even_data = rob_to_mrob(t_rob_next_tail);
+		    end
+	       end
+	  end
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	if(t_mrob_even_we)
+	  begin
+	     r_mrob_even[t_mrob_even_addr] <= t_mrob_even_data;
+	  end
+	if(t_mrob_odd_we)
+	  begin
+	     r_mrob_odd[t_mrob_odd_addr] <= t_mrob_odd_data;
+	  end
+     end // always_ff@ (posedge clk)
+
    always_ff@(posedge clk)
      begin
 	if(reset || t_clr_rob)
@@ -3977,9 +4195,9 @@ module core(clk,
 	     if(t_alloc)
 	       begin
 		  if(r_rob_tail_ptr[0])
-		    r_rob_odd[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_tail;
+		    r_rob_odd[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_tail);
 		  else
-		    r_rob_even[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_tail;
+		    r_rob_even[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_tail);
 `ifdef ENABLE_EXC_RING
 		  r_fetch_insn[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.insn;
 `endif
@@ -3987,9 +4205,9 @@ module core(clk,
 	     if(t_alloc_two)
 	       begin
 		  if(r_rob_next_tail_ptr[0])
-		    r_rob_odd[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_next_tail;
+		    r_rob_odd[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_next_tail);
 		  else
-		    r_rob_even[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_next_tail;
+		    r_rob_even[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_next_tail);
 `ifdef ENABLE_EXC_RING
 		  r_fetch_insn[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.insn;
 `endif
@@ -4269,8 +4487,10 @@ module core(clk,
 
    always_comb
      begin
-	t_rob_head = r_rob_head_ptr[0] ? r_rob_odd[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]] : r_rob_even[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]];
-	t_rob_next_head = r_rob_next_head_ptr[0] ? r_rob_odd[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]] : r_rob_even[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]];
+	t_rob_head = r_rob_head_ptr[0] ? rob_merge(r_mrob_odd[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]], r_rob_odd[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]]) :
+	  rob_merge(r_mrob_even[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]], r_rob_even[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]]);
+	t_rob_next_head = r_rob_next_head_ptr[0] ? rob_merge(r_mrob_odd[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]], r_rob_odd[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]]) :
+	  rob_merge(r_mrob_even[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]], r_rob_even[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]]);
 	
 	t_rob_head_complete = r_rob_sd_complete[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]] &
 			      r_rob_complete[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
@@ -4901,6 +5121,85 @@ module core(clk,
 	  end
      end // always_comb
    
+
+   assign t_next_head_br = t_retire_two & t_rob_next_head.is_br;
+
+`ifdef TOPDOWN
+   /* TOP-DOWN accounting (Verilator-only; +define+TOPDOWN, top.cc --topdown).  The
+    * allocation stage is the dispatch point: 2 slots per cycle.  Each cycle report
+    * the state, how many uops the decode queue OFFERS (0/1/2), how many allocated
+    * and retired, and WHY an offered slot did not allocate:
+    *   1 ROB full  2 uop queue full  3 PRF/HILO/FP/FCR free list short
+    *   4 oldest-first pending  5 pending fault  6 other  7 pairing rule (slot 1 only:
+    *   two branches, oldest-first or serializing second uop)
+    * top.cc turns that into retiring / bad speculation / frontend / backend. */
+   import "DPI-C" function void topdown_cycle(input int st, input int avail, input int nalloc,
+					      input int nret, input int be0, input int be1);
+   wire [1:0] w_td_avail = t_dq_empty ? 2'd0 : (t_dq_next_empty ? 2'd1 : 2'd2);
+   logic [2:0] t_td_be0, t_td_be1;
+   always_comb
+     begin
+	t_td_be0 = 3'd0;
+	t_td_be1 = 3'd0;
+	if((w_td_avail != 2'd0) & !t_alloc)
+	  begin
+	     t_td_be0 = t_rob_full ? 3'd1 :
+			t_uq_full ? 3'd2 :
+			!(t_enough_iprfs & t_enough_hlprfs & t_enough_fprfs & t_enough_fcrprfs) ? 3'd3 :
+			r_oldest_first_pending ? 3'd4 :
+			r_pending_fault ? 3'd5 : 3'd6;
+	  end
+	if((w_td_avail == 2'd2) & t_alloc & !t_alloc_two)
+	  begin
+	     t_td_be1 = t_rob_next_full ? 3'd1 :
+			t_uq_next_full ? 3'd2 :
+			!(t_enough_next_iprfs & t_enough_next_hlprfs & t_enough_next_fprfs & t_enough_next_fcrprfs) ? 3'd3 :
+			((t_uop.is_br & t_uop2.is_br) | t_uop.oldest_first | t_uop2.oldest_first | t_uop2.serializing_op) ? 3'd7 : 3'd6;
+	  end
+     end // always_comb
+   /* per-uop stage stamps: allocation here, scheduler entry / issue in exec.sv,
+    * joined in top.cc by rob index at retirement */
+   import "DPI-C" function void topdown_uop(input int ev, input int rob_ptr);
+   import "DPI-C" function void topdown_retire_uop(input int rob_ptr, input longint alloc_c,
+						   input longint complete_c, input longint retire_c,
+						   input int is_br, input int is_store);
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     if(t_alloc)
+	       begin
+		  topdown_uop(0, {{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]});
+	       end
+	     if(t_alloc & t_alloc_two)
+	       begin
+		  topdown_uop(0, {{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]});
+	       end
+	     if(t_retire)
+	       begin
+		  topdown_retire_uop({{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]},
+				     t_rob_head.alloc_cycle, t_rob_head.complete_cycle, r_cycle,
+				     {31'd0, t_rob_head.is_br}, {31'd0, t_rob_head.is_store});
+	       end
+	     if(t_retire & t_retire_two)
+	       begin
+		  topdown_retire_uop({{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]},
+				     t_rob_next_head.alloc_cycle, t_rob_next_head.complete_cycle, r_cycle,
+				     {31'd0, t_rob_next_head.is_br}, {31'd0, t_rob_next_head.is_store});
+	       end
+	  end
+     end // always_ff
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     topdown_cycle({27'd0, r_state}, {30'd0, w_td_avail},
+			   t_alloc ? (t_alloc_two ? 32'd2 : 32'd1) : 32'd0,
+			   t_retire ? (t_retire_two ? 32'd2 : 32'd1) : 32'd0,
+			   {29'd0, t_td_be0}, {29'd0, t_td_be1});
+	  end
+     end // always_ff
+`endif
 
    /* Case 2: latch the resolved target of the most-recently-retired branch.
     * A serializing op restarts only once it is the ROB head (oldest), by which
