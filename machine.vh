@@ -83,7 +83,11 @@
  `define LG_PHT_SZ 14
 `endif
 
-`define GBL_HIST_LEN 64
+/* history length == index width: a plain gshare XORs the newest LG_PHT_SZ outcomes
+ * into the index.  Folding a longer (64) history into 14 bits tripled compress
+ * mispredicts (29 -> 10.8 /kinsn with the short history, CPI -13%): random-outcome
+ * branches pollute the index so the predictable ones never train. */
+`define GBL_HIST_LEN `LG_PHT_SZ
 
 //page size
 `define LG_PG_SZ 12
