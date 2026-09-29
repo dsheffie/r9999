@@ -58,6 +58,69 @@ typedef struct packed {
    
 } rob_entry_t;
 
+/* The ROB is stored as two structures indexed by the same rob_ptr (rv64core's
+ * split): fields written only at ALLOC live in mrob_entry_t (one write port per
+ * even/odd bank, no reset, so they can map to LUTRAM); fields written at
+ * COMPLETION live in crob_entry_t (multi-ported flops).  rob_entry_t stays the
+ * merged view every reader uses; core.sv's rob_to_mrob/rob_to_crob/rob_merge
+ * convert between them. */
+typedef struct packed {
+   logic is_cpu;
+   logic cpu_ce1;
+   logic is_ret;
+   logic is_call;
+   logic is_irq;
+   logic is_store;
+   logic is_tlbp;
+   logic valid_dst;
+   logic valid_hilo_dst;
+   logic valid_fp_dst;
+   logic valid_fcr_dst;
+   logic has_delay_slot;
+   logic has_nullifying_delay_slot;
+   logic in_delay_slot;
+   logic [4:0] ldst;
+   logic [(`LG_PRF_ENTRIES-1):0] pdst;
+   logic [(`LG_PRF_ENTRIES-1):0] old_pdst;
+   logic [(`M_WIDTH-1):0] pc;
+   logic is_br;
+   logic is_indirect;
+   logic is_break;
+   logic is_syscall;
+   logic is_cache;
+   logic cache_is_d;
+   logic cache_inval;
+   logic [7:0] opcode;
+   logic [`LG_PHT_SZ-1:0] pht_idx;
+   logic oldest_first;
+   logic mode_when_fetched;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+   logic [63:0] fetch_cycle;
+   logic [63:0] alloc_cycle;
+`endif
+} mrob_entry_t;
+
+typedef struct packed {
+   logic faulted;
+   logic is_ii;
+   logic is_fpe;
+   logic fp_set_flags;
+   logic overflow;
+   logic trap;
+   logic is_bad_addr;
+   logic [(`M_WIDTH-1):0] target_pc;
+   logic take_br;
+   logic [(`M_WIDTH-1):0] data;
+   logic tlb_refill;
+   logic tlb_invalid;
+   logic tlb_modified;
+   logic tlb_hit;
+   logic [5:0] tlb_index;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+   logic [63:0] complete_cycle;
+`endif
+} crob_entry_t;
+
 typedef struct packed {
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
    logic 		       complete;

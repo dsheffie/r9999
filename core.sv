@@ -407,8 +407,131 @@ module core(clk,
     * entries (tail, tail+1) which always differ in bit0 -> one to each bank, so each
     * bank sees a single alloc write (instead of 2 write ports on one wide array).
     * Retire reads head + head+1 -> one from each bank.  Bank index = rob_ptr[hi:1]. */
-   rob_entry_t r_rob_even[(N_ROB_ENTRIES/2)-1:0];
-   rob_entry_t r_rob_odd[(N_ROB_ENTRIES/2)-1:0];
+   /* completion-written fields (multi-ported flops) */
+   crob_entry_t r_rob_even[(N_ROB_ENTRIES/2)-1:0];
+   crob_entry_t r_rob_odd[(N_ROB_ENTRIES/2)-1:0];
+   /* alloc-only fields: one write port per bank, no reset (LUTRAM-able) */
+   mrob_entry_t r_mrob_even[(N_ROB_ENTRIES/2)-1:0];
+   mrob_entry_t r_mrob_odd[(N_ROB_ENTRIES/2)-1:0];
+   logic 	t_mrob_even_we, t_mrob_odd_we;
+   logic [`LG_ROB_ENTRIES-2:0] t_mrob_even_addr, t_mrob_odd_addr;
+   mrob_entry_t t_mrob_even_data, t_mrob_odd_data;
+
+   function automatic mrob_entry_t rob_to_mrob(input rob_entry_t e);
+      mrob_entry_t r;
+      r.is_cpu = e.is_cpu;
+      r.cpu_ce1 = e.cpu_ce1;
+      r.is_ret = e.is_ret;
+      r.is_call = e.is_call;
+      r.is_irq = e.is_irq;
+      r.is_store = e.is_store;
+      r.is_tlbp = e.is_tlbp;
+      r.valid_dst = e.valid_dst;
+      r.valid_hilo_dst = e.valid_hilo_dst;
+      r.valid_fp_dst = e.valid_fp_dst;
+      r.valid_fcr_dst = e.valid_fcr_dst;
+      r.has_delay_slot = e.has_delay_slot;
+      r.has_nullifying_delay_slot = e.has_nullifying_delay_slot;
+      r.in_delay_slot = e.in_delay_slot;
+      r.ldst = e.ldst;
+      r.pdst = e.pdst;
+      r.old_pdst = e.old_pdst;
+      r.pc = e.pc;
+      r.is_br = e.is_br;
+      r.is_indirect = e.is_indirect;
+      r.is_break = e.is_break;
+      r.is_syscall = e.is_syscall;
+      r.is_cache = e.is_cache;
+      r.cache_is_d = e.cache_is_d;
+      r.cache_inval = e.cache_inval;
+      r.opcode = e.opcode;
+      r.pht_idx = e.pht_idx;
+      r.oldest_first = e.oldest_first;
+      r.mode_when_fetched = e.mode_when_fetched;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+      r.fetch_cycle = e.fetch_cycle;
+      r.alloc_cycle = e.alloc_cycle;
+`endif
+      return r;
+   endfunction // rob_to_mrob
+
+   function automatic crob_entry_t rob_to_crob(input rob_entry_t e);
+      crob_entry_t r;
+      r.faulted = e.faulted;
+      r.is_ii = e.is_ii;
+      r.is_fpe = e.is_fpe;
+      r.fp_set_flags = e.fp_set_flags;
+      r.overflow = e.overflow;
+      r.trap = e.trap;
+      r.is_bad_addr = e.is_bad_addr;
+      r.target_pc = e.target_pc;
+      r.take_br = e.take_br;
+      r.data = e.data;
+      r.tlb_refill = e.tlb_refill;
+      r.tlb_invalid = e.tlb_invalid;
+      r.tlb_modified = e.tlb_modified;
+      r.tlb_hit = e.tlb_hit;
+      r.tlb_index = e.tlb_index;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+      r.complete_cycle = e.complete_cycle;
+`endif
+      return r;
+   endfunction // rob_to_crob
+
+   function automatic rob_entry_t rob_merge(input mrob_entry_t m, input crob_entry_t c);
+      rob_entry_t r;
+      r.faulted = c.faulted;
+      r.is_ii = c.is_ii;
+      r.is_cpu = m.is_cpu;
+      r.cpu_ce1 = m.cpu_ce1;
+      r.is_fpe = c.is_fpe;
+      r.fp_set_flags = c.fp_set_flags;
+      r.overflow = c.overflow;
+      r.trap = c.trap;
+      r.is_bad_addr = c.is_bad_addr;
+      r.is_ret = m.is_ret;
+      r.is_call = m.is_call;
+      r.is_irq = m.is_irq;
+      r.is_store = m.is_store;
+      r.is_tlbp = m.is_tlbp;
+      r.valid_dst = m.valid_dst;
+      r.valid_hilo_dst = m.valid_hilo_dst;
+      r.valid_fp_dst = m.valid_fp_dst;
+      r.valid_fcr_dst = m.valid_fcr_dst;
+      r.has_delay_slot = m.has_delay_slot;
+      r.has_nullifying_delay_slot = m.has_nullifying_delay_slot;
+      r.in_delay_slot = m.in_delay_slot;
+      r.ldst = m.ldst;
+      r.pdst = m.pdst;
+      r.old_pdst = m.old_pdst;
+      r.pc = m.pc;
+      r.target_pc = c.target_pc;
+      r.is_br = m.is_br;
+      r.is_indirect = m.is_indirect;
+      r.take_br = c.take_br;
+      r.is_break = m.is_break;
+      r.is_syscall = m.is_syscall;
+      r.is_cache = m.is_cache;
+      r.cache_is_d = m.cache_is_d;
+      r.cache_inval = m.cache_inval;
+      r.data = c.data;
+      r.opcode = m.opcode;
+      r.pht_idx = m.pht_idx;
+      r.oldest_first = m.oldest_first;
+      r.tlb_refill = c.tlb_refill;
+      r.tlb_invalid = c.tlb_invalid;
+      r.tlb_modified = c.tlb_modified;
+      r.tlb_hit = c.tlb_hit;
+      r.tlb_index = c.tlb_index;
+      r.mode_when_fetched = m.mode_when_fetched;
+`ifdef ENABLE_CYCLE_ACCOUNTING
+      r.fetch_cycle = m.fetch_cycle;
+      r.alloc_cycle = m.alloc_cycle;
+      r.complete_cycle = c.complete_cycle;
+`endif
+      return r;
+   endfunction // rob_merge
+
    logic [`M_WIDTH-1:0 ] r_addrs[N_ROB_ENTRIES-1:0];
    /* FP IEEE flags side-band (1W at FP completion / 2R at retire), mirroring
     * r_addrs: {denorm(E), V,Z,O,U,I} of each completed FP op, indexed by ROB ptr.
@@ -1308,7 +1431,8 @@ module core(clk,
 	t_dbg_rob = '0;
 	for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
 	  begin
-	     t_dbg_rob = i[0] ? r_rob_odd[i[`LG_ROB_ENTRIES-1:1]] : r_rob_even[i[`LG_ROB_ENTRIES-1:1]];
+	     t_dbg_rob = i[0] ? rob_merge(r_mrob_odd[i[`LG_ROB_ENTRIES-1:1]], r_rob_odd[i[`LG_ROB_ENTRIES-1:1]]) :
+		  rob_merge(r_mrob_even[i[`LG_ROB_ENTRIES-1:1]], r_rob_even[i[`LG_ROB_ENTRIES-1:1]]);
 	     if(r_rob_complete[i[`LG_ROB_ENTRIES-1:0]]  && t_dbg_rob.faulted)
 	       begin
 		  t_faults = t_faults + 'd1;
@@ -1351,7 +1475,8 @@ module core(clk,
 
 	     for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
 	       begin
-		  t_dbg_dump = i[0] ? r_rob_odd[i[`LG_ROB_ENTRIES-1:1]] : r_rob_even[i[`LG_ROB_ENTRIES-1:1]];
+		  t_dbg_dump = i[0] ? rob_merge(r_mrob_odd[i[`LG_ROB_ENTRIES-1:1]], r_rob_odd[i[`LG_ROB_ENTRIES-1:1]]) :
+		  rob_merge(r_mrob_even[i[`LG_ROB_ENTRIES-1:1]], r_rob_even[i[`LG_ROB_ENTRIES-1:1]]);
 		  $display("\trob entry %d, pc %x, complete %b, is br %b, faulted %b",
 			   i[`LG_ROB_ENTRIES-1:0],
 			   t_dbg_dump.pc,
@@ -2782,6 +2907,57 @@ module core(clk,
 	  end
      end // always_ff@ (posedge clk)
    
+   always_comb
+     begin
+	t_mrob_even_we = 1'b0;
+	t_mrob_odd_we = 1'b0;
+	t_mrob_even_addr = r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1];
+	t_mrob_odd_addr = r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1];
+	t_mrob_even_data = rob_to_mrob(t_rob_tail);
+	t_mrob_odd_data = rob_to_mrob(t_rob_tail);
+	if(!(reset || t_clr_rob))
+	  begin
+	     if(t_alloc)
+	       begin
+		  if(r_rob_tail_ptr[0])
+		    begin
+		       t_mrob_odd_we = 1'b1;
+		    end
+		  else
+		    begin
+		       t_mrob_even_we = 1'b1;
+		    end
+	       end
+	     if(t_alloc_two)
+	       begin
+		  if(r_rob_next_tail_ptr[0])
+		    begin
+		       t_mrob_odd_we = 1'b1;
+		       t_mrob_odd_addr = r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1];
+		       t_mrob_odd_data = rob_to_mrob(t_rob_next_tail);
+		    end
+		  else
+		    begin
+		       t_mrob_even_we = 1'b1;
+		       t_mrob_even_addr = r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1];
+		       t_mrob_even_data = rob_to_mrob(t_rob_next_tail);
+		    end
+	       end
+	  end
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	if(t_mrob_even_we)
+	  begin
+	     r_mrob_even[t_mrob_even_addr] <= t_mrob_even_data;
+	  end
+	if(t_mrob_odd_we)
+	  begin
+	     r_mrob_odd[t_mrob_odd_addr] <= t_mrob_odd_data;
+	  end
+     end // always_ff@ (posedge clk)
+
    always_ff@(posedge clk)
      begin
 	if(reset || t_clr_rob)
@@ -2797,16 +2973,16 @@ module core(clk,
 	     if(t_alloc)
 	       begin
 		  if(r_rob_tail_ptr[0])
-		    r_rob_odd[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_tail;
+		    r_rob_odd[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_tail);
 		  else
-		    r_rob_even[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_tail;
+		    r_rob_even[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_tail);
 	       end
 	     if(t_alloc_two)
 	       begin
 		  if(r_rob_next_tail_ptr[0])
-		    r_rob_odd[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_next_tail;
+		    r_rob_odd[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_next_tail);
 		  else
-		    r_rob_even[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= t_rob_next_tail;
+		    r_rob_even[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_next_tail);
 	       end
 	     if(t_complete_valid_1)
 	       begin
@@ -3053,8 +3229,10 @@ module core(clk,
 
    always_comb
      begin
-	t_rob_head = r_rob_head_ptr[0] ? r_rob_odd[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]] : r_rob_even[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]];
-	t_rob_next_head = r_rob_next_head_ptr[0] ? r_rob_odd[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]] : r_rob_even[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]];
+	t_rob_head = r_rob_head_ptr[0] ? rob_merge(r_mrob_odd[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]], r_rob_odd[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]]) :
+	  rob_merge(r_mrob_even[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]], r_rob_even[r_rob_head_ptr[`LG_ROB_ENTRIES-1:1]]);
+	t_rob_next_head = r_rob_next_head_ptr[0] ? rob_merge(r_mrob_odd[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]], r_rob_odd[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]]) :
+	  rob_merge(r_mrob_even[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]], r_rob_even[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:1]]);
 	
 	t_rob_head_complete = r_rob_sd_complete[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]] &
 			      r_rob_complete[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
