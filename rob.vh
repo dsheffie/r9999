@@ -150,6 +150,37 @@ typedef struct packed {
 `endif
 } insn_fetch_t;
 
+/* LSU block codes: why a simple load could not complete on its port-2 pass.
+ * It parks in its LSU entry until its wake condition, then re-issues.
+ *   bit 2 clear: cache-owned -- the MQ entry fetches the line / waits out the
+ *                store, then the l1d sends a wakeup with the lsu_idx.
+ *   bit 2 set:   LSU-owned -- an older store still in the LSU overlaps the load
+ *                (blk_st = which ones); the LSU wakes it itself. */
+typedef enum logic [2:0] {
+   BLK_NONE = 3'd0,
+   BLK_MISS = 3'd1,         /* tag miss: the miss queue reloads the line */
+   BLK_ST_CONFLICT = 3'd2,  /* same set + byte overlap with a store in the l1d MQ */
+   BLK_SB_CONFLICT = 3'd4,  /* overlaps older LSU store(s), cannot forward: wait for them to drain */
+   BLK_SB_DATA = 3'd5,      /* would forward, but the youngest overlapping store has no data yet */
+   BLK_UNCACHEABLE = 3'd6   /* uncached (segment or TLB C) and not yet non-speculative:
+			     * re-issue once at the ROB head (or its committable delay slot) */
+} blk_code_t;
+
+/* exec LSU -> l1d store-buffer view.  The LSU owns the stores (allocation, age,
+ * retirement, drain); the l1d holds each store's translated PA / mask / data at
+ * its LSU slot, where a load's PA is known, and compares loads against it. */
+typedef struct packed {
+   logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] live;     /* slot holds a plain store */
+   logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] epoch;    /* toggles at each slot allocation */
+   logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] data_ok;  /* store data has landed in the l1d */
+   /* matrix[j*N+k] = slot k is older than slot j (the LSU age matrix) */
+   logic [(1<<(2*`LG_MEM_SCHED_ENTRIES))-1:0] matrix;
+   logic 				   retired_pending; /* a retired store has not drained */
+   logic 				   data_valid;      /* store data write */
+   logic [`LG_MEM_SCHED_ENTRIES-1:0] 	   data_idx;
+   logic [63:0] 			   data;
+} lsu_sb_t;
+
 typedef struct packed {
    logic [(`M_WIDTH-1):0] addr;
    logic 	is_store;
@@ -168,6 +199,20 @@ typedef struct packed {
    logic 		       fp_hi;
    logic [31:0]		       fp_pres;
    logic [(`M_WIDTH-1):0]      data;
+   /* simple load (LW/LWU/LB/LBU/LH/LHU/LD/LWC1/LDC1): its LSU entry stays until
+    * the data returns, so the l1d may block it instead of replaying it */
+   logic 		       lsu_hold;
+   logic [`LG_MEM_SCHED_ENTRIES-1:0] lsu_idx;
+   /* plain store drain: write the store held at lsu_idx (PA/data from the l1d
+    * store buffer); the store has retired, so rob_ptr is stale -- never use it */
+   logic 		       commit;
+   /* restart color (rv64core restart_id, 1 bit): flips at every restart; a
+    * request/response of the other color belongs to a flushed era and is dropped
+    * (commits are never dead and are exempt) */
+   logic 		       restart_id;
+   /* load: plain stores older than it at issue, with their slot epochs */
+   logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] lsu_older_st;
+   logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] lsu_older_ep;
 `ifdef VERILATOR
    logic [(`M_WIDTH-1):0]      pc;
    logic [(`M_WIDTH-1):0]      uuid;
@@ -201,6 +246,11 @@ typedef struct packed {
    logic		       tlb_modified;
    logic		       tlb_hit;
    logic [5:0]		       tlb_index;
+   logic 		       lsu_hold;   /* echo of mem_req_t.lsu_hold */
+   logic [`LG_MEM_SCHED_ENTRIES-1:0] lsu_idx;
+   blk_code_t		       blk;        /* valid with core_mem_blk_valid */
+   logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] blk_st;  /* BLK_SB_*: the overlapping store slots */
+   logic 		       restart_id; /* echo of the request's color */
 } mem_rsp_t;
 
 

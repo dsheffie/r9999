@@ -271,11 +271,16 @@ class Gen:
         return "\n".join(L)
 
 def main():
+    global BUFSZ, OFFMASK
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--n", type=int, default=256, help="approx body instruction count")
     ap.add_argument("--out", default="rt", help="output prefix (writes <out>.S)")
+    ap.add_argument("--bufsz", type=int, default=BUFSZ,
+                    help="scratch bytes (power of 2, <= 65536); > the 4KB L1D keeps fills in flight")
     a = ap.parse_args()
+    BUFSZ = a.bufsz
+    OFFMASK = (BUFSZ - 16) & ~7
     random.seed(a.seed)
     g = Gen(a.n)
     g.generate()

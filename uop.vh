@@ -315,6 +315,12 @@ function logic is_div(opcode_t op);
    return x;
 endfunction // is_div
 
+/* SB/SH/SW/SD/SWC1/SDC1: the stores the LSU holds until retirement and drains
+ * itself (the others -- SC, SWL/SWR/SDL/SDR, CACHE -- take the l1d's MQ path) */
+function logic is_plain_store(opcode_t op);
+   return (op == SB) | (op == SH) | (op == SW) | (op == SD) | (op == SWC1) | (op == SDC1);
+endfunction
+
 function logic is_store(opcode_t op);
    logic     x;
    case(op)

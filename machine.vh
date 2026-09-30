@@ -115,6 +115,10 @@
 `define LG_UQ_ENTRIES 3
 /* mem uop queue */
 `define LG_MEM_UQ_ENTRIES 2
+/* LSU (exec.sv): age-ordered pool fed by the in-order mem uop queue.  Simple
+ * loads are held until answered, plain stores until retired and written; slots
+ * also index the l1d-side store buffer */
+`define LG_MEM_SCHED_ENTRIES 3
 /* mem data queue */
 `define LG_MEM_DQ_ENTRIES 2
 /* mem uop queue */

@@ -107,6 +107,22 @@ module exec(clk,
 	    mem_rsp_fp_pres,
 	    mem_rsp_rob_ptr,
 	    mem_rsp_load_data,
+	    mem_rsp_valid,
+	    mem_rsp_lsu_hold,
+	    mem_rsp_lsu_idx,
+	    mem_blk_valid,
+	    mem_blk_code,
+	    mem_blk_st,
+	    mem_wake_valid,
+	    mem_st_done_valid,
+	    mem_st_done_idx,
+	    lsu_sb,
+	    restart_color,
+	    mem_color_pending,
+	    retired_rob_ptr_valid,
+	    retired_rob_ptr_two_valid,
+	    retired_rob_ptr,
+	    retired_rob_ptr_two,
 	    tlb_entry_out,
 	    tlb_entry_out_valid,
 	    irq_pending,
@@ -221,6 +237,27 @@ module exec(clk,
    input logic [31:0]		     mem_rsp_fp_pres;
    input logic [`M_WIDTH-1:0]	     mem_rsp_load_data;
    input logic [`LG_ROB_ENTRIES-1:0] mem_rsp_rob_ptr;
+   /* LSU: a completing simple load frees its entry (mem_rsp_valid & lsu_hold);
+    * a block parks it with a code; a wakeup makes it issuable again */
+   input logic 			     mem_rsp_valid;
+   input logic 			     mem_rsp_lsu_hold;
+   input logic [`LG_MEM_SCHED_ENTRIES-1:0] mem_rsp_lsu_idx;
+   input logic 			     mem_blk_valid;
+   input 			     blk_code_t mem_blk_code;
+   input logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] mem_blk_st;
+   input logic 			     mem_wake_valid;
+   input logic 			     mem_st_done_valid;
+   input logic [`LG_MEM_SCHED_ENTRIES-1:0] mem_st_done_idx;
+   output 			     lsu_sb_t lsu_sb;
+   /* restart color: flips at every restart; stamped into each memory request */
+   output logic 		     restart_color;
+   /* a request of color c is between issue and the l1d (AGU stage / request FIFO) */
+   output logic [1:0] 		     mem_color_pending;
+   /* retirement: a plain store in the LSU becomes committable */
+   input logic 			     retired_rob_ptr_valid;
+   input logic 			     retired_rob_ptr_two_valid;
+   input logic [`LG_ROB_ENTRIES-1:0] retired_rob_ptr;
+   input logic [`LG_ROB_ENTRIES-1:0] retired_rob_ptr_two;
 
    /* int-domain mem writeback: an FP mem result (mem_rsp_fp_dst) writes the FP
     * PRF, not the int PRF.  int/FP physical reg numbers OVERLAP, so int-domain
@@ -423,6 +460,49 @@ module exec(clk,
    logic [`LG_MEM_UQ_ENTRIES:0] r_mem_uq_next_head_ptr, n_mem_uq_next_head_ptr;
    logic [`LG_MEM_UQ_ENTRIES:0] r_mem_uq_next_tail_ptr, n_mem_uq_next_tail_ptr;
 
+   /* LSU: the memory scheduler (rv64core's age-matrix scheduler, extended to
+    * hold loads until answered and stores until written -- see the LSU block) */
+   localparam N_MEM_SCHED_ENTRIES = 1<<`LG_MEM_SCHED_ENTRIES;
+   uop_t r_mem_sched_uops[N_MEM_SCHED_ENTRIES-1:0];
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_valid, n_mem_sched_valid;
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ld, n_mem_sched_ld;          /* simple load */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_st, n_mem_sched_st;          /* plain store */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ser, n_mem_sched_ser;        /* CACHE hit op: serializing */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_issued, n_mem_sched_issued;  /* address pass issued */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_sd_sel, n_mem_sched_sd_sel;  /* store data read issued */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_sd_ok, n_mem_sched_sd_ok;    /* store data in the l1d */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ret, n_mem_sched_ret;        /* store retired */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_cmt, n_mem_sched_cmt;        /* store commit issued */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ep, n_mem_sched_ep;          /* slot epoch (per alloc) */
+   blk_code_t r_mem_sched_blk[N_MEM_SCHED_ENTRIES-1:0];
+   blk_code_t n_mem_sched_blk[N_MEM_SCHED_ENTRIES-1:0];
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_blk_st[N_MEM_SCHED_ENTRIES-1:0];   /* LSU-owned block: stores waited on */
+   logic [N_MEM_SCHED_ENTRIES-1:0] n_mem_sched_blk_st[N_MEM_SCHED_ENTRIES-1:0];
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ep_snap[N_MEM_SCHED_ENTRIES-1:0];  /* epochs at issue */
+   logic [N_MEM_SCHED_ENTRIES-1:0] n_mem_sched_ep_snap[N_MEM_SCHED_ENTRIES-1:0];
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_matrix[N_MEM_SCHED_ENTRIES-1:0];
+   logic [N_MEM_SCHED_ENTRIES-1:0] n_mem_sched_matrix[N_MEM_SCHED_ENTRIES-1:0];
+   logic [N_MEM_SCHED_ENTRIES-1:0] t_mem_entry_rdy, t_mem_elig, t_mem_strict, t_mem_pending, t_mem_st_live;
+   logic [N_MEM_SCHED_ENTRIES-1:0] t_mem_alloc_entry, t_mem_select_entry, t_mem_free_entry;
+   logic [N_MEM_SCHED_ENTRIES-1:0] t_mem_sched_mask_valid, t_mem_survive;
+   logic [N_MEM_SCHED_ENTRIES-1:0] t_mem_cmt_rdy, t_mem_sd_rdy, t_mem_st_retire, t_blk_release;
+   wire [N_MEM_SCHED_ENTRIES-1:0]  w_mem_sched_oldest_ready;
+   logic [`LG_MEM_SCHED_ENTRIES:0] t_mem_sched_alloc_ptr, t_mem_sched_select_ptr, t_mem_sched_pick_ptr;
+   logic [`LG_MEM_SCHED_ENTRIES:0] t_mem_cmt_ptr, t_mem_sd_ptr;
+   uop_t t_picked_mem_uop;
+   logic 	t_mem_issue, t_mem_issue_addr, t_mem_issue_cmt;
+   logic 	t_mem_uq_generic_load, t_mem_uq_plain_store, t_mem_uq_serial;
+   /* the issued op, one stage on (AGU) */
+   logic [`LG_MEM_SCHED_ENTRIES-1:0] r_mem_uq_lsu_idx;
+   logic 	r_mem_uq_lsu_hold, r_mem_uq_commit, r_mem_uq_color;
+   logic 	r_restart_color;
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_uq_older_st, r_mem_uq_older_ep;
+   /* store data capture */
+   logic 	t_sd_go, r_sd_go, r_sd_fp, r_sd_fp_hi, r_sd_zero;
+   logic [`LG_PRF_ENTRIES-1:0] t_sd_src;
+   logic [`LG_MEM_SCHED_ENTRIES-1:0] r_sd_idx;
+   logic [`LG_ROB_ENTRIES-1:0] r_sd_rob;
+
    /* mem data queue */
    //uop_t r_mem_uq[N_MEM_UQ_ENTRIES];
   // uop_t t_mem_uq, mem_uq;
@@ -513,8 +593,11 @@ module exec(clk,
 
    /* a mem uop carries store data (-> store-data queue) when it has an int srcB
     * (stores + merge-loads) or is an FP store reading the FP PRF (swc1/sdc1). */
-   wire w_uop_has_sdata  = uq_uop.is_mem     && (uq_uop.srcB_valid     || (uq_uop.fp_srcB_valid     && uq_uop.is_store));
-   wire w_uop2_has_sdata = uq_uop_two.is_mem && (uq_uop_two.srcB_valid || (uq_uop_two.fp_srcB_valid && uq_uop_two.is_store));
+   /* plain stores capture their data in the LSU, not through the dq */
+   wire w_uop_has_sdata  = uq_uop.is_mem     && (uq_uop.srcB_valid     || (uq_uop.fp_srcB_valid     && uq_uop.is_store)) &&
+			   !is_plain_store(uq_uop.op);
+   wire w_uop2_has_sdata = uq_uop_two.is_mem && (uq_uop_two.srcB_valid || (uq_uop_two.fp_srcB_valid && uq_uop_two.is_store)) &&
+			   !is_plain_store(uq_uop_two.op);
 
    always_comb
      begin
@@ -592,7 +675,15 @@ module exec(clk,
 
    always_ff@(posedge clk)
      begin
-	mem_uq <= t_mem_uq;
+	mem_uq <= t_picked_mem_uop;
+	r_mem_uq_lsu_idx <= t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0];
+	r_mem_uq_lsu_hold <= r_mem_sched_ld[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] |
+			     r_mem_sched_st[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] |
+			     r_mem_sched_ser[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]];
+	r_mem_uq_commit <= t_mem_issue_cmt;
+	r_mem_uq_color <= r_restart_color;
+	r_mem_uq_older_st <= r_mem_sched_matrix[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] & t_mem_st_live;
+	r_mem_uq_older_ep <= r_mem_sched_ep;
 	mem_dq <= t_mem_dq;
      end
 
@@ -622,9 +713,13 @@ module exec(clk,
 	       begin
 		  r_mq_wait[uq_uop.is_mem ? uq_uop.rob_ptr : uq_uop_two.rob_ptr] <= 1'b1; 
 	       end
-	     if(t_pop_mem_uq)
+	     if(t_mem_issue_addr)
 	       begin
-		  r_mq_wait[t_mem_uq.rob_ptr] <= 1'b0;		  
+		  r_mq_wait[t_picked_mem_uop.rob_ptr] <= 1'b0;
+	       end
+	     if(mem_blk_valid)
+	       begin
+		  r_mq_wait[mem_rsp_rob_ptr] <= 1'b1;
 	       end
 	     
 	     //int port
@@ -967,12 +1062,61 @@ module exec(clk,
 	       begin
 		  topdown_uop(2, {{(32-`LG_ROB_ENTRIES){1'b0}}, int_uop.rob_ptr});
 	       end
-	     if(t_pop_mem_uq)
+	     if(t_mem_issue_addr)
 	       begin
-		  topdown_uop(3, {{(32-`LG_ROB_ENTRIES){1'b0}}, t_mem_uq.rob_ptr});
+		  topdown_uop(3, {{(32-`LG_ROB_ENTRIES){1'b0}}, t_picked_mem_uop.rob_ptr});
 	       end
 	  end
      end // always_ff
+`endif
+
+`ifdef PIPETRACE
+   /* pipetrace stage events (letters in gen_html.cc), joined by rob index in top.cc */
+   import "DPI-C" function void pt_event(input int rob_ptr, input int letter, input longint cycle);
+   function int pt_rob(logic [`LG_ROB_ENTRIES-1:0] p);
+      return {{(32-`LG_ROB_ENTRIES){1'b0}}, p};
+   endfunction
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     if(r_start_int)
+	       begin
+		  pt_event(pt_rob(int_uop.rob_ptr), "S", r_cycle);
+	       end
+	     if(t_pop_mem_uq)
+	       begin
+		  pt_event(pt_rob(t_mem_uq.rob_ptr), "Q", r_cycle);
+	       end
+	     if(t_mem_issue_addr)
+	       begin
+		  pt_event(pt_rob(t_picked_mem_uop.rob_ptr), "S", r_cycle);
+	       end
+	     if(mem_blk_valid)
+	       begin
+		  pt_event(pt_rob(mem_rsp_rob_ptr),
+			   (mem_blk_code == BLK_MISS) ? "B" :
+			   (mem_blk_code == BLK_ST_CONFLICT) ? "X" :
+			   (mem_blk_code == BLK_SB_CONFLICT) ? "W" :
+			   (mem_blk_code == BLK_UNCACHEABLE) ? "U" : "D", r_cycle);
+	       end
+	     if(mem_wake_valid && r_mem_sched_valid[mem_rsp_lsu_idx])
+	       begin
+		  pt_event(pt_rob(r_mem_sched_uops[mem_rsp_lsu_idx].rob_ptr), "K", r_cycle);
+	       end
+	     for(integer i = 0; i < N_MEM_SCHED_ENTRIES; i = i + 1)
+	       begin
+		  if(t_blk_release[i] && r_mem_sched_valid[i])
+		    begin
+		       pt_event(pt_rob(r_mem_sched_uops[i].rob_ptr), "K", r_cycle);
+		    end
+	       end
+	     if(r_sd_go)
+	       begin
+		  pt_event(pt_rob(r_sd_rob), "Z", r_cycle);
+	       end
+	  end
+     end // always_ff@ (negedge clk)
 `endif
 
    always_ff@(posedge clk)
@@ -1475,8 +1619,8 @@ module exec(clk,
 	  .reset(reset),
 	  .rdptr0(fp_uq.srcA),
 	  .rdptr1(fp_uq.srcB),
-	  .rdptr2(t_mem_uq.srcB),
-	  .rdptr3(t_mem_dq.src_ptr),
+	  .rdptr2(t_picked_mem_uop.srcB),
+	  .rdptr3(t_sd_go ? t_sd_src : t_mem_dq.src_ptr),
 	  /* bank0 write port shared by fpu-arith result and single-cycle convert
 	   * (mutually exclusive by r_fp_wb_bitvec) */
 	  .wrptr0(w_fdiv_complete ? w_fdiv_dst_ptr : w_fpu_result_valid ? w_fpu_dst_ptr : r_cvt_dst),
@@ -2901,24 +3045,389 @@ module exec(clk,
 
    wire [`M_WIDTH-1:0] w_agu = t_mem_srcA + {{E_BITS{mem_uq.imm[15]}},mem_uq.imm};
 
-   wire w_mem_srcA_ready = t_mem_uq.srcA_valid ? (!r_prf_inflight[t_mem_uq.srcA] | t_fwd_int_mem_srcA | t_fwd_mem_mem_srcA) : 1'b1;
 
    /* mfc1's FP source is the registered FP read r_fp_rd_srcB (aligned with mem_uq).
     * mfc1 (FP src -> address/mem-pop) gates the address pop on its FP source; FP stores
     * read the FP PRF through the store-data queue instead, so they don't gate here. */
-   wire w_mem_fp_srcB_ready = (t_mem_uq.fp_srcB_valid && !t_mem_uq.is_store) ? !r_fp_prf_inflight[t_mem_uq.srcB] : 1'b1;
 
    wire w_dq_ready = t_mem_dq.fp ? !r_fp_prf_inflight[t_mem_dq.src_ptr] :
 		     (!r_prf_inflight[t_mem_dq.src_ptr] | t_fwd_int_mem_srcB | t_fwd_mem_mem_srcB);
 
    always_comb
      begin
-	t_pop_mem_uq = (!t_mem_uq_empty) && (!(mem_q_next_full||mem_q_full)) && w_mem_srcA_ready && w_mem_fp_srcB_ready && !t_flash_clear;
+	/* uq -> scheduler whenever a slot is free (rv64core) */
+	t_pop_mem_uq = (!t_mem_uq_empty) && ((&r_mem_sched_valid) == 1'b0) && !t_flash_clear;
 
 	t_pop_mem_dq = (!t_mem_dq_empty) && !mem_dq_clr && w_dq_ready
 		       && (!(mem_mdq_next_full||mem_mdq_full)) ;
      end
 
+
+   /* ---------------- LSU ----------------
+    * Entry classes (by op at allocation):
+    *   simple load (r_mem_sched_ld): held from issue until its data returns; a
+    *     block parks it (code in r_mem_sched_blk) until its wake condition.
+    *   plain store (r_mem_sched_st): address pass at issue (translate + fault +
+    *     ROB ack; PA/mask land in the l1d store buffer), data captured separately
+    *     when its source is ready, held until it retires, then committed oldest
+    *     store first and freed when the l1d has written it.
+    *   strict (everything else: LL/SC, SWL/SWR/SDL/SDR, LWL/LWR/LDL/LDR, CACHE,
+    *     TLBP, GPR<->FPR moves): issues only when every older entry is gone and
+    *     leaves at issue (today's l1d paths) -- except CACHE hit ops
+    *     (r_mem_sched_ser), which are fully serializing: they also hold their
+    *     entry (and so everything younger) until the l1d answers that the line
+    *     op is done; the l1d admits them only at the ROB head.
+    * Ordering: an entry may issue only when no older entry is "pending" (a strict
+    * op, or a store whose address pass has not issued), so every older store has
+    * its PA in the store buffer before a load reaches the l1d, and a load never
+    * passes a strict op.  Among eligible entries the oldest issues (ALU select). */
+   generate
+      for(genvar i = 0; i < N_MEM_SCHED_ENTRIES; i=i+1)
+	begin : mem_rdy
+	   always_comb
+	     begin
+		t_mem_entry_rdy[i] = r_mem_sched_valid[i] && !r_mem_sched_issued[i] && (r_mem_sched_blk[i] == BLK_NONE) &&
+				     !(mem_q_next_full||mem_q_full) && !t_flash_clear &&
+				     (r_mem_sched_uops[i].srcA_valid ?
+				      (!r_prf_inflight[r_mem_sched_uops[i].srcA] |
+				       (r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (r_mem_sched_uops[i].srcA == int_uop.dst)) |
+				       (w_mem_rsp_int_valid && (r_mem_sched_uops[i].srcA == mem_rsp_dst_ptr))) : 1'b1) &&
+				     ((r_mem_sched_uops[i].fp_srcB_valid && !r_mem_sched_uops[i].is_store) ?
+				      !r_fp_prf_inflight[r_mem_sched_uops[i].srcB] : 1'b1);
+		t_mem_elig[i] = t_mem_entry_rdy[i] &
+				(t_mem_strict[i] ? ((|r_mem_sched_matrix[i]) == 1'b0) :
+				 ((|(r_mem_sched_matrix[i] & t_mem_pending)) == 1'b0));
+		/* retired store, no older store still to commit, data in the l1d: commit
+		 * it (commits stay in program order through the exec mem_q and the MQ,
+		 * so they pipeline back to back) */
+		t_mem_cmt_rdy[i] = t_mem_st_live[i] && r_mem_sched_ret[i] && r_mem_sched_sd_ok[i] && !r_mem_sched_cmt[i] &&
+				   ((|(r_mem_sched_matrix[i] & t_mem_st_live & ~r_mem_sched_cmt)) == 1'b0) &&
+				   !(mem_q_next_full||mem_q_full);
+		/* store data source ready (read through the store-data PRF port) */
+		t_mem_sd_rdy[i] = t_mem_st_live[i] && !r_mem_sched_sd_sel[i] && !t_flash_clear &&
+				  (r_mem_sched_uops[i].fp_srcB_valid ? !r_fp_prf_inflight[r_mem_sched_uops[i].srcB] :
+				   r_mem_sched_uops[i].srcB_valid ? !r_prf_inflight[r_mem_sched_uops[i].srcB] : 1'b1);
+		t_mem_st_retire[i] = t_mem_st_live[i] && r_mem_sched_issued[i] && !r_mem_sched_ret[i] &&
+				     ((retired_rob_ptr_valid && (r_mem_sched_uops[i].rob_ptr == retired_rob_ptr)) ||
+				      (retired_rob_ptr_two_valid && (r_mem_sched_uops[i].rob_ptr == retired_rob_ptr_two)));
+		/* LSU-owned blocks release when the stores they wait on have drained (or,
+		 * for BLK_SB_DATA, have their data); the wait mask drops freed slots */
+		t_blk_release[i] = ((r_mem_sched_blk[i] == BLK_UNCACHEABLE) &&
+				    ((head_of_rob_ptr_valid && (head_of_rob_ptr == r_mem_sched_uops[i].rob_ptr)) ||
+				     (head_of_rob_ds_committable && (next_head_of_rob_ptr == r_mem_sched_uops[i].rob_ptr)))) ||
+				   ((r_mem_sched_blk[i] == BLK_SB_CONFLICT) && ((r_mem_sched_blk_st[i] & ~t_mem_free_entry) == 'd0)) ||
+				   ((r_mem_sched_blk[i] == BLK_SB_DATA) &&
+				    ((r_mem_sched_blk_st[i] & ~t_mem_free_entry & ~r_mem_sched_sd_ok) == 'd0));
+	     end // always_comb
+	   assign w_mem_sched_oldest_ready[i] = t_mem_elig[i] & (~(|(t_mem_elig & r_mem_sched_matrix[i])));
+	end // block: mem_rdy
+   endgenerate
+
+   find_lowest_set_bit#(`LG_MEM_SCHED_ENTRIES) ffs_mem_sched_alloc( .in(~r_mem_sched_valid),
+								   .y(t_mem_sched_alloc_ptr));
+   find_lowest_set_bit#(`LG_MEM_SCHED_ENTRIES) ffs_mem_sched_select( .in(w_mem_sched_oldest_ready),
+								    .y(t_mem_sched_pick_ptr));
+   find_lowest_set_bit#(`LG_MEM_SCHED_ENTRIES) ffs_mem_sched_cmt( .in(t_mem_cmt_rdy),
+								      .y(t_mem_cmt_ptr));
+   find_lowest_set_bit#(`LG_MEM_SCHED_ENTRIES) ffs_mem_sched_sd( .in(t_mem_sd_rdy),
+								     .y(t_mem_sd_ptr));
+
+   /* restart color (rv64core's r_restart_counter, 1 bit) */
+   always_ff@(posedge clk)
+     begin
+	r_restart_color <= reset ? 1'b0 : (restart_complete ? !r_restart_color : r_restart_color);
+     end
+   assign restart_color = r_restart_color;
+
+   /* colors still on their way to the l1d: the AGU stage and the request FIFO
+    * (commits are never dead, so their color does not matter) */
+   always_comb
+     begin
+	logic [`LG_MQ_ENTRIES:0] t_cnt, t_p;
+	mem_color_pending = 2'd0;
+	if(r_mem_ready && !r_mem_uq_commit)
+	  begin
+	     mem_color_pending[r_mem_uq_color] = 1'b1;
+	  end
+	t_cnt = r_mq_tail_ptr - r_mq_head_ptr;
+	for(integer i = 0; i < N_MQ_ENTRIES; i = i + 1)
+	  begin
+	     t_p = r_mq_head_ptr + i[`LG_MQ_ENTRIES:0];
+	     if((i < t_cnt) && !r_mem_q[t_p[`LG_MQ_ENTRIES-1:0]].commit)
+	       begin
+		  mem_color_pending[r_mem_q[t_p[`LG_MQ_ENTRIES-1:0]].restart_id] = 1'b1;
+	       end
+	  end
+     end // always_comb
+
+   /* entry classes (registered state only) */
+   always_comb
+     begin
+	t_mem_strict = r_mem_sched_valid & ~r_mem_sched_ld & ~r_mem_sched_st;
+	t_mem_st_live = r_mem_sched_valid & r_mem_sched_st;
+	t_mem_pending = t_mem_strict | (t_mem_st_live & ~r_mem_sched_issued);
+     end // always_comb
+
+   always_comb
+     begin
+	/* one issue per cycle into the mem pipe: loads/address passes first (a
+	 * commit is off the critical path; when the LSU fills with retired stores
+	 * nothing else is ready, so commits cannot starve) */
+	t_mem_issue_addr = |w_mem_sched_oldest_ready;
+	t_mem_issue_cmt = (|t_mem_cmt_rdy) & !t_mem_issue_addr;
+	t_mem_issue = t_mem_issue_cmt | t_mem_issue_addr;
+	t_mem_sched_select_ptr = t_mem_issue_cmt ? t_mem_cmt_ptr : t_mem_sched_pick_ptr;
+	t_picked_mem_uop = r_mem_sched_uops[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]];
+	/* store data capture shares the store-data PRF port with the dq; the dq wins */
+	t_sd_go = (|t_mem_sd_rdy) & !t_pop_mem_dq;
+	t_sd_src = r_mem_sched_uops[t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0]].srcB;
+	t_mem_alloc_entry = 'd0;
+	t_mem_select_entry = 'd0;
+	if(t_pop_mem_uq)
+	  begin
+	     t_mem_alloc_entry[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = 1'b1;
+	  end
+	if(t_mem_issue)
+	  begin
+	     t_mem_select_entry[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = 1'b1;
+	  end
+	/* freed: a strict op at issue, a simple load at its data response, a plain
+	 * store when the l1d has written it */
+	t_mem_free_entry = t_mem_select_entry & t_mem_strict & ~r_mem_sched_ser & {N_MEM_SCHED_ENTRIES{t_mem_issue_addr}};
+	if(mem_rsp_valid && mem_rsp_lsu_hold && (r_mem_sched_ld[mem_rsp_lsu_idx] | r_mem_sched_ser[mem_rsp_lsu_idx]))
+	  begin
+	     t_mem_free_entry[mem_rsp_lsu_idx] = 1'b1;
+	  end
+	if(mem_st_done_valid)
+	  begin
+	     t_mem_free_entry[mem_st_done_idx] = 1'b1;
+	  end
+	t_mem_free_entry = t_mem_free_entry & r_mem_sched_valid;
+	t_mem_sched_mask_valid = r_mem_sched_valid & (~t_mem_free_entry);
+	t_mem_uq_generic_load = (t_mem_uq.op == LW) | (t_mem_uq.op == LWU) |
+				(t_mem_uq.op == LB) | (t_mem_uq.op == LBU) |
+				(t_mem_uq.op == LH) | (t_mem_uq.op == LHU) |
+				(t_mem_uq.op == LD) | (t_mem_uq.op == LWC1) |
+				(t_mem_uq.op == LDC1);
+	t_mem_uq_plain_store = is_plain_store(t_mem_uq.op);
+	t_mem_uq_serial = (t_mem_uq.op == CHWB) | (t_mem_uq.op == CHWBINV) | (t_mem_uq.op == CHINV);
+     end // always_comb
+
+   /* LSU state next-values */
+   always_comb
+     begin
+	n_mem_sched_valid = r_mem_sched_valid;
+	n_mem_sched_ld = r_mem_sched_ld;
+	n_mem_sched_st = r_mem_sched_st;
+	n_mem_sched_ser = r_mem_sched_ser;
+	n_mem_sched_issued = r_mem_sched_issued;
+	n_mem_sched_sd_sel = r_mem_sched_sd_sel;
+	n_mem_sched_sd_ok = r_mem_sched_sd_ok;
+	n_mem_sched_ret = r_mem_sched_ret | t_mem_st_retire;
+	n_mem_sched_cmt = r_mem_sched_cmt;
+	n_mem_sched_ep = r_mem_sched_ep;
+	for(integer i = 0; i < N_MEM_SCHED_ENTRIES; i = i + 1)
+	  begin
+	     n_mem_sched_blk[i] = t_blk_release[i] ? BLK_NONE : r_mem_sched_blk[i];
+	     n_mem_sched_blk_st[i] = r_mem_sched_blk_st[i] & ~t_mem_free_entry;
+	     n_mem_sched_ep_snap[i] = r_mem_sched_ep_snap[i];
+	     n_mem_sched_matrix[i] = t_mem_alloc_entry[i] ? t_mem_sched_mask_valid :
+				     (r_mem_sched_matrix[i] & ~t_mem_free_entry);
+	  end
+	if(t_pop_mem_uq)
+	  begin
+	     n_mem_sched_valid[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = 1'b1;
+	     n_mem_sched_ld[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_generic_load;
+	     n_mem_sched_st[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_plain_store;
+	     n_mem_sched_ser[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_serial;
+	     n_mem_sched_ep[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = !r_mem_sched_ep[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]];
+	  end
+	if(t_mem_issue_addr)
+	  begin
+	     n_mem_sched_issued[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = 1'b1;
+	     n_mem_sched_ep_snap[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = r_mem_sched_ep;
+	  end
+	if(t_mem_issue_cmt)
+	  begin
+	     n_mem_sched_cmt[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = 1'b1;
+	  end
+	if(t_sd_go)
+	  begin
+	     n_mem_sched_sd_sel[t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = 1'b1;
+	  end
+	if(r_sd_go)
+	  begin
+	     n_mem_sched_sd_ok[r_sd_idx] = 1'b1;
+	  end
+	if(mem_blk_valid)
+	  begin
+	     n_mem_sched_issued[mem_rsp_lsu_idx] = 1'b0;
+	     n_mem_sched_blk[mem_rsp_lsu_idx] = mem_blk_code;
+	     /* LSU-owned: the stores to wait on, minus any drained (or slot reused)
+	      * since the l1d compared */
+	     n_mem_sched_blk_st[mem_rsp_lsu_idx] = mem_blk_st & t_mem_st_live & ~t_mem_free_entry &
+						   ~(r_mem_sched_ep ^ r_mem_sched_ep_snap[mem_rsp_lsu_idx]);
+	  end
+	if(mem_wake_valid)
+	  begin
+	     n_mem_sched_blk[mem_rsp_lsu_idx] = BLK_NONE;
+	  end
+	for(integer i = 0; i < N_MEM_SCHED_ENTRIES; i = i + 1)
+	  begin
+	     if(t_mem_free_entry[i])
+	       begin
+		  n_mem_sched_valid[i] = 1'b0;
+		  n_mem_sched_ld[i] = 1'b0;
+		  n_mem_sched_st[i] = 1'b0;
+		  n_mem_sched_ser[i] = 1'b0;
+		  n_mem_sched_issued[i] = 1'b0;
+		  n_mem_sched_sd_sel[i] = 1'b0;
+		  n_mem_sched_sd_ok[i] = 1'b0;
+		  n_mem_sched_ret[i] = 1'b0;
+		  n_mem_sched_cmt[i] = 1'b0;
+		  n_mem_sched_blk[i] = BLK_NONE;
+		  n_mem_sched_blk_st[i] = 'd0;
+	       end
+	  end
+	/* flush: everything speculative goes; retired stores are committed state and
+	 * stay (they keep draining through the flush) */
+	t_mem_survive = n_mem_sched_valid & n_mem_sched_st & n_mem_sched_ret;
+	if(t_flash_clear)
+	  begin
+	     n_mem_sched_valid = t_mem_survive;
+	     n_mem_sched_ld = 'd0;
+	     n_mem_sched_ser = 'd0;
+	     n_mem_sched_st = t_mem_survive;
+	     n_mem_sched_issued = n_mem_sched_issued & t_mem_survive;
+	     n_mem_sched_sd_sel = n_mem_sched_sd_sel & t_mem_survive;
+	     n_mem_sched_sd_ok = n_mem_sched_sd_ok & t_mem_survive;
+	     n_mem_sched_ret = n_mem_sched_ret & t_mem_survive;
+	     n_mem_sched_cmt = n_mem_sched_cmt & t_mem_survive;
+	     for(integer i = 0; i < N_MEM_SCHED_ENTRIES; i = i + 1)
+	       begin
+		  n_mem_sched_blk[i] = BLK_NONE;
+		  n_mem_sched_blk_st[i] = 'd0;
+		  n_mem_sched_matrix[i] = n_mem_sched_matrix[i] & t_mem_survive;
+	       end
+	  end
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_mem_sched_valid <= 'd0;
+	     r_mem_sched_ld <= 'd0;
+	     r_mem_sched_st <= 'd0;
+	     r_mem_sched_ser <= 'd0;
+	     r_mem_sched_issued <= 'd0;
+	     r_mem_sched_sd_sel <= 'd0;
+	     r_mem_sched_sd_ok <= 'd0;
+	     r_mem_sched_ret <= 'd0;
+	     r_mem_sched_cmt <= 'd0;
+	     r_mem_sched_ep <= 'd0;
+	     for(integer i = 0; i < N_MEM_SCHED_ENTRIES; i = i + 1)
+	       begin
+		  r_mem_sched_blk[i] <= BLK_NONE;
+		  r_mem_sched_blk_st[i] <= 'd0;
+		  r_mem_sched_ep_snap[i] <= 'd0;
+		  r_mem_sched_matrix[i] <= 'd0;
+	       end
+	  end
+	else
+	  begin
+	     r_mem_sched_valid <= n_mem_sched_valid;
+	     r_mem_sched_ld <= n_mem_sched_ld;
+	     r_mem_sched_st <= n_mem_sched_st;
+	     r_mem_sched_ser <= n_mem_sched_ser;
+	     r_mem_sched_issued <= n_mem_sched_issued;
+	     r_mem_sched_sd_sel <= n_mem_sched_sd_sel;
+	     r_mem_sched_sd_ok <= n_mem_sched_sd_ok;
+	     r_mem_sched_ret <= n_mem_sched_ret;
+	     r_mem_sched_cmt <= n_mem_sched_cmt;
+	     r_mem_sched_ep <= n_mem_sched_ep;
+	     for(integer i = 0; i < N_MEM_SCHED_ENTRIES; i = i + 1)
+	       begin
+		  r_mem_sched_blk[i] <= n_mem_sched_blk[i];
+		  r_mem_sched_blk_st[i] <= n_mem_sched_blk_st[i];
+		  r_mem_sched_ep_snap[i] <= n_mem_sched_ep_snap[i];
+		  r_mem_sched_matrix[i] <= n_mem_sched_matrix[i];
+	       end
+	  end
+     end // always_ff@ (posedge clk)
+
+   always_ff@(posedge clk)
+     begin
+	if(t_pop_mem_uq)
+	  begin
+	     r_mem_sched_uops[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] <= t_mem_uq;
+	  end
+     end // always_ff@ (posedge clk)
+
+   /* store data capture: read at t (store-data PRF port), write the l1d store
+    * buffer at t+1 -- which is also the ROB's store-data-complete (retire gate) */
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_sd_go <= 1'b0;
+	  end
+	else
+	  begin
+	     r_sd_go <= t_sd_go;
+	  end
+	r_sd_idx <= t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0];
+	r_sd_fp <= r_mem_sched_uops[t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0]].fp_srcB_valid;
+	r_sd_fp_hi <= r_mem_sched_uops[t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0]].jmp_imm[0];
+	r_sd_zero <= !(r_mem_sched_uops[t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0]].fp_srcB_valid |
+		      r_mem_sched_uops[t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0]].srcB_valid);
+	r_sd_rob <= r_mem_sched_uops[t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0]].rob_ptr;
+     end // always_ff@ (posedge clk)
+
+   always_comb
+     begin
+	lsu_sb.live = t_mem_st_live;
+	lsu_sb.epoch = r_mem_sched_ep;
+	lsu_sb.data_ok = r_mem_sched_sd_ok;
+	for(integer j = 0; j < N_MEM_SCHED_ENTRIES; j = j + 1)
+	  begin
+	     lsu_sb.matrix[j*N_MEM_SCHED_ENTRIES +: N_MEM_SCHED_ENTRIES] = r_mem_sched_matrix[j];
+	  end
+	lsu_sb.retired_pending = |(t_mem_st_live & r_mem_sched_ret);
+	lsu_sb.data_valid = r_sd_go;
+	lsu_sb.data_idx = r_sd_idx;
+	/* FR=0 swc1 odd reg (fp_hi): store the HIGH 32b half (placed low for MEM_SW) */
+	lsu_sb.data = r_sd_zero ? 64'd0 :
+		      r_sd_fp ? (r_sd_fp_hi ? {32'd0, r_fp_rd_dq[63:32]} : r_fp_rd_dq) :
+		      t_mem_srcB;
+     end // always_comb
+
+`ifdef LSU_TRACE
+   always_ff@(negedge clk)
+     begin
+	if(mem_blk_valid)
+	  begin
+	     $display("[LSU] cyc=%0d blk idx=%0d code=%0d rob=%0d st=%b", r_cycle, mem_rsp_lsu_idx, mem_blk_code, mem_rsp_rob_ptr, mem_blk_st);
+	  end
+	if(mem_wake_valid)
+	  begin
+	     $display("[LSU] cyc=%0d wake idx=%0d", r_cycle, mem_rsp_lsu_idx);
+	  end
+	if(t_mem_issue)
+	  begin
+	     $display("[LSU] cyc=%0d %s idx=%0d rob=%0d pc=%x", r_cycle, t_mem_issue_cmt ? "commit" : "issue",
+		      t_mem_sched_select_ptr, t_picked_mem_uop.rob_ptr, t_picked_mem_uop.pc);
+	  end
+	if(mem_st_done_valid)
+	  begin
+	     $display("[LSU] cyc=%0d st_done idx=%0d", r_cycle, mem_st_done_idx);
+	  end
+	if(r_sd_go)
+	  begin
+	     $display("[LSU] cyc=%0d sdata idx=%0d data=%x", r_cycle, r_sd_idx, lsu_sb.data);
+	  end
+     end // always_ff@ (negedge clk)
+`endif
 
    //need another queue to hold store data
    
@@ -2928,8 +3437,9 @@ module exec(clk,
 	/* FR=0 swc1 odd reg (fp_hi): store the HIGH 32b half (placed low for MEM_SW). */
 	t_core_store_data.data = mem_dq.fp ? (mem_dq.fp_hi ? {32'd0, r_fp_rd_dq[63:32]} : r_fp_rd_dq)
 					   : t_mem_srcB;
-	core_store_data_ptr = mem_dq.rob_ptr;
-	core_store_data_ptr_valid = r_dq_ready;
+	/* store-data complete (the ROB's retire gate): the dq or an LSU capture */
+	core_store_data_ptr = r_sd_go ? r_sd_rob : mem_dq.rob_ptr;
+	core_store_data_ptr_valid = r_dq_ready | r_sd_go;
      end
 
    always_ff@(posedge clk)
@@ -2969,7 +3479,7 @@ module exec(clk,
 	  end
 	else
 	  begin
-	     r_mem_ready <= t_pop_mem_uq;
+	     r_mem_ready <= t_mem_issue;
 	     r_dq_ready <= t_pop_mem_dq;
 	  end
      end // always_ff@ (posedge clk)
@@ -3015,6 +3525,12 @@ module exec(clk,
 	t_mem_tail.bad_addr = 1'b0;
 	t_mem_tail.cached = w_cached;
 	t_mem_tail.mapped = w_mapped;
+	t_mem_tail.lsu_hold = r_mem_uq_lsu_hold;
+	t_mem_tail.lsu_idx = r_mem_uq_lsu_idx;
+	t_mem_tail.commit = 1'b0;
+	t_mem_tail.restart_id = r_mem_uq_color;
+	t_mem_tail.lsu_older_st = r_mem_uq_older_st;
+	t_mem_tail.lsu_older_ep = r_mem_uq_older_ep;
 `ifdef VERILATOR
 	t_mem_tail.pc = mem_uq.pc;
 	t_mem_tail.uuid = {32'd0, r_cycle[31:0]};   /* r_cycle is now 64b; uuid keeps the low 32 */
@@ -3301,7 +3817,19 @@ module exec(clk,
 	    begin
 	    end
 	endcase // case (mem_uq.op)
-
+	if(r_mem_uq_commit)
+	  begin
+	     /* retired plain store drain: the l1d rebuilds it from its store buffer
+	      * (PA, data); mark it non-faulting and cached so admission never waits
+	      * on the ROB head */
+	     t_mem_tail.commit = 1'b1;
+	     t_mem_tail.is_store = 1'b1;
+	     t_mem_tail.dst_valid = 1'b0;
+	     t_mem_tail.bad_addr = 1'b0;
+	     t_mem_tail.cached = 1'b1;
+	     t_mem_tail.mapped = 1'b0;
+	     t_mem_tail.addr = 'd0;
+	  end
      end // always_comb
    
 
@@ -3357,18 +3885,18 @@ module exec(clk,
 
    always_comb
      begin
-	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_mem_uq.srcA == int_uop.dst);
+	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_mem_uop.srcA == int_uop.dst);
 	t_fwd_int_mem_srcB = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_mem_dq.src_ptr == int_uop.dst);
-	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_mem_uq.srcA == mem_rsp_dst_ptr);
+	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_picked_mem_uop.srcA == mem_rsp_dst_ptr);
 	t_fwd_mem_mem_srcB = w_mem_rsp_int_valid && (t_mem_dq.src_ptr == mem_rsp_dst_ptr);
      end
    
    always_ff@(posedge clk)
      begin
 	r_fwd_int_mem_srcA <= t_fwd_int_mem_srcA;
-	r_fwd_int_mem_srcB <= t_fwd_int_mem_srcB;
+	r_fwd_int_mem_srcB <= t_fwd_int_mem_srcB & !t_sd_go;   /* port 3 read the LSU store's data instead */
 	r_fwd_mem_mem_srcA <= t_fwd_mem_mem_srcA;
-	r_fwd_mem_mem_srcB <= t_fwd_mem_mem_srcB;
+	r_fwd_mem_mem_srcB <= t_fwd_mem_mem_srcB & !t_sd_go;
 	
 	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst);
 	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcB == int_uop.dst);
@@ -3387,8 +3915,8 @@ module exec(clk,
 	   .reset(reset),
 	   .rdptr0(t_picked_uop.srcA),
 	   .rdptr1(t_picked_uop.srcB),
-	   .rdptr2(t_mem_uq.srcA),
-	   .rdptr3(t_mem_dq.src_ptr),
+	   .rdptr2(t_picked_mem_uop.srcA),
+	   .rdptr3(t_sd_go ? t_sd_src : t_mem_dq.src_ptr),
 	   .wrptr0(int_uop.dst),
 	   .wrptr1(mem_rsp_dst_ptr),
 	   .wen0(r_start_int && t_wr_int_prf),

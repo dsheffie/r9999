@@ -21,19 +21,23 @@ CFLAGS="-march=mips3 -mabi=32 -EB -mno-abicalls -fno-pic -G 0 -O1 -nostdlib -nos
 LDFLAGS="-T $COMMON/link.ld -nostdlib -G 0 -static"
 
 START=${1:-1}; COUNT=${2:-1000}; JOBS=${3:-$(nproc)}
+# RANDGEN_BUFSZ: scratch-buffer bytes (default 1024, fits the L1D).  32768 = 8x the
+# 4KB L1D, so fills are always outstanding under the other memory ops; crt0 zeroes
+# the BSS, so the instruction budget grows with it.
+BUFSZ=${RANDGEN_BUFSZ:-1024}
 $CC $CFLAGS -c "$COMMON/crt0.S" -o "$CRT0" 2>/dev/null   # shared startup, built once
 WORK=$(mktemp -d)
-export WORK SIM GEN CC LD CFLAGS LDFLAGS CRT0
+export WORK SIM GEN CC LD CFLAGS LDFLAGS CRT0 BUFSZ
 
 run_one() {
   local s=$1
   local n=$(( 200 + (s * 41) % 800 ))
   local p="$WORK/s$s"
-  python3 "$GEN" --seed "$s" --n "$n" --out "$p" >/dev/null 2>&1 || { echo "GENERR $s"  >"$WORK/r$s"; return; }
+  python3 "$GEN" --seed "$s" --n "$n" --out "$p" --bufsz "$BUFSZ" >/dev/null 2>&1 || { echo "GENERR $s"  >"$WORK/r$s"; return; }
   if $CC $CFLAGS -c "$p.S" -o "$p.o" 2>/dev/null && $LD $LDFLAGS "$CRT0" "$p.o" -o "$p.elf" 2>/dev/null; then :; else
     echo "BUILDERR $s" >"$WORK/r$s"; rm -f "$p".*; return; fi
   local out
-  out=$(timeout 90 "$SIM" -f "$p.elf" -c 1 --maxicnt $((n*4+30000)) 2>&1)
+  out=$(timeout 90 "$SIM" -f "$p.elf" -c 1 --maxicnt $((n*4+30000+BUFSZ)) 2>&1)
   rm -f "$p".*
   if echo "$out" | grep -q DONE && ! echo "$out" | grep -qiE "does not match|incorrect 8001|no match"; then
     echo "PASS $s" >"$WORK/r$s"

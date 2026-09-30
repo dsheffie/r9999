@@ -28,6 +28,7 @@ TESTS := hello/hello.elf \
          tlb/test_tlb.elf \
          dside_tlb/test_dside_tlb.elf \
          dside_tlb/test_uncached_tlb_load.elf \
+         memlat/l2lat.elf \
          except/test_except.elf \
          except/test_bgezall_ds_fault.elf \
          except/test_regimm_link.elf \
@@ -345,6 +346,10 @@ dside_tlb/test_dside_tlb.elf: dside_tlb/test_dside_tlb.S $(STARTUP) $(COMMON)/si
 
 run-dside-tlb: dside_tlb/test_dside_tlb.elf
 	cd .. && $(SIM) --file tests/$< --checker true 2>&1
+
+memlat/l2lat.elf: memlat/l2lat.c $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -c memlat/l2lat.c -o memlat/l2lat.o
+	$(LD) $(LDFLAGS) $(STARTUP) memlat/l2lat.o -o memlat/l2lat.elf
 
 dside_tlb/test_uncached_tlb_load.elf: dside_tlb/test_uncached_tlb_load.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c dside_tlb/test_uncached_tlb_load.S -o dside_tlb/test_uncached_tlb_load.o

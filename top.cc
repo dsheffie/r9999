@@ -431,6 +431,25 @@ static void topdown_report() {
   }
 }
 
+/* pipetrace stage events (+define+PIPETRACE hooks in core/exec/l1d), keyed by rob
+ * index: cleared at allocation, appended by the pipe, attached to the record
+ * when pt_retire names the rob slot record_retirement is about to retire. */
+namespace pt {
+  static std::list<std::pair<uint64_t, char>> ev[64];
+  static int cur = -1;
+}
+extern "C" void pt_alloc(int rob_ptr) {
+  pt::ev[rob_ptr & 63].clear();
+}
+extern "C" void pt_event(int rob_ptr, int letter, long long cycle) {
+  if(pl != nullptr) {
+    pt::ev[rob_ptr & 63].emplace_back((uint64_t)cycle, (char)letter);
+  }
+}
+extern "C" void pt_retire(int rob_ptr) {
+  pt::cur = rob_ptr & 63;
+}
+
 void record_retirement(long long pc, long long fetch_cycle, long long alloc_cycle, long long complete_cycle, long long retire_cycle,
 		       int faulted , int is_mem, int is_fp, int missed_l1d) {
 
@@ -480,8 +499,11 @@ void record_retirement(long long pc, long long fetch_cycle, long long alloc_cycl
   l1d_insns += is_mem;
   
   if((pl != nullptr) and (record_insns_retired >= pipestart) and (record_insns_retired < pipeend)) {
-    pl->append(record_insns_retired, getAsmString(get_insn(pc, s), pc), pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, faulted);
+    static const std::list<std::pair<uint64_t, char>> no_events;
+    pl->append(record_insns_retired, getAsmString(get_insn(pc, s), pc), pc, fetch_cycle, alloc_cycle, complete_cycle, retire_cycle, faulted,
+	       (pt::cur >= 0) ? pt::ev[pt::cur] : no_events);
   }
+  pt::cur = -1;
   ++record_insns_retired;
 }
 

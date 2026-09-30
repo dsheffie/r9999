@@ -97,6 +97,14 @@ module l1d(clk,
 	   core_mem_req_ack,
 	   core_mem_rsp,
 	   core_mem_rsp_valid,
+	   core_mem_blk_valid,
+	   core_mem_wake_valid,
+	   core_mem_st_done_valid,
+	   core_mem_st_done_idx,
+	   lsu_sb,
+	   restart_color,
+	   mem_color_busy,
+	   mq_graduated_pending,
 	   //output to the memory system
 	   mem_req_ack,
 	   mem_req_valid, 
@@ -162,6 +170,25 @@ module l1d(clk,
    output logic core_mem_req_ack;
    output 	mem_rsp_t core_mem_rsp;
    output logic core_mem_rsp_valid;
+   /* LSU replay: a simple load (lsu_hold) that cannot complete on its port-2 pass
+    * returns a block code (core_mem_rsp.blk) instead of waiting in the l1d; its
+    * miss-queue entry still reloads the line, and the port-1 pass then sends a
+    * wakeup (core_mem_rsp.lsu_idx) instead of the data.  The LSU re-issues it. */
+   output logic core_mem_blk_valid;
+   output logic core_mem_wake_valid;
+   /* a plain-store commit has been written (cache or device): free its LSU slot */
+   output logic core_mem_st_done_valid;
+   output logic [`LG_MEM_SCHED_ENTRIES-1:0] core_mem_st_done_idx;
+   input 	lsu_sb_t lsu_sb;
+   /* restart color: a request / queued op / response of the other color belongs
+    * to a flushed era (commits exempt) -- dropped instead of drained */
+   input logic	restart_color;
+   /* an op of color c is still in flight here (the core's flip-back guard) */
+   output logic [1:0] mem_color_busy;
+   /* a RETIRED old-path store (SWL/SWR/SDL/SDR/SC) still waits in the MQ for its
+    * data from exec's store-data FIFO, which a restart clears: it is live, so the
+    * restart must wait for it to write */
+   output logic mq_graduated_pending;
 
    input logic 	mem_req_ack;
    
@@ -387,6 +414,10 @@ endfunction
    logic 				  r_q_priority, n_q_priority;
    
    logic 				  n_core_mem_rsp_valid, r_core_mem_rsp_valid;
+   logic 				  n_core_mem_blk_valid, r_core_mem_blk_valid;
+   logic 				  n_core_mem_wake_valid, r_core_mem_wake_valid;
+   logic 				  n_core_mem_st_done_valid, r_core_mem_st_done_valid;
+   logic [`LG_MEM_SCHED_ENTRIES-1:0] 	  n_core_mem_st_done_idx, r_core_mem_st_done_idx;
    mem_rsp_t n_core_mem_rsp, r_core_mem_rsp;
 
    wire [5:0] w_tlb_index;
@@ -488,20 +519,57 @@ endfunction
    assign mem_req_cacheable = r_mem_req_cacheable;
    assign mem_req_mask = r_mem_req_mask;
 
+   /* w_* = the l1d's own view of what it answered (counts every answer);
+    * core_mem_* = the same, minus answers for a flushed era (restart color) */
+   logic w_rsp_v, w_blk_v, w_wake_v;
+   mem_rsp_t w_rsp;
+   logic t_req_stale, t_mq_stale_drop, t_mq_stale_owed;
 `ifdef REG_L1D_RSP
    /* registered response -- matches rv64core; see REG_L1D_RSP in machine.vh */
-   assign core_mem_rsp_valid = r_core_mem_rsp_valid;
-   assign core_mem_rsp = r_core_mem_rsp;
+   assign w_rsp_v = r_core_mem_rsp_valid;
+   assign w_blk_v = r_core_mem_blk_valid;
+   assign w_wake_v = r_core_mem_wake_valid;
+   assign w_rsp = r_core_mem_rsp;
+   assign core_mem_st_done_valid = r_core_mem_st_done_valid;
+   assign core_mem_st_done_idx = r_core_mem_st_done_idx;
 `else
-   assign core_mem_rsp_valid = n_core_mem_rsp_valid;
-   assign core_mem_rsp = n_core_mem_rsp;
+   assign w_rsp_v = n_core_mem_rsp_valid;
+   assign w_blk_v = n_core_mem_blk_valid;
+   assign w_wake_v = n_core_mem_wake_valid;
+   assign w_rsp = n_core_mem_rsp;
+   assign core_mem_st_done_valid = n_core_mem_st_done_valid;
+   assign core_mem_st_done_idx = n_core_mem_st_done_idx;
 `endif
+   wire w_rsp_stale = (w_rsp.restart_id != restart_color);
+   assign core_mem_rsp_valid = w_rsp_v & !w_rsp_stale;
+   assign core_mem_blk_valid = w_blk_v & !w_rsp_stale;
+   assign core_mem_wake_valid = w_wake_v & !w_rsp_stale;
+   always_comb
+     begin
+	core_mem_rsp = w_rsp;
+	core_mem_rsp.dst_valid = w_rsp.dst_valid & !w_rsp_stale;   /* no PRF write / forward */
+     end
    
    assign cache_accesses = r_cache_accesses;
    assign cache_hits = r_cache_hits;
 
    wire					 w_cacheable_mem_rsp_valid = (r_state == INJECT_RELOAD) & 
 					 mem_rsp_valid;
+   /* fill -> load bypass: the simple load that owns this fill takes its data from
+    * the fill itself (no array write + port-1 re-lookup + registered hit).  Its
+    * ordering checks were all made on its first pass (an overlapping older LSU store
+    * blocks it BLK_SB_*, an MQ store is ahead of it), and the L1D held no copy, so
+    * the fill is current.  If a port-2 op answers this cycle (they share the
+    * response), the bypass response goes out next cycle from r_fill_rsp: no
+    * port-2 request is accepted on the fill cycle and the MQ's next pop answers a
+    * cycle later, so that slot is always free. */
+   wire					 w_fill_bypass = w_cacheable_mem_rsp_valid &
+					 (r_mem_req_opcode == MEM_LW) &
+					 r_req.lsu_hold & !r_req.is_store;
+   mem_rsp_t				 t_fill_rsp, r_fill_rsp;
+   /* start the fill straight from the port-2 miss (no MQ pop + port-1 re-lookup) */
+   logic				 t_direct_fill_ok, t_direct_fill;
+   logic				 n_fill_rsp_pend, r_fill_rsp_pend;
    
    always_ff@(posedge clk)
      begin
@@ -526,7 +594,7 @@ endfunction
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);
    logic [1:0] r_graduated [N_ROB_ENTRIES-1:0];
    logic [N_ROB_ENTRIES-1:0] r_missed;
-   logic [N_ROB_ENTRIES-1:0] r_rob_inflight;
+   logic [2*N_ROB_ENTRIES-1:0] r_rob_inflight;   /* indexed {restart color, rob_ptr} */
 
    logic r_link_reg_val;
    logic [`PA_WIDTH-1:0] r_link_reg;
@@ -644,7 +712,7 @@ endfunction
 	     /* SC/SCD: clear at its response, after the w_match_link2 check below */
 	     r_link_reg_val <= 1'b0;
 	  end
-	else if(r_got_req2 && w_req2_breaks_link)
+	else if(r_got_req2 && w_req2_breaks_link && !r_req2.commit)
 	  begin
 	     /* in-order first pass breaks the link (model selected above) */
 	     r_link_reg_val <= 1'b0;
@@ -669,15 +737,14 @@ endfunction
 	  begin
 	     r_n_inflight <= 'd0;
 	  end
-	else if(core_mem_req_valid && core_mem_req_ack && !core_mem_rsp_valid)
+	else
 	  begin
-	     r_n_inflight <= r_n_inflight + 'd1;
-	     //$display("inflight increment at cycle %d to %d, rob ptr %d", r_cycle, r_n_inflight + 'd1, core_mem_req.rob_ptr);
-	  end
-	else if(!(core_mem_req_valid && core_mem_req_ack) && core_mem_rsp_valid)
-	  begin
-	     r_n_inflight <= r_n_inflight - 'd1;
-	     //$display("inflight decrement at cycle %d to %d", r_cycle, r_n_inflight - 'd1);
+	     /* a cache-owned block (MISS / ST_CONFLICT) stays counted until its wakeup,
+	      * so memq_empty (the drain condition) cannot assert while one is owed */
+	     r_n_inflight <= r_n_inflight + {{`LG_MRQ_ENTRIES{1'b0}}, t_got_req2}
+			     - {{`LG_MRQ_ENTRIES{1'b0}}, (w_rsp_v | w_wake_v | (w_blk_v & w_rsp.blk[2]))}
+			     - {{`LG_MRQ_ENTRIES{1'b0}}, core_mem_st_done_valid}
+			     - {{`LG_MRQ_ENTRIES{1'b0}}, t_mq_stale_owed};
 	  end
      end // always_ff@ (posedge clk)
 
@@ -723,7 +790,7 @@ endfunction
 	  end
 	else
 	  begin
-	     if(t_push_miss)
+	     if(t_push_miss && !r_req2.commit)
 	       begin
 		  r_missed[r_req2.rob_ptr] <= !t_port2_hit_cache;
 	       end
@@ -738,37 +805,45 @@ endfunction
 	  end
 	else
 	  begin
-	     if(r_got_req2 && !drain_ds_complete && t_push_miss)
+	     if(t_direct_fill)
+	       begin
+		  r_rob_inflight[{r_req2.restart_id, r_req2.rob_ptr}] <= 1'b1;
+	       end
+	     if(r_got_req2 && !drain_ds_complete && t_push_miss && !r_req2.commit)
 	       begin
 		  //$display("rob entry %d enters at cycle %d", r_req2.rob_ptr, r_cycle);
 		  
-		  if(r_rob_inflight[r_req2.rob_ptr] == 1'b1)
+		  if(r_rob_inflight[{r_req2.restart_id, r_req2.rob_ptr}] == 1'b1)
 		    $display("entry %d should not be inflight\n", r_req2.rob_ptr);
 		  
-		  r_rob_inflight[r_req2.rob_ptr] <= 1'b1;
+		  r_rob_inflight[{r_req2.restart_id, r_req2.rob_ptr}] <= 1'b1;
 	       end
-	     if(r_got_req && r_valid_out && (r_tag_out == r_cache_tag))
+	     if(r_got_req && r_valid_out && (r_tag_out == r_cache_tag) && !r_req.commit)
 	       begin
 		  //$display("rob entry %d leaves at cycle %d", r_req.rob_ptr, r_cycle);
-		  //if(r_rob_inflight[r_req.rob_ptr] == 1'b0) 
+		  //if(r_rob_inflight[{r_req.restart_id, r_req.rob_ptr}] == 1'b0) 
 		  //$display("huh %d should be inflight....\n", r_req.rob_ptr);
 		  
-		  r_rob_inflight[r_req.rob_ptr] <= 1'b0;
+		  r_rob_inflight[{r_req.restart_id, r_req.rob_ptr}] <= 1'b0;
 	       end
-	     else if((r_state == INJECT_UNCACHE_STORE | r_state == INJECT_UNCACHE_LOAD) & mem_rsp_valid)
+	     else if(w_fill_bypass)
 	       begin
-		  //if(r_rob_inflight[r_req.rob_ptr] == 1'b0) 
+		  r_rob_inflight[{r_req.restart_id, r_req.rob_ptr}] <= 1'b0;
+	       end
+	     else if((r_state == INJECT_UNCACHE_STORE | r_state == INJECT_UNCACHE_LOAD) & mem_rsp_valid & !r_req.commit)
+	       begin
+		  //if(r_rob_inflight[{r_req.restart_id, r_req.rob_ptr}] == 1'b0) 
 		  //$display("huh %d should be inflight....\n", r_req.rob_ptr);
 		  
-		  r_rob_inflight[r_req.rob_ptr] <= 1'b0;
+		  r_rob_inflight[{r_req.restart_id, r_req.rob_ptr}] <= 1'b0;
 	       end
-	     if(t_force_clear_busy)
+	     if(t_force_clear_busy | t_mq_stale_drop)
 	       begin
-		  r_rob_inflight[t_mem_head.rob_ptr] <= 1'b0;
+		  r_rob_inflight[{t_mem_head.restart_id, t_mem_head.rob_ptr}] <= 1'b0;
 	       end
 	     if(t_ucld_dead_drop)
 	       begin
-		  r_rob_inflight[r_req.rob_ptr] <= 1'b0;
+		  r_rob_inflight[{r_req.restart_id, r_req.rob_ptr}] <= 1'b0;
 	       end
 	     /* a CACHE hit-op retry completes the op on THIS pass whether it hits,
 	      * misses, or tag-mismatches (the line op / L2 scrub is issued either
@@ -777,7 +852,7 @@ endfunction
 	      * can never be accepted (l1d wedge, MQ empty). */
 	     if(r_got_req & w_is_chop_r)
 	       begin
-		  r_rob_inflight[r_req.rob_ptr] <= 1'b0;
+		  r_rob_inflight[{r_req.restart_id, r_req.rob_ptr}] <= 1'b0;
 	       end
 	  end
      end
@@ -804,7 +879,258 @@ endfunction
 	t_remapped_req2.mapped = 1'b0;
      end
 
+   /* ---------------- LSU store buffer (payload only) ----------------
+    * One slot per LSU entry.  A plain store's port-2 pass (translation, fault
+    * check, early ack) writes its PA/mask/op/cacheability here; its data arrives
+    * separately from the LSU (lsu_sb.data_*).  The LSU owns liveness, age,
+    * retirement and drain; a load compares against the slots its LSU entry saw as
+    * older stores at issue (lsu_older_st), still holding the same store (epoch). */
+   localparam N_LSU = 1 << `LG_MEM_SCHED_ENTRIES;
+   logic [`PA_WIDTH-1:0] r_sb_pa[N_LSU-1:0];
+   logic [15:0] 	 r_sb_mask[N_LSU-1:0];
+   mem_op_t		 r_sb_op[N_LSU-1:0];
+   logic [N_LSU-1:0] 	 r_sb_cached;
+   logic [63:0] 	 r_sb_data[N_LSU-1:0];
+   logic 		 t_sb_wr;
+   /* pipetrace: the port-2 / port-1 outcome for this cycle's op (0 = none) */
+   logic [7:0] 		 t_pt2, t_pt1;
+   logic 		 t_p2_ok, t_p2_accept;
+   /* hit-under-miss: the port-2 request was read from the set being filled */
+   logic 		 r_fill_conflict2;
+
+   always_ff@(posedge clk)
+     begin
+	if(t_sb_wr)
+	  begin
+	     r_sb_pa[r_req2.lsu_idx] <= w_mapped_addr;
+	     r_sb_mask[r_req2.lsu_idx] <= make_mask(r_req2);
+	     r_sb_op[r_req2.lsu_idx] <= r_req2.op;
+	     r_sb_cached[r_req2.lsu_idx] <= t_remapped_req2.cached;
+	  end
+	if(lsu_sb.data_valid)
+	  begin
+	     r_sb_data[lsu_sb.data_idx] <= lsu_sb.data;
+	  end
+     end // always_ff@ (posedge clk)
+
+   /* a store's bytes placed in a 16B line (byte k at bits 8k+7:8k), as the port-1
+    * merge writes them: SB raw, SH/SW/SD byte-swapped */
+   function logic [L1D_CL_LEN_BITS-1:0] sb_line(mem_op_t op, logic [3:0] off, logic [63:0] d);
+      logic [L1D_CL_LEN_BITS-1:0] l;
+      l = (op == MEM_SB) ? {120'd0, d[7:0]} :
+	  (op == MEM_SH) ? {112'd0, bswap16(d[15:0])} :
+	  (op == MEM_SW) ? {96'd0, bswap32(d[31:0])} :
+	  {64'd0, bswap64(d)};
+      return l << {off, 3'd0};
+   endfunction
+
+   function logic [L1D_CL_LEN_BITS-1:0] expand_mask(logic [15:0] m);
+      logic [L1D_CL_LEN_BITS-1:0] e;
+      for(integer b = 0; b < 16; b = b + 1)
+	begin
+	   e[b*8 +: 8] = {8{m[b]}};
+	end
+      return e;
+   endfunction
+
+   logic [N_LSU-1:0] t_sb_older, t_sb_match, t_sb_youngest;
+   logic [15:0] 	 t_ld_mask2;
+   logic [`LG_MEM_SCHED_ENTRIES-1:0] t_sb_y;
+   logic 				   t_sb_fwd, t_sb_blk;
+   blk_code_t				   t_sb_code;
+   logic [N_LSU-1:0] 			   t_sb_blk_st;
+   logic [L1D_CL_LEN_BITS-1:0] 		   t_sb_line, t_sb_bytes;
+
+   always_comb
+     begin
+	t_ld_mask2 = make_mask(r_req2);
+	t_sb_y = 'd0;
+	for(integer j = 0; j < N_LSU; j = j + 1)
+	  begin
+	     t_sb_older[j] = r_req2.lsu_older_st[j] & lsu_sb.live[j] & (lsu_sb.epoch[j] == r_req2.lsu_older_ep[j]);
+	     t_sb_match[j] = t_sb_older[j] &
+			     (r_sb_pa[j][`PA_WIDTH-1:`LG_L1D_CL_LEN] == w_mapped_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN]) &
+			     (|(r_sb_mask[j] & t_ld_mask2));
+	  end
+	/* the youngest overlapping older store: no other match is younger than it */
+	for(integer j = 0; j < N_LSU; j = j + 1)
+	  begin
+	     t_sb_youngest[j] = t_sb_match[j] &
+				((t_sb_match & ~lsu_sb.matrix[j*N_LSU +: N_LSU] & ~(1 << j)) == 'd0);
+	     if(t_sb_youngest[j])
+	       begin
+		  t_sb_y = j[`LG_MEM_SCHED_ENTRIES-1:0];
+	       end
+	  end
+	t_sb_line = sb_line(r_sb_op[t_sb_y], r_sb_pa[t_sb_y][3:0], r_sb_data[t_sb_y]);
+	t_sb_bytes = expand_mask(r_sb_mask[t_sb_y]);
+	/* forward when the youngest overlapping older store covers every load byte */
+	t_sb_fwd = (|t_sb_match) & lsu_sb.data_ok[t_sb_y] & r_sb_cached[t_sb_y] & t_remapped_req2.cached &
+		   ((t_ld_mask2 & ~r_sb_mask[t_sb_y]) == 16'd0);
+	/* an uncached load waits for EVERY older store (device ordering); a cached
+	 * one only for overlapping stores it cannot forward from */
+	t_sb_blk = r_req2.lsu_hold & !r_req2.is_store &
+		   (t_remapped_req2.cached ? ((|t_sb_match) & !t_sb_fwd) : (|t_sb_older));
+	t_sb_code = BLK_SB_CONFLICT;
+	t_sb_blk_st = t_remapped_req2.cached ? t_sb_match : t_sb_older;
+	if(t_remapped_req2.cached && !lsu_sb.data_ok[t_sb_y] && r_sb_cached[t_sb_y] &&
+	   ((t_ld_mask2 & ~r_sb_mask[t_sb_y]) == 16'd0))
+	  begin
+	     /* only the data is missing: wait for it, not for the drain */
+	     t_sb_code = BLK_SB_DATA;
+	     t_sb_blk_st = t_sb_youngest;
+	  end
+     end // always_comb
+
+   /* commit: the MQ entry is rebuilt from the store buffer (already physical,
+    * already retired -- it fires at the MQ head with no graduation wait) */
+   mem_req_t t_mq_push_req;
+   always_comb
+     begin
+	t_mq_push_req = t_remapped_req2;
+	if(r_req2.commit)
+	  begin
+	     t_mq_push_req = r_req2;
+	     t_mq_push_req.addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, r_sb_pa[r_req2.lsu_idx]};
+	     t_mq_push_req.op = r_sb_op[r_req2.lsu_idx];
+	     t_mq_push_req.data = r_sb_data[r_req2.lsu_idx];
+	     t_mq_push_req.cached = r_sb_cached[r_req2.lsu_idx];
+	     t_mq_push_req.mapped = 1'b0;
+	     t_mq_push_req.is_store = 1'b1;
+	     t_mq_push_req.bad_addr = 1'b0;
+	  end
+     end
+
+`ifdef LSU_TRACE
+   always_ff@(negedge clk)
+     begin
+	if(!reset && t_p2_accept && (r_state == INJECT_RELOAD))
+	  begin
+	     $display("[L1D] cyc=%0d hum-accept op=%0d", r_cycle, core_mem_req.op);
+	  end
+	if(!reset && r_got_req2 && (r_state == INJECT_RELOAD) && (n_core_mem_rsp_valid && n_core_mem_rsp.dst_valid))
+	  begin
+	     $display("[L1D] cyc=%0d hum-hit", r_cycle);
+	  end
+     end // always_ff@ (negedge clk)
+`endif
+
+   /* per-color accounting for the core's flip-back guard: ops accepted and not yet
+    * answered (a cache-owned block stays owed until its wakeup/data), plus queued
+    * MQ entries (an early-acked old-path store still sits in the MQ) */
+   logic [`LG_MRQ_ENTRIES+1:0] r_color_cnt [1:0];
+   logic [1:0] 		       t_mq_color;
+   always_ff@(posedge clk)
+     begin
+	for(integer c = 0; c < 2; c = c + 1)
+	  begin
+	     if(reset)
+	       begin
+		  r_color_cnt[c] <= 'd0;
+	       end
+	     else
+	       begin
+		  r_color_cnt[c] <= r_color_cnt[c]
+				    + {{(`LG_MRQ_ENTRIES+1){1'b0}}, (t_got_req2 && !core_mem_req.commit && (core_mem_req.restart_id == c[0]))}
+				    - {{(`LG_MRQ_ENTRIES+1){1'b0}}, ((w_rsp_v | w_wake_v | (w_blk_v & w_rsp.blk[2])) && (w_rsp.restart_id == c[0]))}
+				    - {{(`LG_MRQ_ENTRIES+1){1'b0}}, (t_mq_stale_owed && (t_mem_head.restart_id == c[0]))};
+	       end
+	  end
+     end // always_ff@ (posedge clk)
+   always_comb
+     begin
+	t_mq_color = 2'd0;
+	for(integer i = 0; i < N_MQ_ENTRIES; i = i + 1)
+	  begin
+	     if(r_mq_addr_valid[i] && !r_mem_q[i].commit)
+	       begin
+		  t_mq_color[r_mem_q[i].restart_id] = 1'b1;
+	       end
+	  end
+	mq_graduated_pending = 1'b0;
+	for(integer i = 0; i < N_MQ_ENTRIES; i = i + 1)
+	  begin
+	     if(r_mq_addr_valid[i] && r_mem_q[i].is_store && !r_mem_q[i].commit &&
+		(r_graduated[r_mem_q[i].rob_ptr] == 2'b10))
+	       begin
+		  mq_graduated_pending = 1'b1;
+	       end
+	  end
+	mem_color_busy[0] = (r_color_cnt[0] != 'd0) | t_mq_color[0];
+	mem_color_busy[1] = (r_color_cnt[1] != 'd0) | t_mq_color[1];
+     end // always_comb
+
 `ifdef VERILATOR
+   /* rv64core's restart_id check: nothing of a flushed era may be accepted */
+   always_ff@(negedge clk)
+     begin
+	if(!reset && t_got_req2 && !core_mem_req.commit && (core_mem_req.restart_id != restart_color))
+	  begin
+	     $display("cycle %0d : current restart color is %0d but ingesting %0d", r_cycle, restart_color, core_mem_req.restart_id);
+	     $stop();
+	  end
+     end // always_ff@ (negedge clk)
+`endif
+
+`ifdef PIPETRACE
+   import "DPI-C" function void pt_event(input int rob_ptr, input int letter, input longint cycle);
+   always_ff@(negedge clk)
+     begin
+	if(!reset && (t_pt2 != 8'd0))
+	  begin
+	     pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, r_req2.rob_ptr}, {24'd0, t_pt2}, {32'd0, r_cycle});
+	  end
+	if(!reset && (t_pt1 != 8'd0))
+	  begin
+	     pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, r_req.rob_ptr}, {24'd0, t_pt1}, {32'd0, r_cycle});
+	  end
+	/* L1D-miss path of a load (the owner is r_req; stores/commits are skipped --
+	 * a commit's rob_ptr is stale) */
+	if(!reset && t_pop_mq && !t_mem_head.is_store && !t_mem_head.commit)
+	  begin
+	     pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, t_mem_head.rob_ptr}, "O", {32'd0, r_cycle});
+	  end
+	if(!reset && t_direct_fill)
+	  begin
+	     pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, r_req2.rob_ptr}, "E", {32'd0, r_cycle});
+	  end
+	if(!reset && n_mem_req_valid && !r_mem_req_valid && !r_req.is_store && !t_direct_fill)
+	  begin
+	     pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, r_req.rob_ptr}, (n_mem_req_opcode == MEM_LW) ? "E" : "Y", {32'd0, r_cycle});
+	  end
+	if(!reset && (r_state == HANDLE_RELOAD) && !r_req.is_store)
+	  begin
+	     pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, r_req.rob_ptr}, "J", {32'd0, r_cycle});
+	  end
+     end // always_ff@ (negedge clk)
+`endif
+
+`ifdef VERILATOR
+   always_ff@(posedge clk)
+     begin
+	if(n_fill_rsp_pend)
+	  begin
+	     r_fill_rsp <= t_fill_rsp;
+	  end
+	if(!reset && r_fill_rsp_pend && (r_got_req2 || r_got_req))
+	  begin
+	     $display("[LSU] cyc=%0d deferred fill rsp collides with a port pass", r_cycle);
+	     $stop();
+	  end
+     end // always_ff@ (posedge clk)
+
+   /* rsp / block / wakeup share core_mem_rsp: port 1 and port 2 never answer in
+    * the same cycle (a port-1 read retry holds off the port-2 accept) */
+   always_ff@(posedge clk)
+     begin
+	if(!reset && ((n_core_mem_rsp_valid + n_core_mem_blk_valid + n_core_mem_wake_valid) > 2'd1))
+	  begin
+	     $display("[LSU] cyc=%0d l1d rsp/blk/wake collide %b%b%b", r_cycle,
+		      n_core_mem_rsp_valid, n_core_mem_blk_valid, n_core_mem_wake_valid);
+	     $stop();
+	  end
+     end // always_ff@ (posedge clk)
+
    /* an uncached LOAD must reach memory only when non-speculative (at the ROB
     * head, the head's committable delay slot, or draining dead ops, which the
     * t_ucld_dead_drop arm answers without an access) */
@@ -905,7 +1231,7 @@ endfunction
    logic [15:0] t_mq_mask, t_req_mask;
    always_comb
      begin
-	t_mq_mask = make_mask(r_req2);
+	t_mq_mask = make_mask(t_mq_push_req);
 	t_req_mask = make_mask(core_mem_req);
      end
 
@@ -920,8 +1246,8 @@ endfunction
 	  end
 	else if(t_push_miss)
 	  begin
-	     r_mem_q[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0] ] <= t_remapped_req2;
-	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_remapped_req2.addr[IDX_STOP-1:IDX_START];
+	     r_mem_q[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0] ] <= t_mq_push_req;
+	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_mq_push_req.addr[IDX_STOP-1:IDX_START];
 	     /* only stores carry a mask; loads store 0 (mirror nu_l1d:924) */
 	     r_mq_mask[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_mq_mask & {16{r_req2.is_store}};
 	  end
@@ -978,6 +1304,10 @@ endfunction
 	r_hit_busy_addrs <= t_got_req ? w_hit_busy_addrs : {{N_MQ_ENTRIES{1'b1}}};
 	
 	r_hit_busy_addr2 <= reset ? 1'b0 : |w_hit_busy_addrs2;
+	/* hit-under-miss: the port-2 read raced the outstanding fill (or the dirty
+	 * victim writeback) of its set -- its RAM output is not trustworthy */
+	r_fill_conflict2 <= reset ? 1'b0 : (t_got_req2 && (r_state == INJECT_RELOAD) &&
+					    (t_cache_idx2 == r_mem_req_addr[IDX_STOP-1:IDX_START]));
 	r_hit_busy_addrs2 <= t_got_req2 ? w_hit_busy_addrs2 : {{N_MQ_ENTRIES{1'b1}}};
      end
 
@@ -1054,6 +1384,10 @@ endfunction
 	     r_mem_req_store_data <= 'd0;
 	     r_mem_req_opcode <= 'd0;
 	     r_core_mem_rsp_valid <= 1'b0;
+	     r_core_mem_blk_valid <= 1'b0;
+	     r_core_mem_wake_valid <= 1'b0;
+	     r_core_mem_st_done_valid <= 1'b0;
+	     r_fill_rsp_pend <= 1'b0;
 	     r_cache_hits <= 'd0;
 	     r_cache_accesses <= 'd0;
 	     r_inhibit_write <= 1'b0;
@@ -1109,6 +1443,11 @@ endfunction
 	     r_mem_req_store_data <= n_mem_req_store_data;
 	     r_mem_req_opcode <= n_mem_req_opcode;
 	     r_core_mem_rsp_valid <= n_core_mem_rsp_valid;
+	     r_core_mem_blk_valid <= n_core_mem_blk_valid;
+	     r_core_mem_wake_valid <= n_core_mem_wake_valid;
+	     r_core_mem_st_done_valid <= n_core_mem_st_done_valid;
+	     r_fill_rsp_pend <= n_fill_rsp_pend;
+	     r_core_mem_st_done_idx <= n_core_mem_st_done_idx;
 	     r_cache_hits <= n_cache_hits;
 	     r_cache_accesses <= n_cache_accesses;
 	     r_inhibit_write <= n_inhibit_write;
@@ -1277,11 +1616,15 @@ endfunction
    always_comb
      begin
 	t_data2 = r_got_req2 && r_must_forward2 ? r_array_wr_data : r_array_out2;
+	if(t_sb_fwd)
+	  begin
+	     t_data2 = (t_data2 & ~t_sb_bytes) | (t_sb_line & t_sb_bytes);
+	  end
 	t_w32_2 = (select_cl32(t_data2, r_req2.addr[WORD_STOP-1:WORD_START]));
 	t_bswap_w32_2 = bswap32(t_w32_2);
 
-	t_hit_cache2 = r_valid_out2 && (r_tag_out2 == w_tlb_tag2) && r_got_req2 && 
-		      (r_state == ACTIVE);
+	t_hit_cache2 = r_valid_out2 && (r_tag_out2 == w_tlb_tag2) && r_got_req2 && !r_fill_conflict2 &&
+		      ((r_state == ACTIVE) || (r_state == INJECT_RELOAD));
 	t_rsp_dst_valid2 = 1'b0;
 	t_rsp_fp_dst_valid2 = 1'b0;
 	t_rsp_data2 = 'd0;
@@ -1427,7 +1770,8 @@ endfunction
    
    always_comb
      begin
-	t_data = (r_state == INJECT_UNCACHE_LOAD) ? mem_rsp_load_data : (r_got_req & r_must_forward ? r_array_wr_data : r_array_out);
+	t_data = ((r_state == INJECT_UNCACHE_LOAD) | w_fill_bypass) ? mem_rsp_load_data :
+		 (r_got_req & r_must_forward ? r_array_wr_data : r_array_out);
 	
 	t_w32 = (select_cl32(t_data, r_req.addr[WORD_STOP-1:WORD_START]));
 	t_bswap_w32 = bswap32(t_w32);
@@ -1812,7 +2156,22 @@ endfunction
    wire	w_mq_head_nonspec = (head_of_rob_ptr_valid ? (head_of_rob_ptr == t_mem_head.rob_ptr) : 1'b0) |
 			    drain_ds_complete |
 			    (head_of_rob_ds_committable & (next_head_of_rob_ptr == t_mem_head.rob_ptr));
-   wire	w_uncachable_req = (core_mem_req_valid & ((core_mem_req.cached==1'b0) | w_fence_load | w_serialize_all)) ?
+   /* the port-2 op is non-speculative (same test as w_uncachable_req) */
+   wire	w_req2_nonspec = (head_of_rob_ptr_valid ? (head_of_rob_ptr == r_req2.rob_ptr) : 1'b0) |
+			 drain_ds_complete |
+			 (head_of_rob_ds_committable & (next_head_of_rob_ptr == r_req2.rob_ptr));
+   /* CACHE hit ops are serializing (the LSU issues one only when it is the oldest
+    * memory op and holds everything younger): admit it only when non-speculative,
+    * then perform it with no graduation wait and answer when it is done */
+   wire	w_chop_req = (core_mem_req.op == MEM_CHWB) | (core_mem_req.op == MEM_CHWBINV) | (core_mem_req.op == MEM_CHINV);
+   /* NB: never hold an LSU-held op (lsu_hold) here waiting for the ROB head: the
+    * exec request FIFO is in order, and an OLDER op re-issued after a block may be
+    * queued behind it -> deadlock.  An uncached simple load answers BLK_UNCACHEABLE
+    * at port 2 instead; a plain store's address pass touches no memory (the device
+    * write is its post-retire commit).  CACHE ops (also lsu_hold) are serializing,
+    * so nothing older can be queued behind them. */
+   wire	w_uncachable_req = (core_mem_req_valid & (((core_mem_req.cached==1'b0) & !core_mem_req.lsu_hold) |
+						   w_fence_load | w_serialize_all | w_chop_req)) ?
 	(((head_of_rob_ptr_valid ? (head_of_rob_ptr == core_mem_req.rob_ptr) : 1'b0) | drain_ds_complete | w_uncached_ds_ok)): 1'b1;
 
    //always@(negedge clk)
@@ -1914,6 +2273,24 @@ endfunction
 	n_mem_req_opcode = r_mem_req_opcode;
 	t_pop_mq = 1'b0;
 	n_core_mem_rsp_valid = 1'b0;
+	n_core_mem_blk_valid = 1'b0;
+	n_core_mem_wake_valid = 1'b0;
+	n_core_mem_st_done_valid = 1'b0;
+	n_core_mem_st_done_idx = r_req.lsu_idx;
+	t_sb_wr = 1'b0;
+	t_pt2 = 8'd0;
+	t_pt1 = 8'd0;
+	t_p2_accept = 1'b0;
+	/* port-2 accept conditions shared by ACTIVE and hit-under-miss */
+	t_req_stale = core_mem_req_valid && !core_mem_req.commit && (core_mem_req.restart_id != restart_color);
+	t_mq_stale_drop = 1'b0;
+	t_mq_stale_owed = 1'b0;
+	t_p2_ok = core_mem_req_valid && !t_req_stale &&
+		  !(mem_q_almost_full||mem_q_full) &&
+		  !(r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) &&
+		  w_uncachable_req &&
+		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) &&
+		  (core_mem_req.commit || !r_rob_inflight[{core_mem_req.restart_id, core_mem_req.rob_ptr}]);
 	
 	n_core_mem_rsp.data = r_req.addr;
 	n_core_mem_rsp.rob_ptr = r_req.rob_ptr;
@@ -1930,6 +2307,11 @@ endfunction
 	n_core_mem_rsp.tlb_modified = 1'b0;
 	n_core_mem_rsp.tlb_hit = 1'b0;
 	n_core_mem_rsp.tlb_index = 6'd0;
+	n_core_mem_rsp.lsu_hold = r_req.lsu_hold;
+	n_core_mem_rsp.lsu_idx = r_req.lsu_idx;
+	n_core_mem_rsp.blk = BLK_NONE;
+	n_core_mem_rsp.blk_st = 'd0;
+	n_core_mem_rsp.restart_id = r_req.restart_id;
 	
 	n_cache_accesses = r_cache_accesses;
 	n_cache_hits = r_cache_hits;
@@ -1980,30 +2362,39 @@ endfunction
 
 	t_cm_block_stall = t_cm_block && !(r_did_reload||r_is_retry);//1'b0;
 	
-	case(r_state)
-	  INITIALIZE:
-	    begin
-	       n_state = INIT_CACHE;
-	       t_cache_idx = 'd0;	       
-	    end
-	  INIT_CACHE:
-	    begin
-	       t_cache_idx = r_cache_idx + 'd1;
-	       if(r_cache_idx == (L1D_NUM_SETS-1))
-		 begin
-		    //$display("flush done at cycle %d", r_cycle);
-		    n_state = ACTIVE;
-		    n_flush_complete = 1'b1;
-		 end
-	       else
-		 begin
-		    t_mark_invalid = 1'b1;
-		    t_cache_idx = r_cache_idx + 'd1;		    
-		 end
-	    end
-	  ACTIVE:
-	    begin
-	       if(r_got_req2)
+	/* direct fill: a cacheable simple load that misses on port 2 while the l1d is
+	 * otherwise idle (ACTIVE, MQ empty, port 1 idle, no flush) and whose victim is
+	 * clean and not just written by port 1 (rr_last_wr: the port-2 read could predate
+	 * that write) starts its fill here.  Anything else takes the MQ path. */
+	t_direct_fill = 1'b0;
+	t_direct_fill_ok = (r_state == ACTIVE) && r_got_req2 && !drain_ds_complete &&
+			   r_req2.lsu_hold && !r_req2.is_store && t_remapped_req2.cached &&
+			   !t_port2_hit_cache && !r_hit_busy_addr2 &&
+			   mem_q_empty && !r_got_req && !rr_last_wr && !r_lock_cache &&
+			   !n_flush_req && !n_flush_cl_req && !r_fill_rsp_pend &&
+			   !(r_valid_out2 && r_dirty_out2) &&
+			   /* the victim port 2 read (VA index) must be the set the fill
+			    * replaces (PA index): differs only when the L1D exceeds a page */
+			   (r_cache_idx2 == t_remapped_req2.addr[IDX_STOP-1:IDX_START]);
+
+	/* fill -> load bypass response (w_fill_bypass): built from the port-1 defaults
+	 * above; a deferred one (r_fill_rsp_pend) goes out in the always-free next slot */
+	n_fill_rsp_pend = 1'b0;
+	t_fill_rsp = n_core_mem_rsp;
+	t_fill_rsp.data = t_rsp_data[`M_WIDTH-1:0];
+	t_fill_rsp.dst_valid = r_req.dst_valid;
+	t_fill_rsp.bad_addr = r_req.bad_addr;
+	if(r_fill_rsp_pend)
+	  begin
+	     n_core_mem_rsp = r_fill_rsp;
+	     n_core_mem_rsp_valid = 1'b1;
+	  end
+
+	/* port 2 (first pass) -- processed in ACTIVE and, for hit-under-miss, while a
+	 * fill is outstanding (INJECT_RELOAD): port 2 only READS the arrays and the
+	 * fill is the only writer, so the two never collide.  A request to the set
+	 * being filled is treated as a miss (r_fill_conflict2). */
+	if(r_got_req2 && ((r_state == ACTIVE) || (r_state == INJECT_RELOAD)))
 		 begin
 		    n_core_mem_rsp.data = r_req2.addr;
 		    n_core_mem_rsp.rob_ptr = r_req2.rob_ptr;
@@ -2014,7 +2405,15 @@ endfunction
 		    n_core_mem_rsp.fp_merge = r_req2.fp_merge;
 		    n_core_mem_rsp.fp_hi = r_req2.fp_hi;
 		    n_core_mem_rsp.fp_pres = r_req2.fp_pres;
-		    if(drain_ds_complete)
+		    n_core_mem_rsp.lsu_hold = r_req2.lsu_hold;
+		    n_core_mem_rsp.lsu_idx = r_req2.lsu_idx;
+		    n_core_mem_rsp.restart_id = r_req2.restart_id;
+		    if(r_req2.commit)
+		      begin
+			 /* retired plain store: queue its write (fires at the MQ head) */
+			 t_push_miss = 1'b1;
+		      end
+		    else if(drain_ds_complete)
 		      begin
 			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
@@ -2099,6 +2498,48 @@ endfunction
 			  n_core_mem_rsp.bad_addr = 1'b1;
 			  n_core_mem_rsp_valid = 1'b1;
 		       end
+		    else if(r_req2.is_store && r_req2.lsu_hold && !w_is_chop2)
+		      begin
+			 /* plain store address pass: record PA/mask in the store buffer and
+			  * ack (the ROB entry completes); the LSU holds the store until it
+			  * retires, then commits it */
+			 t_sb_wr = 1'b1;
+			 n_core_mem_rsp.dst_valid = 1'b0;
+			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			 n_core_mem_rsp.tlb_index = w_tlb_index;
+			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
+			 n_core_mem_rsp_valid = 1'b1;
+		      end
+		    else if(r_req2.lsu_hold && !r_req2.is_store && !t_remapped_req2.cached && !w_req2_nonspec)
+		      begin
+			 /* uncached simple load, still speculative: back to the LSU */
+			 t_pt2 = "U";
+			 n_core_mem_blk_valid = 1'b1;
+			 n_core_mem_rsp.blk = BLK_UNCACHEABLE;
+		      end
+		    else if(t_sb_blk)
+		      begin
+			 n_core_mem_blk_valid = 1'b1;
+			 n_core_mem_rsp.blk = t_sb_code;
+			 n_core_mem_rsp.blk_st = t_sb_blk_st;
+		      end
+		    else if(t_sb_fwd && r_req2.lsu_hold)
+		      begin
+			 /* store->load forward (t_data2 already merged) */
+			 t_pt2 = "V";
+			 n_core_mem_rsp.data = t_rsp_data2[`M_WIDTH-1:0];
+			 n_core_mem_rsp.dst_valid = r_req2.dst_valid;
+			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
+			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
+			 n_core_mem_rsp.tlb_index = w_tlb_index;
+			 n_core_mem_rsp_valid = 1'b1;
+		      end
+		    else if(w_is_chop2)
+		      begin
+			 /* CACHE hit op (non-speculative, see w_chop_req): queue it; it
+			  * fires at the MQ head and answers when both beats are done */
+			 t_push_miss = 1'b1;
+		      end
 		    else if(r_req2.is_store)
 		      begin
 			 t_push_miss = 1'b1;
@@ -2143,12 +2584,13 @@ endfunction
 		     * field) must not fast-hit: w_uncachable_req only saw the segment's
 		     * cacheability, and user segments (kuseg/xkuseg) are "cached" there.
 		     * It falls to the miss queue, where it waits for the ROB head. */
-		    else if(t_port2_hit_cache && !r_hit_busy_addr2 && t_remapped_req2.cached)
+		    else if(t_port2_hit_cache && !r_hit_busy_addr2 && !r_fill_conflict2 && t_remapped_req2.cached)
 		      begin
 `ifdef VERBOSE_L1D
 			 $display("cycle %d port2 hit for uuid %d, addr %x, data %x", 
 				  r_cycle, r_req2.uuid, r_req2.addr, t_rsp_data2);
 `endif
+			 t_pt2 = "H";
 			 n_core_mem_rsp.data = t_rsp_data2[`M_WIDTH-1:0];
                          n_core_mem_rsp.dst_valid = t_rsp_dst_valid2;
 			 n_core_mem_rsp.fp_dst = r_req2.fp_dst;   /* port2: route FP loads to the FP PRF */
@@ -2163,13 +2605,66 @@ endfunction
 		      end
 		    else
 		      begin
-			 t_push_miss = 1'b1;
+			 if(t_direct_fill_ok)
+			   begin
+			      /* same request the port-1 clean-miss arm would make, one pass
+			       * earlier; r_req becomes the fill's owner (w_fill_bypass) */
+			      t_direct_fill = 1'b1;
+			      n_req = t_remapped_req2;
+			      n_reload_issue = 1'b1;
+			      t_miss_idx = t_remapped_req2.addr[IDX_STOP-1:IDX_START];
+			      t_miss_addr = t_remapped_req2.addr;
+			      n_inhibit_write = 1'b0;
+			      n_lock_cache = 1'b0;
+			      n_mem_req_cacheable = 1'b1;
+			      n_mem_req_mask = 16'hffff;
+			      n_mem_req_addr = {t_remapped_req2.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_opcode = MEM_LW;
+			      n_mem_req_valid = 1'b1;
+			      n_state = INJECT_RELOAD;
+			   end
+			 else
+			   begin
+			      t_push_miss = 1'b1;
+			   end
 			 if(t_port2_hit_cache)
 			   begin
 			      n_cache_hits = r_cache_hits + 'd1;
 			   end
+			 t_pt2 = r_req2.is_store ? 8'd0 : "M";
+			 /* cacheable simple load: hand it back to the LSU with a block
+			  * code; the MQ entry only fetches the line and sends the wakeup */
+			 if(r_req2.lsu_hold && t_remapped_req2.cached)
+			   begin
+			      n_core_mem_blk_valid = 1'b1;
+			      n_core_mem_rsp.blk = (t_port2_hit_cache && !r_fill_conflict2) ? BLK_ST_CONFLICT : BLK_MISS;
+			   end
 		      end
 		 end // if (r_got_req2)
+
+	case(r_state)
+	  INITIALIZE:
+	    begin
+	       n_state = INIT_CACHE;
+	       t_cache_idx = 'd0;	       
+	    end
+	  INIT_CACHE:
+	    begin
+	       t_cache_idx = r_cache_idx + 'd1;
+	       if(r_cache_idx == (L1D_NUM_SETS-1))
+		 begin
+		    //$display("flush done at cycle %d", r_cycle);
+		    n_state = ACTIVE;
+		    n_flush_complete = 1'b1;
+		 end
+	       else
+		 begin
+		    t_mark_invalid = 1'b1;
+		    t_cache_idx = r_cache_idx + 'd1;		    
+		 end
+	    end
+	  ACTIVE:
+	    begin
 	       
 
 	       if(r_got_req)
@@ -2296,7 +2791,7 @@ endfunction
 			 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
 			 n_mem_req_store_data = t_array_data;
 			 t_got_miss = 1'b1;
-			 if(r_req.is_store)
+			 if(r_req.is_store && !r_req.commit)
 			   begin
 			      t_reset_graduated = 1'b1;				   
 			   end
@@ -2309,13 +2804,19 @@ endfunction
 		      end // if (r_req.cached == 1'b0)
 		    else if(r_valid_out && (r_tag_out == r_cache_tag))
 		      begin /* valid cacheline - hit in cache */
-			 if(r_req.is_store)
+			 if(r_req.commit)
+			   begin
+			      /* plain store written: free its LSU slot */
+			      n_core_mem_st_done_valid = 1'b1;
+			   end
+			 else if(r_req.is_store)
 			   begin
 			      /* SC result already sent via the port2 early ack. */
 			      t_reset_graduated = 1'b1;
 			   end
 			 else
 			   begin
+			      t_pt1 = "P";
 			      n_core_mem_rsp.data = t_rsp_data[`M_WIDTH-1:0];
 			      n_core_mem_rsp.dst_valid = t_rsp_dst_valid;
 			      n_core_mem_rsp_valid = 1'b1;
@@ -2407,29 +2908,42 @@ endfunction
 	       begin
 		  if(!t_mh_block)
 		    begin
-		       if(w_is_chop_head)
+		       if(!t_mem_head.commit && (t_mem_head.restart_id != restart_color))
 			 begin
-			    /* CACHE hit-op at MQ head: release on graduation alone (no
-			     * store data).  Re-fire through port 1 as a READ pass; the
-			     * retry arm performs the line op on the TLB-translated PA
+			    /* queued op of a flushed era: drop it (a dead store never
+			     * writes, a dead uncached load never touches the device).
+			     * r_graduated is left alone -- a new op may own that rob_ptr */
+			    t_pop_mq = 1'b1;
+			    t_mq_stale_drop = 1'b1;
+			    t_mq_stale_owed = !t_mem_head.is_store;
+			 end
+		       else if(t_mem_head.commit)
+			 begin
+			    /* retired plain store: data is in the entry, no graduation wait */
+			    t_pop_mq = 1'b1;
+			    n_req = t_mem_head;
+			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
+			    t_addr = t_mem_head.addr;
+			    t_got_req = 1'b1;
+			    n_is_retry = 1'b1;
+			    n_last_wr = 1'b1;
+			 end
+		       else if(w_is_chop_head)
+			 begin
+			    /* CACHE hit-op at MQ head: it was admitted non-speculative,
+			     * so fire at once.  Re-fire through port 1 as a READ pass;
+			     * the retry arm performs the line op on the TLB-translated PA
 			     * the MQ entry carries. */
-			    if(r_graduated[t_mem_head.rob_ptr] == 2'b10)
-			      begin
-				 t_pop_mq = 1'b1;
-				 n_req = t_mem_head;
-				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
-				 t_addr = t_mem_head.addr;
-				 t_got_req = 1'b1;
-				 n_is_retry = 1'b1;
-				 n_last_rd = 1'b1;
-				 t_got_rd_retry = 1'b1;
-			      end
-			    else if(drain_ds_complete && dead_rob_mask[t_mem_head.rob_ptr])
-			      begin
-				 t_pop_mq = 1'b1;
-				 t_force_clear_busy = 1'b1;
-			      end
+			    t_pop_mq = 1'b1;
+			    n_req = t_mem_head;
+			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
+			    t_addr = t_mem_head.addr;
+			    t_got_req = 1'b1;
+			    n_is_retry = 1'b1;
+			    n_last_rd = 1'b1;
+			    t_got_rd_retry = 1'b1;
 			 end
 		       else if(t_mem_head.is_store)
 			 begin
@@ -2515,41 +3029,14 @@ endfunction
 		   * ACTIVE. */
 		  (n_state == ACTIVE) &&
 		  !t_got_miss && 
-		  !(mem_q_almost_full||mem_q_full) && 
 		  !t_got_rd_retry &&
-		  !(r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) && 
 		  !t_cm_block_stall &&
-		  w_uncachable_req &&
-		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) && 
-		  /*(r_graduated[core_mem_req.rob_ptr] == 2'b00) && */
-		  (!r_rob_inflight[core_mem_req.rob_ptr])
+		  t_p2_ok
 		  )
 	       begin
-		  //use 2nd read port
-		  t_cache_idx2 = core_mem_req.addr[IDX_STOP-1:IDX_START];
-		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:TAG_LSB];
-		  n_tlb_addr = core_mem_req.addr;
-		  n_req2 = core_mem_req;
-		  core_mem_req_ack = 1'b1;
-		  t_got_req2 = 1'b1;
-
-		  //if(core_mem_req.op == MEM_LW && core_mem_req.addr[1:0] != 'd0)
-		  //begin
-		  //$display("unaligned load!!!! from pc %x", core_mem_req.pc);
-		  //end
-		  
-`ifdef VERBOSE_L1D		       
-		  $display("accepting new op %d, pc %x, addr %x for rob ptr %d at cycle %d, mem_q_empty %b", 
-			   core_mem_req.op, core_mem_req.pc, core_mem_req.addr,
-			   core_mem_req.rob_ptr, r_cycle, mem_q_empty);
-`endif
-		  
-		  n_last_wr2 = core_mem_req.is_store;
-		  n_last_rd2 = !core_mem_req.is_store;
-		  
-		  n_cache_accesses =  r_cache_accesses + 'd1;
+		  t_p2_accept = 1'b1;
 	       end // if (core_mem_req_valid &&...
-	       else if(r_flush_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
+	       else if(r_flush_req && mem_q_empty && !lsu_sb.retired_pending && !(r_got_req && (r_last_wr | w_is_chop_r)))
 		 begin
 		    n_state = FLUSH_CACHE;
 		    n_mem_req_mask = 16'hffff;
@@ -2563,7 +3050,7 @@ endfunction
 		    t_cache_idx = 'd0;
 		    n_flush_req = 1'b0;
 		 end
-	       else if(r_flush_cl_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))   /* a chop retry transitions n_state too */
+	       else if(r_flush_cl_req && mem_q_empty && !lsu_sb.retired_pending && !(r_got_req && (r_last_wr | w_is_chop_r)))   /* a chop retry transitions n_state too */
 		 begin
 `ifdef VERILATOR
 		    if(!mem_q_empty) $stop();
@@ -2586,9 +3073,31 @@ endfunction
 	       //$display("waiting reload for addr %x at cycle %d", r_req.addr, r_cycle);
 	       	if(mem_rsp_valid)
 		  begin
-		     n_state = r_reload_issue ? HANDLE_RELOAD : ACTIVE;
+		     if(w_fill_bypass)
+		       begin
+			  t_pt1 = "P";
+			  if(r_got_req2)
+			    begin
+			       n_fill_rsp_pend = 1'b1;
+			    end
+			  else
+			    begin
+			       n_core_mem_rsp = t_fill_rsp;
+			       n_core_mem_rsp_valid = 1'b1;
+			    end
+			  n_state = ACTIVE;
+		       end
+		     else
+		       begin
+			  n_state = r_reload_issue ? HANDLE_RELOAD : ACTIVE;
+		       end
 		     n_inhibit_write = 1'b0;
 		     n_reload_issue = 1'b0;
+		  end
+		else if(t_p2_ok && !core_mem_req.is_atomic)
+		  begin
+		     /* hit-under-miss: keep taking port-2 requests while the fill is out */
+		     t_p2_accept = 1'b1;
 		  end
 	    end
 	  INJECT_UNCACHE_STORE:
@@ -2597,7 +3106,8 @@ endfunction
 	       if(mem_rsp_valid)
 		 begin
 		    //$display("rsp complete, going to active");
-		    n_state = ACTIVE;		    
+		    n_state = ACTIVE;
+		    n_core_mem_st_done_valid = r_req.commit;
 		 end
 	    end
 	  INJECT_UNCACHE_LOAD:
@@ -2605,6 +3115,7 @@ endfunction
 	       if(mem_rsp_valid)
 		 begin
 		    //$display("data returns for uncached load");
+		    t_pt1 = "P";
 		    n_core_mem_rsp.data = t_rsp_data[`M_WIDTH-1:0];
                     n_core_mem_rsp.dst_valid = r_req.dst_valid;
 		    n_core_mem_rsp.bad_addr = r_req.bad_addr;		    
@@ -2711,8 +3222,8 @@ endfunction
 		       end
 		     else if(r_chop_wait && r_chop_beat)
 		       begin
-			  /* beat 1 done -> both 16B lines covered; graduate the chop */
-			  t_reset_graduated = 1'b1;
+			  /* beat 1 done -> both 16B lines covered: the chop is done */
+			  n_core_mem_rsp_valid = 1'b1;
 			  n_chop_beat = 1'b0;
 			  n_state = ACTIVE;
 		       end
@@ -2835,6 +3346,37 @@ endfunction
 	    begin
 	    end
 	endcase // case r_state
+	/* a request from a flushed era (rv64core restart_id): ack and drop it */
+	if(t_req_stale && ((r_state == ACTIVE) || (r_state == INJECT_RELOAD)))
+	  begin
+	     core_mem_req_ack = 1'b1;
+	  end
+	if(t_p2_accept)
+	  begin
+		  //use 2nd read port
+		  t_cache_idx2 = core_mem_req.addr[IDX_STOP-1:IDX_START];
+		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:TAG_LSB];
+		  n_tlb_addr = core_mem_req.addr;
+		  n_req2 = core_mem_req;
+		  core_mem_req_ack = 1'b1;
+		  t_got_req2 = 1'b1;
+
+		  //if(core_mem_req.op == MEM_LW && core_mem_req.addr[1:0] != 'd0)
+		  //begin
+		  //$display("unaligned load!!!! from pc %x", core_mem_req.pc);
+		  //end
+		  
+`ifdef VERBOSE_L1D		       
+		  $display("accepting new op %d, pc %x, addr %x for rob ptr %d at cycle %d, mem_q_empty %b", 
+			   core_mem_req.op, core_mem_req.pc, core_mem_req.addr,
+			   core_mem_req.rob_ptr, r_cycle, mem_q_empty);
+`endif
+		  
+		  n_last_wr2 = core_mem_req.is_store && !core_mem_req.commit;
+		  n_last_rd2 = !core_mem_req.is_store;
+		  
+		  n_cache_accesses =  r_cache_accesses + 'd1;
+	  end
      end // always_comb
 
 `ifdef VERILATOR

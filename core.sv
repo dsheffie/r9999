@@ -28,6 +28,12 @@ import "DPI-C" function void record_retirement(input longint pc,
 					       input int     missed_l1d);
 
 import "DPI-C" function void record_restart(input int restart_cycles);
+`ifdef PIPETRACE
+/* pipetrace stage events: clear the rob slot's event list at allocation; name the
+ * slot record_retirement is about to retire (see top.cc pt::) */
+import "DPI-C" function void pt_alloc(input int rob_ptr);
+import "DPI-C" function void pt_retire(input int rob_ptr);
+`endif
 import "DPI-C" function void record_ds_restart(input int delay_cycles);
 import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
 
@@ -105,6 +111,14 @@ module core(clk,
 	    
 	    core_mem_rsp,
 	    core_mem_rsp_valid,
+	    core_mem_blk_valid,
+	    core_mem_wake_valid,
+	    core_mem_st_done_valid,
+	    core_mem_st_done_idx,
+	    lsu_sb,
+	    restart_color,
+	    mem_color_busy,
+	    mq_graduated_pending,
 	    
 	    retire_reg_ptr,
 	    retire_reg_data,
@@ -256,6 +270,14 @@ module core(clk,
   
    input 	 mem_rsp_t core_mem_rsp;
    input logic 	 core_mem_rsp_valid;
+   input logic 	 core_mem_blk_valid;   /* LSU block code (core_mem_rsp.blk/lsu_idx) */
+   input logic 	 core_mem_wake_valid;  /* LSU wakeup (core_mem_rsp.lsu_idx) */
+   input logic 	 core_mem_st_done_valid;   /* LSU plain store written */
+   input logic [`LG_MEM_SCHED_ENTRIES-1:0] core_mem_st_done_idx;
+   output 	 lsu_sb_t lsu_sb;          /* LSU -> l1d store-buffer view */
+   output logic	 restart_color;            /* current restart color (to the l1d) */
+   input logic [1:0] mem_color_busy;       /* l1d: a memory op of color c is still in flight */
+   input logic	 mq_graduated_pending;     /* l1d: a retired old-path store has not written yet */
 
    output logic [4:0] 			  retire_reg_ptr;
    output logic [`M_WIDTH-1:0]		  retire_reg_data;
@@ -541,6 +563,14 @@ module core(clk,
    
    logic [N_ROB_ENTRIES-1:0] 		  r_rob_complete;
    logic [N_ROB_ENTRIES-1:0] 		  r_rob_sd_complete;
+   /* ROB entry holds a memory op: a flush restarts without waiting for dead memory
+    * ops (restart color) -- only non-memory ops still drain */
+   logic [N_ROB_ENTRIES-1:0] 		  r_rob_is_mem;
+   wire [1:0] 				  w_exec_color_pending;
+   /* the color the next restart flips TO must have nothing left in flight (1-bit
+    * color: a straggler from two restarts ago would otherwise alias as live) */
+   wire 				  w_next_color_busy = mem_color_busy[!restart_color] | w_exec_color_pending[!restart_color] |
+							      mq_graduated_pending;
 
    logic 				  t_core_store_data_ptr_valid;
    logic [`LG_ROB_ENTRIES-1:0] 		  t_core_store_data_ptr;
@@ -1383,6 +1413,9 @@ module core(clk,
 			    
    	if(t_retire)
    	  begin
+`ifdef PIPETRACE
+	     pt_retire({{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]});
+`endif
 	     record_retirement({{ZP{1'b0}},t_rob_head.pc}, 
    			       t_rob_head.fetch_cycle,
    			       t_rob_head.alloc_cycle,
@@ -1395,6 +1428,9 @@ module core(clk,
    	  end
    	if(t_retire_two)
    	  begin
+`ifdef PIPETRACE
+	     pt_retire({{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]});
+`endif
 	     record_retirement({{ZP{1'b0}},t_rob_next_head.pc},
    			       t_rob_next_head.fetch_cycle,
    			       t_rob_next_head.alloc_cycle,
@@ -1885,7 +1921,10 @@ module core(clk,
 		      end
 		 end
 
-	       if(r_rob_inflight == 'd0 && r_ds_done && memq_empty && t_divide_ready)
+	       /* restart once non-memory ops have drained; dead memory ops are left in
+		* flight and their responses dropped by color (was: r_rob_inflight == 0
+		* && memq_empty, i.e. wait out every wrong-path miss) */
+	       if(((r_rob_inflight & ~r_rob_is_mem) == 'd0) && r_ds_done && !w_next_color_busy && t_divide_ready)
 		 begin
 		    //$display("%d : wait for drain and memq_empty  took  %d cycles",r_cycle, r_restart_cycles);		    
 		    n_state = RAT;
@@ -1900,7 +1939,7 @@ module core(clk,
 	    begin
 	       //$display("memq_empty = %b, r_rob_inflight = %d",
 	       //memq_empty, r_rob_inflight);
-	       if(r_rob_inflight == 'd0 && memq_empty && t_divide_ready)
+	       if(((r_rob_inflight & ~r_rob_is_mem) == 'd0) && !w_next_color_busy && t_divide_ready)
 		 begin
 		    n_state = RAT;
 		 end
@@ -2865,11 +2904,13 @@ module core(clk,
 	  begin
 	     r_rob_complete <= 'd0;
 	     r_rob_sd_complete <= 'd0;
+	     r_rob_is_mem <= 'd0;
 	  end
 	else
 	  begin
 	     if(t_alloc)
 	       begin
+		  r_rob_is_mem[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_uop.is_mem;
 		  r_rob_complete[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_fold_uop;
 		  /* must match exec.sv w_uop_has_sdata: an FP store's data operand is
 		   * fp_srcB (srcB_valid=0).  Without the fp term sdc1/swc1 retired
@@ -2881,6 +2922,7 @@ module core(clk,
 	       end
 	     if(t_alloc_two)
 	       begin
+		  r_rob_is_mem[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_uop2.is_mem;
 		  r_rob_complete[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_fold_uop2;
 		  r_rob_sd_complete[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= !(t_uop2.is_mem & (t_uop2.srcB_valid | (t_uop2.fp_srcB_valid & t_uop2.is_store)));
 	       end
@@ -3135,8 +3177,10 @@ module core(clk,
     
    always_ff@(posedge clk)
      begin
-	if(reset)
+	if(reset || t_clr_rob)
 	  begin
+	     /* at restart everything still in flight is dead (memory ops keep going
+	      * and are dropped by restart color) */
 	     r_rob_inflight <= 'd0;
 	  end
 	else
@@ -3735,6 +3779,22 @@ module core(clk,
 	   .mem_rsp_fp_pres(core_mem_rsp.fp_pres),
 	   .mem_rsp_load_data(core_mem_rsp.data),
 	   .mem_rsp_rob_ptr(core_mem_rsp.rob_ptr),
+	   .mem_rsp_valid(core_mem_rsp_valid),
+	   .mem_rsp_lsu_hold(core_mem_rsp.lsu_hold),
+	   .mem_rsp_lsu_idx(core_mem_rsp.lsu_idx),
+	   .mem_blk_valid(core_mem_blk_valid),
+	   .mem_blk_code(core_mem_rsp.blk),
+	   .mem_blk_st(core_mem_rsp.blk_st),
+	   .mem_wake_valid(core_mem_wake_valid),
+	   .mem_st_done_valid(core_mem_st_done_valid),
+	   .mem_st_done_idx(core_mem_st_done_idx),
+	   .lsu_sb(lsu_sb),
+	   .restart_color(restart_color),
+	   .mem_color_pending(w_exec_color_pending),
+	   .retired_rob_ptr_valid(retired_rob_ptr_valid),
+	   .retired_rob_ptr_two_valid(retired_rob_ptr_two_valid),
+	   .retired_rob_ptr(retired_rob_ptr),
+	   .retired_rob_ptr_two(retired_rob_ptr_two),
 	   .irq_pending(w_irq_pending),
 	   .cp0_count(w_cp0_count)
 	   );
@@ -3859,6 +3919,23 @@ module core(clk,
    
 
    assign t_next_head_br = t_retire_two & t_rob_next_head.is_br;
+
+`ifdef PIPETRACE
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     if(t_alloc)
+	       begin
+		  pt_alloc({{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]});
+	       end
+	     if(t_alloc & t_alloc_two)
+	       begin
+		  pt_alloc({{(32-`LG_ROB_ENTRIES){1'b0}}, r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]});
+	       end
+	  end
+     end // always_ff@ (negedge clk)
+`endif
 
 `ifdef TOPDOWN
    /* TOP-DOWN accounting (Verilator-only; +define+TOPDOWN, top.cc --topdown).  The

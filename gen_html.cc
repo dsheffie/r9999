@@ -75,8 +75,17 @@ int main(int argc, char *argv[]) {
        << "\"" << rec.uuid << "\","
        << "\"events\":{"
        << "\"" << rec.fetch_cycle << "\":\"F\","
-       << "\"" << rec.alloc_cycle << "\":\"A\","
-       << "\"" << rec.complete_cycle << "\":\"C\","
+       << "\"" << rec.alloc_cycle << "\":\"A\",";
+    /* memory-pipe stage events (a later event in the same cycle wins the cell):
+     *   Q LSU entry   S LSU issue (address pass; again after a wake)
+     *   H port-2 hit  V port-2 store->load forward  M port-2 miss (to the MQ)
+     *   B blocked: miss   X blocked: MQ store   W blocked: LSU store   D blocked: LSU store data
+     *   U blocked: uncached, not yet at the ROB head
+     *   K wakeup      P port-1 (MQ) data return   Z store data captured */
+    for(const auto &e : rec.events) {
+      ss << "\"" << e.first << "\":\"" << e.second << "\",";
+    }
+    ss << "\"" << rec.complete_cycle << "\":\"C\","
        << "\"" << rec.retire_cycle << "\":\"R\""                  
        << "}}]"
        << "}";

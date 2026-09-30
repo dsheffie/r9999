@@ -8,6 +8,7 @@
 
 #include <boost/serialization/serialization.hpp>
 #include <boost/serialization/list.hpp>
+#include <boost/serialization/utility.hpp>
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
 
@@ -25,6 +26,10 @@ public:
   uint64_t pc;
   uint64_t fetch_cycle, alloc_cycle, complete_cycle, retire_cycle;
   bool faulted;
+  /* stage events between alloc and retire, (cycle, letter) -- the memory pipe
+   * (LSU issue, l1d port-2 hit/forward/miss, block codes, wakeups, store data);
+   * the letters are listed in gen_html.cc */
+  std::list<std::pair<uint64_t, char>> events;
   friend class boost::serialization::access;
   template<class Archive>
   void serialize(Archive & ar, const unsigned int version) {
@@ -36,6 +41,7 @@ public:
     ar & complete_cycle;
     ar & retire_cycle;
     ar & faulted;
+    ar & events;
   }
 public:
   pipeline_record(uint64_t uuid,
@@ -45,10 +51,11 @@ public:
 		  uint64_t alloc_cycle,
 		  uint64_t complete_cycle,
 		  uint64_t retire_cycle,
-		  bool faulted) :
+		  bool faulted,
+		  const std::list<std::pair<uint64_t, char>> &events) :
     uuid(uuid), disasm(disasm), pc(pc), fetch_cycle(fetch_cycle), alloc_cycle(alloc_cycle),
     complete_cycle(complete_cycle), retire_cycle(retire_cycle),
-    faulted(faulted) {}
+    faulted(faulted), events(events) {}
   pipeline_record() :
     uuid(~0UL), disasm(""), pc(0), fetch_cycle(0), alloc_cycle(0),
     complete_cycle(0), retire_cycle(0), faulted(false) {}
@@ -58,6 +65,9 @@ public:
 	<< "," << r.fetch_cycle << "," << r.alloc_cycle
 	<< "," << r.complete_cycle << "," << r.retire_cycle
 	<< "," << r.faulted;
+    for(const auto &e : r.events) {
+      out << "," << e.second << "@" << e.first;
+    }
     return out;
   }
 };
@@ -105,9 +115,10 @@ public:
 	      uint64_t alloc_cycle,
 	      uint64_t complete_cycle,
 	      uint64_t retire_cycle,
-	      bool faulted) {
+	      bool faulted,
+	      const std::list<std::pair<uint64_t, char>> &events) {
     records.emplace_back(uuid, disasm, pc, fetch_cycle, alloc_cycle, complete_cycle,
-			 retire_cycle, faulted);
+			 retire_cycle, faulted, events);
   }
 };
 

@@ -331,6 +331,13 @@ module core_l1d_l1i(clk,
    logic 				  core_mem_req_valid;
    logic 				  core_mem_req_ack;
    logic 				  core_mem_rsp_valid;
+   logic 				  core_mem_blk_valid, core_mem_wake_valid;
+   logic 				  core_mem_st_done_valid;
+   logic [`LG_MEM_SCHED_ENTRIES-1:0] 	  core_mem_st_done_idx;
+   lsu_sb_t lsu_sb;
+   logic 				  restart_color;
+   logic [1:0] 				  mem_color_busy;
+   logic 				  mq_graduated_pending;
    logic 				  core_store_data_valid;
    logic 				  core_store_data_ack;
    
@@ -523,6 +530,7 @@ module core_l1d_l1i(clk,
    logic [4:0] 				  t_l2_req_opcode;
    logic				  t_l2_req_cacheable;
    logic [15:0]				  t_l2_req_mask;
+   logic				  t_l2_passthru;
 
 
    tlb_data_t tlb_entry_out;
@@ -608,11 +616,45 @@ module core_l1d_l1i(clk,
 	    begin
 	    end
 	  endcase
+	/* L2 pass-through: when the arbiter is idle and grants the L1D, the L1D's
+	 * request reaches the L2 in the grant cycle instead of a cycle later through
+	 * r_req (the L2's address mux selects the L1D while IDLE, so L1D only).
+	 * r_req still follows; the L2 has left IDLE by then and the ack clears it. */
+	t_l2_passthru = (r_state == IDLE) && (n_state == GNT_L1D);
      end // always_comb
 
 
    
    wire [127:0] w_l1_mem_load_data;
+
+`ifdef PIPETRACE
+   /* pipetrace: the L1D fill's trip through the arbiter and L2, stamped on the
+    * load that owns it (dcache.r_req; stores/commits skipped) */
+   import "DPI-C" function void pt_event(input int rob_ptr, input int letter, input longint cycle);
+   logic [63:0] r_pt_cycle;
+   always_ff@(posedge clk)
+     begin
+	r_pt_cycle <= reset ? 64'd0 : r_pt_cycle + 64'd1;
+     end
+   always_ff@(negedge clk)
+     begin
+	if(!reset && !dcache.r_req.is_store)
+	  begin
+	     if((r_state == IDLE) && (n_state == GNT_L1D))
+	       begin
+		  pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, dcache.r_req.rob_ptr}, "G", r_pt_cycle);
+	       end
+	     if((r_state == GNT_L1D) && w_l1_mem_req_ack)
+	       begin
+		  pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, dcache.r_req.rob_ptr}, "N", r_pt_cycle);
+	       end
+	     if((r_state == GNT_L1D) && w_l1_mem_rsp_valid)
+	       begin
+		  pt_event({{(32-`LG_ROB_ENTRIES){1'b0}}, dcache.r_req.rob_ptr}, "L", r_pt_cycle);
+	       end
+	  end
+     end // always_ff@ (negedge clk)
+`endif
 
    
    l2 l2cache (
@@ -627,7 +669,7 @@ module core_l1d_l1i(clk,
 	       
 	       .flush_complete(w_l2_flush_complete),
 	       
-	       .l1_mem_req_valid(r_req),
+	       .l1_mem_req_valid(r_req | t_l2_passthru),
 	       .l1_mem_req_ack(w_l1_mem_req_ack),
 	       .l1_mem_req_addr(t_l2_req_addr),
 	       .l1_mem_req_cacheable(t_l2_req_cacheable),
@@ -718,6 +760,14 @@ module core_l1d_l1i(clk,
 	       .core_store_data_ack(core_store_data_ack),
 	       
 	       .core_mem_rsp_valid(core_mem_rsp_valid),
+	       .core_mem_blk_valid(core_mem_blk_valid),
+	       .core_mem_wake_valid(core_mem_wake_valid),
+	       .core_mem_st_done_valid(core_mem_st_done_valid),
+	       .core_mem_st_done_idx(core_mem_st_done_idx),
+	       .lsu_sb(lsu_sb),
+	       .restart_color(restart_color),
+	       .mem_color_busy(mem_color_busy),
+	       .mq_graduated_pending(mq_graduated_pending),
 	       .core_mem_rsp(core_mem_rsp),
 
 	       .mem_req_ack(l1d_mem_req_ack),
@@ -857,6 +907,14 @@ module core_l1d_l1i(clk,
 	     .core_store_data_ack(core_store_data_ack),
 	     
 	     .core_mem_rsp_valid(core_mem_rsp_valid),
+	     .core_mem_blk_valid(core_mem_blk_valid),
+	     .core_mem_wake_valid(core_mem_wake_valid),
+	     .core_mem_st_done_valid(core_mem_st_done_valid),
+	     .core_mem_st_done_idx(core_mem_st_done_idx),
+	     .lsu_sb(lsu_sb),
+	     .restart_color(restart_color),
+	     .mem_color_busy(mem_color_busy),
+	     .mq_graduated_pending(mq_graduated_pending),
 	     .core_mem_rsp(core_mem_rsp),
 	     
 	     .retire_reg_ptr(retire_reg_ptr),
