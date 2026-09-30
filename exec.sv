@@ -79,6 +79,8 @@ module exec(clk,
 	    uq_wait,
 	    mq_wait,
 	    fp_uq_wait,
+	    dbg_memop_idx,
+	    dbg_memop_pc,
 	    uq_full,
 	    uq_next_full,
 	    uq_uop,
@@ -196,6 +198,13 @@ module exec(clk,
    output logic [N_ROB_ENTRIES-1:0]  uq_wait;
    output logic [N_ROB_ENTRIES-1:0]  mq_wait;
    output logic [N_ROB_ENTRIES-1:0]  fp_uq_wait;
+   /* DEBUG: ROB-indexed PC of the last memory op scheduled into each ROB slot.
+    * Written at the one-mem-op-per-cycle schedule point (t_pop_mem_uq); survives
+    * squash (only overwritten when the slot is reused).  Snarfed by rob index to
+    * identify a memory op that stranded its L1D r_rob_inflight bit but never
+    * retired (the applu FP-wedge orphan). */
+   input logic [`LG_ROB_ENTRIES-1:0] dbg_memop_idx;
+   output logic [31:0] 		     dbg_memop_pc;
    
    output logic 			     uq_full;
    output logic 			     uq_next_full;
@@ -358,19 +367,27 @@ module exec(clk,
    wire [`M_WIDTH-1:0] w_srcA, w_srcB;
    wire [`M_WIDTH-1:0] w_mem_srcA, w_mem_srcB;
    
-   /* forwarded operand DATA, captured on the same edge and under the same
-    * conditions as the r_fwd_* flags below.  The mux used to read r_int_result /
-    * r_mem_result, which reload every cycle: a flag set for one producer could be
-    * paired with the NEXT cycle's result (silicon: a consumer read a load value its
-    * producer never wrote).  Capturing the data with its flag makes them agree. */
-   logic [`M_WIDTH-1:0]     r_fwd_srcA_data, r_fwd_srcB_data;
-   logic [`M_WIDTH-1:0]     r_fwd_mem_srcA_data;
    logic 	r_fwd_int_srcA, r_fwd_int_srcB;
    logic 	r_fwd_mem_srcA, r_fwd_mem_srcB;
 
    logic t_fwd_int_mem_srcA,t_fwd_mem_mem_srcA;
    logic r_fwd_int_mem_srcA,r_fwd_mem_mem_srcA;
    
+   /* Dedicated forward-DATA registers, one per forward flag, captured in the
+    * SAME if() that sets the flag.  ROOT-CAUSE FIX for the 2026-09-02/03 stale
+    * forward (4 silicon ring captures, fwd_sel field): the flags are one-shot
+    * but the old free-running result registers (since removed) were overwritten EVERY
+    * cycle, so any consumer that executes later than pick+1 forwards a LATER
+    * producer's value.  Capture 20260903_120637 shows it exactly: two load
+    * responses one cycle apart, the bnez forwarded from MEM and received the
+    * SECOND load's data (the ra value, non-zero) while its own producer had
+    * written 0 -- so the never-taken __free_hook branch was taken and jr t9
+    * jumped to 0.  REG_L1D_RSP moved the timing and the fault survived, which
+    * proves the defect is this flag/data lifetime mismatch and not the L1D
+    * response path.  With the data captured beside its flag the pair cannot
+    * desynchronise, whatever the pick-to-execute delay. */
+   logic [`M_WIDTH-1:0]     r_fwd_srcA_data, r_fwd_srcB_data;
+   logic [`M_WIDTH-1:0]     r_fwd_mem_srcA_data;
    logic [(`M_WIDTH*2)-1:0] r_fwd_hilo_data;
    logic [(`M_WIDTH*2)-1:0] r_src_hilo;
    logic 	r_fwd_hilo_int, r_fwd_hilo_mul, r_fwd_hilo_div;
@@ -419,6 +436,8 @@ module exec(clk,
    logic 			    t_div_complete;
 
    logic [N_ROB_ENTRIES-1:0] 	    r_uq_wait, r_mq_wait, r_fp_uq_wait;
+   /* DEBUG mem-op PC shadow, ROB-indexed (see dbg_memop_pc port). */
+   logic [31:0] 		    r_memop_pc [N_ROB_ENTRIES-1:0];
    /* non mem uop queue */
    uop_t r_uq[N_UQ_ENTRIES];
    uop_t uq, int_uop;
@@ -631,6 +650,7 @@ module exec(clk,
 	     if(t_mem_issue_addr)
 	       begin
 		  r_mq_wait[t_picked_mem_uop.rob_ptr] <= 1'b0;
+		  r_memop_pc[t_picked_mem_uop.rob_ptr] <= t_picked_mem_uop.pc[31:0];
 	       end
 	     if(mem_blk_valid)
 	       begin
@@ -819,6 +839,8 @@ module exec(clk,
    
    always_comb
      begin
+	/* forwarded operands come from the data captured WITH the flag (see the
+	 * r_fwd_*_data declarations), never from the free-running result registers */
 	t_srcA = r_fwd_int_srcA ? r_fwd_srcA_data :
 		 r_fwd_mem_srcA ? r_fwd_srcA_data :
 		 w_srcA;
@@ -1431,6 +1453,7 @@ module exec(clk,
 `endif
    assign uq_wait = r_uq_wait;
    assign mq_wait = r_mq_wait;
+   assign dbg_memop_pc = r_memop_pc[dbg_memop_idx];
    assign fp_uq_wait = r_fp_uq_wait;
    
    
@@ -1908,6 +1931,11 @@ module exec(clk,
 	complete_bundle_2.trap <= 1'b0;
 	complete_bundle_2.fp_flags <= {w_fp_cmpl_denorm, w_fp_cmpl_fflags};
 	complete_bundle_2.data <= w_fdiv_complete ? w_fdiv_y : (w_fpu_result_valid || w_fpu_fcr_valid) ? w_fpu_result : r_cvt_result;
+	complete_bundle_2.fwd_sel <= 2'b00;   /* FP/convert port: no int srcA mux */
+	complete_bundle_2.fwd_selB <= 2'b00;
+	complete_bundle_2.srcB_val <= 32'd0;
+	complete_bundle_2.hi_nzA <= 1'b0;
+	complete_bundle_2.hi_nzB <= 1'b0;
      end
 
    always_comb
@@ -2443,6 +2471,7 @@ module exec(clk,
 	    end
 	  BEQ:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = (t_srcA  == t_srcB);
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2450,6 +2479,7 @@ module exec(clk,
 	    end
 	  BEQL:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = (t_srcA  == t_srcB);
 	       t_mispred_br = int_uop.br_pred != t_take_br || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2457,6 +2487,7 @@ module exec(clk,
 	    end
 	  BNE:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = (t_srcA  != t_srcB);
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2538,6 +2569,7 @@ module exec(clk,
 	    end
 	  BGEZ:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2563,6 +2595,7 @@ module exec(clk,
 	    end
 	  BLTZ:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}}));
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2570,6 +2603,7 @@ module exec(clk,
 	    end
 	  BLEZ:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = ($signed(t_srcA) <= $signed({`M_WIDTH{1'b0}}));
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2577,6 +2611,8 @@ module exec(clk,
 	    end
 	  BLEZL:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}})) || (t_srcA == {`M_WIDTH{1'b0}});
 	       t_mispred_br = int_uop.br_pred != t_take_br || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2584,6 +2620,7 @@ module exec(clk,
 	    end
 	  BGTZ:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = ($signed(t_srcA) > $signed({`M_WIDTH{1'b0}}));
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;	       
@@ -2591,6 +2628,7 @@ module exec(clk,
 	    end
 	  BNEL:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = (t_srcA  != t_srcB);
 	       /* branch-likely: a not-taken BNEL must nullify its delay slot, which the
 	        * `|| !t_take_br' restart does, as for every other likely form.  It was
@@ -2602,6 +2640,7 @@ module exec(clk,
 	    end
 	  BLTZL:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = $signed(t_srcA) < $signed({`M_WIDTH{1'b0}});
 	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2609,6 +2648,7 @@ module exec(clk,
 	    end
 	  BGTZL:
 	    begin
+	       t_result = t_srcA;  /* ring: record the compared operand (branches have no dst) */
 	       t_take_br = ($signed(t_srcA) > $signed({`M_WIDTH{1'b0}}));
 	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
@@ -2883,6 +2923,11 @@ module exec(clk,
 		* serialize funnel can drive a per-line D flush at flush_cl_addr =
 		* rob.data. No GPR writeback (CACHE has no architectural dst). */
 	       t_result = t_srcA + t_simm;
+	       t_alu_valid = 1'b1;
+	    end
+	  XFLUSH, XPG_WBINV, XPG_INV:
+	    begin
+	       /* injected ARM flush: nothing to compute (the core holds the page) */
 	       t_alu_valid = 1'b1;
 	    end
 	  default:
@@ -3381,6 +3426,7 @@ module exec(clk,
 	t_mem_tail.bad_addr = 1'b0;
 	t_mem_tail.cached = w_cached;
 	t_mem_tail.mapped = w_mapped;
+	t_mem_tail.pc = mem_uq.pc;   /* un-guarded for synth: store-tracer PC watchpoint */
 	t_mem_tail.lsu_hold = r_mem_uq_lsu_hold;
 	t_mem_tail.lsu_idx = r_mem_uq_lsu_idx;
 	t_mem_tail.commit = 1'b0;
@@ -3690,10 +3736,17 @@ module exec(clk,
      end // always_comb
    
 
-   /* forwarded data: each register loads under EXACTLY the condition (and in the
-    * same priority order) as the flag the operand mux selects it with */
+
+   always_comb
+     begin
+	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_mem_uop.srcA == int_uop.dst);
+	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_picked_mem_uop.srcA == mem_rsp_dst_ptr);
+     end
+   
    always_ff@(posedge clk)
      begin
+	r_fwd_int_mem_srcA <= t_fwd_int_mem_srcA;
+	r_fwd_mem_mem_srcA <= t_fwd_mem_mem_srcA;
 	if(t_fwd_int_mem_srcA)
 	  begin
 	     r_fwd_mem_srcA_data <= t_result;
@@ -3702,6 +3755,15 @@ module exec(clk,
 	  begin
 	     r_fwd_mem_srcA_data <= mem_rsp_load_data[`M_WIDTH-1:0];
 	  end
+	
+	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst);
+	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcB == int_uop.dst);
+	
+	r_fwd_mem_srcA <= w_mem_rsp_int_valid && (t_picked_uop.srcA == mem_rsp_dst_ptr);
+	r_fwd_mem_srcB <= w_mem_rsp_int_valid && (t_picked_uop.srcB == mem_rsp_dst_ptr);
+
+	/* capture the forwarded DATA with its flag -- int result wins if both
+	 * match, mirroring the mux priority above */
 	if(r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst))
 	  begin
 	     r_fwd_srcA_data <= t_result;
@@ -3718,6 +3780,10 @@ module exec(clk,
 	  begin
 	     r_fwd_srcB_data <= mem_rsp_load_data[`M_WIDTH-1:0];
 	  end
+
+	r_fwd_hilo_int <= r_start_int && t_wr_hilo && (t_picked_uop.hilo_src == int_uop.hilo_dst);
+	r_fwd_hilo_mul <= t_hilo_prf_ptr_val_out && (t_picked_uop.hilo_src == t_hilo_prf_ptr_out);
+	r_fwd_hilo_div <= t_div_complete && (t_picked_uop.hilo_src == t_div_hilo_prf_ptr_out);
 	if(r_start_int && t_wr_hilo && (t_picked_uop.hilo_src == int_uop.hilo_dst))
 	  begin
 	     r_fwd_hilo_data <= t_hilo_result;
@@ -3730,28 +3796,6 @@ module exec(clk,
 	  begin
 	     r_fwd_hilo_data <= t_div_result;
 	  end
-     end // always_ff
-
-   always_comb
-     begin
-	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_mem_uop.srcA == int_uop.dst);
-	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_picked_mem_uop.srcA == mem_rsp_dst_ptr);
-     end
-   
-   always_ff@(posedge clk)
-     begin
-	r_fwd_int_mem_srcA <= t_fwd_int_mem_srcA;
-	r_fwd_mem_mem_srcA <= t_fwd_mem_mem_srcA;
-	
-	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst);
-	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcB == int_uop.dst);
-	
-	r_fwd_mem_srcA <= w_mem_rsp_int_valid && (t_picked_uop.srcA == mem_rsp_dst_ptr);
-	r_fwd_mem_srcB <= w_mem_rsp_int_valid && (t_picked_uop.srcB == mem_rsp_dst_ptr);
-
-	r_fwd_hilo_int <= r_start_int && t_wr_hilo && (t_picked_uop.hilo_src == int_uop.hilo_dst);
-	r_fwd_hilo_mul <= t_hilo_prf_ptr_val_out && (t_picked_uop.hilo_src == t_hilo_prf_ptr_out);
-	r_fwd_hilo_div <= t_div_complete && (t_picked_uop.hilo_src == t_div_hilo_prf_ptr_out);
      end
 
 
@@ -4672,6 +4716,11 @@ module exec(clk,
 	     complete_bundle_1.overflow <= 1'b0;
 	     complete_bundle_1.trap <= 1'b0;
 	     complete_bundle_1.data <= t_mul_result[`M_WIDTH-1:0];
+	     complete_bundle_1.fwd_sel <= 2'b00;
+	     complete_bundle_1.fwd_selB <= 2'b00;
+	     complete_bundle_1.srcB_val <= 32'd0;
+	     complete_bundle_1.hi_nzA <= 1'b0;
+	     complete_bundle_1.hi_nzB <= 1'b0;
 	  end
 	else
 	  begin
@@ -4684,6 +4733,13 @@ module exec(clk,
 	     complete_bundle_1.overflow <= t_overflow;
 	     complete_bundle_1.trap <= t_trap;	     
 	     complete_bundle_1.data <= t_result;
+	     /* which source fed t_srcA for this uop -- see complete_t.fwd_sel */
+	     complete_bundle_1.fwd_sel <= {r_fwd_int_srcA, r_fwd_mem_srcA};
+	     /* srcB operand + its mux select, same edge as take_br/data */
+	     complete_bundle_1.fwd_selB <= {r_fwd_int_srcB, r_fwd_mem_srcB};
+	     complete_bundle_1.srcB_val <= t_srcB[31:0];
+	     complete_bundle_1.hi_nzA <= |t_srcA[`M_WIDTH-1:32];
+	     complete_bundle_1.hi_nzB <= |t_srcB[`M_WIDTH-1:32];
 	  end
 	//(uq.rob_ptr == 'd5) ? 1'b1 : 1'b0;
      end
@@ -4700,5 +4756,153 @@ module exec(clk,
 	   end
      end
 `endif
+
+
+`ifdef VERILATOR
+   /* ==================================================================
+    * OPERAND VALUE CHECK (sim-only).
+    *
+    * The invariant the silicon violated, twice, on 2026-09-02:
+    *   the source operand an instruction CONSUMES must equal the value most
+    *   recently written to that physical register.
+    *
+    * Evidence (captures/CAPTURE_fault_20260902_{0940,1949}.txt): a `lw t9`
+    * wrote 0 to physreg P; a `bnez t9` reading P took its branch (so it saw
+    * NON-zero -- the encoding in the guest's own libc is `bne $25,$0`, so the
+    * second operand is $zero and taken REQUIRES non-zero); a `jr t9` reading
+    * the same P, with no intervening write, got 0 and jumped to 0.
+    *
+    * Why an assertion over real workloads and NOT a directed test: the fault
+    * needs a long stall (ring `gap` = 20-57 cycles) to park a consumer on a
+    * missing load so that wakeup collides with writeback.  Hand-building that
+    * timing is far harder than letting a real boot produce it.  Why not formal:
+    * PDR does not converge at 56k latches and BMC from reset cannot reach a
+    * state that needs a full cache miss to set up.
+    *
+    * Unlike the formal harness this shadows EVERY physreg, so every executed
+    * instruction is checked.  The two same-cycle write bypasses are modelled
+    * explicitly -- without them a legitimately forwarded operand reads as a
+    * mismatch, which is a false positive, not a bug.
+    * ================================================================== */
+   logic [`M_WIDTH-1:0] r_vchk_shadow [N_INT_PRF_ENTRIES-1:0];
+   logic [N_INT_PRF_ENTRIES-1:0] r_vchk_valid;
+   logic [`M_WIDTH-1:0] t_vchk_expect;
+   integer 		vchk_i;
+
+   wire w_vchk_wr0 = r_start_int & t_wr_int_prf & (int_uop.dst != 'd0);
+   wire w_vchk_wr1 = mem_rsp_dst_valid & (~mem_rsp_fp_dst) & (mem_rsp_dst_ptr != 'd0);
+
+   wire w_vchk_read = r_start_int & int_uop.srcA_valid & (~int_uop.fp_srcA_valid)
+		    & (int_uop.srcA != 'd0) & r_vchk_valid[int_uop.srcA];
+
+   always_comb
+     begin
+	/* a write landing THIS cycle is what the operand mux is supposed to
+	 * forward, so it -- not the shadow -- is the correct expectation. */
+	t_vchk_expect = (w_vchk_wr1 & (mem_rsp_dst_ptr == int_uop.srcA)) ? mem_rsp_load_data :
+			(w_vchk_wr0 & (int_uop.dst     == int_uop.srcA)) ? t_result :
+			r_vchk_shadow[int_uop.srcA];
+     end
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_vchk_valid <= 'd0;
+	  end
+	else
+	  begin
+	     if(w_vchk_wr0)
+	       begin
+		  r_vchk_shadow[int_uop.dst] <= t_result;
+		  r_vchk_valid[int_uop.dst]  <= 1'b1;
+	       end
+	     if(w_vchk_wr1)
+	       begin
+		  r_vchk_shadow[mem_rsp_dst_ptr] <= mem_rsp_load_data;
+		  r_vchk_valid[mem_rsp_dst_ptr]  <= 1'b1;
+	       end
+	     if(w_vchk_read & (t_srcA != t_vchk_expect))
+	       begin
+		  $display("[VALCHK] cyc=%0d pc=%x op=%0d srcA=p%0d GOT %x EXPECT %x  fwd_int=%b fwd_mem=%b",
+			   r_cycle, int_uop.pc, int_uop.op, int_uop.srcA,
+			   t_srcA, t_vchk_expect, r_fwd_int_srcA, r_fwd_mem_srcA);
+		  $stop();
+	       end
+	  end
+     end // always_ff
+`endif
+
+
+
+`ifdef VERILATOR
+   /* ==================================================================
+    * READER-AGREEMENT CHECK (sim-only).  dsheffie's formulation:
+    *   every reader of a given physical register gets the SAME value, unless
+    *   the register has been recycled (reallocated to a new producer).
+    *
+    * Strictly better than the value check above for this bug, because it never
+    * models the WRITE path: the first reader of an allocation establishes the
+    * reference and every later reader must match it.  Forwarding, bypass
+    * timing and read-during-write are all irrelevant to whether two readers
+    * AGREE -- which is precisely why the previous harnesses kept producing
+    * false positives around same-cycle bypasses.
+    *
+    * This is exactly what silicon violated on 2026-09-02 (two captures):
+    *   lw t9   -> physreg P
+    *   bnez t9 -> reads P, branch TAKEN     => saw non-zero
+    *   jr t9   -> reads P, target 0         => saw zero
+    * with no write to P in between.  Physregs are written once per allocation,
+    * so two readers disagreeing is impossible in a correct machine.
+    *
+    * Recycling: a physreg starts a new life when it is pushed as a dst.  An
+    * older consumer of the previous allocation cannot still be pending at that
+    * point -- the register is only freed once the overwriting instruction
+    * retires, which is after every older reader has retired.
+    * ================================================================== */
+   logic [`M_WIDTH-1:0] r_rd_ref   [N_INT_PRF_ENTRIES-1:0];
+   logic [N_INT_PRF_ENTRIES-1:0] r_rd_seen;
+
+   wire w_rda_valid = r_start_int & int_uop.srcA_valid & (~int_uop.fp_srcA_valid)
+		    & (int_uop.srcA != 'd0);
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_rd_seen <= 'd0;
+	  end
+	else
+	  begin
+	     /* recycle: a new producer claims this physreg -> drop the reference */
+	     if(uq_push && uq_uop.dst_valid)
+	       begin
+		  r_rd_seen[uq_uop.dst] <= 1'b0;
+	       end
+	     if(uq_push_two && uq_uop_two.dst_valid)
+	       begin
+		  r_rd_seen[uq_uop_two.dst] <= 1'b0;
+	       end
+
+	     if(w_rda_valid)
+	       begin
+		  if(r_rd_seen[int_uop.srcA] == 1'b0)
+		    begin
+		       r_rd_ref[int_uop.srcA]  <= t_srcA;
+		       r_rd_seen[int_uop.srcA] <= 1'b1;
+		    end
+		  else if(r_rd_ref[int_uop.srcA] != t_srcA)
+		    begin
+		       $display("[RDAGREE] cyc=%0d pc=%x op=%0d p%0d: first reader saw %x, this reader sees %x  (fwd_int=%b fwd_mem=%b)",
+				r_cycle, int_uop.pc, int_uop.op, int_uop.srcA,
+				r_rd_ref[int_uop.srcA], t_srcA, r_fwd_int_srcA, r_fwd_mem_srcA);
+		       $stop();
+		    end
+	       end
+	  end
+     end // always_ff
+`endif
+
+
 
 endmodule

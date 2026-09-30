@@ -59,6 +59,10 @@ import "DPI-C" function void dirtydrop(input longint unsigned cycle, input longi
 `endif
 
 module l1d(clk,
+`ifdef FORMAL_DPRELOAD
+	   fml_pre_tag,
+	   fml_pre_data,
+`endif
 	   reset,
 	   asid,
 	   tlb_entry_in,
@@ -79,6 +83,7 @@ module l1d(clk,
 	   restart_valid,
 	   clr_link_reg,
 	   memq_empty,
+	   dbg_rob_inflight,
 	   drain_ds_complete,
 	   dead_rob_mask,
 	   flush_req,
@@ -86,6 +91,11 @@ module l1d(clk,
 	   flush_cl_req,
 	   flush_cl_addr,
 	   flush_cl_inval,
+	   dma_inval_req,
+	   dma_inval_addr,
+	   dma_inval_ack,
+	   flush_pg_req,
+	   pg_drop_dirty_cnt,
 	   //inputs from core
 	   core_mem_req_valid,
 	   core_mem_req,
@@ -145,6 +155,7 @@ module l1d(clk,
    input logic 			     restart_valid;
    input logic			     clr_link_reg;
    output logic			     memq_empty;
+   output logic [N_ROB_ENTRIES-1:0] dbg_rob_inflight;
    input logic 			     drain_ds_complete;
    input logic [(1<<`LG_ROB_ENTRIES)-1:0] dead_rob_mask;
    
@@ -153,6 +164,28 @@ module l1d(clk,
    input logic flush_cl_req;
    input logic [`M_WIDTH-1:0] flush_cl_addr;
    input logic 		      flush_cl_inval;
+   /* DMA-completion invalidate: a SECOND requester into the same per-line
+    * invalidate machinery, independent of the CPU's CACHE-op handshake so the
+    * core never stalls on it.  One 16B line per request; the SoC-side walker
+    * steps the range and holds dma_inval_addr stable until dma_inval_ack.
+    * Always drop-without-writeback (software already invalidated pre-DMA, so a
+    * line present here is a clean speculative refill -- writing it back would
+    * stomp the DMA'd data). */
+   input logic 		      dma_inval_req;
+   input logic [`PA_WIDTH-1:0] dma_inval_addr;
+   output logic 	      dma_inval_ack;
+   /* injected page op (XPG_WBINV / XPG_INV): walk the page's lines at flush_cl_addr
+    * (page-aligned PA, held by the core like the CACHE-op address), flush_cl_inval =
+    * drop (XPG_INV).  Per line, L1D then L2 -- the core is drained at the ROB head, so
+    * the order is free (~/code/murphi/r9999_pagewalk.m):
+    *   WBINV: L1D dirty hit -> MEM_WB (to DRAM, L2 copy dropped); otherwise invalidate
+    *          an L1D hit and MEM_INVL (L2 writes back if dirty, then drops).
+    *   INV:   invalidate an L1D hit, MEM_PGDROP (L2 drops without writeback).
+    * One flush_complete pulse at the end of the page. */
+   input logic 		      flush_pg_req;
+   /* dirty lines found by XPG_INV walks (L1D + L2): a correctly cleaned page has none,
+    * so any nonzero count is a coherence bug (saturating). */
+   output logic [15:0] 	      pg_drop_dirty_cnt;
    input logic 		      flush_req;
    output logic 	      flush_complete;
 
@@ -217,6 +250,29 @@ module l1d(clk,
    localparam TAG_LSB = (IDX_STOP < `LG_PG_SZ) ? IDX_STOP : `LG_PG_SZ;
    localparam LG_ALIAS_BITS = IDX_STOP - TAG_LSB;   // == max(0, IDX_STOP - LG_PG_SZ)
    localparam N_TAG_BITS = `PA_WIDTH - TAG_LSB;
+`ifdef FORMAL_DPRELOAD
+   /* FORMAL PRELOAD (d-side).  The flush walk normally writes valid=0 to every
+    * set; here it writes valid=1 and fills tag/data from these FREE inputs, so a
+    * load HITS immediately instead of needing a DRAM round trip.  Two payoffs:
+    *  (1) REACHABILITY -- no fill latency, so interesting states arrive in a
+    *      handful of cycles instead of the ~30 the DIVA controls needed.
+    *  (2) It makes `dst_valid` LIVE.  The response only carries dst_valid on a
+    *      CACHE-HIT reply (t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2),
+    *      and a harness that cannot manufacture a hit leaves every response-field
+    *      control CONSTANT-0 -- which is exactly why formal_l1d_rsp's c_dstv /
+    *      c_ptr / c_rob / c_dat are all dead and its bad_p0 "proof" is vacuous.
+    * These MUST be real ports, not undriven nets: the build does `setundef -zero`,
+    * which would silently tie them to 0 (the phantom mem_req_ack trap).
+    * OVER-APPROXIMATION: a free tag lets a line claim any address, so this admits
+    * cache states no real fill sequence produces.  UNSAT is therefore sound; a SAT
+    * counterexample must be checked for realizability before it is believed. */
+   input logic [N_TAG_BITS-1:0]      fml_pre_tag;
+   input logic [L1D_CL_LEN_BITS-1:0] fml_pre_data;
+   /* INIT_CACHE is the RESET walk (INITIALIZE -> INIT_CACHE -> ACTIVE) and needs no
+    * flush_req, so the preload happens automatically out of reset.  FLUSH_CACHE is
+    * included so an explicit flush re-preloads rather than emptying the cache. */
+   wire w_dpreload = ((r_state == INIT_CACHE) | (r_state == FLUSH_CACHE)) & t_mark_invalid;
+`endif
    localparam WORD_START = 2;
    localparam WORD_STOP = WORD_START+LG_WORDS_PER_CL;
    localparam DWORD_START = 3;
@@ -357,6 +413,22 @@ endfunction
 
    logic 				  r_flush_req, n_flush_req;
    logic 				  r_flush_cl_req, n_flush_cl_req;
+   logic 				  r_dma_inval_req, n_dma_inval_req;
+   logic 				  r_dma_inval_ack, n_dma_inval_ack;
+   logic 				  r_cl_is_dma, n_cl_is_dma;   /* owner of the in-flight FLUSH_CL */
+   logic 				  r_flush_pg_req, n_flush_pg_req;
+   localparam LG_PG_LINES = `LG_PG_SZ - `LG_L1D_CL_LEN;
+   logic [LG_PG_LINES-1:0] 		  r_pg_off, n_pg_off;
+   logic [15:0] 			  r_pg_dirty_cnt, n_pg_dirty_cnt;
+   assign pg_drop_dirty_cnt = r_pg_dirty_cnt;
+   wire [`PA_WIDTH-1:0] 		  w_pg_line = {flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ], r_pg_off, {`LG_L1D_CL_LEN{1'b0}}};
+   wire [`PA_WIDTH-1:0] 		  w_pg_line_nxt = {flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ], r_pg_off + 1'b1, {`LG_L1D_CL_LEN{1'b0}}};
+   wire [`PA_WIDTH-1:0] 		  w_pg_line0 = {flush_cl_addr[`PA_WIDTH-1:`LG_PG_SZ], {`LG_PG_SZ{1'b0}}};
+   wire 				  w_pg_hit = r_valid_out & (r_tag_out == w_pg_line[`PA_WIDTH-1:TAG_LSB]);
+   assign dma_inval_ack = r_dma_inval_ack;
+   /* arbitrated line address/op: the CPU CACHE-op wins; DMA is always invalidate */
+   wire [`M_WIDTH-1:0] 			  w_cl_addr  = r_cl_is_dma ? {{(`M_WIDTH-`PA_WIDTH){1'b0}}, dma_inval_addr} : flush_cl_addr;
+   wire 				  w_cl_inval = r_cl_is_dma ? 1'b1 : flush_cl_inval;
    logic 				  r_flush_complete, n_flush_complete;
    
 
@@ -365,6 +437,11 @@ endfunction
    logic [31:0] 			  t_w32_2, t_bswap_w32_2;
 
    logic 				  t_got_rd_retry, t_port2_hit_cache;
+`ifdef L1D_PORT2_ALWAYS_MISS
+   wire 				  w_p2_force_miss = 1'b1;
+`else
+   wire 				  w_p2_force_miss = 1'b0;
+`endif
       
    logic 				  t_mark_invalid;
    logic 				  t_wr_array;
@@ -462,7 +539,11 @@ endfunction
 			      * CHOP_BEAT2 but for the whole-cache-flush path -- re-index to
 			      * set+1 and re-run FLUSH_CL so a 32B-stride Index_WB_Invalidate
 			      * covers both 16B lines. */
-			     FLUSH_CL_BEAT2_RD = 'd16
+			     FLUSH_CL_BEAT2_RD = 'd16,
+			     /* injected page op: one line of the page per visit (RAM
+			      * outputs are for w_pg_line), then wait for the L2 ack */
+			     FLUSH_PG = 'd17,
+			     FLUSH_PG_WAIT = 'd18
                              } state_t;
 
    
@@ -477,6 +558,8 @@ endfunction
     * FLUSH_CL_BEAT2_RD=16 aliases INITIALIZE=0 in the trace -- a transient
     * 1-cycle re-index state, acceptable to lose in observability. */
    assign state = r_state[3:0];
+   /* both restart colors folded: "this rob slot has an l1d op in flight" */
+   assign dbg_rob_inflight = r_rob_inflight[N_ROB_ENTRIES-1:0] | r_rob_inflight[2*N_ROB_ENTRIES-1:N_ROB_ENTRIES];
    
    logic	r_mem_req_cacheable, n_mem_req_cacheable;
    logic [15:0]	t_mem_req_mask, r_mem_req_mask, n_mem_req_mask;
@@ -591,6 +674,32 @@ endfunction
                         (r_link_reg == {r_req2.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],
                                         {`LG_L1D_CL_LEN{1'b0}}});
 
+`ifdef VERILATOR
+   logic r_pg_wait2;
+   always_ff@(posedge clk)
+     begin
+	r_pg_wait2 <= reset ? 1'b0 : (r_state == FLUSH_PG_WAIT) & (n_state == FLUSH_PG_WAIT);
+     end
+   /* XPG_INV found a dirty line: the page was not cleaned before its DMA deposit */
+   always_ff@(negedge clk)
+     begin
+	if((r_state == FLUSH_PG) & flush_cl_inval & w_pg_hit & r_dirty_out)
+	  begin
+	     $display("[pgdrop-dirty] L1D cyc=%d pa=%x", r_cycle, w_pg_line);
+	  end
+	/* the walk held the index, so from the 2nd wait cycle on the RAM output is the
+	 * post-invalidate line: a page op must never leave a page line valid */
+	if((r_state == FLUSH_PG_WAIT) & r_pg_wait2 & w_pg_hit)
+	  begin
+	     $display("[pgwalk] LINE STILL VALID after page op: cyc=%d pa=%x", r_cycle, w_pg_line);
+	     $stop();
+	  end
+	if((r_state == FLUSH_PG_WAIT) & mem_rsp_valid & flush_cl_inval & mem_rsp_load_data[0])
+	  begin
+	     $display("[pgdrop-dirty] L2 cyc=%d pa=%x", r_cycle, w_pg_line);
+	  end
+     end // always_ff
+`endif
    /* CACHE hit-type mem ops (MEM_CHWB/CHWBINV/CHINV): line ops with dtlb-translated
     * PAs, deferred to post-retirement via store graduation. */
    wire w_is_chop2 = (r_req2.op == MEM_CHWB) | (r_req2.op == MEM_CHWBINV) | (r_req2.op == MEM_CHINV);
@@ -1294,6 +1403,12 @@ endfunction
 	     r_flush_complete <= 1'b0;
 	     r_flush_req <= 1'b0;
 	     r_flush_cl_req <= 1'b0;
+	     r_dma_inval_req <= 1'b0;
+	     r_dma_inval_ack <= 1'b0;
+	     r_cl_is_dma <= 1'b0;
+	     r_flush_pg_req <= 1'b0;
+	     r_pg_off <= 'd0;
+	     r_pg_dirty_cnt <= 16'd0;
 	     r_chop_wait <= 1'b0;
 	     r_chop_beat <= 1'b0;
 	     r_flush_cl_beat <= 1'b0;
@@ -1351,6 +1466,12 @@ endfunction
 	     r_flush_complete <= n_flush_complete;
 	     r_flush_req <= n_flush_req;
 	     r_flush_cl_req <= n_flush_cl_req;
+	     r_dma_inval_req <= n_dma_inval_req;
+	     r_dma_inval_ack <= n_dma_inval_ack;
+	     r_cl_is_dma <= n_cl_is_dma;
+	     r_flush_pg_req <= n_flush_pg_req;
+	     r_pg_off <= n_pg_off;
+	     r_pg_dirty_cnt <= n_pg_dirty_cnt;
 	     r_chop_wait <= n_chop_wait;
 	     r_chop_beat <= n_chop_beat;
 	     r_flush_cl_beat <= n_flush_cl_beat;
@@ -1458,9 +1579,15 @@ endfunction
       .clk(clk),
       .rd_addr0(t_cache_idx),
       .rd_addr1(t_cache_idx2),
+`ifdef FORMAL_DPRELOAD
+      .wr_addr(w_dpreload ? r_cache_idx : r_mem_req_addr[IDX_STOP-1:IDX_START]),
+      .wr_data(w_dpreload ? fml_pre_tag : r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
+      .wr_en(w_cacheable_mem_rsp_valid | w_dpreload),
+`else
       .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
       .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
       .wr_en(w_cacheable_mem_rsp_valid),
+`endif
       .rd_data0(r_tag_out),
       .rd_data1(r_tag_out2)
       );
@@ -1471,9 +1598,15 @@ endfunction
       .clk(clk),
       .rd_addr0(t_cache_idx),
       .rd_addr1(t_cache_idx2),
+`ifdef FORMAL_DPRELOAD
+      .wr_addr(w_dpreload ? r_cache_idx : t_array_wr_addr),
+      .wr_data(w_dpreload ? fml_pre_data : t_array_wr_data),
+      .wr_en(t_array_wr_en | w_dpreload),
+`else
       .wr_addr(t_array_wr_addr),
       .wr_data(t_array_wr_data),
       .wr_en(t_array_wr_en),
+`endif
       .rd_data0(r_array_out),
       .rd_data1(r_array_out2)
       );
@@ -1528,6 +1661,10 @@ endfunction
 	if(t_mark_invalid)
 	  begin
 	     t_write_valid_en = 1'b1;
+`ifdef FORMAL_DPRELOAD
+	     /* mark VALID instead of invalid, so the line is live after the walk */
+	     if(w_dpreload) begin t_valid_value = 1'b1; end
+`endif
 	  end
 	else if(w_cacheable_mem_rsp_valid)
 	  begin
@@ -2110,6 +2247,17 @@ endfunction
 
    /* memory system should be idle before dealing with an uncachable req */
    wire w_memq_empty = mem_q_empty & (r_n_inflight == 'd0) & (r_state == ACTIVE);
+
+`ifdef L1D_ONE_MEMOP
+   /* DIAGNOSTIC (opt-in via SV2V_DEFINES=L1D_ONE_MEMOP): accept a new core memory op
+    * ONLY when the L1D is fully idle -- nothing in either pipe stage (r_got_req/req2),
+    * no outstanding miss (r_n_inflight==0), and the store queue drained (mem_q_empty).
+    * This removes ALL inter-memop overlap/forwarding, to test whether the long-lived
+    * pointer corruption is a concurrent-memop (store-forward / bypass) race.  Slow. */
+   wire w_one_memop_ok = mem_q_empty & (r_n_inflight == 'd0) & !r_got_req & !r_got_req2;
+`else
+   wire w_one_memop_ok = 1'b1;
+`endif
    // EXPERIMENT: fence mapped cached LOADS to ROB-head too (non-speculative), so a
    // speculative refill can't re-cache a stale DMA-target buffer line ahead of the
    // driver's dma_cache_inv (the R10000 read-path hazard).  DMA buffers are mapped
@@ -2217,7 +2365,16 @@ endfunction
    always_comb
      begin
 	t_got_rd_retry = 1'b0;
+`ifdef L1D_PORT2_ALWAYS_MISS
+	/* DIAGNOSTIC: force every core access to MISS the speculative VA-indexed port-2 read,
+	 * so it serializes through the in-order miss queue (the same path LWL/LWR always take).
+	 * Removes the speculative VIPT hit + TLB-physical-tag race entirely -> memory system is
+	 * fully in-order.  If the IRIX be/chkdev corruption disappears, port-2 speculation (fed
+	 * by the timing-critical TLB) is the culprit.  Very slow (every load refills from L2). */
+	t_port2_hit_cache = 1'b0;
+`else
 	t_port2_hit_cache = r_valid_out2 && (r_tag_out2 == w_tlb_tag2);
+`endif
 	t_mem_req_mask = make_mask(r_req);
 	n_state = r_state;
 	t_miss_idx = r_miss_idx;
@@ -2272,6 +2429,7 @@ endfunction
 		  !(r_last_wr2 && (r_cache_idx2 == core_mem_req.addr[IDX_STOP-1:IDX_START]) && !core_mem_req.is_store) &&
 		  w_uncachable_req &&
 		  (core_mem_req.is_atomic ? mem_q_empty : 1'b1) &&
+		  w_one_memop_ok &&
 		  (core_mem_req.commit || !r_rob_inflight[{core_mem_req.restart_id, core_mem_req.rob_ptr}]);
 	
 	n_core_mem_rsp.data = r_req.addr;
@@ -2300,6 +2458,12 @@ endfunction
 	
 	n_flush_req = r_flush_req | flush_req;
 	n_flush_cl_req = r_flush_cl_req | flush_cl_req;
+	n_dma_inval_req = r_dma_inval_req | dma_inval_req;
+	n_dma_inval_ack = 1'b0;
+	n_cl_is_dma = r_cl_is_dma;
+	n_flush_pg_req = r_flush_pg_req | flush_pg_req;
+	n_pg_off = r_pg_off;
+	n_pg_dirty_cnt = r_pg_dirty_cnt;
 	n_flush_complete = 1'b0;
 	t_addr = 'd0;
 	
@@ -2526,12 +2690,25 @@ endfunction
 			  * fires at the MQ head and answers when both beats are done */
 			 t_push_miss = 1'b1;
 		      end
+		    /* L1D_PORT2_ALWAYS_MISS: force port-2 ops off the FAST-HIT reply path
+		     * and down the miss queue instead.  Diagnostic for whether the
+		     * port-2 fast-hit reply is the source of the stale-register
+		     * load-use failure captured 2026-08-29/30.
+		     * Deliberately gates only the REPLY, not t_port2_hit_cache itself,
+		     * so hit counters and r_missed[] stay truthful.  The else branch
+		     * below already services present-but-busy lines via the MQ, so this
+		     * reuses an exercised path rather than a new one -- and unlike
+		     * L1D_ONE_MEMOP it never REFUSES a request, which is what wedged
+		     * retirement on silicon in the 2026-07-26 attempt. */
 		    /* An access the TLB maps UNCACHED (t_remapped_req2.cached, the page's C
 		     * field) must not fast-hit: w_uncachable_req only saw the segment's
 		     * cacheability, and user segments (kuseg/xkuseg) are "cached" there.
 		     * It falls to the miss queue, where it waits for the ROB head. */
-		    else if(t_port2_hit_cache && !r_hit_busy_addr2 && !r_fill_conflict2 && t_remapped_req2.cached)
+		    else if(t_port2_hit_cache && !r_hit_busy_addr2 && !w_p2_force_miss && !r_fill_conflict2 && t_remapped_req2.cached)
 		      begin
+`ifdef P2_FASTHIT_PROBE
+			 $display("[P2FH] port2 fast-hit reply");
+`endif
 `ifdef VERBOSE_L1D
 			 $display("cycle %d port2 hit for uuid %d, addr %x, data %x", 
 				  r_cycle, r_req2.uuid, r_req2.addr, t_rsp_data2);
@@ -2953,6 +3130,24 @@ endfunction
 		    t_cache_idx = flush_cl_addr[IDX_STOP-1:IDX_START];
 		    //$display("flush addr %x, maps to cl %d at cycle", flush_cl_addr, t_cache_idx, r_cycle);
 		    n_flush_cl_req = 1'b0;
+		    n_cl_is_dma = 1'b0;
+		    n_state = FLUSH_CL;
+		 end
+	       else if(r_flush_pg_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
+		 begin
+		    t_cache_idx = w_pg_line0[IDX_STOP-1:IDX_START];
+		    n_flush_pg_req = 1'b0;
+		    n_pg_off = 'd0;
+		    n_state = FLUSH_PG;
+		 end
+	       else if(r_dma_inval_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
+		 begin
+		    /* DMA-completion invalidate of one line.  Lower priority than the
+		     * CPU's CACHE op above, and only when the mem pipe is quiet -- the
+		     * same guard the CPU path uses. */
+		    t_cache_idx = dma_inval_addr[IDX_STOP-1:IDX_START];
+		    n_dma_inval_req = 1'b0;
+		    n_cl_is_dma = 1'b1;
 		    n_state = FLUSH_CL;
 		 end
 	    end // case: ACTIVE
@@ -3047,15 +3242,17 @@ endfunction
 	    end
 	  FLUSH_CL:
 	    begin
-	       if(flush_cl_inval)
+	       if(w_cl_inval)
 		 begin
 		    /* CACHE D-Hit-Invalidate (DMA-in): drop the line WITHOUT writeback,
 		     * but only on a real hit (tag match) so we never discard a
 		     * different dirty line that happens to alias this index. Then tell
-		     * L2 to drop its copy too (caches are non-inclusive). */
-		    if(r_valid_out && (r_tag_out == flush_cl_addr[`PA_WIDTH-1:TAG_LSB]))
+		     * L2 to drop its copy too (caches are non-inclusive).
+		     * w_cl_* is the arbitrated address/op: CPU CACHE-op or the
+		     * DMA-completion invalidate (see r_cl_is_dma). */
+		    if(r_valid_out && (r_tag_out == w_cl_addr[`PA_WIDTH-1:TAG_LSB]))
 		      t_mark_invalid = 1'b1;
-		    n_mem_req_addr = {flush_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = {w_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
 		    n_mem_req_opcode = MEM_INVL;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_mask = 16'hffff;
@@ -3105,6 +3302,16 @@ endfunction
 		  begin
 		     n_inhibit_write = 1'b0;
 		     n_chop_wait = 1'b0;
+		     if(r_cl_is_dma)
+		       begin
+			  /* DMA-completion invalidate: exactly ONE 16B line -- the
+			   * SoC-side walker steps the range itself, so do NOT run the
+			   * 32B-stride second beat the Index CACHE ops need. */
+			  n_dma_inval_ack = 1'b1;
+			  n_cl_is_dma = 1'b0;
+			  n_state = ACTIVE;
+		       end
+		     else
 		     /* mem-pipe CACHE hit-ops were early-acked; do NOT pulse the
 		      * core's funnel flush handshake (it latches and would falsely
 		      * satisfy a later CACHE_FLUSH wait). */
@@ -3190,6 +3397,56 @@ endfunction
 		    n_mem_req_valid = 1'b1;
 		    n_chop_wait = 1'b1;
 		    n_state = FLUSH_CL_WAIT;
+		 end
+	    end
+	  FLUSH_PG:
+	    begin
+	       t_cache_idx = r_cache_idx;
+	       n_mem_req_addr = w_pg_line;
+	       n_mem_req_cacheable = 1'b1;
+	       n_mem_req_mask = 16'hffff;
+	       n_mem_req_valid = 1'b1;
+	       n_state = FLUSH_PG_WAIT;
+	       if(w_pg_hit)
+		 begin
+		    t_mark_invalid = 1'b1;
+		 end
+	       if(!flush_cl_inval & w_pg_hit & r_dirty_out)
+		 begin
+		    n_mem_req_opcode = MEM_WB;
+		    n_mem_req_store_data = t_data;
+		    n_inhibit_write = 1'b1;
+		 end
+	       else
+		 begin
+		    n_mem_req_opcode = flush_cl_inval ? MEM_PGDROP : MEM_INVL;
+		 end
+	       if(flush_cl_inval & w_pg_hit & r_dirty_out & (r_pg_dirty_cnt != 16'hffff))
+		 begin
+		    n_pg_dirty_cnt = r_pg_dirty_cnt + 16'd1;
+		 end
+	    end
+	  FLUSH_PG_WAIT:
+	    begin
+	       t_cache_idx = r_cache_idx;
+	       if(mem_rsp_valid)
+		 begin
+		    n_inhibit_write = 1'b0;
+		    if(flush_cl_inval & mem_rsp_load_data[0] & (n_pg_dirty_cnt != 16'hffff))
+		      begin
+			 n_pg_dirty_cnt = n_pg_dirty_cnt + 16'd1;
+		      end
+		    if(r_pg_off == {LG_PG_LINES{1'b1}})
+		      begin
+			 n_flush_complete = 1'b1;
+			 n_state = ACTIVE;
+		      end
+		    else
+		      begin
+			 n_pg_off = r_pg_off + 'd1;
+			 t_cache_idx = w_pg_line_nxt[IDX_STOP-1:IDX_START];
+			 n_state = FLUSH_PG;
+		      end
 		 end
 	    end
 	  FLUSH_CACHE:

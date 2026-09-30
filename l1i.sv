@@ -40,6 +40,8 @@ module l1i(clk,
 	   restart_pc,
 	   restart_src_pc,
 	   restart_src_is_indirect,
+	   dbg_arch_hist,
+	   dbg_spec_hist,
 	   restart_valid,
 	   restart_ack,
 	   retire_valid,
@@ -97,6 +99,15 @@ module l1i(clk,
    input logic [`M_WIDTH-1:0] restart_pc;
    input logic [`M_WIDTH-1:0] restart_src_pc;
    input logic 	      restart_src_is_indirect;
+   /* Global history, read back over the existing trace-index debug port.
+    * ARCH is the RETIRED history (updated at branch retirement); SPEC is the
+    * speculative copy the PHT is actually indexed with.  Dumping BOTH lets a
+    * capture test whether speculative history was correctly restored after a
+    * squash (n_spec_gbl_hist = n_arch_gbl_hist) -- if it was not, later
+    * predictions index the wrong PHT entry, which no per-instruction pht_idx
+    * can reveal. */
+   output logic [63:0]        dbg_arch_hist;
+   output logic [63:0]        dbg_spec_hist;
    input logic 	      restart_valid;
    output logic       restart_ack;
    //return stack signals
@@ -233,6 +244,8 @@ module l1i(clk,
    
    logic [`GBL_HIST_LEN-1:0] 	     n_arch_gbl_hist, r_arch_gbl_hist;
    logic [`GBL_HIST_LEN-1:0] 	     n_spec_gbl_hist, r_spec_gbl_hist;
+   assign dbg_arch_hist = {{(64-`GBL_HIST_LEN){1'b0}}, r_arch_gbl_hist};
+   assign dbg_spec_hist = {{(64-`GBL_HIST_LEN){1'b0}}, r_spec_gbl_hist};
 
    logic [`GBL_HIST_LEN-1:0] 	     r_last_spec_gbl_hist;
    
@@ -502,8 +515,9 @@ endfunction
 
    always_ff@(posedge clk)
      begin
-	r_btb_pc <= reset ? 'd0 : 
-		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : 'd0;
+	/* cold/invalid entry -> POISON, not zero: see BTB_POISON_PC in machine.vh */
+	r_btb_pc <= reset ? `BTB_POISON_PC : 
+		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : `BTB_POISON_PC;
 	
      end
 
@@ -1176,10 +1190,10 @@ endfunction
 	t_insn3.pred_target = t_gb_take2 ? n_pc : 'd0;
 	t_insn3.pred = t_gb_take2;
 	t_insn3.pht_idx = r_pht_idx;
-	/* predecode, like slots 1/2: with predicted-taken fetch groups a branch can
+	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
 	 * sit in slot 2, and a hardcoded 0 left ITS delay slot looking like an
-	 * ordinary insn to decode's delay-slot tracker -> irq injection could
-	 * replace a delay slot (IRIX swtch lost `lw s2` -> KERNEL FAULT). */
+	 * ordinary insn to decode's delay-slot tracker -> irq/xflush injection
+	 * could replace a delay slot (IRIX swtch lost `lw s2` -> KERNEL FAULT). */
 	t_insn3.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd2) != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn3.fetch_cycle = r_cycle;
@@ -1193,10 +1207,10 @@ endfunction
 	t_insn4.pred_target = 'd0;
 	t_insn4.pred = 1'b0;
 	t_insn4.pht_idx = r_pht_idx;
-	/* predecode, like slots 1/2: with predicted-taken fetch groups a branch can
+	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
 	 * sit in slot 3, and a hardcoded 0 left ITS delay slot looking like an
-	 * ordinary insn to decode's delay-slot tracker -> irq injection could
-	 * replace a delay slot (IRIX swtch lost `lw s2` -> KERNEL FAULT). */
+	 * ordinary insn to decode's delay-slot tracker -> irq/xflush injection
+	 * could replace a delay slot (IRIX swtch lost `lw s2` -> KERNEL FAULT). */
 	t_insn4.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd3) != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn4.fetch_cycle = r_cycle;

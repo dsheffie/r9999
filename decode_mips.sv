@@ -12,6 +12,8 @@ module decode_mips(
 		   cu1,
 		   fr,
 		   irq,
+		   xflush,
+		   xflush_op,
 		   tlb_miss,
 		   tlb_invalid,
 		   misaligned,
@@ -34,6 +36,14 @@ module decode_mips(
    input logic			cu1;   /* Status.CU1 (coprocessor-1 / FPU enable) */
    input logic			fr;    /* Status.FR (FP register mode: 1=32x64b, 0=16 even/odd pairs) */
    input logic			irq;
+   /* an ARM-requested whole-cache flush is pending: replace this (non-delay-slot)
+    * instruction with a serializing whole-L1D CACHE op, exactly as an IRQ
+    * replaces it; the core restarts at this pc once the flush completes. */
+   input logic			xflush;
+   /* the injected flush's op (XFLUSH / XPG_WBINV / XPG_INV).  The page it names is
+    * NOT carried in the uop: only one ext flush is pending at a time, so the core
+    * reads it from its latched request at the ROB head. */
+   input opcode_t		xflush_op;
    input logic			tlb_miss;
    input logic			tlb_invalid;
    input logic			misaligned;
@@ -91,6 +101,9 @@ module decode_mips(
    always_comb
      begin
 	uop.op = II;
+`ifdef ENABLE_EXC_RING
+	uop.insn = insn;   /* debug: ferry the raw fetched word to the ROB alloc (exception ring) */
+`endif
 	uop.srcA = 'd0;
 	uop.srcB = 'd0;
 	uop.dst = 'd0;
@@ -139,6 +152,14 @@ module decode_mips(
 	if(irq)
 	  begin
 	     uop.op = IRQ;
+	  end
+	else if(xflush)
+	  begin
+	     uop.op = xflush_op;
+	     uop.is_int = 1'b1;
+	     uop.serializing_op = 1'b1;
+	     uop.srcA = 'd0;
+	     uop.srcA_valid = 1'b1;
 	  end
 	else if(misaligned)
 	  begin
@@ -1409,7 +1430,7 @@ module decode_mips(
 		    else if((insn[25:21]==5'd6) && (insn[10:0] == 11'd0))
 		      begin /* ctc1: FCR[fs] <- GPR[rt] (only FCR31 is writable) */
 			 uop.op = CTC1;
-			 uop.dst = fs;         /* carry the FCR number (NOT a PRF write) */
+			 uop.dst = fs;         /* the FCR number, for the FCSR-field write */
 			 uop.srcA = rt;
 			 uop.srcA_valid = 1'b1;
 			 uop.fcr_dst_valid = 1'b1;  /* CTC1 writes all 8 CCs: full write */

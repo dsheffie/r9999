@@ -278,7 +278,13 @@ typedef enum logic [7:0]
     * "trap if negative": the overflow rule needs the result sign to differ from
     * the minuend's, and with a $0 minuend only 0x80000000 does that.  So the
     * whole overflow condition collapses to a single equality. */
-   NEGT
+   NEGT,
+   /* ARM-requested cache maintenance, injected by decode like an IRQ (see
+    * core.sv ext_flush_req); the page's physical address rides in {jmp_imm, imm}.
+    * Not architectural instructions: they never count as retired. */
+   XFLUSH,       /* whole L1D then L2: write back + invalidate */
+   XPG_WBINV,    /* one page, before a transfer: write back + invalidate (L1D, then L2) */
+   XPG_INV       /* one page, after a deposit: drop, no write back (L2, then L1D) */
    } opcode_t;
 
 function logic is_mult(opcode_t op);
@@ -297,6 +303,21 @@ function logic is_mult(opcode_t op);
    endcase
    return x;
 endfunction // is_mult
+
+function logic is_xflush(opcode_t op);
+   logic     x;
+   case(op)
+     XFLUSH:
+       x = 1'b1;
+     XPG_WBINV:
+       x = 1'b1;
+     XPG_INV:
+       x = 1'b1;
+     default:
+       x = 1'b0;
+   endcase
+   return x;
+endfunction // is_xflush
 
 function logic is_div(opcode_t op);
    logic     x;
@@ -447,7 +468,13 @@ typedef struct packed {
 `endif
 `ifdef ENABLE_CYCLE_ACCOUNTING
    logic [63:0] 	    fetch_cycle;
-`endif   
+`endif
+`ifdef ENABLE_EXC_RING
+   /* raw fetched instruction word, carried decode->alloc so the exception ring can
+    * record what the core ACTUALLY decoded -- diff vs DRAM[pc] catches I-side fetch
+    * corruption (fetched != memory). Debug-only; dropped when ENABLE_EXC_RING is off. */
+   logic [31:0] 	    insn;
+`endif
 } uop_t;
 
 

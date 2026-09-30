@@ -1,11 +1,24 @@
 `ifndef __machine_hdr__
 `define __machine_hdr__
 
+/* Retire-ring depth, log2 of TOTAL records (split across two banks).  MUST be
+ * outside `ifdef VERILATOR -- core.sv uses it in the synthesized ring, so a
+ * sim-only definition builds under Verilator and then fails sv2v with
+ * "Undefined macro: LG_RTRACE_ENTRIES".
+ * 8=256 (original), 14=16K (~57 BRAM36), 15=32K (~114 BRAM36, 93% of the part). */
+`ifndef LG_RTRACE_ENTRIES
+ /* 2048 entries.  Measured on three real captures: the whole evidence window (the
+  * jalr that set ra, the epilogue reload, the faulting jr) spans ~20 retires, i.e.
+  * 0.09% of the old 32K ring -- which cost ~125 BRAM tiles and forced 98.6% BRAM
+  * occupancy.  Shallow-and-wide beats deep-and-narrow here. */
+ `define LG_RTRACE_ENTRIES 11
+`endif
+
 // Debug trace infrastructure (ROB cycle stamps + HW trace buffer): sim-only.
 // Synth/FPGA builds omit it -- the 256x384-bit trace RAM dominates build time.
 `ifdef VERILATOR
  `define ENABLE_CYCLE_ACCOUNTING 1
- `define ENABLE_TRACE_BUFFER 1
+`define ENABLE_TRACE_BUFFER 1
 `endif
 
 // On-silicon HW breakpoint/value-watchpoint in core.sv (freeze the pipe at an offending
@@ -170,7 +183,7 @@
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
 `else
- `define LG_L1D_NUM_SETS 8
+ `define LG_L1D_NUM_SETS 10   // 1024 sets x 16B = 16KB
 `endif
 `endif
 
@@ -179,7 +192,7 @@
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
 `else
- `define LG_L1I_NUM_SETS 8
+ `define LG_L1I_NUM_SETS 10   // 1024 sets x 16B = 16KB (4KB direct-mapped thrashed dhry_henny code -> L1I conflict misses)
 `endif
 `endif
 
@@ -205,15 +218,7 @@
  `elsif BIG_SIM_L2
   `define LG_L2_NUM_SETS 16     /* 65536 lines x 16B = 1MB (sim-only; too big for FPGA BRAM) */
  `else
-  `define LG_L2_NUM_SETS 10     /* 1024 lines x 16B = 16KB (default) */
-  /* Back to 16KB from the 128KB of 2fb24a9.  128KB does shake out more L2 bugs, as
-   * that commit intended, but it also RETAINS a speculatively-filled line long
-   * enough to act as the stale reservoir for the R10000-class non-coherent-DMA bug
-   * -- the same reservoir ENABLE_L2_TINY / ENABLE_L2_NOCACHE above exist to kill.
-   * With both of those commented out and no HW snoop into the L1D
-   * (ENABLE_L2_INCLUSION is not defined by any build), a 128KB L2 against a 4KB L1D
-   * leaves IRIX dying in reconfigure with `xfs_iflush: Bad inode <n> magic number`.
-   * 16KB is the geometry 09d1ccf recorded as "configuration does not appear fail". */
+  `define LG_L2_NUM_SETS 13      /* 8192 lines x 16B = 128KB (restored for debug bit; deep trace lives in DRAM, not BRAM) */
  `endif
 `endif
 `endif
@@ -272,6 +277,23 @@
  *   TLB_SHADOW_RAM_STYLE -> exec's CP0 maintenance shadow TLB (r_shadow_tlb)
  *   RF_RAM_STYLE         -> the rf4r2w register-file banks (int/FP/hilo PRFs) */
 `define TLB_SHADOW_RAM_STYLE (* ram_style = "block" *)
+/* rw_addr_collision: force Vivado to insert explicit read-during-write BYPASS
+ * logic on the register-file banks.  Two reasons:
+ *   1. ram_style="block" is NOT being honoured -- 4 read + 2 write ports exceed
+ *      what a BRAM can do, so synthesis reports
+ *        [Synth 8-6849] Infeasible attribute ram_style = "block" ... using LUTRAM
+ *      and the banks are built from ~1678 LUTs of REPLICATED distributed RAM.
+ *   2. The 2026-09-02 captures put the fault in a same-cycle read/write window on
+ *      exactly these arrays, and today nothing but the operand mux covers that
+ *      collision -- there is no RAM-level bypass.  AMD documents a bug class where
+ *      synthesized hardware diverges from RTL simulation on RAM address collisions,
+ *      with rw_addr_collision as the documented remedy (UG901 RAM_STYLE; see also
+ *      beyond-circuits.com 2019/10 "RAM address conflicts and a Vivado synthesis
+ *      bug").  That matches the shape of this bug: reproduces on silicon, will not
+ *      reproduce in 1.24e9 Verilator cycles.
+ * If the fault survives this, the whole RAM-collision class is eliminated rather
+ * than merely suspected. */
+
 `define RF_RAM_STYLE         (* ram_style = "block" *)
 
 /* CP0 PRId (processor identification) values. imp field is bits [15:8];
@@ -290,6 +312,23 @@
 `define PRID_VALUE  `PRID_R4400
 
 `define LG_BTB_SZ 7
+
+/* Poison for a COLD/INVALID branch-target prediction.  MUST NOT be zero.
+ *
+ * The tagless BTB returns its "no entry" value straight into n_pc with no
+ * validity check at the use site, so every cold indirect call speculatively
+ * fetches it.  With that value = 0, a wild jump to 0 is AMBIGUOUS: it looks
+ * identical to a genuine NULL function pointer in the program (which is what
+ * the 2026-08-24 __split_vma oops looked like).  A distinct poison separates
+ * the two in a crash dump: land here => the PREDICTOR produced it; land on 0
+ * => it was real data.
+ *
+ * Kept in USER space and 4-byte aligned ON PURPOSE.  A kernel-space poison
+ * would turn the routine cold-indirect speculative fetch from a TLB miss into
+ * a privilege AdEL, changing the fault class in exactly the squash window
+ * under investigation; an unaligned one may not fault cleanly at all (see the
+ * Sail conformance gap on address-errors for out-of-range fetch). */
+`define BTB_POISON_PC 64'h00000000deadcafc
 
 typedef enum logic [4:0] {
    MEM_LB   = 5'd0,
@@ -324,9 +363,12 @@ typedef enum logic [4:0] {
    MEM_CHWB    = 5'd27, /* CACHE D Hit-Writeback: mem-pipe (dtlb-translated) per-line op */
    MEM_CHWBINV = 5'd28, /* CACHE D Hit-Writeback-Invalidate (mem-pipe) */
    MEM_CHINV   = 5'd29, /* CACHE D Hit-Invalidate, no WB (DMA-in drop; mem-pipe) */
-   MEM_SNOOP_INVL = 5'd30 /* DMA-coherence snoop: drop the L2 line, DISCARD even if dirty
+   MEM_SNOOP_INVL = 5'd30, /* DMA-coherence snoop: drop the L2 line, DISCARD even if dirty
                            * (a stale prior-owner dirty line must not clobber DMA data), and
                            * emit NO L1 response (the request came from the snoop FIFO, not an L1) */
+   MEM_PGDROP = 5'd31  /* injected page drop (XPG_INV, after a DMA deposit): drop the L2 line
+                        * WITHOUT writeback and ack the L1D; rsp_data[0] = the line was dirty
+                        * (never expected: the pre-transfer XPG_WBINV cleaned the page) */
 } mem_op_t;
 
 /* MIPS R10000 exception ordering 

@@ -86,6 +86,24 @@ module rf4r2w(clk, reset,
 	if(wen1)
 	  r_ram_mem[wrptr1[LG_DEPTH-2:0]] <= wr1;
 `ifdef VERILATOR
+	/* BANK INVARIANT.  Writes choose the bank by PORT (port0->alu, port1->mem) and
+	 * ignore the pointer MSB; reads choose it by the pointer MSB.  So an ALU result
+	 * whose pdst has MSB=1, or a load result whose pdst has MSB=0, is written into
+	 * one bank and read from the other -- the reader silently gets a STALE value.
+	 * The allocator is supposed to guarantee this (core.sv steers the free list by
+	 * t_uop.is_mem), but nothing checks that the steering and the completion port
+	 * agree.  That disagreement would look exactly like the captured jr bug: correct
+	 * value in the ROB, correct completion order, stale operand at the consumer. */
+	if(wen0 & (wrptr0 != 'd0) & (wrptr0[LG_DEPTH-1] != 1'b0))
+	  begin
+	     $display("[RF-BANK] ALU-port write to MEM-bank pdst: wrptr0=%d", wrptr0);
+	  end
+	if(wen1 & (wrptr1[LG_DEPTH-1] != 1'b1))
+	  begin
+	     $display("[RF-BANK] MEM-port write to ALU-bank pdst: wrptr1=%d", wrptr1);
+	  end
+`endif
+`ifdef VERILATOR
 	  end // else: !if(reset)
 `endif
      end
