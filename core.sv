@@ -105,9 +105,6 @@ module core(clk,
 	    core_mem_req,
 	    core_mem_req_valid,
 
-	    core_store_data_valid,
-	    core_store_data,
-	    core_store_data_ack,
 	    
 	    core_mem_rsp,
 	    core_mem_rsp_valid,
@@ -118,7 +115,6 @@ module core(clk,
 	    lsu_sb,
 	    restart_color,
 	    mem_color_busy,
-	    mq_graduated_pending,
 	    
 	    retire_reg_ptr,
 	    retire_reg_data,
@@ -264,9 +260,6 @@ module core(clk,
    output logic  core_mem_req_valid;
    output 	 mem_req_t core_mem_req;
 
-   output logic  core_store_data_valid;
-   output 	 mem_data_t core_store_data;
-   input logic 	 core_store_data_ack;
   
    input 	 mem_rsp_t core_mem_rsp;
    input logic 	 core_mem_rsp_valid;
@@ -277,7 +270,6 @@ module core(clk,
    output 	 lsu_sb_t lsu_sb;          /* LSU -> l1d store-buffer view */
    output logic	 restart_color;            /* current restart color (to the l1d) */
    input logic [1:0] mem_color_busy;       /* l1d: a memory op of color c is still in flight */
-   input logic	 mq_graduated_pending;     /* l1d: a retired old-path store has not written yet */
 
    output logic [4:0] 			  retire_reg_ptr;
    output logic [`M_WIDTH-1:0]		  retire_reg_data;
@@ -569,8 +561,7 @@ module core(clk,
    wire [1:0] 				  w_exec_color_pending;
    /* the color the next restart flips TO must have nothing left in flight (1-bit
     * color: a straggler from two restarts ago would otherwise alias as live) */
-   wire 				  w_next_color_busy = mem_color_busy[!restart_color] | w_exec_color_pending[!restart_color] |
-							      mq_graduated_pending;
+   wire 				  w_next_color_busy = mem_color_busy[!restart_color] | w_exec_color_pending[!restart_color];
 
    logic 				  t_core_store_data_ptr_valid;
    logic [`LG_ROB_ENTRIES-1:0] 		  t_core_store_data_ptr;
@@ -811,8 +802,8 @@ module core(clk,
 		 (t_retire_two & (t_rob_next_head.pc[31:0] == bp_pc)));
 
    /* STORE value+address WATCHPOINT (rob_ptr-correlated).  The store ADDRESS (VA) rides
-    * t_mem_req (with rob_ptr); the store DATA arrives later on core_store_data (same
-    * rob_ptr, decoupled through the mem-data queue).  On a store whose VA==bp_wp_addr,
+    * t_mem_req (with rob_ptr); the store DATA arrives later from the LSU's
+    * store-data capture (t_core_store_data_ptr = its rob_ptr, lsu_sb.data).  On a store whose VA==bp_wp_addr,
     * remember its rob_ptr; when that rob_ptr's data arrives and equals bp_wp_val, FREEZE
     * -- i.e. freeze on the store that writes the CORRUPT value to the watched slot,
     * whichever instruction did it. */
@@ -823,10 +814,10 @@ module core(clk,
    assign dbg_wp_data = r_wp_data;
    wire		w_wp_addr_match = bp_enable & t_mem_req_valid & t_mem_req.is_store &
 		(t_mem_req.addr[31:0] == bp_wp_addr);
-   wire		w_wp_data_here  = r_wp_pending & core_store_data_valid &
-		(core_store_data.rob_ptr == r_wp_robptr);
+   wire		w_wp_data_here  = r_wp_pending & t_core_store_data_ptr_valid &
+		(t_core_store_data_ptr == r_wp_robptr);
    /* bp_wp_val == 0xffffffff is a WILDCARD: freeze on ANY store to bp_wp_addr. */
-   wire		w_wp_match      = w_wp_data_here & ((bp_wp_val == 32'hffffffff) | (core_store_data.data[31:0] == bp_wp_val));
+   wire		w_wp_match      = w_wp_data_here & ((bp_wp_val == 32'hffffffff) | (lsu_sb.data[31:0] == bp_wp_val));
 
    /* resettable fault-trap: while armed (bp_enable), the FIRST fatal USERSPACE arch-fault
     * (AdEL/AdES/IBE/DBE/RI, EPC in useg) latches {epc,cause,badvaddr} + sets r_fault_hit,
@@ -876,7 +867,7 @@ module core(clk,
 	if(reset)
 	  r_wp_data <= 32'd0;
 	else if(w_wp_data_here)
-	  r_wp_data <= core_store_data.data[31:0];   /* exact data of the store to bp_wp_addr */
+	  r_wp_data <= lsu_sb.data[31:0];   /* exact data of the store to bp_wp_addr */
 	/* single pending slot: remember the rob_ptr of a store to bp_wp_addr, cleared when
 	 * its data arrives (or on fault_clear).  A newer match overwrites -- fine, since we
 	 * only care about the store carrying the corrupt value bp_wp_val. */
@@ -3741,7 +3732,6 @@ module core(clk,
 	   .clear_cnt(r_clear_cnt),
 `endif
 	   .ds_done(r_ds_done),
-	   .mem_dq_clr(t_clr_rob),
 	   .restart_complete(t_restart_complete),
 	   .head_of_rob_ptr_valid(head_of_rob_ptr_valid),
 	   .head_of_rob_ptr(head_of_rob_ptr),
@@ -3766,9 +3756,6 @@ module core(clk,
 	   .mem_req(t_mem_req),
 	   .mem_req_valid(t_mem_req_valid),
 	   .mem_req_ack(core_mem_req_ack),
-	   .core_store_data_valid(core_store_data_valid),
-	   .core_store_data(core_store_data),
-	   .core_store_data_ack(core_store_data_ack),
 	   .core_store_data_ptr_valid(t_core_store_data_ptr_valid),
 	   .core_store_data_ptr(t_core_store_data_ptr),
 	   .mem_rsp_dst_ptr(core_mem_rsp.dst_ptr),

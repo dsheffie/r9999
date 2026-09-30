@@ -210,6 +210,8 @@ typedef struct packed {
     * request/response of the other color belongs to a flushed era and is dropped
     * (commits are never dead and are exempt) */
    logic 		       restart_id;
+   /* SC/SCD commit: the reservation held at its address pass (write only if set) */
+   logic 		       sc_ok;
    /* load: plain stores older than it at issue, with their slot epochs */
    logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] lsu_older_st;
    logic [(1<<`LG_MEM_SCHED_ENTRIES)-1:0] lsu_older_ep;

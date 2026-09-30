@@ -326,7 +326,6 @@ module core_l1d_l1i(clk,
    
    mem_req_t core_mem_req;
    mem_rsp_t core_mem_rsp;
-   mem_data_t core_store_data;
    
    logic 				  core_mem_req_valid;
    logic 				  core_mem_req_ack;
@@ -337,9 +336,6 @@ module core_l1d_l1i(clk,
    lsu_sb_t lsu_sb;
    logic 				  restart_color;
    logic [1:0] 				  mem_color_busy;
-   logic 				  mq_graduated_pending;
-   logic 				  core_store_data_valid;
-   logic 				  core_store_data_ack;
    
    
    typedef enum logic [2:0] {
@@ -755,9 +751,6 @@ module core_l1d_l1i(clk,
 	       .core_mem_req(core_mem_req),
 	       .core_mem_req_ack(core_mem_req_ack),
 
-	       .core_store_data_valid(core_store_data_valid),
-	       .core_store_data(core_store_data),
-	       .core_store_data_ack(core_store_data_ack),
 	       
 	       .core_mem_rsp_valid(core_mem_rsp_valid),
 	       .core_mem_blk_valid(core_mem_blk_valid),
@@ -767,7 +760,6 @@ module core_l1d_l1i(clk,
 	       .lsu_sb(lsu_sb),
 	       .restart_color(restart_color),
 	       .mem_color_busy(mem_color_busy),
-	       .mq_graduated_pending(mq_graduated_pending),
 	       .core_mem_rsp(core_mem_rsp),
 
 	       .mem_req_ack(l1d_mem_req_ack),
@@ -902,9 +894,6 @@ module core_l1d_l1i(clk,
 	     .core_mem_req_valid(core_mem_req_valid),
 	     .core_mem_req(core_mem_req),
 	     
-	     .core_store_data_valid(core_store_data_valid),
-	     .core_store_data(core_store_data),
-	     .core_store_data_ack(core_store_data_ack),
 	     
 	     .core_mem_rsp_valid(core_mem_rsp_valid),
 	     .core_mem_blk_valid(core_mem_blk_valid),
@@ -914,7 +903,6 @@ module core_l1d_l1i(clk,
 	     .lsu_sb(lsu_sb),
 	     .restart_color(restart_color),
 	     .mem_color_busy(mem_color_busy),
-	     .mq_graduated_pending(mq_graduated_pending),
 	     .core_mem_rsp(core_mem_rsp),
 	     
 	     .retire_reg_ptr(retire_reg_ptr),

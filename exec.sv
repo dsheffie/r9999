@@ -70,7 +70,6 @@ module exec(clk,
 `endif
 	    divide_ready,
 	    ds_done,
-	    mem_dq_clr,
 	    restart_complete,
 	    head_of_rob_ptr_valid,
 	    head_of_rob_ptr,
@@ -93,9 +92,6 @@ module exec(clk,
 	    mem_req,
 	    mem_req_valid, 
 	    mem_req_ack,
-	    core_store_data_valid,
-	    core_store_data,
-	    core_store_data_ack,
 	    //tell rob store data has been read
 	    core_store_data_ptr,
 	    core_store_data_ptr_valid,
@@ -189,7 +185,6 @@ module exec(clk,
 `endif
    output logic       divide_ready;
    input logic ds_done;
-   input logic mem_dq_clr;
    input logic restart_complete;
    input logic head_of_rob_ptr_valid;
    input logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
@@ -221,9 +216,6 @@ module exec(clk,
    output 	logic mem_req_valid;
    input logic 	      mem_req_ack;
 
-   output logic 	      core_store_data_valid;
-   output 		      mem_data_t core_store_data;
-   input logic 		      core_store_data_ack;
    
    output logic [`LG_ROB_ENTRIES-1:0] core_store_data_ptr;
    output logic 		      core_store_data_ptr_valid;
@@ -334,13 +326,7 @@ module exec(clk,
    logic 		    mem_q_full,mem_q_next_full, mem_q_empty;
 
 
-   mem_data_t r_mdq[N_MQ_ENTRIES-1:0];
-   mem_data_t t_mdq_tail, t_mdq_head;
    
-   logic [`LG_MQ_ENTRIES:0] r_mdq_head_ptr, n_mdq_head_ptr;
-   logic [`LG_MQ_ENTRIES:0] r_mdq_tail_ptr, n_mdq_tail_ptr;
-   logic [`LG_MQ_ENTRIES:0] r_mdq_next_tail_ptr, n_mdq_next_tail_ptr;
-   logic 		    mem_mdq_full,mem_mdq_next_full, mem_mdq_empty;
    
 
    logic [3:0]		    r_rd_pc_idx, n_rd_pc_idx;
@@ -350,8 +336,8 @@ module exec(clk,
    
    
 
-   logic 	t_pop_uq,t_pop_mem_uq,t_pop_mem_dq;
-   logic 	r_mem_ready, r_dq_ready;
+   logic 	t_pop_uq,t_pop_mem_uq;
+   logic 	r_mem_ready;
    
    
    localparam E_BITS = `M_WIDTH-16;
@@ -378,19 +364,19 @@ module exec(clk,
     * paired with the NEXT cycle's result (silicon: a consumer read a load value its
     * producer never wrote).  Capturing the data with its flag makes them agree. */
    logic [`M_WIDTH-1:0]     r_fwd_srcA_data, r_fwd_srcB_data;
-   logic [`M_WIDTH-1:0]     r_fwd_mem_srcA_data, r_fwd_mem_srcB_data;
+   logic [`M_WIDTH-1:0]     r_fwd_mem_srcA_data;
    logic 	r_fwd_int_srcA, r_fwd_int_srcB;
    logic 	r_fwd_mem_srcA, r_fwd_mem_srcB;
 
-   logic t_fwd_int_mem_srcA,t_fwd_int_mem_srcB,t_fwd_mem_mem_srcA,t_fwd_mem_mem_srcB;
-   logic r_fwd_int_mem_srcA,r_fwd_int_mem_srcB,r_fwd_mem_mem_srcA,r_fwd_mem_mem_srcB;
+   logic t_fwd_int_mem_srcA,t_fwd_mem_mem_srcA;
+   logic r_fwd_int_mem_srcA,r_fwd_mem_mem_srcA;
    
    logic [(`M_WIDTH*2)-1:0] r_fwd_hilo_data;
    logic [(`M_WIDTH*2)-1:0] r_src_hilo;
    logic 	r_fwd_hilo_int, r_fwd_hilo_mul, r_fwd_hilo_div;
       
    logic [`M_WIDTH-1:0] t_srcA, t_srcB;
-   logic [`M_WIDTH-1:0] t_mem_srcA, t_mem_srcB;
+   logic [`M_WIDTH-1:0] t_mem_srcA;
    
    
    logic [(`M_WIDTH*2)-1:0] t_src_hilo;
@@ -468,6 +454,8 @@ module exec(clk,
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ld, n_mem_sched_ld;          /* simple load */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_st, n_mem_sched_st;          /* plain store */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ser, n_mem_sched_ser;        /* CACHE hit op: serializing */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_old1, n_mem_sched_old1;      /* SC/SCD: a held store that issues only when oldest */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_mg, n_mem_sched_mg;          /* LWL/LWR/LDL/LDR: needs the old rt (captured) before issue */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_issued, n_mem_sched_issued;  /* address pass issued */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_sd_sel, n_mem_sched_sd_sel;  /* store data read issued */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_sd_ok, n_mem_sched_sd_ok;    /* store data in the l1d */
@@ -491,7 +479,7 @@ module exec(clk,
    logic [`LG_MEM_SCHED_ENTRIES:0] t_mem_cmt_ptr, t_mem_sd_ptr;
    uop_t t_picked_mem_uop;
    logic 	t_mem_issue, t_mem_issue_addr, t_mem_issue_cmt;
-   logic 	t_mem_uq_generic_load, t_mem_uq_plain_store, t_mem_uq_serial;
+   logic 	t_mem_uq_generic_load, t_mem_uq_plain_store, t_mem_uq_serial, t_mem_uq_old1, t_mem_uq_merge;
    /* the issued op, one stage on (AGU) */
    logic [`LG_MEM_SCHED_ENTRIES-1:0] r_mem_uq_lsu_idx;
    logic 	r_mem_uq_lsu_hold, r_mem_uq_commit, r_mem_uq_color;
@@ -503,25 +491,9 @@ module exec(clk,
    logic [`LG_MEM_SCHED_ENTRIES-1:0] r_sd_idx;
    logic [`LG_ROB_ENTRIES-1:0] r_sd_rob;
 
-   /* mem data queue */
-   //uop_t r_mem_uq[N_MEM_UQ_ENTRIES];
-  // uop_t t_mem_uq, mem_uq;
-   dq_t r_mem_dq[N_MEM_DQ_ENTRIES];
-   dq_t t_dq0, t_dq1, t_mem_dq, mem_dq;
-   mem_data_t t_core_store_data;
-   
-   logic 	      t_mem_dq_read, t_mem_dq_empty, t_mem_dq_full,
-		      t_mem_dq_next_full;
-   
-   logic [`LG_MEM_DQ_ENTRIES:0]  r_mem_dq_head_ptr, n_mem_dq_head_ptr;
-   logic [`LG_MEM_DQ_ENTRIES:0]  r_mem_dq_tail_ptr, n_mem_dq_tail_ptr;
-   logic [`LG_MEM_DQ_ENTRIES:0] r_mem_dq_next_head_ptr, n_mem_dq_next_head_ptr;
-   logic [`LG_MEM_DQ_ENTRIES:0] r_mem_dq_next_tail_ptr, n_mem_dq_next_tail_ptr;
-
    
    logic             t_push_two_mem,  t_push_two_int;
    logic             t_push_one_mem,  t_push_one_int;
-   logic 	     t_push_two_dq, t_push_one_dq;
    
    logic 			t_flash_clear;
    always_comb
@@ -531,8 +503,8 @@ module exec(clk,
 
    always_comb
      begin
-	uq_full = t_uq_full || t_mem_uq_full || t_mem_dq_full || t_fp_uq_full;
-	uq_next_full = t_uq_next_full || t_mem_uq_next_full || t_mem_dq_next_full || t_fp_uq_next_full;
+	uq_full = t_uq_full || t_mem_uq_full || t_fp_uq_full;
+	uq_next_full = t_uq_next_full || t_mem_uq_next_full || t_fp_uq_next_full;
      end
    
    always_ff@(posedge clk)
@@ -571,33 +543,9 @@ module exec(clk,
 	  end
      end // always_ff@ (posedge clk// )
    
-   always_ff@(posedge clk)
-     begin
-	if(reset  || mem_dq_clr)
-	  begin
-	     r_mem_dq_head_ptr <= 'd0;
-	     r_mem_dq_tail_ptr <= 'd0;
-	     r_mem_dq_next_head_ptr <= 'd1;
-	     r_mem_dq_next_tail_ptr <= 'd1;
-	  end
-	else
-	  begin
-	     r_mem_dq_head_ptr <= n_mem_dq_head_ptr;
-	     r_mem_dq_tail_ptr <= n_mem_dq_tail_ptr;
-	     r_mem_dq_next_head_ptr <= n_mem_dq_next_head_ptr;
-	     r_mem_dq_next_tail_ptr <= n_mem_dq_next_tail_ptr;
-	  end
-     end // always_ff@ (posedge clk// )
    
    
 
-   /* a mem uop carries store data (-> store-data queue) when it has an int srcB
-    * (stores + merge-loads) or is an FP store reading the FP PRF (swc1/sdc1). */
-   /* plain stores capture their data in the LSU, not through the dq */
-   wire w_uop_has_sdata  = uq_uop.is_mem     && (uq_uop.srcB_valid     || (uq_uop.fp_srcB_valid     && uq_uop.is_store)) &&
-			   !is_plain_store(uq_uop.op);
-   wire w_uop2_has_sdata = uq_uop_two.is_mem && (uq_uop_two.srcB_valid || (uq_uop_two.fp_srcB_valid && uq_uop_two.is_store)) &&
-			   !is_plain_store(uq_uop_two.op);
 
    always_comb
      begin
@@ -605,11 +553,6 @@ module exec(clk,
 	n_mem_uq_tail_ptr = r_mem_uq_tail_ptr;
 	n_mem_uq_next_head_ptr = r_mem_uq_next_head_ptr;
 	n_mem_uq_next_tail_ptr = r_mem_uq_next_tail_ptr;
-	
-	n_mem_dq_head_ptr = r_mem_dq_head_ptr;
-	n_mem_dq_tail_ptr = r_mem_dq_tail_ptr;
-	n_mem_dq_next_head_ptr = r_mem_dq_next_head_ptr;
-	n_mem_dq_next_tail_ptr = r_mem_dq_next_tail_ptr;
 
 
 	
@@ -619,36 +562,13 @@ module exec(clk,
 	t_mem_uq_next_full = (r_mem_uq_head_ptr != r_mem_uq_next_tail_ptr) && 
 			     (r_mem_uq_head_ptr[`LG_MEM_UQ_ENTRIES-1:0] == r_mem_uq_next_tail_ptr[`LG_MEM_UQ_ENTRIES-1:0]);
 
-	t_mem_dq_empty = (r_mem_dq_head_ptr == r_mem_dq_tail_ptr);
-	t_mem_dq_full = (r_mem_dq_head_ptr != r_mem_dq_tail_ptr) && (r_mem_dq_head_ptr[`LG_MEM_DQ_ENTRIES-1:0] == r_mem_dq_tail_ptr[`LG_MEM_DQ_ENTRIES-1:0]);
-
-	t_mem_dq_next_full = (r_mem_dq_head_ptr != r_mem_dq_next_tail_ptr) && 
-			     (r_mem_dq_head_ptr[`LG_MEM_DQ_ENTRIES-1:0] == r_mem_dq_next_tail_ptr[`LG_MEM_DQ_ENTRIES-1:0]);
 		
 	t_mem_uq = r_mem_uq[r_mem_uq_head_ptr[`LG_MEM_UQ_ENTRIES-1:0]];
 
-	t_mem_dq = r_mem_dq[r_mem_dq_head_ptr[`LG_MEM_DQ_ENTRIES-1:0]];
 
 	t_push_two_mem = uq_push && uq_push_two && uq_uop.is_mem && uq_uop_two.is_mem;
 	t_push_one_mem = ((uq_push && uq_uop.is_mem) || (uq_push_two && uq_uop_two.is_mem)) && !t_push_two_mem;
 
-	t_push_two_dq = uq_push && uq_push_two &&
-			w_uop_has_sdata && w_uop2_has_sdata;
-
-	t_push_one_dq = (uq_push_two && w_uop2_has_sdata) ||
-			(uq_push && w_uop_has_sdata);
-	
-	
-	if(t_push_two_dq)
-	  begin
-	     n_mem_dq_tail_ptr = r_mem_dq_tail_ptr + 'd2;
-	     n_mem_dq_next_tail_ptr = r_mem_dq_next_tail_ptr + 'd2;	     
-	  end
-	else if(t_push_one_dq)
-	  begin
-	     n_mem_dq_tail_ptr = r_mem_dq_tail_ptr + 'd1;
-	     n_mem_dq_next_tail_ptr = r_mem_dq_next_tail_ptr + 'd1;
-	  end
 	
 	/* these need work */
 	if(t_push_two_mem)
@@ -667,10 +587,6 @@ module exec(clk,
 	  begin
 	     n_mem_uq_head_ptr = r_mem_uq_head_ptr + 'd1;
 	  end
-	if(t_pop_mem_dq)
-	  begin
-	     n_mem_dq_head_ptr = r_mem_dq_head_ptr + 'd1;
-	  end
      end // always_comb
 
    always_ff@(posedge clk)
@@ -684,7 +600,6 @@ module exec(clk,
 	r_mem_uq_color <= r_restart_color;
 	r_mem_uq_older_st <= r_mem_sched_matrix[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] & t_mem_st_live;
 	r_mem_uq_older_ep <= r_mem_sched_ep;
-	mem_dq <= t_mem_dq;
      end
 
    always_ff@(posedge clk)
@@ -774,33 +689,6 @@ module exec(clk,
      end // always_ff@ (posedge clk)
 
 
-   always_comb     
-     begin
-	t_dq0.rob_ptr = uq_uop.rob_ptr;
-	t_dq0.src_ptr = uq_uop.srcB;
-	t_dq0.fp = uq_uop.fp_srcB_valid;
-	t_dq0.fp_hi = uq_uop.jmp_imm[0];   /* FR=0 swc1: high-half store */
-	t_dq1.rob_ptr = uq_uop_two.rob_ptr;
-	t_dq1.src_ptr = uq_uop_two.srcB;
-	t_dq1.fp = uq_uop_two.fp_srcB_valid;
-	t_dq1.fp_hi = uq_uop_two.jmp_imm[0];
-     end
-
-       
-
-   
-   always_ff@(posedge clk)
-     begin
-	if(t_push_two_dq)
-	  begin
-	     r_mem_dq[r_mem_dq_next_tail_ptr[`LG_MEM_DQ_ENTRIES-1:0]] <= t_dq1;
-	     r_mem_dq[r_mem_dq_tail_ptr[`LG_MEM_DQ_ENTRIES-1:0]] <= t_dq0;
-	  end
-	else if(t_push_one_dq)
-	  begin
-	     r_mem_dq[r_mem_dq_tail_ptr[`LG_MEM_DQ_ENTRIES-1:0]] <= w_uop_has_sdata ? t_dq0 : t_dq1;
-	  end	
-     end
    
    
 
@@ -943,9 +831,6 @@ module exec(clk,
 		     r_fwd_mem_mem_srcA ? r_fwd_mem_srcA_data :
 		     w_mem_srcA;
 
-	t_mem_srcB = r_fwd_int_mem_srcB ? r_fwd_mem_srcB_data :
-		     r_fwd_mem_mem_srcB ? r_fwd_mem_srcB_data :
-		     w_mem_srcB;
 	
 	t_src_hilo = r_fwd_hilo_int ? r_fwd_hilo_data :
 		     r_fwd_hilo_mul ? r_fwd_hilo_data :
@@ -1530,33 +1415,6 @@ module exec(clk,
 
 
    
-   always_comb
-     begin
-	n_mdq_head_ptr = r_mdq_head_ptr;
-	n_mdq_tail_ptr = r_mdq_tail_ptr;
-	n_mdq_next_tail_ptr = r_mdq_next_tail_ptr;
-	
-	if(r_dq_ready)
-	  begin
-	     n_mdq_tail_ptr = r_mdq_tail_ptr + 'd1;
-	     n_mdq_next_tail_ptr = r_mdq_next_tail_ptr + 'd1;
-	  end
-	
-	if(core_store_data_ack)
-	  begin
-	     n_mdq_head_ptr = r_mdq_head_ptr + 'd1;
-	  end
-
-	core_store_data = r_mdq[r_mdq_head_ptr[`LG_MQ_ENTRIES-1:0]];
-			       
-	mem_mdq_empty = (r_mdq_head_ptr == r_mdq_tail_ptr);
-	
-	mem_mdq_full = (r_mdq_head_ptr != r_mdq_tail_ptr) &&
-		     (r_mdq_head_ptr[`LG_MQ_ENTRIES-1:0] == r_mdq_tail_ptr[`LG_MQ_ENTRIES-1:0]);
-
-	mem_mdq_next_full = (r_mdq_head_ptr != r_mdq_next_tail_ptr) &&
-			    (r_mdq_head_ptr[`LG_MQ_ENTRIES-1:0] == r_mdq_next_tail_ptr[`LG_MQ_ENTRIES-1:0]);
-     end // always_comb
    
 
    
@@ -1574,7 +1432,6 @@ module exec(clk,
    assign uq_wait = r_uq_wait;
    assign mq_wait = r_mq_wait;
    assign fp_uq_wait = r_fp_uq_wait;
-   assign core_store_data_valid = !mem_mdq_empty;
    
    
    always_ff@(posedge clk)
@@ -1582,10 +1439,6 @@ module exec(clk,
 	r_mq_head_ptr <= reset ? 'd0 : n_mq_head_ptr;
 	r_mq_tail_ptr <= reset ? 'd0 : n_mq_tail_ptr;
 	r_mq_next_tail_ptr <= reset ? 'd1 : n_mq_next_tail_ptr;
-
-	r_mdq_head_ptr <= (reset || mem_dq_clr) ? 'd0 : n_mdq_head_ptr;
-	r_mdq_tail_ptr <= (reset || mem_dq_clr) ? 'd0 : n_mdq_tail_ptr;
-	r_mdq_next_tail_ptr <= (reset || mem_dq_clr) ? 'd1 : n_mdq_next_tail_ptr;	
      end
 
    always_ff@(posedge clk)
@@ -1620,7 +1473,7 @@ module exec(clk,
 	  .rdptr0(fp_uq.srcA),
 	  .rdptr1(fp_uq.srcB),
 	  .rdptr2(t_picked_mem_uop.srcB),
-	  .rdptr3(t_sd_go ? t_sd_src : t_mem_dq.src_ptr),
+	  .rdptr3(t_sd_src),
 	  /* bank0 write port shared by fpu-arith result and single-cycle convert
 	   * (mutually exclusive by r_fp_wb_bitvec) */
 	  .wrptr0(w_fdiv_complete ? w_fdiv_dst_ptr : w_fpu_result_valid ? w_fpu_dst_ptr : r_cvt_dst),
@@ -3050,16 +2903,12 @@ module exec(clk,
     * mfc1 (FP src -> address/mem-pop) gates the address pop on its FP source; FP stores
     * read the FP PRF through the store-data queue instead, so they don't gate here. */
 
-   wire w_dq_ready = t_mem_dq.fp ? !r_fp_prf_inflight[t_mem_dq.src_ptr] :
-		     (!r_prf_inflight[t_mem_dq.src_ptr] | t_fwd_int_mem_srcB | t_fwd_mem_mem_srcB);
 
    always_comb
      begin
 	/* uq -> scheduler whenever a slot is free (rv64core) */
 	t_pop_mem_uq = (!t_mem_uq_empty) && ((&r_mem_sched_valid) == 1'b0) && !t_flash_clear;
 
-	t_pop_mem_dq = (!t_mem_dq_empty) && !mem_dq_clr && w_dq_ready
-		       && (!(mem_mdq_next_full||mem_mdq_full)) ;
      end
 
 
@@ -3087,6 +2936,7 @@ module exec(clk,
 	   always_comb
 	     begin
 		t_mem_entry_rdy[i] = r_mem_sched_valid[i] && !r_mem_sched_issued[i] && (r_mem_sched_blk[i] == BLK_NONE) &&
+				     (!r_mem_sched_mg[i] || r_mem_sched_sd_ok[i]) &&
 				     !(mem_q_next_full||mem_q_full) && !t_flash_clear &&
 				     (r_mem_sched_uops[i].srcA_valid ?
 				      (!r_prf_inflight[r_mem_sched_uops[i].srcA] |
@@ -3095,7 +2945,7 @@ module exec(clk,
 				     ((r_mem_sched_uops[i].fp_srcB_valid && !r_mem_sched_uops[i].is_store) ?
 				      !r_fp_prf_inflight[r_mem_sched_uops[i].srcB] : 1'b1);
 		t_mem_elig[i] = t_mem_entry_rdy[i] &
-				(t_mem_strict[i] ? ((|r_mem_sched_matrix[i]) == 1'b0) :
+				((t_mem_strict[i] | r_mem_sched_old1[i]) ? ((|r_mem_sched_matrix[i]) == 1'b0) :
 				 ((|(r_mem_sched_matrix[i] & t_mem_pending)) == 1'b0));
 		/* retired store, no older store still to commit, data in the l1d: commit
 		 * it (commits stay in program order through the exec mem_q and the MQ,
@@ -3104,7 +2954,8 @@ module exec(clk,
 				   ((|(r_mem_sched_matrix[i] & t_mem_st_live & ~r_mem_sched_cmt)) == 1'b0) &&
 				   !(mem_q_next_full||mem_q_full);
 		/* store data source ready (read through the store-data PRF port) */
-		t_mem_sd_rdy[i] = t_mem_st_live[i] && !r_mem_sched_sd_sel[i] && !t_flash_clear &&
+		t_mem_sd_rdy[i] = (t_mem_st_live[i] || (r_mem_sched_valid[i] && r_mem_sched_mg[i])) &&
+				  !r_mem_sched_sd_sel[i] && !t_flash_clear &&
 				  (r_mem_sched_uops[i].fp_srcB_valid ? !r_fp_prf_inflight[r_mem_sched_uops[i].srcB] :
 				   r_mem_sched_uops[i].srcB_valid ? !r_prf_inflight[r_mem_sched_uops[i].srcB] : 1'b1);
 		t_mem_st_retire[i] = t_mem_st_live[i] && r_mem_sched_issued[i] && !r_mem_sched_ret[i] &&
@@ -3178,8 +3029,8 @@ module exec(clk,
 	t_mem_issue = t_mem_issue_cmt | t_mem_issue_addr;
 	t_mem_sched_select_ptr = t_mem_issue_cmt ? t_mem_cmt_ptr : t_mem_sched_pick_ptr;
 	t_picked_mem_uop = r_mem_sched_uops[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]];
-	/* store data capture shares the store-data PRF port with the dq; the dq wins */
-	t_sd_go = (|t_mem_sd_rdy) & !t_pop_mem_dq;
+	/* store / merge-load data capture: the store-data PRF read port (port 3) */
+	t_sd_go = |t_mem_sd_rdy;
 	t_sd_src = r_mem_sched_uops[t_mem_sd_ptr[`LG_MEM_SCHED_ENTRIES-1:0]].srcB;
 	t_mem_alloc_entry = 'd0;
 	t_mem_select_entry = 'd0;
@@ -3204,13 +3055,19 @@ module exec(clk,
 	  end
 	t_mem_free_entry = t_mem_free_entry & r_mem_sched_valid;
 	t_mem_sched_mask_valid = r_mem_sched_valid & (~t_mem_free_entry);
+	/* merging partial loads read memory like any load; their old-rt operand is
+	 * captured into the entry's store-buffer data slot before they issue */
+	t_mem_uq_merge = (t_mem_uq.op == LWL) | (t_mem_uq.op == LWR) |
+			 (t_mem_uq.op == LDL) | (t_mem_uq.op == LDR);
 	t_mem_uq_generic_load = (t_mem_uq.op == LW) | (t_mem_uq.op == LWU) |
 				(t_mem_uq.op == LB) | (t_mem_uq.op == LBU) |
 				(t_mem_uq.op == LH) | (t_mem_uq.op == LHU) |
 				(t_mem_uq.op == LD) | (t_mem_uq.op == LWC1) |
-				(t_mem_uq.op == LDC1);
-	t_mem_uq_plain_store = is_plain_store(t_mem_uq.op);
+				(t_mem_uq.op == LDC1) | t_mem_uq_merge;
+	t_mem_uq_plain_store = is_lsu_store(t_mem_uq.op);
 	t_mem_uq_serial = (t_mem_uq.op == CHWB) | (t_mem_uq.op == CHWBINV) | (t_mem_uq.op == CHINV);
+	/* SC/SCD check the link on their address pass: every older op must be gone */
+	t_mem_uq_old1 = (t_mem_uq.op == SC) | (t_mem_uq.op == SCD);
      end // always_comb
 
    /* LSU state next-values */
@@ -3220,6 +3077,8 @@ module exec(clk,
 	n_mem_sched_ld = r_mem_sched_ld;
 	n_mem_sched_st = r_mem_sched_st;
 	n_mem_sched_ser = r_mem_sched_ser;
+	n_mem_sched_old1 = r_mem_sched_old1;
+	n_mem_sched_mg = r_mem_sched_mg;
 	n_mem_sched_issued = r_mem_sched_issued;
 	n_mem_sched_sd_sel = r_mem_sched_sd_sel;
 	n_mem_sched_sd_ok = r_mem_sched_sd_ok;
@@ -3240,6 +3099,8 @@ module exec(clk,
 	     n_mem_sched_ld[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_generic_load;
 	     n_mem_sched_st[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_plain_store;
 	     n_mem_sched_ser[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_serial;
+	     n_mem_sched_old1[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_old1;
+	     n_mem_sched_mg[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_merge;
 	     n_mem_sched_ep[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = !r_mem_sched_ep[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]];
 	  end
 	if(t_mem_issue_addr)
@@ -3280,6 +3141,8 @@ module exec(clk,
 		  n_mem_sched_ld[i] = 1'b0;
 		  n_mem_sched_st[i] = 1'b0;
 		  n_mem_sched_ser[i] = 1'b0;
+		  n_mem_sched_old1[i] = 1'b0;
+		  n_mem_sched_mg[i] = 1'b0;
 		  n_mem_sched_issued[i] = 1'b0;
 		  n_mem_sched_sd_sel[i] = 1'b0;
 		  n_mem_sched_sd_ok[i] = 1'b0;
@@ -3297,6 +3160,8 @@ module exec(clk,
 	     n_mem_sched_valid = t_mem_survive;
 	     n_mem_sched_ld = 'd0;
 	     n_mem_sched_ser = 'd0;
+	     n_mem_sched_old1 = n_mem_sched_old1 & t_mem_survive;
+	     n_mem_sched_mg = 'd0;
 	     n_mem_sched_st = t_mem_survive;
 	     n_mem_sched_issued = n_mem_sched_issued & t_mem_survive;
 	     n_mem_sched_sd_sel = n_mem_sched_sd_sel & t_mem_survive;
@@ -3320,6 +3185,8 @@ module exec(clk,
 	     r_mem_sched_ld <= 'd0;
 	     r_mem_sched_st <= 'd0;
 	     r_mem_sched_ser <= 'd0;
+	     r_mem_sched_old1 <= 'd0;
+	     r_mem_sched_mg <= 'd0;
 	     r_mem_sched_issued <= 'd0;
 	     r_mem_sched_sd_sel <= 'd0;
 	     r_mem_sched_sd_ok <= 'd0;
@@ -3340,6 +3207,8 @@ module exec(clk,
 	     r_mem_sched_ld <= n_mem_sched_ld;
 	     r_mem_sched_st <= n_mem_sched_st;
 	     r_mem_sched_ser <= n_mem_sched_ser;
+	     r_mem_sched_old1 <= n_mem_sched_old1;
+	     r_mem_sched_mg <= n_mem_sched_mg;
 	     r_mem_sched_issued <= n_mem_sched_issued;
 	     r_mem_sched_sd_sel <= n_mem_sched_sd_sel;
 	     r_mem_sched_sd_ok <= n_mem_sched_sd_ok;
@@ -3399,7 +3268,7 @@ module exec(clk,
 	/* FR=0 swc1 odd reg (fp_hi): store the HIGH 32b half (placed low for MEM_SW) */
 	lsu_sb.data = r_sd_zero ? 64'd0 :
 		      r_sd_fp ? (r_sd_fp_hi ? {32'd0, r_fp_rd_dq[63:32]} : r_fp_rd_dq) :
-		      t_mem_srcB;
+		      w_mem_srcB;
      end // always_comb
 
 `ifdef LSU_TRACE
@@ -3433,22 +3302,11 @@ module exec(clk,
    
    always_comb
      begin
-	t_core_store_data.rob_ptr = mem_dq.rob_ptr;
-	/* FR=0 swc1 odd reg (fp_hi): store the HIGH 32b half (placed low for MEM_SW). */
-	t_core_store_data.data = mem_dq.fp ? (mem_dq.fp_hi ? {32'd0, r_fp_rd_dq[63:32]} : r_fp_rd_dq)
-					   : t_mem_srcB;
-	/* store-data complete (the ROB's retire gate): the dq or an LSU capture */
-	core_store_data_ptr = r_sd_go ? r_sd_rob : mem_dq.rob_ptr;
-	core_store_data_ptr_valid = r_dq_ready | r_sd_go;
+	/* store-data complete (the ROB's retire gate): an LSU data capture */
+	core_store_data_ptr = r_sd_rob;
+	core_store_data_ptr_valid = r_sd_go;
      end
 
-   always_ff@(posedge clk)
-     begin
-	if(r_dq_ready)
-	  begin
-	     r_mdq[r_mdq_tail_ptr[`LG_MQ_ENTRIES-1:0]] <= t_core_store_data;
-	  end
-     end
 
    
    
@@ -3475,12 +3333,10 @@ module exec(clk,
 	if(reset)
 	  begin
 	     r_mem_ready <= 1'b0;
-	     r_dq_ready <= 1'b0;
 	  end
 	else
 	  begin
 	     r_mem_ready <= t_mem_issue;
-	     r_dq_ready <= t_pop_mem_dq;
 	  end
      end // always_ff@ (posedge clk)
 
@@ -3529,6 +3385,7 @@ module exec(clk,
 	t_mem_tail.lsu_idx = r_mem_uq_lsu_idx;
 	t_mem_tail.commit = 1'b0;
 	t_mem_tail.restart_id = r_mem_uq_color;
+	t_mem_tail.sc_ok = 1'b0;
 	t_mem_tail.lsu_older_st = r_mem_uq_older_st;
 	t_mem_tail.lsu_older_ep = r_mem_uq_older_ep;
 `ifdef VERILATOR
@@ -3845,14 +3702,6 @@ module exec(clk,
 	  begin
 	     r_fwd_mem_srcA_data <= mem_rsp_load_data[`M_WIDTH-1:0];
 	  end
-	if(t_fwd_int_mem_srcB)
-	  begin
-	     r_fwd_mem_srcB_data <= t_result;
-	  end
-	else if(t_fwd_mem_mem_srcB)
-	  begin
-	     r_fwd_mem_srcB_data <= mem_rsp_load_data[`M_WIDTH-1:0];
-	  end
 	if(r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst))
 	  begin
 	     r_fwd_srcA_data <= t_result;
@@ -3886,17 +3735,13 @@ module exec(clk,
    always_comb
      begin
 	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_mem_uop.srcA == int_uop.dst);
-	t_fwd_int_mem_srcB = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_mem_dq.src_ptr == int_uop.dst);
 	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_picked_mem_uop.srcA == mem_rsp_dst_ptr);
-	t_fwd_mem_mem_srcB = w_mem_rsp_int_valid && (t_mem_dq.src_ptr == mem_rsp_dst_ptr);
      end
    
    always_ff@(posedge clk)
      begin
 	r_fwd_int_mem_srcA <= t_fwd_int_mem_srcA;
-	r_fwd_int_mem_srcB <= t_fwd_int_mem_srcB & !t_sd_go;   /* port 3 read the LSU store's data instead */
 	r_fwd_mem_mem_srcA <= t_fwd_mem_mem_srcA;
-	r_fwd_mem_mem_srcB <= t_fwd_mem_mem_srcB & !t_sd_go;
 	
 	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst);
 	r_fwd_int_srcB <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcB == int_uop.dst);
@@ -3916,7 +3761,7 @@ module exec(clk,
 	   .rdptr0(t_picked_uop.srcA),
 	   .rdptr1(t_picked_uop.srcB),
 	   .rdptr2(t_picked_mem_uop.srcA),
-	   .rdptr3(t_sd_go ? t_sd_src : t_mem_dq.src_ptr),
+	   .rdptr3(t_sd_src),
 	   .wrptr0(int_uop.dst),
 	   .wrptr1(mem_rsp_dst_ptr),
 	   .wen0(r_start_int && t_wr_int_prf),

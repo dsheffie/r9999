@@ -90,9 +90,6 @@ module l1d(clk,
 	   core_mem_req_valid,
 	   core_mem_req,
 	   //store data (and lwl/lwr data)
-	   core_store_data_valid,
-	   core_store_data,
-	   core_store_data_ack,
 	   //outputs to core
 	   core_mem_req_ack,
 	   core_mem_rsp,
@@ -104,7 +101,6 @@ module l1d(clk,
 	   lsu_sb,
 	   restart_color,
 	   mem_color_busy,
-	   mq_graduated_pending,
 	   //output to the memory system
 	   mem_req_ack,
 	   mem_req_valid, 
@@ -163,9 +159,6 @@ module l1d(clk,
    input logic core_mem_req_valid;
    input       mem_req_t core_mem_req;
 
-   input logic core_store_data_valid;
-   input       mem_data_t core_store_data;
-   output logic core_store_data_ack;
    
    output logic core_mem_req_ack;
    output 	mem_rsp_t core_mem_rsp;
@@ -185,10 +178,6 @@ module l1d(clk,
    input logic	restart_color;
    /* an op of color c is still in flight here (the core's flip-back guard) */
    output logic [1:0] mem_color_busy;
-   /* a RETIRED old-path store (SWL/SWR/SDL/SDR/SC) still waits in the MQ for its
-    * data from exec's store-data FIFO, which a restart clears: it is live, so the
-    * restart must wait for it to write */
-   output logic mq_graduated_pending;
 
    input logic 	mem_req_ack;
    
@@ -406,9 +395,7 @@ endfunction
    logic 				  n_inhibit_write, r_inhibit_write;
    logic 				  t_got_non_mem, r_got_non_mem;
 
-   logic                                  t_incr_busy,t_force_clear_busy;
    logic 				  t_ucld_dead_drop;
-   logic 				  n_stall_store, r_stall_store;
       
    logic 				  n_is_retry, r_is_retry;
    logic 				  r_q_priority, n_q_priority;
@@ -592,7 +579,6 @@ endfunction
      end // always_ff@ (posedge clk)
 
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);
-   logic [1:0] r_graduated [N_ROB_ENTRIES-1:0];
    logic [N_ROB_ENTRIES-1:0] r_missed;
    logic [2*N_ROB_ENTRIES-1:0] r_rob_inflight;   /* indexed {restart color, rob_ptr} */
 
@@ -604,9 +590,7 @@ endfunction
    wire w_match_link2 = r_link_reg_val &&
                         (r_link_reg == {r_req2.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],
                                         {`LG_L1D_CL_LEN{1'b0}}});
-   logic r_sc_should_write;
 
-   logic t_reset_graduated;
    /* CACHE hit-type mem ops (MEM_CHWB/CHWBINV/CHINV): line ops with dtlb-translated
     * PAs, deferred to post-retirement via store graduation. */
    wire w_is_chop2 = (r_req2.op == MEM_CHWB) | (r_req2.op == MEM_CHWBINV) | (r_req2.op == MEM_CHINV);
@@ -642,40 +626,6 @@ endfunction
      end
 `endif
 
-   always_ff@(posedge clk)
-     begin
-	if(reset /*|| restart_valid*/)
-	  begin
-	     for(integer i = 0; i < N_ROB_ENTRIES; i = i+1)
-	       begin
-		  r_graduated[i] <= 2'b00;
-	       end
-	  end
-	else
-	  begin
-	     if(retired_rob_ptr_valid && r_graduated[retired_rob_ptr] == 2'b01)
-	       begin
-		  r_graduated[retired_rob_ptr] <= 2'b10;
-	       end
-	     if(retired_rob_ptr_two_valid && r_graduated[retired_rob_ptr_two] == 2'b01) 
-	       begin
-		  r_graduated[retired_rob_ptr_two] <= 2'b10;
-	       end
-	     if(t_incr_busy)
-	       begin
-		  //$display("cycle %d : incr busy for ptr %d", r_cycle, r_req2.rob_ptr);
-		  r_graduated[r_req2.rob_ptr] <= 2'b01;
-	       end
-	     if(t_reset_graduated)
-               begin
-		  r_graduated[r_req.rob_ptr] <= 2'b00;
-	       end
-	     if(t_force_clear_busy)
-	       begin
-		  r_graduated[t_mem_head.rob_ptr] <= 2'b00;
-	       end
-	  end
-     end // always_ff@ (posedge clk)
 
    wire w_req2_is_store = (r_req2.op == MEM_SB)  || (r_req2.op == MEM_SH)  ||
                           (r_req2.op == MEM_SW)  || (r_req2.op == MEM_SWL) ||
@@ -719,17 +669,6 @@ endfunction
 	  end
      end
 
-   always_ff@(posedge clk)
-     begin
-	if(reset)
-	  r_sc_should_write <= 1'b0;
-	else if(n_core_mem_rsp_valid && r_got_req2 && (r_req2.op == MEM_SC || r_req2.op == MEM_SCD))
-	  /* SC succeeds on the reservation (link); the data write is deferred to the
-	   * port1 graduated-store path, which waits for the hit after a reload.  (Do
-	   * NOT require a cache hit here, else a conflict-displaced line livelocks the
-	   * SC even with a valid reservation -- matches rv64core MEM_SCD.) */
-	  r_sc_should_write <= w_match_link2;
-     end
 
    always_ff@(posedge clk)
      begin
@@ -837,7 +776,7 @@ endfunction
 		  
 		  r_rob_inflight[{r_req.restart_id, r_req.rob_ptr}] <= 1'b0;
 	       end
-	     if(t_force_clear_busy | t_mq_stale_drop)
+	     if(t_mq_stale_drop)
 	       begin
 		  r_rob_inflight[{t_mem_head.restart_id, t_mem_head.rob_ptr}] <= 1'b0;
 	       end
@@ -877,6 +816,13 @@ endfunction
 	 * mark it unmapped so the replay refills from / re-tags with the PA and
 	 * does NOT translate it a second time. */
 	t_remapped_req2.mapped = 1'b0;
+	/* merge loads (LWL/LWR/LDL/LDR) take their register merge value from
+	 * their LSU slot; MQ entries and direct fills carry it in .data */
+	if(r_req2.op == MEM_LWL || r_req2.op == MEM_LWR ||
+	   r_req2.op == MEM_LDL || r_req2.op == MEM_LDR)
+	  begin
+	     t_remapped_req2.data = r_sb_data[r_req2.lsu_idx];
+	  end
      end
 
    /* ---------------- LSU store buffer (payload only) ----------------
@@ -890,6 +836,7 @@ endfunction
    logic [15:0] 	 r_sb_mask[N_LSU-1:0];
    mem_op_t		 r_sb_op[N_LSU-1:0];
    logic [N_LSU-1:0] 	 r_sb_cached;
+   logic [N_LSU-1:0] 	 r_sb_scok;       /* SC/SCD: link held at the address pass */
    logic [63:0] 	 r_sb_data[N_LSU-1:0];
    logic 		 t_sb_wr;
    /* pipetrace: the port-2 / port-1 outcome for this cycle's op (0 = none) */
@@ -906,6 +853,7 @@ endfunction
 	     r_sb_mask[r_req2.lsu_idx] <= make_mask(r_req2);
 	     r_sb_op[r_req2.lsu_idx] <= r_req2.op;
 	     r_sb_cached[r_req2.lsu_idx] <= t_remapped_req2.cached;
+	     r_sb_scok[r_req2.lsu_idx] <= w_match_link2;
 	  end
 	if(lsu_sb.data_valid)
 	  begin
@@ -940,6 +888,7 @@ endfunction
    blk_code_t				   t_sb_code;
    logic [N_LSU-1:0] 			   t_sb_blk_st;
    logic [L1D_CL_LEN_BITS-1:0] 		   t_sb_line, t_sb_bytes;
+   logic 				   w_sb_fwd_op;
 
    always_comb
      begin
@@ -962,10 +911,15 @@ endfunction
 		  t_sb_y = j[`LG_MEM_SCHED_ENTRIES-1:0];
 	       end
 	  end
+	/* the youngest overlapping store is a whole-access store sb_line can place
+	 * (partial stores and SC never forward: the load waits for their drain) */
+	w_sb_fwd_op = (r_sb_op[t_sb_y] == MEM_SB) | (r_sb_op[t_sb_y] == MEM_SH) |
+		      (r_sb_op[t_sb_y] == MEM_SW) | (r_sb_op[t_sb_y] == MEM_SD);
 	t_sb_line = sb_line(r_sb_op[t_sb_y], r_sb_pa[t_sb_y][3:0], r_sb_data[t_sb_y]);
 	t_sb_bytes = expand_mask(r_sb_mask[t_sb_y]);
 	/* forward when the youngest overlapping older store covers every load byte */
 	t_sb_fwd = (|t_sb_match) & lsu_sb.data_ok[t_sb_y] & r_sb_cached[t_sb_y] & t_remapped_req2.cached &
+		   w_sb_fwd_op &
 		   ((t_ld_mask2 & ~r_sb_mask[t_sb_y]) == 16'd0);
 	/* an uncached load waits for EVERY older store (device ordering); a cached
 	 * one only for overlapping stores it cannot forward from */
@@ -973,7 +927,7 @@ endfunction
 		   (t_remapped_req2.cached ? ((|t_sb_match) & !t_sb_fwd) : (|t_sb_older));
 	t_sb_code = BLK_SB_CONFLICT;
 	t_sb_blk_st = t_remapped_req2.cached ? t_sb_match : t_sb_older;
-	if(t_remapped_req2.cached && !lsu_sb.data_ok[t_sb_y] && r_sb_cached[t_sb_y] &&
+	if(t_remapped_req2.cached && !lsu_sb.data_ok[t_sb_y] && r_sb_cached[t_sb_y] && w_sb_fwd_op &&
 	   ((t_ld_mask2 & ~r_sb_mask[t_sb_y]) == 16'd0))
 	  begin
 	     /* only the data is missing: wait for it, not for the drain */
@@ -995,6 +949,7 @@ endfunction
 	     t_mq_push_req.op = r_sb_op[r_req2.lsu_idx];
 	     t_mq_push_req.data = r_sb_data[r_req2.lsu_idx];
 	     t_mq_push_req.cached = r_sb_cached[r_req2.lsu_idx];
+	     t_mq_push_req.sc_ok = r_sb_scok[r_req2.lsu_idx];
 	     t_mq_push_req.mapped = 1'b0;
 	     t_mq_push_req.is_store = 1'b1;
 	     t_mq_push_req.bad_addr = 1'b0;
@@ -1045,15 +1000,6 @@ endfunction
 	     if(r_mq_addr_valid[i] && !r_mem_q[i].commit)
 	       begin
 		  t_mq_color[r_mem_q[i].restart_id] = 1'b1;
-	       end
-	  end
-	mq_graduated_pending = 1'b0;
-	for(integer i = 0; i < N_MQ_ENTRIES; i = i + 1)
-	  begin
-	     if(r_mq_addr_valid[i] && r_mem_q[i].is_store && !r_mem_q[i].commit &&
-		(r_graduated[r_mem_q[i].rob_ptr] == 2'b10))
-	       begin
-		  mq_graduated_pending = 1'b1;
 	       end
 	  end
 	mem_color_busy[0] = (r_color_cnt[0] != 'd0) | t_mq_color[0];
@@ -1344,7 +1290,6 @@ endfunction
 	     r_reload_issue <= 1'b0;
 	     r_did_reload <= 1'b0;
 	     
-	     r_stall_store <= 1'b0;
 	     r_is_retry <= 1'b0;
 	     r_flush_complete <= 1'b0;
 	     r_flush_req <= 1'b0;
@@ -1402,7 +1347,6 @@ endfunction
 	     r_reload_issue <= n_reload_issue;
 	     r_did_reload <= n_did_reload;
 	     r_uncache_wb_dirty <= n_uncache_wb_dirty;
-	     r_stall_store <= n_stall_store;
 	     r_is_retry <= n_is_retry;
 	     r_flush_complete <= n_flush_complete;
 	     r_flush_req <= n_flush_req;
@@ -1723,15 +1667,15 @@ endfunction
 	       case(r_req2.addr[1:0])
 		 2'd0:
 		   begin
-		      t_rsp_data2 = {{32{r_req2.data[31]}}, r_req2.data[31:8], t_bswap_w32_2[31:24]};
+		      t_rsp_data2 = {{32{t_remapped_req2.data[31]}}, t_remapped_req2.data[31:8], t_bswap_w32_2[31:24]};
 		   end
 		 2'd1:
 		   begin
-		      t_rsp_data2 = {{32{r_req2.data[31]}}, r_req2.data[31:16], t_bswap_w32_2[31:16]};
+		      t_rsp_data2 = {{32{t_remapped_req2.data[31]}}, t_remapped_req2.data[31:16], t_bswap_w32_2[31:16]};
 		   end
 		 2'd2:
 		   begin
-		      t_rsp_data2 = {{32{r_req2.data[31]}}, r_req2.data[31:24], t_bswap_w32_2[31:8]};				       
+		      t_rsp_data2 = {{32{t_remapped_req2.data[31]}}, t_remapped_req2.data[31:24], t_bswap_w32_2[31:8]};				       
 		   end
 		 2'd3:
 		   begin
@@ -1749,19 +1693,58 @@ endfunction
 		   end
 		 2'd1:
 		   begin
-		      t_rsp_data2 = {{32{t_bswap_w32_2[23]}}, t_bswap_w32_2[23:0], r_req2.data[7:0]};
+		      t_rsp_data2 = {{32{t_bswap_w32_2[23]}}, t_bswap_w32_2[23:0], t_remapped_req2.data[7:0]};
 		   end
 		 2'd2:
 		   begin
-		      t_rsp_data2 = {{32{t_bswap_w32_2[15]}}, t_bswap_w32_2[15:0], r_req2.data[15:0]};
+		      t_rsp_data2 = {{32{t_bswap_w32_2[15]}}, t_bswap_w32_2[15:0], t_remapped_req2.data[15:0]};
 		   end
 		 2'd3:
 		   begin
-		      t_rsp_data2 = {{32{t_bswap_w32_2[7]}}, t_bswap_w32_2[7:0], r_req2.data[23:0]};
+		      t_rsp_data2 = {{32{t_bswap_w32_2[7]}}, t_bswap_w32_2[7:0], t_remapped_req2.data[23:0]};
 		   end
 	       endcase // case (r_req.addr[1:0])
 	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;	       
 	    end // case: MEM_LWL
+	  MEM_LDL:
+	    begin
+	       /* Doubleword-aligned base: high word (MSW, lower addr) at dw_hi_idx,
+		* low word (LSW, higher addr) at dw_hi_idx+1.
+		* t_dword[63:56]=byte0(lowest addr) .. t_dword[7:0]=byte7(highest addr). */
+	       begin
+		  logic [63:0] 		       t_dword;
+		  t_dword = bswap64(select_cl64(t_data2, r_req2.addr[DWORD_START]));
+		  case(r_req2.addr[2:0])
+		    3'd0: t_rsp_data2 = t_dword;
+		    3'd1: t_rsp_data2 = {t_dword[55:0], t_remapped_req2.data[7:0]};
+		    3'd2: t_rsp_data2 = {t_dword[47:0], t_remapped_req2.data[15:0]};
+		    3'd3: t_rsp_data2 = {t_dword[39:0], t_remapped_req2.data[23:0]};
+		    3'd4: t_rsp_data2 = {t_dword[31:0], t_remapped_req2.data[31:0]};
+		    3'd5: t_rsp_data2 = {t_dword[23:0], t_remapped_req2.data[39:0]};
+		    3'd6: t_rsp_data2 = {t_dword[15:0], t_remapped_req2.data[47:0]};
+		    3'd7: t_rsp_data2 = {t_dword[7:0],  t_remapped_req2.data[55:0]};
+		  endcase
+	       end
+	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
+	    end // case: MEM_LDL
+	  MEM_LDR:
+	    begin
+	       begin
+		  logic [63:0] 		       t_dword;
+		  t_dword = bswap64(select_cl64(t_data2, r_req2.addr[DWORD_START]));
+		  case(r_req2.addr[2:0])
+		    3'd0: t_rsp_data2 = {t_remapped_req2.data[63:8],  t_dword[63:56]};
+		    3'd1: t_rsp_data2 = {t_remapped_req2.data[63:16], t_dword[63:48]};
+		    3'd2: t_rsp_data2 = {t_remapped_req2.data[63:24], t_dword[63:40]};
+		    3'd3: t_rsp_data2 = {t_remapped_req2.data[63:32], t_dword[63:32]};
+		    3'd4: t_rsp_data2 = {t_remapped_req2.data[63:40], t_dword[63:24]};
+		    3'd5: t_rsp_data2 = {t_remapped_req2.data[63:48], t_dword[63:16]};
+		    3'd6: t_rsp_data2 = {t_remapped_req2.data[63:56], t_dword[63:8]};
+		    3'd7: t_rsp_data2 = t_dword;
+		  endcase
+	       end
+	       t_rsp_dst_valid2 = r_req2.dst_valid & t_hit_cache2;
+	    end // case: MEM_LDR
 	  default:
 	    begin
 	    end
@@ -2053,17 +2036,17 @@ endfunction
 		* is forwarded to a same-line load via r_array_wr_data (store->load
 		* forwarding, see r_must_forward) even though the array write is gated
 		* off.  Keep the line unchanged so a failed SC is invisible to a later load. */
-	       t_array_data = r_sc_should_write ? merge_cl32(t_data, bswap32(r_req.data[31:0]), r_req.addr[WORD_STOP-1:WORD_START]) : t_data;
+	       t_array_data = r_req.sc_ok ? merge_cl32(t_data, bswap32(r_req.data[31:0]), r_req.addr[WORD_STOP-1:WORD_START]) : t_data;
 	       t_rsp_data = 'd0;
 	       t_rsp_dst_valid = 1'b0;
-	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_sc_should_write;
+	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_req.sc_ok;
 	    end
 	  MEM_SCD:
 	    begin
-	       t_array_data = r_sc_should_write ? merge_cl64(t_data, bswap64(r_req.data[63:0]), r_req.addr[DWORD_START]) : t_data;
+	       t_array_data = r_req.sc_ok ? merge_cl64(t_data, bswap64(r_req.data[63:0]), r_req.addr[DWORD_START]) : t_data;
 	       t_rsp_data = 'd0;
 	       t_rsp_dst_valid = 1'b0;
-	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_sc_should_write;
+	       t_wr_array = t_hit_cache && (r_is_retry || r_did_reload) && r_req.sc_ok;
 	    end
 	  MEM_SWR:
 	    begin
@@ -2263,7 +2246,6 @@ endfunction
 	n_req2 = r_req2;
 	
 	core_mem_req_ack = 1'b0;
-	core_store_data_ack = 1'b0;
 	
 	n_mem_req_valid = 1'b0;
 	n_mem_req_cacheable = r_mem_req_cacheable;
@@ -2325,16 +2307,12 @@ endfunction
 	
 	t_mark_invalid = 1'b0;
 	n_is_retry = 1'b0;
-	t_reset_graduated = 1'b0;
 	n_chop_wait = r_chop_wait;
 	n_chop_beat = r_chop_beat;
 	n_flush_cl_beat = r_flush_cl_beat;
-	t_force_clear_busy = 1'b0;
 	t_ucld_dead_drop = 1'b0;
 	
-	t_incr_busy = 1'b0;
 
-	n_stall_store = 1'b0;
 	n_q_priority = !r_q_priority;
 	
 	n_reload_issue = r_reload_issue;
@@ -2505,6 +2483,14 @@ endfunction
 			  * retires, then commits it */
 			 t_sb_wr = 1'b1;
 			 n_core_mem_rsp.dst_valid = 1'b0;
+			 if(r_req2.op == MEM_SC || r_req2.op == MEM_SCD)
+			   begin
+			      /* SC/SCD: answer the reservation (link) now; the commit writes
+			       * only if it held (sc_ok). Do NOT require a cache hit, else a
+			       * conflict-displaced line livelocks the SC (rv64core MEM_SCD). */
+			      n_core_mem_rsp.data = {{(`M_WIDTH-1){1'b0}}, w_match_link2};
+			      n_core_mem_rsp.dst_valid = r_req2.dst_valid;
+			   end
 			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
 			 n_core_mem_rsp.tlb_index = w_tlb_index;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
@@ -2539,46 +2525,6 @@ endfunction
 			 /* CACHE hit op (non-speculative, see w_chop_req): queue it; it
 			  * fires at the MQ head and answers when both beats are done */
 			 t_push_miss = 1'b1;
-		      end
-		    else if(r_req2.is_store)
-		      begin
-			 t_push_miss = 1'b1;
-			 t_incr_busy = 1'b1;
-			 n_stall_store = 1'b1;
-			 if(r_req2.op != MEM_SC && r_req2.op != MEM_SCD)
-			   begin
-			      //ack early
-			      n_core_mem_rsp.dst_valid = 1'b0;
-			      n_core_mem_rsp.tlb_hit = w_tlb_hit;
-			      n_core_mem_rsp.tlb_index = w_tlb_index;
-			      if(t_port2_hit_cache)
-				begin
-				   n_cache_hits = r_cache_hits + 'd1;
-				end
-			      n_core_mem_rsp_valid = 1'b1;
-			      n_core_mem_rsp.bad_addr = r_req2.bad_addr;
-			   end
-			 else
-			   begin
-			      /* SC/SCD: early ack with the reservation result (link); cache write
-			       * deferred to the graduated-store port1 path. */
-			      n_core_mem_rsp.data = {{(`M_WIDTH-1){1'b0}}, w_match_link2};
-			      n_core_mem_rsp.dst_valid = r_req2.dst_valid;
-			      n_core_mem_rsp.bad_addr = r_req2.bad_addr;
-			      if(t_port2_hit_cache)
-				begin
-				   n_cache_hits = r_cache_hits + 'd1;
-				end
-			      n_core_mem_rsp_valid = 1'b1;
-			   end
-		      end // if (r_req2.is_store)
-		    else if(r_req2.op == MEM_LWL || r_req2.op == MEM_LWR ||
-			    r_req2.op == MEM_LDL || r_req2.op == MEM_LDR)
-		      begin
-			 t_push_miss = 1'b1;
-			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
-			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
-			 n_core_mem_rsp.tlb_index = w_tlb_index;
 		      end
 		    /* An access the TLB maps UNCACHED (t_remapped_req2.cached, the page's C
 		     * field) must not fast-hit: w_uncachable_req only saw the segment's
@@ -2791,10 +2737,6 @@ endfunction
 			 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
 			 n_mem_req_store_data = t_array_data;
 			 t_got_miss = 1'b1;
-			 if(r_req.is_store && !r_req.commit)
-			   begin
-			      t_reset_graduated = 1'b1;				   
-			   end
 			 
 			 //$display("uncachable req at pc %x to addr %x, is store %b, data %x, mask %b, rob ptr %x\n", 
 			 //r_req.pc, {r_req.addr[31:4], 4'd0}, r_req.is_store, r_req.data,
@@ -2811,8 +2753,7 @@ endfunction
 			   end
 			 else if(r_req.is_store)
 			   begin
-			      /* SC result already sent via the port2 early ack. */
-			      t_reset_graduated = 1'b1;
+			      /* unreachable: every store but a CACHE op (own arm) is a commit */
 			   end
 			 else
 			   begin
@@ -2912,7 +2853,7 @@ endfunction
 			 begin
 			    /* queued op of a flushed era: drop it (a dead store never
 			     * writes, a dead uncached load never touches the device).
-			     * r_graduated is left alone -- a new op may own that rob_ptr */
+			     * (store-buffer and LSU state belong to the new era) */
 			    t_pop_mq = 1'b1;
 			    t_mq_stale_drop = 1'b1;
 			    t_mq_stale_owed = !t_mem_head.is_store;
@@ -2944,53 +2885,6 @@ endfunction
 			    n_is_retry = 1'b1;
 			    n_last_rd = 1'b1;
 			    t_got_rd_retry = 1'b1;
-			 end
-		       else if(t_mem_head.is_store)
-			 begin
-			    if(r_graduated[t_mem_head.rob_ptr] == 2'b10 && (core_store_data_valid ? (t_mem_head.rob_ptr == core_store_data.rob_ptr) : 1'b0) )
-			      begin
-`ifdef VERBOSE_L1D
-				 $display("firing store for %x with data %x at cycle %d for rob ptr %d, uuid %d", 
-					  t_mem_head.addr, t_mem_head.data, r_cycle, t_mem_head.rob_ptr, t_mem_head.uuid);
-`endif
-				 t_pop_mq = 1'b1;
-				 core_store_data_ack = 1'b1;
-				 n_req = t_mem_head;
-				 n_req.data = core_store_data.data;
-				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
-				 t_addr = t_mem_head.addr;
-				 t_got_req = 1'b1;
-				 n_is_retry = 1'b1;
-				 n_last_wr = 1'b1;
-			      end // if (t_mem_head.rob_ptr == head_of_rob_ptr)
-			    else if(drain_ds_complete && dead_rob_mask[t_mem_head.rob_ptr])
-			      begin
-`ifdef VERBOSE_L1D
-				 $display("CLEARING EVERYTHING OUT, should clear line %d for rob ptr %d, data %x", 
-					  t_mem_head.addr[IDX_STOP-1:IDX_START], t_mem_head.rob_ptr, t_mem_head.data);
-`endif
-				 t_pop_mq = 1'b1;
-				 t_force_clear_busy = 1'b1;
-			      end
-			 end // if (t_mem_head.is_store)
-		       else if(t_mem_head.op == MEM_LWL || t_mem_head.op == MEM_LWR ||
-			       t_mem_head.op == MEM_LDL || t_mem_head.op == MEM_LDR)
-			 begin
-			    if((core_store_data_valid ? (t_mem_head.rob_ptr == core_store_data.rob_ptr) : 1'b0) || drain_ds_complete)
-			      begin
-				 t_pop_mq = 1'b1;
-				 n_req = t_mem_head;
-				 n_req.data = core_store_data.data;
-				 core_store_data_ack = 1'b1;
-				 t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
-				 t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
-				 t_addr = t_mem_head.addr;
-				 t_got_req = 1'b1;
-				 n_is_retry = 1'b1;
-				 n_last_rd = 1'b1;
-				 t_got_rd_retry = 1'b1;
-			      end
 			 end
 		       else if(t_mem_head.cached || w_mq_head_nonspec)
 			 begin
@@ -3425,11 +3319,6 @@ endfunction
 	       begin
 		  //$display("retried store prevents ack at cycle %d", r_cycle);
 		  t_stall_reason = 'd6;
-	       end
-	     else if(r_graduated[core_mem_req.rob_ptr] != 2'b00) 
-	       begin
-		  //$display("rob pointer in flight prevents ack at cycle %d", r_cycle);
-		  t_stall_reason = 'd7;		  
 	       end
 	  end // if (core_mem_req_valid && !core_mem_req_ack)
      end // always_comb
