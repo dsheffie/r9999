@@ -111,6 +111,7 @@ module l1d(clk,
 	   lsu_sb,
 	   restart_color,
 	   mem_color_busy,
+	   mem_quiet,
 	   //output to the memory system
 	   mem_req_ack,
 	   mem_req_valid, 
@@ -210,6 +211,7 @@ module l1d(clk,
    input logic	restart_color;
    /* an op of color c is still in flight here (the core's flip-back guard) */
    output logic [1:0] mem_color_busy;
+   output logic       mem_quiet;       /* nothing accepted is still being worked on */
 
    input logic 	mem_req_ack;
    
@@ -1100,6 +1102,75 @@ endfunction
 	       end
 	  end
      end // always_ff@ (posedge clk)
+`ifdef VERILATOR
+   /* debug only: exact shadow of the per-color accounting, keyed {color, rob_ptr}.
+    * Catches the leak/double-answer the moment it happens, not at the next flip. */
+   logic [N_ROB_ENTRIES-1:0] r_dbg_out [1:0];
+   logic [7:0] r_dbg_mm_cnt;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_dbg_out[0] <= '0;
+	     r_dbg_out[1] <= '0;
+	  end
+	else
+	  begin
+	     logic [N_ROB_ENTRIES-1:0] t_o0, t_o1;
+	     t_o0 = r_dbg_out[0];
+	     t_o1 = r_dbg_out[1];
+	     if(t_got_req2 && !core_mem_req.commit)
+	       begin
+		  if(core_mem_req.restart_id ? t_o1[core_mem_req.rob_ptr] : t_o0[core_mem_req.rob_ptr])
+		    begin
+		       $display("[COLORSHADOW] cyc=%0d double accept color=%0d rob=%0d op=%0d", r_cycle, core_mem_req.restart_id, core_mem_req.rob_ptr, core_mem_req.op);
+		    end
+		  if(core_mem_req.restart_id) t_o1[core_mem_req.rob_ptr] = 1'b1; else t_o0[core_mem_req.rob_ptr] = 1'b1;
+	       end
+	     if((w_rsp_v | w_wake_v | (w_blk_v & w_rsp.blk[2])))
+	       begin
+		  if(!(w_rsp.restart_id ? r_dbg_out[1][w_rsp.rob_ptr] : r_dbg_out[0][w_rsp.rob_ptr]))
+		    begin
+		       $display("[COLORSHADOW] cyc=%0d answer to non-outstanding color=%0d rob=%0d rsp=%b blk=%b(%0d) wake=%b st_commit_op=%0d",
+				r_cycle, w_rsp.restart_id, w_rsp.rob_ptr, w_rsp_v, w_blk_v, w_rsp.blk, w_wake_v, r_req.op);
+		    end
+		  if(w_rsp.restart_id) t_o1[w_rsp.rob_ptr] = 1'b0; else t_o0[w_rsp.rob_ptr] = 1'b0;
+	       end
+	     if(t_mq_stale_owed)
+	       begin
+		  if(t_mem_head.restart_id) t_o1[t_mem_head.rob_ptr] = 1'b0; else t_o0[t_mem_head.rob_ptr] = 1'b0;
+	       end
+	     r_dbg_out[0] <= t_o0;
+	     r_dbg_out[1] <= t_o1;
+	  end
+     end
+   always_ff@(negedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_dbg_mm_cnt <= 8'd0;
+	  end
+	else if((($countones(r_dbg_out[0]) != r_color_cnt[0]) || ($countones(r_dbg_out[1]) != r_color_cnt[1])) && (r_dbg_mm_cnt < 8'd20))
+	  begin
+	     r_dbg_mm_cnt <= r_dbg_mm_cnt + 8'd1;
+	     $display("[COLORSHADOW] cyc=%0d count mismatch shadow=%0d/%0d cnt=%0d/%0d", r_cycle,
+		      $countones(r_dbg_out[0]), $countones(r_dbg_out[1]), r_color_cnt[0], r_color_cnt[1]);
+	  end
+     end
+`endif
+`ifdef VERILATOR
+   /* debug only: a color counter must never underflow or run away */
+   always_ff@(negedge clk)
+     begin
+	for(integer c = 0; c < 2; c = c + 1)
+	  begin
+	     if(!reset && (r_color_cnt[c] > (N_MQ_ENTRIES + 8)))
+	       begin
+		  $display("[COLORCNT] cyc=%0d color %0d count %0d runaway/underflow", r_cycle, c, r_color_cnt[c]);
+	       end
+	  end
+     end
+`endif
    always_comb
      begin
 	t_mq_color = 2'd0;
@@ -1112,6 +1183,10 @@ endfunction
 	  end
 	mem_color_busy[0] = (r_color_cnt[0] != 'd0) | t_mq_color[0];
 	mem_color_busy[1] = (r_color_cnt[1] != 'd0) | t_mq_color[1];
+	/* independent of the color counters: the queue is empty, no pass or fill is
+	 * in progress and no answer is on its way out */
+	mem_quiet = mem_q_empty && (r_state == ACTIVE) && !r_got_req && !r_got_req2 &&
+		    !r_fill_rsp_pend && !w_rsp_v && !w_blk_v && !w_wake_v;
      end // always_comb
 
 `ifdef VERILATOR

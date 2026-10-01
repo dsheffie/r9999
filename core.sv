@@ -132,6 +132,7 @@ module core(clk,
 	    lsu_sb,
 	    restart_color,
 	    mem_color_busy,
+	    mem_quiet,
 	    
 	    retire_reg_ptr,
 	    retire_reg_data,
@@ -309,6 +310,7 @@ module core(clk,
    output 	 lsu_sb_t lsu_sb;          /* LSU -> l1d store-buffer view */
    output logic	 restart_color;            /* current restart color (to the l1d) */
    input logic [1:0] mem_color_busy;       /* l1d: a memory op of color c is still in flight */
+   input logic       mem_quiet;            /* l1d: nothing accepted is still in flight */
 
    output logic [4:0] 			  retire_reg_ptr;
    output logic [`M_WIDTH-1:0]		  retire_reg_data;
@@ -622,7 +624,40 @@ module core(clk,
    wire [1:0] 				  w_exec_color_pending;
    /* the color the next restart flips TO must have nothing left in flight (1-bit
     * color: a straggler from two restarts ago would otherwise alias as live) */
+/* debug knob RESTART_MIN_CYC=N: never leave DRAIN/EXCEPTION_DRAIN in fewer than N
+ * cycles (tests for completions that trail a flush by a few pipeline stages) */
+`ifdef RESTART_MIN_CYC
+   logic [7:0] r_drain_age;
+   always_ff@(posedge clk)
+     begin
+	r_drain_age <= (reset || !((r_state == DRAIN) || (r_state == EXCEPTION_DRAIN))) ? 8'd0 :
+		       ((r_drain_age == 8'hff) ? r_drain_age : (r_drain_age + 8'd1));
+     end
+   wire w_drain_min_ok = (r_drain_age >= `RESTART_MIN_CYC);
+`else
+   wire w_drain_min_ok = 1'b1;
+`endif
+`ifdef RESTART_MEM_QUIET
+   /* debug knob: restart only once the memory system is empty (every accepted op
+    * answered, nothing left to send), like main -- the color counters are not used */
+   wire 				  w_next_color_busy = !mem_quiet | (w_exec_color_pending != 2'd0);
+`else
    wire 				  w_next_color_busy = mem_color_busy[!restart_color] | w_exec_color_pending[!restart_color];
+`endif
+`ifdef VERILATOR
+   /* debug only: a restart that waits a long time names what it is waiting on */
+   logic [31:0] r_dbg_drain_cyc;
+   always_ff@(posedge clk)
+     begin
+	r_dbg_drain_cyc <= (reset || !((r_state == DRAIN) || (r_state == EXCEPTION_DRAIN))) ? 32'd0 : (r_dbg_drain_cyc + 32'd1);
+	if(r_dbg_drain_cyc == 32'd100000)
+	  begin
+	     $display("[DRAINWAIT] cyc=%0d state=%0d nonmem_inflight=%x ds_done=%b color=%b mem_color_busy=%b exec_color_pending=%b div_ready=%b",
+		      r_cycle, r_state, (r_rob_inflight & ~r_rob_is_mem), r_ds_done, restart_color,
+		      mem_color_busy, w_exec_color_pending, t_divide_ready);
+	  end
+     end
+`endif
 
    logic 				  t_core_store_data_ptr_valid;
    logic [`LG_ROB_ENTRIES-1:0] 		  t_core_store_data_ptr;
@@ -1648,6 +1683,27 @@ module core(clk,
     * host can tell a captured trace from a live wrapping one with no new reg. */
    assign dbg_trace_wptr = {7'd0, r_trace_frozen, r_trace_wptr};   /* port widened to 16b for the 32K PC-trace ring */
    assign dbg_trace_data = r_trace_row[dbg_trace_index[3:0]];
+`elsif STALL_SNAP
+   /* debug: stall snapshot on the otherwise-unused trace port (index[4:0] = word).
+    * The machine is wedged when this is read, so live values are the snapshot. */
+   logic [31:0] r_snap_since_retire;
+   logic [31:0] r_snap_word;
+   always_ff@(posedge clk)
+     begin
+	r_snap_since_retire <= (reset || t_retire) ? 32'd0 : (r_snap_since_retire + 32'd1);
+	r_snap_word <= (dbg_trace_index[4:0] == 5'd0) ? {16'h5AA5, 2'd0, r_state, t_rob_head_complete, t_rob_head.faulted, t_rob_empty, 6'd0} :
+		       (dbg_trace_index[4:0] == 5'd1) ? t_rob_head.pc[31:0] :
+		       (dbg_trace_index[4:0] == 5'd2) ? {1'b0, t_rob_head.srcA_ptr, 1'b0, t_rob_head.pdst, 1'b0, t_rob_head.old_pdst, {(8-`LG_ROB_ENTRIES-1){1'b0}}, r_rob_head_ptr} :
+		       (dbg_trace_index[4:0] == 5'd3) ? {{(32-N_ROB_ENTRIES){1'b0}}, r_rob_inflight} :
+		       (dbg_trace_index[4:0] == 5'd4) ? {24'd0, mem_quiet, mem_color_busy, restart_color, w_exec_color_pending, memq_empty, 1'b0} :
+		       (dbg_trace_index[4:0] == 5'd5) ? r_snap_since_retire :
+		       (dbg_trace_index[4:0] == 5'd6) ? {1'b0, r_alloc_rat[27], 1'b0, r_retire_rat[27], 1'b0, r_alloc_rat[26], 1'b0, r_retire_rat[26]} :
+		       (dbg_trace_index[4:0] == 5'd7) ? {{(8-`LG_ROB_ENTRIES-1){1'b0}}, r_rob_tail_ptr, 24'd0} :
+		       (dbg_trace_index[4:0] >= 5'd8 && dbg_trace_index[4:0] < 5'd18) ? w_dbg_exec_snap[{dbg_trace_index[4:0] - 5'd8, 5'd0} +: 32] :
+		       32'hDEADBEEF;
+     end
+   assign dbg_trace_wptr = 'd0;
+   assign dbg_trace_data = r_snap_word;
 `else
    assign dbg_trace_wptr = 'd0;
    assign dbg_trace_data = 'd0;
@@ -2602,7 +2658,7 @@ module core(clk,
 	       /* restart once non-memory ops have drained; dead memory ops are left in
 		* flight and their responses dropped by color (was: r_rob_inflight == 0
 		* && memq_empty, i.e. wait out every wrong-path miss) */
-	       if(((r_rob_inflight & ~r_rob_is_mem) == 'd0) && r_ds_done && !w_next_color_busy && t_divide_ready)
+	       if(((r_rob_inflight & ~r_rob_is_mem) == 'd0) && r_ds_done && !w_next_color_busy && t_divide_ready && w_drain_min_ok)
 		 begin
 		    //$display("%d : wait for drain and memq_empty  took  %d cycles",r_cycle, r_restart_cycles);		    
 		    n_state = RAT;
@@ -2617,7 +2673,7 @@ module core(clk,
 	    begin
 	       //$display("memq_empty = %b, r_rob_inflight = %d",
 	       //memq_empty, r_rob_inflight);
-	       if(((r_rob_inflight & ~r_rob_is_mem) == 'd0) && !w_next_color_busy && t_divide_ready)
+	       if(((r_rob_inflight & ~r_rob_is_mem) == 'd0) && !w_next_color_busy && t_divide_ready && w_drain_min_ok)
 		 begin
 		    n_state = RAT;
 		 end
@@ -3668,6 +3724,31 @@ module core(clk,
 	       end
 	  end
      end // always_ff@ (posedge clk)
+`ifdef VERILATOR
+   /* debug only: the RAT/free-list restore reads the REGISTERED retire state, so a
+    * retirement in the same cycle would be invisible to it (its pdst would come back
+    * free while committed) */
+   always_ff@(negedge clk)
+     begin
+	if(!reset && t_rat_copy && (t_retire || t_retire_two))
+	  $display("[RATCOPYRETIRE] cyc=%0d state=%0d retire=%b retire_two=%b pc=%x", r_cycle, r_state, t_retire, t_retire_two, t_rob_head.pc);
+     end
+`endif
+`ifdef VERILATOR
+   /* debug only: in ACTIVE a completion must land on an entry that is in flight -- one
+    * that is not came from a flushed path (during DRAIN these are routine and wiped by
+    * the RAT clear).  NOTE: blind to a stale completion on a slot a NEW op already
+    * occupies (it is in flight); exec's [STALEEXEC] epoch check covers that case. */
+   always_ff@(negedge clk)
+     begin
+	if(!reset && !t_clr_rob && (r_state == ACTIVE) && t_complete_valid_1 && !r_rob_inflight[t_complete_bundle_1.rob_ptr[`LG_ROB_ENTRIES-1:0]])
+	  $display("[STALECOMPL] cyc=%0d port1 rob=%0d state=%0d", r_cycle, t_complete_bundle_1.rob_ptr, r_state);
+	if(!reset && !t_clr_rob && (r_state == ACTIVE) && t_complete_valid_2 && !r_rob_inflight[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:0]])
+	  $display("[STALECOMPL] cyc=%0d port2 rob=%0d state=%0d", r_cycle, t_complete_bundle_2.rob_ptr, r_state);
+	if(!reset && !t_clr_rob && (r_state == ACTIVE) && core_mem_rsp_valid && !r_rob_inflight[core_mem_rsp.rob_ptr])
+	  $display("[STALECOMPL] cyc=%0d mem rob=%0d state=%0d", r_cycle, core_mem_rsp.rob_ptr, r_state);
+     end
+`endif
    
    always_comb
      begin
@@ -4255,6 +4336,27 @@ module core(clk,
 	  end
      end // always_comb
 
+`ifdef VERILATOR
+   /* debug only: physical-register ownership invariants (silicon deadlocked on a
+    * register handed out twice: mfc0 k1 and a younger li k0 both got P1) */
+   always_ff@(negedge clk)
+     begin
+	if(!reset && t_free_reg && r_prf_free[t_free_reg_ptr])
+	  $display("[DBLFREE] cyc=%0d spec list: p%0d freed while already free, retiring pc=%x", r_cycle, t_free_reg_ptr, t_rob_head.pc);
+	if(!reset && t_free_reg_two && r_prf_free[t_free_reg_two_ptr])
+	  $display("[DBLFREE] cyc=%0d spec list (slot 2): p%0d freed while already free, retiring pc=%x", r_cycle, t_free_reg_two_ptr, t_rob_next_head.pc);
+	if(!reset && t_retire && t_rob_head.valid_dst && r_retire_prf_free[t_rob_head.old_pdst])
+	  $display("[DBLFREE] cyc=%0d retire list: p%0d freed while already free, pc=%x", r_cycle, t_rob_head.old_pdst, t_rob_head.pc);
+	for(integer i = 0; i < 32; i = i + 1)
+	  begin
+	     if(!reset && t_alloc && t_uop.dst_valid && (r_retire_rat[i] == n_prf_entry) && (i != 0))
+	       $display("[DBLALLOC] cyc=%0d p%0d allocated to pc=%x but retire RAT maps r%0d to it", r_cycle, n_prf_entry, t_uop.pc, i);
+	     if(!reset && t_alloc_two && t_uop2.dst_valid && (r_retire_rat[i] == n_prf_entry2) && (i != 0))
+	       $display("[DBLALLOC] cyc=%0d p%0d allocated (slot 2) to pc=%x but retire RAT maps r%0d to it", r_cycle, n_prf_entry2, t_uop2.pc, i);
+	  end
+     end
+`endif
+
    logic t_dec0_in_delay_slot, t_dec1_in_delay_slot;
    logic n_dec_delay_slot, r_dec_delay_slot;
    
@@ -4443,7 +4545,9 @@ module core(clk,
      end // always_comb
    
    
+   logic [319:0] w_dbg_exec_snap;
    exec e (
+	   .dbg_exec_snap(w_dbg_exec_snap),
 	   .clk(clk), 
 	   .reset(reset),
 	   .ip6(ip6),

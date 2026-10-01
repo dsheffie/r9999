@@ -73,6 +73,7 @@ module exec(clk,
 	    restart_complete,
 	    head_of_rob_ptr_valid,
 	    head_of_rob_ptr,
+	    dbg_exec_snap,
 	    next_head_of_rob_ptr,
 	    head_of_rob_ds_committable,
 	    cpr0_status_reg,
@@ -190,6 +191,7 @@ module exec(clk,
    input logic restart_complete;
    input logic head_of_rob_ptr_valid;
    input logic [`LG_ROB_ENTRIES-1:0] head_of_rob_ptr;
+   output logic [319:0] dbg_exec_snap;   /* STALL_SNAP: head/scheduler/LSU/PRF state for the AXI debug port */
    input logic [`LG_ROB_ENTRIES-1:0] next_head_of_rob_ptr;
    input logic			     head_of_rob_ds_committable;
    output logic [31:0]     cpr0_status_reg;
@@ -4916,4 +4918,166 @@ module exec(clk,
 
 
 
+`ifdef VERILATOR
+   /* debug only: a retired store must commit and free its slot (the r_graduated
+    * failure mode: one store retired but never freed wedges every flush/CACHE op).
+    * Per-entry age since retirement, reset when the slot is freed or reallocated. */
+   logic [31:0] r_dbg_ret_age [N_MEM_SCHED_ENTRIES-1:0];
+   always_ff@(posedge clk)
+     begin
+	for(integer i = 0; i < N_MEM_SCHED_ENTRIES; i = i + 1)
+	  begin
+	     if(reset || !(t_mem_st_live[i] && r_mem_sched_ret[i]))
+	       begin
+		  r_dbg_ret_age[i] <= 32'd0;
+	       end
+	     else
+	       begin
+		  r_dbg_ret_age[i] <= r_dbg_ret_age[i] + 32'd1;
+		  if(r_dbg_ret_age[i] == 32'd200000)
+		    begin
+		       $display("[STUCKST] cyc=%0d lsu slot %0d rob=%0d op=%0d retired 200K cycles ago, still live: cmt=%b sd_ok=%b",
+				r_cycle, i, r_mem_sched_uops[i].rob_ptr, r_mem_sched_uops[i].op, r_mem_sched_cmt[i], r_mem_sched_sd_ok[i]);
+		    end
+	       end
+	  end
+     end
+`endif
+`ifdef STALL_SNAP
+   /* debug: where is the ROB head, and what is it waiting on */
+   always_comb
+     begin
+	logic t_hin_alu, t_hin_mem;
+	logic [2:0] t_hai, t_hmi;
+	uop_t t_hu;
+	t_hin_alu = 1'b0; t_hin_mem = 1'b0; t_hai = 3'd0; t_hmi = 3'd0;
+	for(integer i = 0; i < N_INT_SCHED_ENTRIES; i = i + 1)
+	  begin
+	     if(r_alu_sched_valid[i] && (r_alu_sched_uops[i].rob_ptr == head_of_rob_ptr))
+	       begin
+		  t_hin_alu = 1'b1;
+		  t_hai = i[2:0];
+	       end
+	  end
+	for(integer i = 0; i < N_MEM_SCHED_ENTRIES; i = i + 1)
+	  begin
+	     if(r_mem_sched_valid[i] && (r_mem_sched_uops[i].rob_ptr == head_of_rob_ptr))
+	       begin
+		  t_hin_mem = 1'b1;
+		  t_hmi = i[2:0];
+	       end
+	  end
+	t_hu = t_hin_alu ? r_alu_sched_uops[t_hai] : r_mem_sched_uops[t_hmi];
+	dbg_exec_snap = '0;
+	dbg_exec_snap[31:0] = {8'hE0, t_hin_alu, t_hai, r_alu_srcA_rdy[t_hai], r_alu_srcB_rdy[t_hai],
+			       t_hu.srcA_valid, t_hu.srcB_valid, t_hin_mem, t_hmi, r_mem_sched_blk[t_hmi],
+			       r_mem_sched_issued[t_hmi], t_uq_empty, t_uq_full, t_mem_uq_empty, t_mem_uq_full, r_mem_ready, 3'd0};
+	dbg_exec_snap[63:32] = {1'b0, t_hu.srcA[6:0], 1'b0, t_hu.srcB[6:0], 1'b0, t_hu.dst[6:0], t_hu.op[7:0]};
+	dbg_exec_snap[95:64] = {{(8-N_INT_SCHED_ENTRIES){1'b0}}, r_alu_sched_valid, {(8-N_INT_SCHED_ENTRIES){1'b0}}, t_alu_entry_rdy,
+				r_mem_sched_valid, r_mem_sched_issued};
+	dbg_exec_snap[127:96] = {r_mem_sched_ld, r_mem_sched_st, r_mem_sched_ret, r_mem_sched_cmt};
+	for(integer i = 0; i < 8; i = i + 1)
+	  begin
+	     dbg_exec_snap[128 + 3*i +: 3] = r_mem_sched_blk[i];
+	  end
+	dbg_exec_snap[159:152] = {r_prf_inflight[t_hu.srcA], r_prf_inflight[t_hu.srcB], 6'd0};
+	dbg_exec_snap[191:160] = {{(8-`LG_MQ_ENTRIES-1){1'b0}}, r_mq_head_ptr, {(8-`LG_MQ_ENTRIES-1){1'b0}}, r_mq_tail_ptr, r_mem_sched_sd_ok, r_mem_sched_ser};
+	dbg_exec_snap[319:192] = r_prf_inflight;
+     end
+`else
+   assign dbg_exec_snap = '0;
+`endif
+`ifdef RSTWIN_TRACE   /* VERILATOR-only: per-restart completion trace (verbose) */
+   /* debug only: name every port-1 completion that lands near a restart, and time
+    * the flush -> restart window.  r_dbg_st_* = what last STARTED at each rob slot. */
+   logic [31:0] r_dbg_st_pc [N_ROB_ENTRIES-1:0];
+   logic [7:0]  r_dbg_st_op [N_ROB_ENTRIES-1:0];
+   logic [31:0] r_dbg_st_ep [N_ROB_ENTRIES-1:0];
+   logic [3:0]  r_dbg_since_rc;
+   logic        r_dbg_dsd;
+   always_ff@(posedge clk)
+     begin
+	if(r_start_int)
+	  begin
+	     r_dbg_st_pc[int_uop.rob_ptr] <= int_uop.pc[31:0];
+	     r_dbg_st_op[int_uop.rob_ptr] <= int_uop.op;
+	     r_dbg_st_ep[int_uop.rob_ptr] <= int_uop.clear_id;
+	  end
+	r_dbg_since_rc <= reset ? 4'hf : (restart_complete ? 4'd0 : ((r_dbg_since_rc == 4'hf) ? 4'hf : (r_dbg_since_rc + 4'd1)));
+	r_dbg_dsd <= reset ? 1'b0 : ds_done;
+     end
+   always_ff@(negedge clk)
+     begin
+	if(!reset && ds_done && !r_dbg_dsd)
+	  $display("[RSTWIN] cyc=%0d flush starts (ds_done rises), clear_cnt=%0d r_start_int=%b int_rob=%0d op=%0d", r_cycle, clear_cnt, r_start_int, int_uop.rob_ptr, int_uop.op);
+	if(!reset && restart_complete)
+	  $display("[RSTWIN] cyc=%0d restart completes", r_cycle);
+	if(!reset && complete_valid_1 && (r_dbg_since_rc < 4'd8))
+	  $display("[RSTWIN] cyc=%0d port1 completion %0d cyc after restart: rob=%0d kind=%s op=%0d pc=%x ep=%0d cur=%0d",
+		   r_cycle, r_dbg_since_rc, complete_bundle_1.rob_ptr,
+		   r_dbg_mulc ? "MUL" : r_dbg_divc ? "DIV" : "ALU",
+		   r_dbg_st_op[complete_bundle_1.rob_ptr], r_dbg_st_pc[complete_bundle_1.rob_ptr],
+		   r_dbg_st_ep[complete_bundle_1.rob_ptr], clear_cnt);
+     end
+   logic r_dbg_mulc, r_dbg_divc;
+   always_ff@(posedge clk)
+     begin
+	r_dbg_mulc <= t_mul_complete;
+	r_dbg_divc <= !t_mul_complete & t_div_complete;
+     end
+`endif
+`ifdef VERILATOR
+   /* debug only: r_prf_inflight is wiped while ds_done is high, so a push in that
+    * cycle loses its inflight set and its consumers read the register early */
+   always_ff@(negedge clk)
+     begin
+	if(!reset && ds_done && ((uq_push && uq_uop.dst_valid) || (uq_push_two && uq_uop_two.dst_valid)))
+	  $display("[PUSHDSDONE] cyc=%0d push with dst during ds_done: rob=%0d dst=p%0d pc=%x", r_cycle,
+		   uq_push ? uq_uop.rob_ptr : uq_uop_two.rob_ptr, uq_push ? uq_uop.dst : uq_uop_two.dst, uq_push ? uq_uop.pc : uq_uop_two.pc);
+     end
+`endif
+`ifdef VERILATOR
+   /* debug only: after a restart, NO state may be changed by an op from a flushed
+    * epoch (uop.clear_id != clear_cnt).  Every unit that can write state is checked;
+    * units that only carry a rob_ptr look the epoch up in a dispatch-time table. */
+   logic [31:0] r_dbg_ep [N_ROB_ENTRIES-1:0];
+   logic        r_dbg_post;     /* between restart_complete and the next flush */
+   always_ff@(posedge clk)
+     begin
+	if(uq_push)
+	  begin
+	     r_dbg_ep[uq_uop.rob_ptr] <= uq_uop.clear_id;
+	  end
+	if(uq_push_two)
+	  begin
+	     r_dbg_ep[uq_uop_two.rob_ptr] <= uq_uop_two.clear_id;
+	  end
+	r_dbg_post <= reset ? 1'b0 : (ds_done ? 1'b0 : (restart_complete ? 1'b1 : r_dbg_post));
+     end
+   always_ff@(negedge clk)
+     begin
+	if(!reset && r_dbg_post)
+	  begin
+	     if(r_start_int && (int_uop.clear_id != clear_cnt) &&
+		(t_wr_int_prf || t_wr_cpr0 || t_wr_hilo || n_tlb_entry_out_valid || t_mispred_br || t_alu_valid))
+	       $display("[STALEEXEC] cyc=%0d ALU op=%0d pc=%x rob=%0d ep=%0d cur=%0d wr_prf=%b wr_cp0=%b wr_hilo=%b tlbw=%b mispred=%b",
+			r_cycle, int_uop.op, int_uop.pc, int_uop.rob_ptr, int_uop.clear_id, clear_cnt,
+			t_wr_int_prf, t_wr_cpr0, t_wr_hilo, n_tlb_entry_out_valid, t_mispred_br);
+	     if(t_mul_complete && (r_dbg_ep[t_rob_ptr_out] != clear_cnt))
+	       $display("[STALEEXEC] cyc=%0d MUL complete rob=%0d ep=%0d cur=%0d", r_cycle, t_rob_ptr_out, r_dbg_ep[t_rob_ptr_out], clear_cnt);
+	     if(t_div_complete && (r_dbg_ep[t_div_rob_ptr_out] != clear_cnt))
+	       $display("[STALEEXEC] cyc=%0d DIV complete rob=%0d ep=%0d cur=%0d", r_cycle, t_div_rob_ptr_out, r_dbg_ep[t_div_rob_ptr_out], clear_cnt);
+	     if((w_fpu_result_valid || w_fpu_fcr_valid) && (r_dbg_ep[w_fpu_rob_ptr] != clear_cnt))
+	       $display("[STALEEXEC] cyc=%0d FPU complete rob=%0d ep=%0d cur=%0d", r_cycle, w_fpu_rob_ptr, r_dbg_ep[w_fpu_rob_ptr], clear_cnt);
+	     if(r_cvt_valid && (r_dbg_ep[r_cvt_rob] != clear_cnt))
+	       $display("[STALEEXEC] cyc=%0d CVT complete rob=%0d ep=%0d cur=%0d", r_cycle, r_cvt_rob, r_dbg_ep[r_cvt_rob], clear_cnt);
+	     if(w_fdiv_complete && (r_dbg_ep[w_fdiv_rob_ptr] != clear_cnt))
+	       $display("[STALEEXEC] cyc=%0d FDIV complete rob=%0d ep=%0d cur=%0d", r_cycle, w_fdiv_rob_ptr, r_dbg_ep[w_fdiv_rob_ptr], clear_cnt);
+	     if(r_sd_go && (r_dbg_ep[r_sd_rob] != clear_cnt))
+	       $display("[STALEEXEC] cyc=%0d SD capture rob=%0d ep=%0d cur=%0d", r_cycle, r_sd_rob, r_dbg_ep[r_sd_rob], clear_cnt);
+	     if(mem_rsp_valid && (r_dbg_ep[mem_rsp_rob_ptr] != clear_cnt))
+	       $display("[STALEEXEC] cyc=%0d MEM rsp rob=%0d ep=%0d cur=%0d dst_valid=%b", r_cycle, mem_rsp_rob_ptr, r_dbg_ep[mem_rsp_rob_ptr], clear_cnt, mem_rsp_dst_valid);
+	  end
+     end
+`endif
 endmodule

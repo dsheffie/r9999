@@ -385,6 +385,7 @@ module core_l1d_l1i(clk,
    lsu_sb_t lsu_sb;
    logic 				  restart_color;
    logic [1:0] 				  mem_color_busy;
+   logic 				  mem_quiet;
    
    
    typedef enum logic [2:0] {
@@ -944,6 +945,7 @@ module core_l1d_l1i(clk,
 	       .lsu_sb(lsu_sb),
 	       .restart_color(restart_color),
 	       .mem_color_busy(mem_color_busy),
+	     .mem_quiet(mem_quiet),
 	       .core_mem_rsp(core_mem_rsp),
 
 	       .mem_req_ack(l1d_mem_req_ack),
@@ -1097,6 +1099,7 @@ module core_l1d_l1i(clk,
 	     .lsu_sb(lsu_sb),
 	     .restart_color(restart_color),
 	     .mem_color_busy(mem_color_busy),
+	     .mem_quiet(mem_quiet),
 	     .core_mem_rsp(core_mem_rsp),
 	     
 	     .retire_reg_ptr(retire_reg_ptr),
