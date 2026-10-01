@@ -2146,7 +2146,12 @@ void execMips(state_t *s) {
       if(tlb_probe_ro(s, sva, &spa, /*for_store=*/true)) {
         /* skip UNCACHED stores (kseg1 VA / device-range PA): the RTL routes these
          * around the L1D cache array so wr_log never fires -> pushing them drifts the FIFO. */
-        bool uncached = (((uint32_t)sva & 0xe0000000u) == 0xa0000000u) ||
+        /* 64-bit kernels reach uncached memory through XKPHYS (VA[63:62]==2) with
+         * CCA VA[61:59] == 2 (uncached) or 7 (uncached accelerated) -- e.g. Linux's
+         * set_uncached_handler copies the cache-error vector via TO_UNCAC().  The low
+         * 32 bits of such a VA look like kuseg, so the kseg1 test alone misses it. */
+        bool xkphys_uc = ((sva >> 62) == 2) && ((((sva >> 59) & 7) == 2) || (((sva >> 59) & 7) == 7));
+        bool uncached = (((uint32_t)sva & 0xe0000000u) == 0xa0000000u) || xkphys_uc ||
                         (spa >= 0x1f000000u && spa <= 0x1fffffffu);
         if(!uncached) {
           uint32_t srt = (inst >> 16) & 31;              /* ft for FP stores, rt for integer */

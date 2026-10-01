@@ -159,7 +159,6 @@ module l1d(clk,
    input logic 			     drain_ds_complete;
    input logic [(1<<`LG_ROB_ENTRIES)-1:0] dead_rob_mask;
    
-   logic [`M_WIDTH-1:0]			  r_tlb_addr, n_tlb_addr;
    
    input logic flush_cl_req;
    input logic [`M_WIDTH-1:0] flush_cl_addr;
@@ -1160,13 +1159,20 @@ endfunction
      end // always_ff@ (negedge clk)
 `endif
 
-`ifdef VERILATOR
+   /* the deferred fill response: FUNCTIONAL state, so it must not live under
+    * `ifdef VERILATOR (it once did -- synthesis dropped the register, the FPGA
+    * delivered a zero response and the waiting load wedged; sim never saw it) */
    always_ff@(posedge clk)
      begin
 	if(n_fill_rsp_pend)
 	  begin
 	     r_fill_rsp <= t_fill_rsp;
 	  end
+     end
+
+`ifdef VERILATOR
+   always_ff@(posedge clk)
+     begin
 	if(!reset && r_fill_rsp_pend && (r_got_req2 || r_got_req))
 	  begin
 	     $display("[LSU] cyc=%0d deferred fill rsp collides with a port pass", r_cycle);
@@ -1412,7 +1418,6 @@ endfunction
 	     r_chop_wait <= 1'b0;
 	     r_chop_beat <= 1'b0;
 	     r_flush_cl_beat <= 1'b0;
-	     r_tlb_addr <= 'd0;
 	     r_cache_idx <= 'd0;
 	     r_cache_tag <= 'd0;
 	     r_cache_idx2 <= 'd0;
@@ -1476,7 +1481,6 @@ endfunction
 	     r_chop_beat <= n_chop_beat;
 	     r_flush_cl_beat <= n_flush_cl_beat;
 	     r_cache_idx <= t_cache_idx;
-	     r_tlb_addr <= n_tlb_addr;
 	     r_cache_tag <= t_cache_tag;
 	     
 	     r_cache_idx2 <= t_cache_idx2;
@@ -2338,8 +2342,12 @@ endfunction
 	     .reset(reset),
 	     .asid(asid),
 	     .active(core_mem_req.mapped),
-	     .req(t_got_req2),
-	     .va(n_tlb_addr),
+	     /* translate whatever is presented, NOT only an accepted request: the
+	      * registered outputs are read only in the cycle after an accept, when
+	      * this is that request's address anyway.  Keeps the port-2 accept
+	      * decision (store-buffer compare, fill start, ...) off the CAM path. */
+	     .req(core_mem_req_valid),
+	     .va(core_mem_req.addr),
 	     .pa(w_mapped_addr),
 	     .hit(w_tlb_hit),
 	     .hit_index(w_tlb_index),
@@ -2385,7 +2393,6 @@ endfunction
 	t_cache_idx2 = 'd0;
 	t_cache_tag2 = 'd0;	
 
-	n_tlb_addr = r_tlb_addr;
 	
 	t_got_req = 1'b0;
 	t_got_req2 = 1'b0;
@@ -3507,7 +3514,6 @@ endfunction
 		  //use 2nd read port
 		  t_cache_idx2 = core_mem_req.addr[IDX_STOP-1:IDX_START];
 		  t_cache_tag2 = core_mem_req.addr[`PA_WIDTH-1:TAG_LSB];
-		  n_tlb_addr = core_mem_req.addr;
 		  n_req2 = core_mem_req;
 		  core_mem_req_ack = 1'b1;
 		  t_got_req2 = 1'b1;

@@ -652,7 +652,18 @@ module exec(clk,
 		  r_mq_wait[t_picked_mem_uop.rob_ptr] <= 1'b0;
 		  r_memop_pc[t_picked_mem_uop.rob_ptr] <= t_picked_mem_uop.pc[31:0];
 	       end
-	     if(mem_blk_valid)
+	     /* r_mq_wait = "this op is back in the LSU and will not complete if the
+	      * machine flushes now" (t_clr_mask drops its ROB inflight bit).  Only an
+	      * LSU-owned block puts it back (it is re-picked, which clears the bit); a
+	      * cache-owned block (BLK_MISS/BLK_ST_CONFLICT) stays in the l1d and is
+	      * ANSWERED, never re-picked, so setting the bit there leaked it to the next
+	      * op in the ROB slot -- a multiply then lost its inflight bit at a flush, the
+	      * restart did not wait for it, and its completion landed on a new op. */
+	     if(mem_rsp_valid)
+	       begin
+		  r_mq_wait[mem_rsp_rob_ptr] <= 1'b0;
+	       end
+	     if(mem_blk_valid && mem_blk_code[2])
 	       begin
 		  r_mq_wait[mem_rsp_rob_ptr] <= 1'b1;
 	       end
