@@ -161,6 +161,12 @@ unaligned/test_unaligned.elf: unaligned/test_unaligned.c $(STARTUP) $(COMMON)/si
 #   64-bit variant faults in 64-bit mode -> must take the XTLB vector (0x080)
 #   32-bit variant faults in 32-bit mode -> must take the TLB  vector (0x000)
 # -----------------------------------------------------------------------
+# MTC0 Index/EntryLo/PageMask is oldest_first, not serializing: wrong-path / delay-slot /
+# branch-likely mtc0 + mtc0->tlbwi->tlbr ordering.  Self-contained; expect 'P' (-c 0 and -c 1).
+tlb/test_mtc0_tlb_spec.elf: tlb/test_mtc0_tlb_spec.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c tlb/test_mtc0_tlb_spec.S -o tlb/test_mtc0_tlb_spec.o
+	$(LD) $(LDFLAGS) tlb/test_mtc0_tlb_spec.o -o $@
+
 xtlb/test_xtlb64.elf: xtlb/test_xtlb.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -DMODE64 -x assembler-with-cpp -c xtlb/test_xtlb.S -o xtlb/test_xtlb64.o
 	$(LD) $(LDFLAGS) xtlb/test_xtlb64.o -o $@

@@ -918,6 +918,14 @@ module core(clk,
    state_t r_state, n_state;
    logic 	r_pending_fault, n_pending_fault;
    logic        r_oldest_first_pending, n_oldest_first_pending;
+   /* CP0 ordering (uop.vh is_cp0_wr/is_cp0_rd): CP0 writers allocated / retired.  A
+    * CP0 reader snapshots r_cp0_alloc_seq into uop.cp0_seq and exec issues it once its
+    * commit sequence (retire_cp0_valid count) catches up.  A flush drops every
+    * un-retired writer: alloc resyncs to retire. */
+   logic [`LG_ROB_ENTRIES+1:0] r_cp0_alloc_seq, n_cp0_alloc_seq;
+   logic [`LG_ROB_ENTRIES+1:0] r_cp0_retire_seq, n_cp0_retire_seq;
+   logic        r_retire_cp0_valid, r_retire_cp0_staged;
+   logic [`LG_ROB_ENTRIES-1:0] r_retire_cp0_rob_ptr;
    
    /* single-step: one architectural commit per 0->1 edge on `step` */
    logic        r_step_d, r_step_credit, n_step_credit;
@@ -1094,7 +1102,13 @@ module core(clk,
    
 
    assign ready_for_resume = r_ready_for_resume;
-   assign head_of_rob_ptr_valid = (r_state == ACTIVE) | ( (r_state==DRAIN) && !r_ds_done);
+   /* In DRAIN the delay slot of the retired mispredicted branch is the head and must
+    * be allowed to issue -- unless it is the NULLIFIED slot of a not-taken
+    * branch-likely: an oldest_first op there (mtc0 EntryLo/Index, tlbwr, an uncached
+    * access) would otherwise execute its side effect and then be discarded. */
+   assign head_of_rob_ptr_valid = (r_state == ACTIVE) |
+				  ( (r_state==DRAIN) && !r_ds_done &&
+				    !(r_has_nullifying_delay_slot && !r_take_br) );
    assign head_of_rob_ptr = r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
    assign head_of_rob_has_delay_slot = t_rob_head.has_delay_slot | t_rob_head.has_nullifying_delay_slot;
    /* Fix A (uncached-delay-slot deadlock): a REGULAR (non-nullifying) delay slot
@@ -1111,6 +1125,45 @@ module core(clk,
 					 & t_rob_head.faulted
 					 & t_rob_head.has_delay_slot
 					 & ~t_rob_head.has_nullifying_delay_slot;
+
+   always_comb
+     begin
+	n_cp0_alloc_seq = r_cp0_alloc_seq
+			  + ((t_alloc & is_cp0_wr(t_uop.op)) ? 'd1 : 'd0)
+			  + ((t_alloc_two & is_cp0_wr(t_uop2.op)) ? 'd1 : 'd0);
+	n_cp0_retire_seq = r_cp0_retire_seq
+			   + ((t_retire & is_cp0_wr(t_rob_head.opcode)) ? 'd1 : 'd0);
+	if(t_clr_rob)
+	  begin
+	     n_cp0_alloc_seq = n_cp0_retire_seq;
+	  end
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	r_cp0_alloc_seq <= reset ? 'd0 : n_cp0_alloc_seq;
+	r_cp0_retire_seq <= reset ? 'd0 : n_cp0_retire_seq;
+	/* commit handshake to exec: one CP0 writer retires per cycle (t_retire_two) */
+	r_retire_cp0_valid <= reset ? 1'b0 : (t_retire & is_cp0_wr(t_rob_head.opcode));
+	r_retire_cp0_staged <= reset ? 1'b0 : (t_retire & ((t_rob_head.opcode == MTC0) | (t_rob_head.opcode == DMTC0)));
+	r_retire_cp0_rob_ptr <= r_rob_head_ptr[`LG_ROB_ENTRIES-1:0];
+     end
+
+`ifdef VERILATOR
+   always_ff@(posedge clk)
+     begin
+	if(!reset && t_rob_empty && (r_cp0_alloc_seq != r_cp0_retire_seq))
+	  begin
+	     $display("[CP0SEQ] cycle %d: ROB empty but alloc seq %d != retire seq %d", r_cycle, r_cp0_alloc_seq, r_cp0_retire_seq);
+	     $stop();
+	  end
+	if(!reset && t_retire_two && is_cp0_wr(t_rob_next_head.opcode))
+	  begin
+	     $display("[CP0SEQ] cycle %d: CP0 writer retired in the second slot", r_cycle);
+	     $stop();
+	  end
+     end
+`endif
 				      
    assign flush_req_l1d = r_flush_req_l1d;
    assign flush_req_l1i = r_flush_req_l1i;
@@ -2527,6 +2580,7 @@ module core(clk,
 				   & (t_rob_head.is_br ? !t_rob_next_head.is_br : 1'b1)
 				   & !t_rob_next_head.is_ret
 				   & !t_rob_next_head.is_call
+				   & !is_cp0_wr(t_rob_next_head.opcode)   /* one CP0 commit per cycle */
 		    		   & !t_rob_next_head.valid_hilo_dst
 				   & !t_rob_next_head.valid_fcr_dst 
 				   & ~single_step;
@@ -2594,7 +2648,9 @@ module core(clk,
 	       //r_cycle, r_rob_inflight, r_ds_done, t_rob_head_complete, r_has_delay_slot);
 
 	       
-	       if(r_has_nullifying_delay_slot && t_rob_head_complete && !r_ds_done)
+	       /* a nullified (not-taken) slot is discarded: do not wait for it to complete
+		* (it may be an oldest_first op that is no longer allowed to issue) */
+	       if(r_has_nullifying_delay_slot && (t_rob_head_complete || !r_take_br) && !r_ds_done)
 		 begin
 		    if(r_take_br)
 		      begin
@@ -3172,6 +3228,8 @@ module core(clk,
 	
 	t_alloc_uop = t_uop;
 	t_alloc_uop2 = t_uop2;
+	t_alloc_uop.cp0_seq = r_cp0_alloc_seq;
+	t_alloc_uop2.cp0_seq = r_cp0_alloc_seq + (is_cp0_wr(t_uop.op) ? 'd1 : 'd0);
 `ifdef VERILATOR
 	t_alloc_uop.clear_id = r_clear_cnt;
 	t_alloc_uop2.clear_id = r_clear_cnt;
@@ -4604,6 +4662,9 @@ module core(clk,
 	   .head_of_rob_ptr(head_of_rob_ptr),
 	   .next_head_of_rob_ptr(next_head_of_rob_ptr),
 	   .head_of_rob_ds_committable(head_of_rob_ds_committable),
+	   .retire_cp0_valid(r_retire_cp0_valid),
+	   .retire_cp0_staged(r_retire_cp0_staged),
+	   .retire_cp0_rob_ptr(r_retire_cp0_rob_ptr),
 	   .cpr0_status_reg(status_reg),
 	   .mq_wait(mq_wait),
 	   .uq_wait(uq_wait),

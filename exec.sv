@@ -76,6 +76,9 @@ module exec(clk,
 	    dbg_exec_snap,
 	    next_head_of_rob_ptr,
 	    head_of_rob_ds_committable,
+	    retire_cp0_valid,
+	    retire_cp0_staged,
+	    retire_cp0_rob_ptr,
 	    cpr0_status_reg,
 	    uq_wait,
 	    mq_wait,
@@ -194,6 +197,11 @@ module exec(clk,
    output logic [319:0] dbg_exec_snap;   /* STALL_SNAP: head/scheduler/LSU/PRF state for the AXI debug port */
    input logic [`LG_ROB_ENTRIES-1:0] next_head_of_rob_ptr;
    input logic			     head_of_rob_ds_committable;
+   /* a CP0 writer (uop.vh is_cp0_wr) retired last cycle; staged = (D)MTC0, whose data
+    * is committed from r_cp0_stage_* at retire_cp0_rob_ptr */
+   input logic			     retire_cp0_valid;
+   input logic			     retire_cp0_staged;
+   input logic [`LG_ROB_ENTRIES-1:0] retire_cp0_rob_ptr;
    output logic [31:0]     cpr0_status_reg;
       
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);   
@@ -315,6 +323,17 @@ module exec(clk,
    logic [N_INT_PRF_ENTRIES-1:0]  r_fp_prf_inflight, n_fp_prf_inflight;
 
    logic 			  t_wr_int_prf, t_wr_cpr0, t_wr_cpr0_64;
+   /* (D)MTC0 data staged per ROB entry at exec, committed to CP0 at retire */
+   logic [`M_WIDTH-1:0] 	  r_cp0_stage_data[N_ROB_ENTRIES-1:0];
+   logic [4:0] 			  r_cp0_stage_reg[N_ROB_ENTRIES-1:0];
+   logic 			  r_cp0_stage_64[N_ROB_ENTRIES-1:0];
+   wire 			  w_cp0_wr = retire_cp0_valid & retire_cp0_staged;
+   wire [4:0] 			  w_cp0_wr_reg = r_cp0_stage_reg[retire_cp0_rob_ptr];
+   wire [`M_WIDTH-1:0] 		  w_cp0_wr_data = r_cp0_stage_data[retire_cp0_rob_ptr];
+   wire 			  w_cp0_wr_64 = r_cp0_stage_64[retire_cp0_rob_ptr];
+   /* CP0 writers retired AND committed; a CP0 reader issues when this reaches its
+    * uop.cp0_seq (the writers allocated before it) */
+   logic [`LG_ROB_ENTRIES+1:0] 	  r_cp0_commit_seq;
    logic 			  t_wr_fcsr;
    logic [`M_WIDTH-1:0]		  t_csr0_val, t_csr0_64_val;
    
@@ -1160,6 +1179,8 @@ module exec(clk,
 					(t_alu_srcB_match[i] |r_alu_srcB_rdy[i]) &
 					(t_alu_hilo_match[i] |r_alu_hilo_rdy[i]) &
 					(t_alu_fcr_match[i] |r_alu_fcr_rdy[i]) &
+					(!is_cp0_rd(r_alu_sched_uops[i].op) ||
+					 (r_alu_sched_uops[i].cp0_seq == r_cp0_commit_seq)) &
 					(!r_alu_sched_uops[i].oldest_first ||
 					 (head_of_rob_ptr_valid &&
 					  (r_alu_sched_uops[i].rob_ptr == head_of_rob_ptr)) ||
@@ -3862,7 +3883,7 @@ module exec(clk,
 	 * the reg7 putchar EVERY idle cycle the mtc0 lingers (~10x when the scheduler
 	 * is slow to refill) -> repeated console chars.  Same sticky-int_uop class as
 	 * the TLB-spray/ERET gates (070c810); this one was missed. */
-	t_push_putchar = r_start_int & t_wr_cpr0 & (int_uop.dst == 'd7);
+	t_push_putchar = w_cp0_wr & (w_cp0_wr_reg == 'd7);
 	if(t_push_putchar)
 	  begin
 	     n_wr_pc_idx = r_wr_pc_idx + 'd1;
@@ -3883,10 +3904,25 @@ module exec(clk,
      begin
 	if(t_push_putchar)
 	  begin
-	     r_pc_buf[r_wr_pc_idx[2:0]] <= t_srcA[7:0];
+	     r_pc_buf[r_wr_pc_idx[2:0]] <= w_cp0_wr_data[7:0];
 	  end
      end
    
+   always_ff@(posedge clk)
+     begin
+	if(r_start_int & t_wr_cpr0)
+	  begin
+	     r_cp0_stage_data[int_uop.rob_ptr] <= t_srcA;
+	     r_cp0_stage_reg[int_uop.rob_ptr] <= int_uop.dst[4:0];
+	     r_cp0_stage_64[int_uop.rob_ptr] <= t_wr_cpr0_64;
+	  end
+     end
+
+   always_ff@(posedge clk)
+     begin
+	r_cp0_commit_seq <= reset ? 'd0 : (r_cp0_commit_seq + (retire_cp0_valid ? 'd1 : 'd0));
+     end
+
    assign putchar_fifo_out = r_pc_buf[r_rd_pc_idx[2:0]];
    assign putchar_fifo_empty = r_wr_pc_idx == r_rd_pc_idx;
    wire w_putchar_fifo_full = (r_wr_pc_idx[2:0] == r_rd_pc_idx[2:0]) & (r_wr_pc_idx[3] != r_rd_pc_idx[3]);
@@ -4011,10 +4047,10 @@ module exec(clk,
 		  n_exc_in_ds = exc_in_delay;
 	       end
 	  end // if (core_wr_cause)
-	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd13)
+	else if(w_cp0_wr & w_cp0_wr_reg == 'd13)
 	  begin
-	     n_ip0 = t_srcA[8];
-	     n_ip1 = t_srcA[9];	     
+	     n_ip0 = w_cp0_wr_data[8];
+	     n_ip1 = w_cp0_wr_data[9];	     
 	  end
      end
 
@@ -4030,9 +4066,9 @@ module exec(clk,
    always_comb
      begin
 	n_epc = r_epc;
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd14)
+	if(w_cp0_wr & w_cp0_wr_reg == 'd14)
 	  begin
-	     n_epc = t_srcA;
+	     n_epc = w_cp0_wr_data;
 	  end
 	else if(core_wr_epc & (r_sr_exl == 1'b0))
 	  begin
@@ -4046,7 +4082,7 @@ module exec(clk,
      if(!reset && (n_epc != r_epc))
        $display("[epc] %x -> %x  r_sr_exl=%b cwr_epc=%b mtc0epc=%b cwr_cause=%b srcA=%x",
 		r_epc[31:0], n_epc[31:0], r_sr_exl, core_wr_epc,
-		(r_start_int & t_wr_cpr0 & (int_uop.dst=='d14)), core_wr_cause, t_srcA[31:0]);
+		(w_cp0_wr & (w_cp0_wr_reg=='d14)), core_wr_cause, w_cp0_wr_data[31:0]);
 `endif
    always_ff@(posedge clk)
      begin
@@ -4159,10 +4195,10 @@ module exec(clk,
 	     n_index_probe_failed = (core_tlbp_hit==1'b0);
 	     n_index = core_tlbp_index;
 	  end
-	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd0)
+	else if(w_cp0_wr & w_cp0_wr_reg == 'd0)
 	  begin
-	     n_index = t_srcA[5:0];
-	     n_index_probe_failed = t_srcA[31];
+	     n_index = w_cp0_wr_data[5:0];
+	     n_index_probe_failed = w_cp0_wr_data[31];
 	  end
      end
 
@@ -4187,15 +4223,15 @@ module exec(clk,
 	     n_entrylo0_c = r_tlb_entry.c0;	     
 	     n_entrylo0_pfn = r_tlb_entry.pfn0;	     
 	  end
-	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd2)
+	else if(w_cp0_wr & w_cp0_wr_reg == 'd2)
 	  begin
-	     n_entrylo0_g = t_srcA[0];
-	     n_entrylo0_v = t_srcA[1];
-	     n_entrylo0_d = t_srcA[2];
-	     n_entrylo0_c = t_srcA[5:3];
+	     n_entrylo0_g = w_cp0_wr_data[0];
+	     n_entrylo0_v = w_cp0_wr_data[1];
+	     n_entrylo0_d = w_cp0_wr_data[2];
+	     n_entrylo0_c = w_cp0_wr_data[5:3];
 	     /* PFN = PA[PA_WIDTH-1:12] = EntryLo[PFN_WIDTH+5:6]; PA bits beyond
 	      * PA_WIDTH (a 64b write past the 36-bit PA) are dropped (real 36-bit HW). */
-	     n_entrylo0_pfn = t_srcA[(`PFN_WIDTH+5):6];
+	     n_entrylo0_pfn = w_cp0_wr_data[(`PFN_WIDTH+5):6];
 	  end
      end
 
@@ -4214,13 +4250,13 @@ module exec(clk,
 	     n_entrylo1_c = r_tlb_entry.c1;	     
 	     n_entrylo1_pfn = r_tlb_entry.pfn1;	     
 	  end	
-	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd3)
+	else if(w_cp0_wr & w_cp0_wr_reg == 'd3)
 	  begin
-	     n_entrylo1_g = t_srcA[0];
-	     n_entrylo1_v = t_srcA[1];
-	     n_entrylo1_d = t_srcA[2];
-	     n_entrylo1_c = t_srcA[5:3];
-	     n_entrylo1_pfn = t_srcA[(`PFN_WIDTH+5):6];
+	     n_entrylo1_g = w_cp0_wr_data[0];
+	     n_entrylo1_v = w_cp0_wr_data[1];
+	     n_entrylo1_d = w_cp0_wr_data[2];
+	     n_entrylo1_c = w_cp0_wr_data[5:3];
+	     n_entrylo1_pfn = w_cp0_wr_data[(`PFN_WIDTH+5):6];
 	  end
      end
 
@@ -4229,13 +4265,13 @@ module exec(clk,
 	n_badvpn2 = r_badvpn2;
 	n_ptebase = r_ptebase;
 	n_xptebase = r_xptebase;
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd4)
+	if(w_cp0_wr & w_cp0_wr_reg == 'd4)
 	  begin
-	     n_ptebase = t_srcA[31:23];
+	     n_ptebase = w_cp0_wr_data[31:23];
 	  end
-	else if(r_start_int & t_wr_cpr0 & t_wr_cpr0_64 & int_uop.dst == 'd20)
+	else if(w_cp0_wr & w_cp0_wr_64 & w_cp0_wr_reg == 'd20)
 	  begin
-	     n_xptebase = t_srcA[63:33];
+	     n_xptebase = w_cp0_wr_data[63:33];
 	  end
 	if(save_to_tlb_regs)
 	  begin
@@ -4251,9 +4287,9 @@ module exec(clk,
 	  begin
 	     n_pagemask = r_tlb_entry.pagemask;
 	  end
-	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd5)
+	else if(w_cp0_wr & w_cp0_wr_reg == 'd5)
 	  begin
-	     n_pagemask = t_srcA[24:13];
+	     n_pagemask = w_cp0_wr_data[24:13];
 	  end
      end
    
@@ -4273,9 +4309,9 @@ module exec(clk,
 	     n_entryhi_r    = core_badvaddr[63:62];
 	     n_entryhi_vpn2 = core_badvaddr[39:13];
 	  end
-	else if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd10)
+	else if(w_cp0_wr & w_cp0_wr_reg == 'd10)
 	  begin
-	     n_entryhi_asid = t_srcA[7:0];
+	     n_entryhi_asid = w_cp0_wr_data[7:0];
 	     /* Take the full VPN2 (va[39:13]) + region R (va[63:62]) from the
 	      * sign-extended GPR for BOTH mtc0 and dmtc0.  The GPR already holds
 	      * the full sign-extended VA, so a 32-bit mtc0 of a high kseg2/ckseg
@@ -4284,17 +4320,17 @@ module exec(clk,
 	      * via mtc0 (IRIX tlbwired, etc.).  Zero-extending here was the companion
 	      * workaround to the old low-19 loose match. In 32-bit addressing the
 	      * TLB match ignores R/upper-VPN, so the extra stored bits are benign. */
-	     n_entryhi_r    = t_srcA[63:62];
-	     n_entryhi_vpn2 = t_srcA[39:13];
+	     n_entryhi_r    = w_cp0_wr_data[63:62];
+	     n_entryhi_vpn2 = w_cp0_wr_data[39:13];
 	  end
      end
 
 `ifdef VERILATOR
    always_comb
      begin
-	if(save_to_tlb_regs & (r_start_int & t_wr_cpr0 & int_uop.dst == 'd10))
+	if(save_to_tlb_regs & (w_cp0_wr & w_cp0_wr_reg == 'd10))
 	  begin
-	     $display("attempting save to tlb regs through a fault and write tlb regs in the same cycle, uop pc %x", int_uop.pc);
+	     $display("attempting save to tlb regs through a fault and commit an EntryHi write in the same cycle");
 	     $stop();
 	  end
      end
@@ -4365,36 +4401,36 @@ module exec(clk,
 	  n_timer_ip = n_timer_ip | 1'b1;   /* inject an extra timer IRQ */
 `endif
 
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd12)
+	if(w_cp0_wr & w_cp0_wr_reg == 'd12)
 	  begin
-	     n_sr_ie = t_srcA[0];
-	     n_sr_exl = t_srcA[1];
-	     n_sr_erl = t_srcA[2];
-	     n_sr_ksu = t_srcA[4:3];
-	     n_sr_ux = t_srcA[5];
-	     n_sr_sx = t_srcA[6];
-	     n_sr_kx = t_srcA[7];
-	     n_sr_cu0 = t_srcA[28];
-	     n_sr_cu1 = t_srcA[29];
-	     n_sr_fr  = t_srcA[26];
-	     n_sr_bev = t_srcA[22];
-	     n_sr_ts = t_srcA[21];
-	     n_sr_im = t_srcA[15:8];
+	     n_sr_ie = w_cp0_wr_data[0];
+	     n_sr_exl = w_cp0_wr_data[1];
+	     n_sr_erl = w_cp0_wr_data[2];
+	     n_sr_ksu = w_cp0_wr_data[4:3];
+	     n_sr_ux = w_cp0_wr_data[5];
+	     n_sr_sx = w_cp0_wr_data[6];
+	     n_sr_kx = w_cp0_wr_data[7];
+	     n_sr_cu0 = w_cp0_wr_data[28];
+	     n_sr_cu1 = w_cp0_wr_data[29];
+	     n_sr_fr  = w_cp0_wr_data[26];
+	     n_sr_bev = w_cp0_wr_data[22];
+	     n_sr_ts = w_cp0_wr_data[21];
+	     n_sr_im = w_cp0_wr_data[15:8];
 	  end
 	/* MTC0 reg 9: write Count */
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd9)
+	if(w_cp0_wr & w_cp0_wr_reg == 'd9)
 	  begin
-	     n_count = t_srcA[31:0];
+	     n_count = w_cp0_wr_data[31:0];
 	  end
 	/* MTC0 reg 18/19: WatchLo/WatchHi — functional register only (no watch hw) */
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd18)
-	  n_watchlo = t_srcA[31:0];
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd19)
-	  n_watchhi = t_srcA[31:0];
+	if(w_cp0_wr & w_cp0_wr_reg == 'd18)
+	  n_watchlo = w_cp0_wr_data[31:0];
+	if(w_cp0_wr & w_cp0_wr_reg == 'd19)
+	  n_watchhi = w_cp0_wr_data[31:0];
 	/* MTC0 reg 11: write Compare and clear timer IP */
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd11)
+	if(w_cp0_wr & w_cp0_wr_reg == 'd11)
 	  begin
-	     n_compare = t_srcA[31:0];
+	     n_compare = w_cp0_wr_data[31:0];
 	     n_timer_ip = 1'b0;
 `ifdef TIMER_RARE
 	     /* CO-SIM ONLY (never silicon): stretch the LARGE periodic scheduler tick by
@@ -4402,9 +4438,9 @@ module exec(clk,
 	      * divergence points -- become rare, letting the lockstep checker run far past
 	      * the ~62M scheduler wall.  Leave short calibration intervals (get_r4k_counter
 	      * ~4096) untouched so IRIX still boots. */
-	     if((t_srcA[31:0] - r_count) > 32'd100000)
+	     if((w_cp0_wr_data[31:0] - r_count) > 32'd100000)
 	       begin
-		  n_compare = r_count + ((t_srcA[31:0] - r_count) * `TIMER_RARE);
+		  n_compare = r_count + ((w_cp0_wr_data[31:0] - r_count) * `TIMER_RARE);
 	       end
 `endif
 	  end
@@ -4691,9 +4727,9 @@ module exec(clk,
 	n_random = r_random;
 	n_wired = r_wired;
 	/* write wired */
-	if(r_start_int & t_wr_cpr0 & int_uop.dst == 'd6)
+	if(w_cp0_wr & w_cp0_wr_reg == 'd6)
 	  begin
-	     n_wired = t_srcA[5:0];
+	     n_wired = w_cp0_wr_data[5:0];
 	     n_random = (`N_TLB_ENTRIES-1);
 	  end
 	else if(retire)

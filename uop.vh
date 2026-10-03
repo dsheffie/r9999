@@ -304,6 +304,53 @@ function logic is_mult(opcode_t op);
    return x;
 endfunction // is_mult
 
+/* CP0 ordering: every CP0 writer bumps a sequence number at alloc and at retire
+ * (core.sv r_cp0_alloc_seq / r_cp0_retire_seq); every CP0 reader snapshots the alloc
+ * sequence into uop.cp0_seq and issues only once exec's commit sequence has caught up,
+ * i.e. every older CP0 write has retired and committed.  Together this renames all of
+ * CP0 as ONE register whose versions become ready at retire: CP0 ops are totally
+ * ordered, nothing else waits on them.  (D)MTC0 data is staged per ROB entry at exec
+ * and committed at retire (exec.sv r_cp0_stage_*). */
+function logic is_cp0_wr(opcode_t op);
+   logic     x;
+   case(op)
+     MTC0:
+       x = 1'b1;
+     DMTC0:
+       x = 1'b1;
+     TLBP:
+       x = 1'b1;
+     TLBR:
+       x = 1'b1;
+     default:
+       x = 1'b0;
+   endcase
+   return x;
+endfunction // is_cp0_wr
+
+function logic is_cp0_rd(opcode_t op);
+   logic     x;
+   case(op)
+     MFC0:
+       x = 1'b1;
+     DMFC0:
+       x = 1'b1;
+     TLBR:
+       x = 1'b1;
+     TLBWI:
+       x = 1'b1;
+     TLBWR:
+       x = 1'b1;
+     TLBP:
+       x = 1'b1;
+     ERET:
+       x = 1'b1;
+     default:
+       x = 1'b0;
+   endcase
+   return x;
+endfunction // is_cp0_rd
+
 function logic is_xflush(opcode_t op);
    logic     x;
    case(op)
@@ -448,6 +495,7 @@ typedef struct packed {
    logic [`M_WIDTH-1:0]        pc;
    logic [`M_WIDTH-1:0]        pred_target;
    logic [`LG_ROB_ENTRIES-1:0] rob_ptr;
+   logic [`LG_ROB_ENTRIES+1:0] cp0_seq;   /* CP0 readers: CP0 writers allocated before this op (see is_cp0_wr) */
    logic 		       serializing_op;
    logic 		       must_restart;
    logic 		       oldest_first;

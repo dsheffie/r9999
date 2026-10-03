@@ -88,6 +88,17 @@ module decode_mips(
    wire [`LG_PRF_ENTRIES-1:0]	rs = {{ZP{1'b0}},insn[25:21]};
    wire [`LG_PRF_ENTRIES-1:0]	rt = {{ZP{1'b0}},insn[20:16]};
    wire [`LG_PRF_ENTRIES-1:0]	rd = {{ZP{1'b0}},insn[15:11]};
+   /* (D)MTC0 commits at retire (exec.sv r_cp0_stage_*) and is ordered against every
+    * other CP0 op by the CP0 sequence (uop.vh is_cp0_wr/is_cp0_rd), so it needs no
+    * serialization -- EXCEPT for registers consumed implicitly by fetch/decode/
+    * translate/interrupt logic outside that ordering: those still drain and refetch.
+    * Plain: Index(0) EntryLo0(2) EntryLo1(3) Context(4) PageMask(5) console(7)
+    * EPC(14) XContext(20) ErrorEPC(30). */
+   wire 	w_mtc0_plain = (insn[15:11] == 5'd0) | (insn[15:11] == 5'd2) |
+			 (insn[15:11] == 5'd3) | (insn[15:11] == 5'd4) |
+			 (insn[15:11] == 5'd5) | (insn[15:11] == 5'd7) |
+			 (insn[15:11] == 5'd14) | (insn[15:11] == 5'd20) |
+			 (insn[15:11] == 5'd30);
 
    wire [`LG_PRF_ENTRIES-1:0]	fs = {{ZP{1'b0}},insn[15:11]};
    wire [`LG_PRF_ENTRIES-1:0]	ft = {{ZP{1'b0}},insn[20:16]};
@@ -136,6 +147,7 @@ module decode_mips(
 	uop.must_restart = 1'b0;
 	uop.oldest_first = 1'b0;
 	uop.rob_ptr = 'd0;
+	uop.cp0_seq = 'd0;
 	uop.br_pred = 1'b0;
 	uop.is_br = 1'b0;
 	uop.pht_idx = pht_idx;
@@ -1307,7 +1319,7 @@ module decode_mips(
 			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.srcA = rd;
 			 uop.is_int = 1'b1;
-			 uop.oldest_first = 1'b1;
+			 /* not oldest_first: ordered by the CP0 sequence (uop.vh is_cp0_rd) */
 		      end
 		    else if((insn[25:21] == 5'd1) & (insn[10:0] == 'd0)) /* dmfc0 */
 		      begin
@@ -1324,7 +1336,7 @@ module decode_mips(
 			      uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			      uop.srcA = rd;
 			      uop.is_int = 1'b1;
-			      uop.oldest_first = 1'b1;
+			      /* not oldest_first: see MFC0 */
 			   end
 			 /* else: 64-bit op in 32-bit mode -> op stays II (RI) */
 		      end
@@ -1336,7 +1348,7 @@ module decode_mips(
 			 uop.srcA_valid = 1'b1;
 			 uop.has_delay_slot = 1'b0;
 			 uop.is_int = 1'b1;
-			 uop.serializing_op = 1'b1;
+			 uop.serializing_op = !w_mtc0_plain;
 		      end // case: 5'd4
 		    else if((insn[25:21] == 5'd5) & (insn[10:0] == 'd0)) /* dmtc0 */
 		      begin
@@ -1348,7 +1360,7 @@ module decode_mips(
 			      uop.srcA_valid = 1'b1;
 			      uop.has_delay_slot = 1'b0;
 			      uop.is_int = 1'b1;
-			      uop.serializing_op = 1'b1;
+			      uop.serializing_op = !w_mtc0_plain;
 			   end
 			 /* else: 64-bit op in 32-bit mode -> op stays II (RI) */
 		      end
