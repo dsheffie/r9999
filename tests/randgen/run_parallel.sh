@@ -38,6 +38,7 @@ run_one() {
     echo "BUILDERR $s" >"$WORK/r$s"; rm -f "$p".*; return; fi
   local out
   out=$(timeout 90 "$SIM" -f "$p.elf" -c 1 --maxicnt $((n*4+30000+BUFSZ)) 2>&1)
+  echo "$out" | grep -ao "L1D probes [0-9]*, hit [0-9]*, dirty [0-9]*" >> "${PROBE_LOG:-/dev/null}"
   rm -f "$p".*
   if echo "$out" | grep -q DONE && ! echo "$out" | grep -qiE "does not match|incorrect 8001|no match"; then
     echo "PASS $s" >"$WORK/r$s"
