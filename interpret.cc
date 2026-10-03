@@ -2665,8 +2665,10 @@ void execMips(state_t *s) {
 	    s->pc = (int32_t)s->cpr0[CPR0_ERROREPC] - 4;
 	    s->cpr0[CPR0_SR] &= ~SR_ERL;
 	  } else {
-	    /* Return from exception: PC = EPC, clear EXL */
-	    s->pc = (int32_t)s->cpr0[CPR0_EPC] - 4;
+	    /* Return from exception: PC = EPC, clear EXL.  The FULL 64-bit EPC: the 32-bit
+	     * cpr0 view returned n64 user code at 0x120002420 to 0x20002420 (an XTLB refill
+	     * and a false checker divergence; the RTL was right). */
+	    s->pc = s->cpr0_64[CPR0_EPC] - 4;
 	    s->cpr0[CPR0_SR] &= ~SR_EXL;
 	  }
 	  s->insn_histo[mipsInsn::ERET]++;
