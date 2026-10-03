@@ -844,6 +844,7 @@ module core_l1d_l1i(clk,
 	       .l1_mem_req_mask(t_l2_req_mask),
 	       .l1_mem_req_store_data(l1d_mem_req_store_data),
 	       .l1_mem_req_opcode(t_l2_req_opcode),
+	       .l1_mem_req_from_d(r_state != GNT_L1I),
 		       .l2_nocache(l2_nocache),
 	       
 	       .l1_mem_rsp_valid(w_l1_mem_rsp_valid),
@@ -1228,6 +1229,79 @@ module core_l1d_l1i(clk,
 `endif
 
    
+
+
+`ifdef VERILATOR
+   /* inclusive-l2-v2 stage A shadow check (sim only): every 16K cycles walk the L1D and,
+    * for each valid line, look its PA up in the L2.  Two outcomes are counted separately:
+    *   not in the L2 at all  -> an inclusion violation (expected until stage B adds the
+    *                            back-invalidate probe: an L1I miss can evict an L1D line)
+    *   in the L2 but pd clear or pidx != the line's colour -> a stage A tracking BUG */
+   localparam CHK_L1D_SETS = 1 << `LG_L1D_NUM_SETS;
+   localparam CHK_L1D_TAG_LSB = ((`LG_L1D_CL_LEN + `LG_L1D_NUM_SETS) < `LG_PG_SZ) ?
+				(`LG_L1D_CL_LEN + `LG_L1D_NUM_SETS) : `LG_PG_SZ;
+   localparam CHK_L2_IDX_STOP = `LG_L2_NUM_SETS + 4;
+   localparam CHK_L1D_IDX_STOP = `LG_L1D_CL_LEN + `LG_L1D_NUM_SETS;
+   logic [13:0] r_preschk_cnt;
+   logic [63:0] r_preschk_bad, r_preschk_incl, r_preschk_lines;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_preschk_cnt <= 'd0;
+	     r_preschk_bad <= 'd0;
+	     r_preschk_incl <= 'd0;
+	     r_preschk_lines <= 'd0;
+	  end
+	else
+	  begin
+	     r_preschk_cnt <= r_preschk_cnt + 'd1;
+	     if(r_preschk_cnt == 'd0)
+	       begin
+		  logic [63:0] t_lines, t_bad, t_incl;
+		  t_lines = 'd0; t_bad = 'd0; t_incl = 'd0;
+		  for(integer i = 0; i < CHK_L1D_SETS; i = i + 1)
+		    begin
+		       if(dcache.dc_valid.b0.r_ram[i] != 'd0)
+			 begin
+			    logic [63:0] pa, l2i;
+			    logic [63:0] l2t;
+			    pa = ({{(64-$bits(dcache.dc_tag.b0.r_ram[i])){1'b0}}, dcache.dc_tag.b0.r_ram[i]} << CHK_L1D_TAG_LSB)
+			       | ((64'(i) << `LG_L1D_CL_LEN) & ((64'd1 << CHK_L1D_TAG_LSB) - 64'd1));
+			    l2i = (pa >> 4) & ((64'd1 << `LG_L2_NUM_SETS) - 64'd1);
+			    l2t = pa >> CHK_L2_IDX_STOP;
+			    t_lines = t_lines + 'd1;
+			    if(!(l2cache.valid_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]] &&
+				 (64'(l2cache.tag_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]]) == l2t)))
+			      begin
+				 t_incl = t_incl + 'd1;
+			      end
+			    else if(!l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]][l2cache.N_PIDX] ||
+				    (64'(l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]][l2cache.N_PIDX-1:0]) !=
+				     ((pa >> `LG_PG_SZ) & ((64'd1 << l2cache.N_PIDX) - 64'd1))))
+			      begin
+				 if((r_preschk_bad + t_bad) < 'd20)
+				   begin
+				      $display("[PRESCHK] L1D set %0d pa %x: L2 pres %b (want pd=1 pidx=%0d)",
+					       i, pa, l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]],
+					       (pa >> `LG_PG_SZ) & ((64'd1 << l2cache.N_PIDX) - 64'd1));
+				   end
+				 t_bad = t_bad + 'd1;
+			      end
+			 end
+		    end
+		  r_preschk_lines <= r_preschk_lines + t_lines;
+		  r_preschk_bad <= r_preschk_bad + t_bad;
+		  r_preschk_incl <= r_preschk_incl + t_incl;
+	       end
+	  end
+     end
+   final
+     begin
+	$display("[PRESCHK] scans: L1D lines checked %0d, tracking mismatches %0d, not-in-L2 (inclusion) %0d",
+		 r_preschk_lines, r_preschk_bad, r_preschk_incl);
+     end
+`endif
 
 endmodule // core_l1d_l1i
 
