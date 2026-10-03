@@ -46,7 +46,14 @@ module l2(clk,
 	  // DMA-coherence snoop (from henry's snoop FIFO): invalidate one L2 line per request.
 	  snoop_req_valid,
 	  snoop_req_addr,
-	  snoop_req_ack
+	  snoop_req_ack,
+
+	  // stage B: back-invalidate probe to the L1D
+	  probe_req,
+	  probe_addr,
+	  probe_ack,
+	  probe_dirty,
+	  probe_data
 	  );
 
    input logic clk;
@@ -101,6 +108,40 @@ module l2(clk,
    input logic 	       snoop_req_valid;
    input logic [`PA_WIDTH-1:0] snoop_req_addr;
    output logic        snoop_req_ack;
+   /* inclusive-l2-v2 stage B: before evicting a line the L1D may hold (pd) on behalf of an
+    * L1I miss, back-invalidate it in the L1D.  probe_req/probe_addr are held until
+    * probe_ack; a dirty L1D copy comes back on probe_data and is what gets written back. */
+   output logic 	      probe_req;
+   output logic [`PA_WIDTH-1:0] probe_addr;
+   input logic 		      probe_ack;
+   input logic 		      probe_dirty;
+   input logic [127:0] 	      probe_data;
+   logic 		      r_probe_req, n_probe_req;
+   logic [`PA_WIDTH-1:0]      r_probe_addr, n_probe_addr;
+   logic 		      r_probed, n_probed;
+   logic 		      r_probe_dirty, n_probe_dirty;
+   logic [127:0] 	      r_probe_data, n_probe_data;
+   assign probe_req = r_probe_req;
+   assign probe_addr = r_probe_addr;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_probe_req <= 1'b0;
+	     r_probe_addr <= 'd0;
+	     r_probed <= 1'b0;
+	     r_probe_dirty <= 1'b0;
+	     r_probe_data <= 'd0;
+	  end
+	else
+	  begin
+	     r_probe_req <= n_probe_req;
+	     r_probe_addr <= n_probe_addr;
+	     r_probed <= n_probed;
+	     r_probe_dirty <= n_probe_dirty;
+	     r_probe_data <= n_probe_data;
+	  end
+     end
    logic 	       r_snoop_ack, n_snoop_ack;
    assign snoop_req_ack = r_snoop_ack;
 `ifdef VERILATOR
@@ -444,14 +485,16 @@ module l2(clk,
      end // always_ff
 `endif
 
-`ifdef VERILATOR
-   /* stage A (sim only): an L2 replacement of a line the L1D may still hold breaks
-    * inclusion; stage B adds the back-invalidate probe that prevents it.  Clocked, so it
-    * sees settled values and fires once per event. */
+`ifdef PRESEVICT_LOG
+   /* (sim only, opt-in: ~1M lines per 100M Linux insns) log every L2 replacement of a line
+    * the L1D may still hold: after its probe (L1I miss) or at once (L1D miss -- a stale pd,
+    * the L1D already gave the line up).  Clocked, so it sees settled values and fires once
+    * per event. */
    always_ff@(posedge clk)
      begin
 	if(!reset && (r_state == CHECK_VALID_AND_TAG) && !r_is_uncache &&
-	   ((r_opcode == 5'd4) || (r_opcode == 5'd7)) && !w_hit && w_valid && w_pres[N_PIDX])
+	   ((r_opcode == 5'd4) || (r_opcode == 5'd7)) && !w_hit && w_valid && w_pres[N_PIDX] &&
+	   (r_from_d || r_probed))   /* once per eviction: after the probe (L1I) or at once (L1D) */
 	  begin
 	     $display("[PRESEVICT] cyc=%0d evict pa %x (pidx %0d) for %s req pa %x",
 		      r_cycle, {w_tag, t_idx, 4'd0}, w_pres[N_PIDX-1:0],
@@ -494,6 +537,11 @@ module l2(clk,
 	
 	n_req_ack = 1'b0;
 	n_snoop_ack = 1'b0;
+	n_probe_req = r_probe_req;
+	n_probe_addr = r_probe_addr;
+	n_probed = r_probed;
+	n_probe_dirty = r_probe_dirty;
+	n_probe_data = r_probe_data;
 `ifdef VERILATOR
 	n_snoop_hit = r_snoop_hit;
 	n_snoop_dirty = r_snoop_dirty;
@@ -548,6 +596,8 @@ module l2(clk,
 	       n_saveaddr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_opcode = l1_mem_req_opcode;
 	       n_from_d = l1_mem_req_from_d;
+	       n_probed = 1'b0;
+	       n_probe_dirty = 1'b0;
 	       n_store_data = l1_mem_req_store_data;
 	       n_store_mask = 16'h0;
 
@@ -794,6 +844,21 @@ module l2(clk,
 			 t_wr_d0 = 1'b1;
 		      end
 		 end
+	       else if(!r_from_d && w_valid && w_pres[N_PIDX] && !r_probed)
+		 begin
+		    /* stage B: an L1I miss is about to evict a line the L1D may hold --
+		     * back-invalidate it there first (it comes back if dirty).  Stay in
+		     * CHECK_VALID_AND_TAG (t_idx holds, so w_* stay put) until the ack. */
+		    n_probe_req = 1'b1;
+		    n_probe_addr = {w_tag, t_idx, 4'd0};
+		    if(r_probe_req && probe_ack)
+		      begin
+			 n_probe_req = 1'b0;
+			 n_probed = 1'b1;
+			 n_probe_dirty = probe_dirty;
+			 n_probe_data = probe_data;
+		      end
+		 end
 	       else
 		 begin
 		    n_cache_hits = r_cache_hits - 64'd1;
@@ -803,9 +868,10 @@ module l2(clk,
 		     * unlike MEM_INVL) -> a stale copy clobbered the SCSI-DMA descriptor
 		     * in DRAM (armed {08398f80,0x40} regressed to {883e4800,0}) -> IRIX
 		     * XFS panic. The CLEAN_RELOAD fill site already defends the same leak. */
-		    if(w_need_wb)
+		    if(w_need_wb || r_probe_dirty)
 		      begin
-			 n_mem_req_store_data = w_d0;
+			 /* a dirty L1D copy (returned by the probe) is newer than the L2's */
+			 n_mem_req_store_data = r_probe_dirty ? r_probe_data : w_d0;
 			 n_addr = {w_tag, t_idx, 4'd0};
 			 n_mem_opcode = 5'd7;
 			 n_store_mask = 16'hffff;
