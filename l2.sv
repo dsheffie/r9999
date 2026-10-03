@@ -20,6 +20,7 @@ module l2(clk,
 	  l1_mem_req_mask,
 	  l1_mem_req_store_data,
 	  l1_mem_req_opcode,
+	  l1_mem_req_from_d,
 	  l2_nocache,
 
 	  //l2 -> l1
@@ -76,6 +77,9 @@ module l2(clk,
    
    input logic [127:0] l1_mem_req_store_data;
    input logic [4:0] l1_mem_req_opcode;
+   /* the granted request is the L1D's (the arbiter's address mux selects the L1D unless
+    * it is in GNT_L1I) -- presence tracking only records L1D fills */
+   input logic       l1_mem_req_from_d;
 
    output logic        l1_mem_rsp_valid;
    output logic [127:0] l1_mem_load_data;
@@ -231,6 +235,23 @@ module l2(clk,
    reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) dirty_ram
      (.clk(clk), .addr(t_idx), .wr_data(t_dirty), .wr_en(t_wr_dirty), .rd_data(w_dirty));   
 
+   /* L1D presence + colour per L2 line (inclusive-l2-v2 stage A).  pd = "the L1D may hold
+    * this line", pidx = the L1D index colour it was filled at (the index bits above the
+    * page offset).  Today the L1D is PA-indexed, so pidx is just the PA colour of the
+    * request; stage C makes the L1D VA-indexed and supplies the colour explicitly.
+    * Set on an L1D fill, cleared on an L1D writeback and on every L2 valid-bit write
+    * (refill, drop, flush, init).  Conservative: a silent clean L1D eviction leaves pd set. */
+   localparam L1D_IDX_STOP = `LG_L1D_CL_LEN + `LG_L1D_NUM_SETS;
+   localparam N_PIDX = (L1D_IDX_STOP > `LG_PG_SZ) ? (L1D_IDX_STOP - `LG_PG_SZ) : 1;
+   logic 		r_from_d, n_from_d;
+   logic [N_PIDX:0] 	t_pres, w_pres;
+   logic 		t_wr_pres;
+   wire [N_PIDX-1:0] 	w_req_pidx = (L1D_IDX_STOP > `LG_PG_SZ) ?
+					r_saveaddr[L1D_IDX_STOP-1:`LG_PG_SZ] : 'd0;
+
+   reg_ram1rw #(.WIDTH(N_PIDX+1), .LG_DEPTH(LG_L2_LINES)) pres_ram
+     (.clk(clk), .addr(t_idx), .wr_data(t_pres), .wr_en(t_wr_pres), .rd_data(w_pres));
+
    wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
    wire 		w_need_wb = w_valid ? w_dirty : 1'b0;
       
@@ -244,6 +265,7 @@ module l2(clk,
 	     r_idx <= 'd0;
 	     r_tag <= 'd0;
 	     r_opcode <= 5'd0;
+	     r_from_d <= 1'b0;
 	     r_addr <= 'd0;
 	     r_saveaddr <= 'd0;
 	     r_mem_req <= 1'b0;
@@ -278,6 +300,7 @@ module l2(clk,
 	     r_idx <= t_idx;
 	     r_tag <= n_tag;
 	     r_opcode <= n_opcode;
+	     r_from_d <= n_from_d;
 	     r_addr <= n_addr;
 	     r_saveaddr <= n_saveaddr;
 	     r_mem_req <= n_mem_req;
@@ -421,6 +444,21 @@ module l2(clk,
      end // always_ff
 `endif
 
+`ifdef VERILATOR
+   /* stage A (sim only): an L2 replacement of a line the L1D may still hold breaks
+    * inclusion; stage B adds the back-invalidate probe that prevents it.  Clocked, so it
+    * sees settled values and fires once per event. */
+   always_ff@(posedge clk)
+     begin
+	if(!reset && (r_state == CHECK_VALID_AND_TAG) && !r_is_uncache &&
+	   ((r_opcode == 5'd4) || (r_opcode == 5'd7)) && !w_hit && w_valid && w_pres[N_PIDX])
+	  begin
+	     $display("[PRESEVICT] cyc=%0d evict pa %x (pidx %0d) for %s req pa %x",
+		      r_cycle, {w_tag, t_idx, 4'd0}, w_pres[N_PIDX-1:0],
+		      r_from_d ? "L1D" : "L1I", r_saveaddr);
+	  end
+     end
+`endif
    state_t r_last_state;
    always_ff@(posedge clk)
      begin
@@ -441,6 +479,8 @@ module l2(clk,
 	n_state = r_state;
 	n_flush_complete = 1'b0;
 	t_wr_valid = 1'b0;
+	t_wr_pres = 1'b0;
+	t_pres = 'd0;
 	t_wr_dirty = 1'b0;
 	t_wr_d0 = 1'b0;
 	t_wr_tag = 1'b0;
@@ -448,6 +488,7 @@ module l2(clk,
 	t_idx = r_idx;
 	n_tag = r_tag;
 	n_opcode = r_opcode;
+	n_from_d = r_from_d;
 	n_addr = r_addr;
 	n_saveaddr = r_saveaddr;
 	
@@ -506,6 +547,7 @@ module l2(clk,
 	       n_addr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_saveaddr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_opcode = l1_mem_req_opcode;
+	       n_from_d = l1_mem_req_from_d;
 	       n_store_data = l1_mem_req_store_data;
 	       n_store_mask = 16'h0;
 
@@ -725,6 +767,12 @@ module l2(clk,
 		    n_reload = 1'b0;
 		    if(r_opcode == 5'd4)
 		      begin
+			 /* an L1D fill: record that the L1D holds the line, and where */
+			 if(r_from_d)
+			   begin
+			      t_wr_pres = 1'b1;
+			      t_pres = {1'b1, w_req_pidx};
+			   end
 			 n_rsp_data =  w_d0;
 			 n_state = IDLE;
 			 n_rsp_valid = 1'b1;
@@ -732,6 +780,12 @@ module l2(clk,
 		      end
 		    else if(r_opcode == 5'd7)
 		      begin
+			 /* an L1D writeback (victim / alias / flush): it gave the line up */
+			 if(r_from_d)
+			   begin
+			      t_wr_pres = 1'b1;
+			      t_pres = 'd0;
+			   end
 			 t_wr_dirty = 1'b1;
 			 t_dirty = 1'b1;
 			 n_state = WAIT_STORE_IDLE;
@@ -955,6 +1009,11 @@ module l2(clk,
 	    begin
 	    end
 	endcase
+	if(t_wr_valid && !t_wr_pres)
+	  begin
+	     t_wr_pres = 1'b1;
+	     t_pres = 'd0;
+	  end
      end
 
 `ifdef DESC_TRACE
