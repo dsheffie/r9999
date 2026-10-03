@@ -52,6 +52,7 @@ TESTS := hello/hello.elf \
          cache/test_flush_full.elf \
          cache/test_flush_l2_full.elf \
          cache/test_l2_evict.elf \
+         cache/test_l1i_probe.elf \
          cache/test_uc_wb_alias.elf \
          devregs/test_devregs.elf \
          addr64/test_badvaddr.elf
@@ -222,6 +223,10 @@ cache/test_flush_l2_full.elf: cache/test_flush_l2_full.S $(STARTUP) $(COMMON)/si
 cache/test_l2_evict.elf: cache/test_l2_evict.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l2_evict.S -o cache/test_l2_evict.o
 	$(LD) $(LDFLAGS) $(STARTUP) cache/test_l2_evict.o -o $@
+
+cache/test_l1i_probe.elf: cache/test_l1i_probe.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l1i_probe.S -o cache/test_l1i_probe.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_l1i_probe.o -o $@
 
 cache/test_uc_wb_alias.elf: cache/test_uc_wb_alias.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_uc_wb_alias.S -o cache/test_uc_wb_alias.o

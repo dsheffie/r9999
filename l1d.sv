@@ -94,6 +94,11 @@ module l1d(clk,
 	   dma_inval_req,
 	   dma_inval_addr,
 	   dma_inval_ack,
+	   probe_req,
+	   probe_addr,
+	   probe_ack,
+	   probe_dirty,
+	   probe_data,
 	   flush_pg_req,
 	   pg_drop_dirty_cnt,
 	   //inputs from core
@@ -174,6 +179,18 @@ module l1d(clk,
    input logic 		      dma_inval_req;
    input logic [`PA_WIDTH-1:0] dma_inval_addr;
    output logic 	      dma_inval_ack;
+   /* inclusive-l2-v2 stage B: back-invalidate probe from the L2, which is evicting a line
+    * the L1D may hold on behalf of an L1I miss.  The L2 holds probe_req/probe_addr until
+    * probe_ack (a 1-cycle pulse); r_prb_seen keeps one held request from being answered
+    * twice and clears when probe_req drops.  The probe is taken from ACTIVE or from any
+    * state that is only waiting on the L2 -- never dependent on the L1D's own request
+    * (rule R2 of INCLUSIVE_L2_PROTOCOL.md).  Hit: the line is invalidated and returned
+    * (probe_dirty, probe_data) if dirty. */
+   input logic 		      probe_req;
+   input logic [`PA_WIDTH-1:0] probe_addr;
+   output logic 	      probe_ack;
+   output logic 	      probe_dirty;
+   output logic [127:0]       probe_data;
    /* injected page op (XPG_WBINV / XPG_INV): walk the page's lines at flush_cl_addr
     * (page-aligned PA, held by the core like the CACHE-op address), flush_cl_inval =
     * drop (XPG_INV).  Per line, L1D then L2 -- the core is drained at the ROB head, so
@@ -544,11 +561,70 @@ endfunction
 			     /* injected page op: one line of the page per visit (RAM
 			      * outputs are for w_pg_line), then wait for the L2 ack */
 			     FLUSH_PG = 'd17,
-			     FLUSH_PG_WAIT = 'd18
+			     FLUSH_PG_WAIT = 'd18,
+			     PROBE_CHK = 'd19
                              } state_t;
 
    
    state_t r_state, n_state;
+   /* stage B probe state */
+   logic 		      r_prb_seen, n_prb_seen;
+   logic 		      r_prb_ack, n_prb_ack;
+   logic 		      r_prb_dirty, n_prb_dirty;
+   logic [127:0] 	      r_prb_data, n_prb_data;
+   state_t 		      r_prb_ret, n_prb_ret;
+   logic [`LG_L1D_NUM_SETS-1:0] r_prb_save, n_prb_save;
+   logic [`PA_WIDTH-1:TAG_LSB] r_prb_tag, n_prb_tag;
+   logic 		      t_prb_pend, t_prb_ok_state, t_prb_hit;
+`ifdef VERILATOR
+   /* stage B probe statistics (sim only) */
+   logic [63:0] r_dbg_prb, r_dbg_prb_hit, r_dbg_prb_dirty;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_dbg_prb <= 'd0;
+	     r_dbg_prb_hit <= 'd0;
+	     r_dbg_prb_dirty <= 'd0;
+	  end
+	else if(r_state == PROBE_CHK)
+	  begin
+	     r_dbg_prb <= r_dbg_prb + 'd1;
+	     r_dbg_prb_hit <= r_dbg_prb_hit + (t_prb_hit ? 'd1 : 'd0);
+	     r_dbg_prb_dirty <= r_dbg_prb_dirty + ((t_prb_hit && r_dirty_out) ? 'd1 : 'd0);
+	  end
+     end
+   final
+     begin
+	$display("[PROBE] L1D probes %0d, hit %0d, dirty %0d", r_dbg_prb, r_dbg_prb_hit, r_dbg_prb_dirty);
+     end
+`endif
+   assign probe_ack = r_prb_ack;
+   assign probe_dirty = r_prb_dirty;
+   assign probe_data = r_prb_data;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_prb_seen <= 1'b0;
+	     r_prb_ack <= 1'b0;
+	     r_prb_dirty <= 1'b0;
+	     r_prb_data <= 'd0;
+	     r_prb_ret <= ACTIVE;
+	     r_prb_save <= 'd0;
+	     r_prb_tag <= 'd0;
+	  end
+	else
+	  begin
+	     r_prb_seen <= n_prb_seen;
+	     r_prb_ack <= n_prb_ack;
+	     r_prb_dirty <= n_prb_dirty;
+	     r_prb_data <= n_prb_data;
+	     r_prb_ret <= n_prb_ret;
+	     r_prb_save <= n_prb_save;
+	     r_prb_tag <= n_prb_tag;
+	  end
+     end
    logic 	t_pop_mq;
    logic 	n_reload_issue, r_reload_issue;
    logic 	n_did_reload, r_did_reload;
@@ -2460,6 +2536,22 @@ endfunction
 `endif
 	t_mem_req_mask = make_mask(r_req);
 	n_state = r_state;
+	n_prb_seen = r_prb_seen & probe_req;
+	n_prb_ack = 1'b0;
+	n_prb_dirty = r_prb_dirty;
+	n_prb_data = r_prb_data;
+	n_prb_ret = r_prb_ret;
+	n_prb_save = r_prb_save;
+	n_prb_tag = r_prb_tag;
+	t_prb_hit = 1'b0;
+	/* a probe the L1D has not answered yet: stop taking new port-1/port-2 work so the
+	 * pipes drain and it can be taken (a steady request stream must not starve it) */
+	t_prb_pend = probe_req & !r_prb_seen;
+	t_prb_ok_state = (r_state == ACTIVE) || (r_state == INJECT_RELOAD) ||
+			 (r_state == INJECT_UNCACHE_STORE) || (r_state == INJECT_UNCACHE_LOAD) ||
+			 (r_state == FLUSH_CL_WAIT) || (r_state == FLUSH_CACHE_WAIT) ||
+			 (r_state == FLUSH_CACHE_LAST_WAIT) || (r_state == FLUSH_PG_WAIT) ||
+			 ((r_state == UNCACHE_WB) && r_uncache_wb_dirty);
 	t_miss_idx = r_miss_idx;
 	t_miss_addr = r_miss_addr;
 	t_cache_idx = 'd0;
@@ -3104,7 +3196,7 @@ endfunction
 
 
 	       
-	     if(!mem_q_empty && !t_got_miss && !r_lock_cache)
+	     if(!mem_q_empty && !t_got_miss && !r_lock_cache && !t_prb_pend)
 	       begin
 		  if(!t_mh_block)
 		    begin
@@ -3170,7 +3262,11 @@ endfunction
 	       end
 
 	       
-	       if(core_mem_req_valid &&
+	       if(t_prb_pend)
+		 begin
+		    /* stage B: a probe is waiting for the port-1/port-2 pipes to drain */
+		 end
+	       else if(core_mem_req_valid &&
 		  /* port2 is a 2-stage pipe: the request is ACKed here in ACTIVE but
 		   * PROCESSED next cycle under `ACTIVE:`.  If this cycle's logic already
 		   * decided to leave ACTIVE (a chop's double beat -> CHOP_BEAT2_RD, a
@@ -3233,6 +3329,22 @@ endfunction
 		    n_state = FLUSH_CL;
 		 end
 	    end // case: ACTIVE
+	  PROBE_CHK:
+	    begin
+	       /* r_*_out are the probed line (read in the entry cycle; r_cache_idx is its
+		* index, so t_mark_invalid writes valid/dirty there) */
+	       t_prb_hit = r_valid_out && (r_tag_out == r_prb_tag);
+	       if(t_prb_hit)
+		 begin
+		    t_mark_invalid = 1'b1;
+		 end
+	       n_prb_ack = 1'b1;
+	       n_prb_dirty = t_prb_hit && r_dirty_out;
+	       n_prb_data = r_array_out;
+	       n_prb_seen = 1'b1;
+	       t_cache_idx = r_prb_save;
+	       n_state = r_prb_ret;
+	    end
 	  WAIT_INJECT_RELOAD:
 	    begin
 	       n_mem_req_valid = 1'b1;
@@ -3265,7 +3377,7 @@ endfunction
 		     n_inhibit_write = 1'b0;
 		     n_reload_issue = 1'b0;
 		  end
-		else if(t_p2_ok && !core_mem_req.is_atomic)
+		else if(t_p2_ok && !core_mem_req.is_atomic && !t_prb_pend)
 		  begin
 		     /* hit-under-miss: keep taking port-2 requests while the fill is out */
 		     t_p2_accept = 1'b1;
@@ -3579,6 +3691,19 @@ endfunction
 	    begin
 	    end
 	endcase // case r_state
+	/* stage B: take a pending probe when neither port pipe holds a request, no response
+	 * is arriving, and the current state is ACTIVE or only waiting on the L2 (and is not
+	 * leaving this cycle).  The read this state wanted (t_cache_idx) is saved and
+	 * re-issued when the probe is done, so the state resumes with its RAM outputs. */
+	if(t_prb_pend && !r_got_req && !r_got_req2 && !mem_rsp_valid &&
+	   (n_state == r_state) && t_prb_ok_state)
+	  begin
+	     n_prb_save = t_cache_idx;
+	     n_prb_ret = r_state;
+	     n_prb_tag = probe_addr[`PA_WIDTH-1:TAG_LSB];
+	     t_cache_idx = probe_addr[IDX_STOP-1:IDX_START];
+	     n_state = PROBE_CHK;
+	  end
 	/* a request from a flushed era (rv64core restart_id): ack and drop it */
 	if(t_req_stale && ((r_state == ACTIVE) || (r_state == INJECT_RELOAD)))
 	  begin

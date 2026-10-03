@@ -821,6 +821,13 @@ module core_l1d_l1i(clk,
 `endif
 
    
+   /* inclusive-l2-v2 stage B: L2 -> L1D back-invalidate probe */
+   wire 		 w_probe_req;
+   wire [`PA_WIDTH-1:0] w_probe_addr;
+   wire 		 w_probe_ack;
+   wire 		 w_probe_dirty;
+   wire [127:0] 	 w_probe_data;
+
    l2 l2cache (
 	       .clk(clk),
 	       .reset(reset),
@@ -864,8 +871,12 @@ module core_l1d_l1i(clk,
 	       .cache_hits(l2_cache_hits),
 		       .snoop_req_valid(1'b0)  /* task #51 DMA->L2 snoop tied off on main until the henry snoop FIFO is wired */,
 		       .snoop_req_addr(snoop_req_addr),
-		       .snoop_req_ack(snoop_req_ack)
-
+		       .snoop_req_ack(snoop_req_ack),
+	       .probe_req(w_probe_req),
+	       .probe_addr(w_probe_addr),
+	       .probe_ack(w_probe_ack),
+	       .probe_dirty(w_probe_dirty),
+	       .probe_data(w_probe_data)
 	       );
    
    
@@ -930,6 +941,11 @@ module core_l1d_l1i(clk,
 	       .dma_inval_req(dma_inval_req),
 	       .dma_inval_addr(dma_inval_addr),
 	       .dma_inval_ack(dma_inval_ack),
+	       .probe_req(w_probe_req),
+	       .probe_addr(w_probe_addr),
+	       .probe_ack(w_probe_ack),
+	       .probe_dirty(w_probe_dirty),
+	       .probe_data(w_probe_data),
 	       .flush_pg_req(flush_pg_req),
 	       .pg_drop_dirty_cnt(ext_flush_dirty_cnt),
 	       .flush_complete(l1d_flush_complete),
@@ -1243,7 +1259,7 @@ module core_l1d_l1i(clk,
    localparam CHK_L2_IDX_STOP = `LG_L2_NUM_SETS + 4;
    localparam CHK_L1D_IDX_STOP = `LG_L1D_CL_LEN + `LG_L1D_NUM_SETS;
    logic [13:0] r_preschk_cnt;
-   logic [63:0] r_preschk_bad, r_preschk_incl, r_preschk_lines;
+   logic [63:0] r_preschk_bad, r_preschk_incl, r_preschk_lines, r_preschk_infl;
    always_ff@(posedge clk)
      begin
 	if(reset)
@@ -1252,14 +1268,15 @@ module core_l1d_l1i(clk,
 	     r_preschk_bad <= 'd0;
 	     r_preschk_incl <= 'd0;
 	     r_preschk_lines <= 'd0;
+	     r_preschk_infl <= 'd0;
 	  end
 	else
 	  begin
 	     r_preschk_cnt <= r_preschk_cnt + 'd1;
 	     if(r_preschk_cnt == 'd0)
 	       begin
-		  logic [63:0] t_lines, t_bad, t_incl;
-		  t_lines = 'd0; t_bad = 'd0; t_incl = 'd0;
+		  logic [63:0] t_lines, t_bad, t_incl, t_infl;
+		  t_lines = 'd0; t_bad = 'd0; t_incl = 'd0; t_infl = 'd0;
 		  for(integer i = 0; i < CHK_L1D_SETS; i = i + 1)
 		    begin
 		       if(dcache.dc_valid.b0.r_ram[i] != 'd0)
@@ -1274,7 +1291,18 @@ module core_l1d_l1i(clk,
 			    if(!(l2cache.valid_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]] &&
 				 (64'(l2cache.tag_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]]) == l2t)))
 			      begin
-				 t_incl = t_incl + 'd1;
+				 /* benign transient: the L1D has a fill outstanding to this very
+				  * index -- its old clean line stays valid until the fill lands,
+				  * but the L2 already (correctly) evicted it on the L1D's behalf */
+				 if((dcache.r_state != dcache.ACTIVE) &&
+				    (dcache.r_mem_req_addr[CHK_L1D_IDX_STOP-1:`LG_L1D_CL_LEN] == i[`LG_L1D_NUM_SETS-1:0]))
+				   begin
+				      t_infl = t_infl + 'd1;
+				   end
+				 else
+				   begin
+				      t_incl = t_incl + 'd1;
+				   end
 			      end
 			    else if(!l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]][l2cache.N_PIDX] ||
 				    (64'(l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]][l2cache.N_PIDX-1:0]) !=
@@ -1293,13 +1321,14 @@ module core_l1d_l1i(clk,
 		  r_preschk_lines <= r_preschk_lines + t_lines;
 		  r_preschk_bad <= r_preschk_bad + t_bad;
 		  r_preschk_incl <= r_preschk_incl + t_incl;
+		  r_preschk_infl <= r_preschk_infl + t_infl;
 	       end
 	  end
      end
    final
      begin
-	$display("[PRESCHK] scans: L1D lines checked %0d, tracking mismatches %0d, not-in-L2 (inclusion) %0d",
-		 r_preschk_lines, r_preschk_bad, r_preschk_incl);
+	$display("[PRESCHK] scans: L1D lines checked %0d, tracking mismatches %0d, not-in-L2 (inclusion) %0d, not-in-L2 behind an own in-flight fill %0d",
+		 r_preschk_lines, r_preschk_bad, r_preschk_incl, r_preschk_infl);
      end
 `endif
 
