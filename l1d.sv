@@ -2327,6 +2327,17 @@ endfunction
    /* memory system should be idle before dealing with an uncachable req */
    wire w_memq_empty = mem_q_empty & (r_n_inflight == 'd0) & (r_state == ACTIVE);
 
+   /* the L1D is fully drained: nothing in either pipe stage, nothing owed (every
+    * accepted op answered), the MQ empty and no retired store still to be written.
+    * Every flush (CACHE flush, CACHE line op, XPG page op, DMA invalidate) starts
+    * only from here.  A flush that started with a port-1 miss or a port-2 direct
+    * fill in hand overwrote n_state, the fill's response was consumed as a flush
+    * beat, the load was never answered and its {color,rob} inflight bit leaked:
+    * the next (EXCEPTION_)DRAIN waited on that color forever (the go/IRIX wedge on
+    * silicon, raced by XPG page flushes).  An XPG walk that ran ahead of a retired
+    * store to its page also let that store land after the flush (stale DMA read). */
+   wire w_l1d_drained = mem_q_empty & (r_n_inflight == 'd0) & !r_got_req & !r_got_req2 & !lsu_sb.retired_pending;
+
 `ifdef L1D_ONE_MEMOP
    /* DIAGNOSTIC (opt-in via SV2V_DEFINES=L1D_ONE_MEMOP): accept a new core memory op
     * ONLY when the L1D is fully idle -- nothing in either pipe stage (r_got_req/req2),
@@ -3189,7 +3200,7 @@ endfunction
 	       begin
 		  t_p2_accept = 1'b1;
 	       end // if (core_mem_req_valid &&...
-	       else if(r_flush_req && mem_q_empty && !lsu_sb.retired_pending && !(r_got_req && (r_last_wr | w_is_chop_r)))
+	       else if(r_flush_req && w_l1d_drained)
 		 begin
 		    n_state = FLUSH_CACHE;
 		    n_mem_req_mask = 16'hffff;
@@ -3203,7 +3214,7 @@ endfunction
 		    t_cache_idx = 'd0;
 		    n_flush_req = 1'b0;
 		 end
-	       else if(r_flush_cl_req && mem_q_empty && !lsu_sb.retired_pending && !(r_got_req && (r_last_wr | w_is_chop_r)))   /* a chop retry transitions n_state too */
+	       else if(r_flush_cl_req && w_l1d_drained)   /* a chop retry transitions n_state too */
 		 begin
 `ifdef VERILATOR
 		    if(!mem_q_empty) $stop();
@@ -3215,14 +3226,14 @@ endfunction
 		    n_cl_is_dma = 1'b0;
 		    n_state = FLUSH_CL;
 		 end
-	       else if(r_flush_pg_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
+	       else if(r_flush_pg_req && w_l1d_drained)
 		 begin
 		    t_cache_idx = w_pg_line0[IDX_STOP-1:IDX_START];
 		    n_flush_pg_req = 1'b0;
 		    n_pg_off = 'd0;
 		    n_state = FLUSH_PG;
 		 end
-	       else if(r_dma_inval_req && mem_q_empty && !(r_got_req && (r_last_wr | w_is_chop_r)))
+	       else if(r_dma_inval_req && w_l1d_drained)
 		 begin
 		    /* DMA-completion invalidate of one line.  Lower priority than the
 		     * CPU's CACHE op above, and only when the mem pipe is quiet -- the

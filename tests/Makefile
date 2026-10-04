@@ -167,6 +167,11 @@ tlb/test_mtc0_tlb_spec.elf: tlb/test_mtc0_tlb_spec.S $(COMMON)/sim.h $(COMMON)/l
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c tlb/test_mtc0_tlb_spec.S -o tlb/test_mtc0_tlb_spec.o
 	$(LD) $(LDFLAGS) tlb/test_mtc0_tlb_spec.o -o $@
 
+# exception hammers (self-contained: own _start + vectors, no crt0)
+exchammer/%.elf: exchammer/%.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c exchammer/$*.S -o exchammer/$*.o
+	$(LD) $(LDFLAGS) exchammer/$*.o -o $@
+
 xtlb/test_xtlb64.elf: xtlb/test_xtlb.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -DMODE64 -x assembler-with-cpp -c xtlb/test_xtlb.S -o xtlb/test_xtlb64.o
 	$(LD) $(LDFLAGS) xtlb/test_xtlb64.o -o $@
