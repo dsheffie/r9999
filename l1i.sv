@@ -13,20 +13,13 @@ import "DPI-C" function void record_fetch(int push1, int push2, int push3, int p
 
 
 
-module compute_pht_idx(pc, hist, idx);
+module compute_pht_idx(pc, idx);
    input logic [`M_WIDTH-1:0] pc;
-   input logic [`GBL_HIST_LEN-1:0] hist;
    output logic [`LG_PHT_SZ-1:0]   idx;
 
-   /* index per 16B LINE (bit 4 up): the entry now holds a counter for each of the
-    * 4 slots, so the low bits that used to select between adjacent instructions
-    * are supplied by the slot mux instead. */
-`ifdef ENABLE_MINI_TAGE
-   /* mini-TAGE: the PHT is the PC-indexed bimodal; history goes to the tagged table */
+   /* the PHT is the PC-indexed bimodal (history goes to the tagged tables), indexed
+    * per 16B LINE (bit 4 up): the entry holds a counter for each of the 4 slots */
    assign idx = pc[`LG_PHT_SZ+3:4];
-`else
-   assign idx = hist ^ pc[`LG_PHT_SZ+3:4];
-`endif
    
 endmodule
 
@@ -211,9 +204,8 @@ module l1i(clk,
    logic [`LG_BPU_TBL_SZ-1:0] 		  r_bpu_idx;
    logic 				  t_bpu_alloc;
    /* per-slot predicted direction: the bimodal/gshare counter MSBs, with the tagged
-    * table's slot overridden on a hit (ENABLE_MINI_TAGE) */
+    * table's slot overridden on a hit */
    logic [3:0] 				  t_pred_vec;
-`ifdef ENABLE_MINI_TAGE
    /* tagged table entry: [16] valid, [15:7] tag, [6:5] slot, [4:2] 3b ctr, [1:0] useful */
    localparam T1_W = 1 + `TAGE_TAG_W + 2 + 3 + 2;
    localparam N_T1 = 1 << `LG_TAGE_SZ;
@@ -253,7 +245,6 @@ module l1i(clk,
    logic [2:0] 				  t_t2_ctr;
    logic [1:0] 				  t_t2_u;
    logic 				  t_prov_pred, t_alt_pred, t_t1_free, t_t2_free;
-`endif
    
    logic 				  r_take_br;
    
@@ -652,11 +643,7 @@ endfunction
    assign w_tlb_pc = (r_mapped && w_eff_hit) ? w_eff_pa : r_la_pc[`PA_WIDTH-1:0];
    
    wire w_hit0 = r_valid_out0 & (r_tag_out0 == w_tlb_pc[(`PA_WIDTH-1):TAG_LSB]);
-`ifdef ENABLE_L1I_2WAY
    wire w_hit1 = r_valid_out1 & (r_tag_out1 == w_tlb_pc[(`PA_WIDTH-1):TAG_LSB]);
-`else
-   wire w_hit1 = 1'b0;
-`endif
    always_comb
      begin
 	t_array_out = w_hit1 ? r_array_out1 : r_array_out0;
@@ -897,10 +884,8 @@ endfunction
 		    n_mem_req_valid = 1'b1;
 		    n_miss_pc = r_cache_pc;
 		    n_pc = r_pc;
-`ifdef ENABLE_L1I_2WAY
 		    /* victim: an invalid way first, else the set's LRU way */
 		    n_fill_way = !r_valid_out0 ? 1'b0 : !r_valid_out1 ? 1'b1 : r_lru_out;
-`endif
 		 end
 	       else if(t_hit && !fq_full)
 		 begin
@@ -1218,12 +1203,11 @@ endfunction
    logic [`LG_L1I_NUM_SETS-1:0] t_valid_ram_idx;
 
    
-   compute_pht_idx cpi0 (.pc(n_cache_pc), .hist(r_spec_gbl_hist), .idx(n_pht_idx));
+   compute_pht_idx cpi0 (.pc(n_cache_pc), .idx(n_pht_idx));
 
    always_comb
      begin
 	t_pred_vec = {r_pht_out_vec[7], r_pht_out_vec[5], r_pht_out_vec[3], r_pht_out_vec[1]};
-`ifdef ENABLE_MINI_TAGE
 	/* tagged table: index/tag from the same pc + history the PHT index uses, so the
 	 * registered read lines up with r_cache_pc.  Fold is written for 16b history,
 	 * 10b index, 9b tag. */
@@ -1247,7 +1231,6 @@ endfunction
 	  begin
 	     t_pred_vec[r_t2_out[6:5]] = r_t2_out[4];
 	  end
-`endif
      end
 
    
@@ -1330,7 +1313,6 @@ endfunction
 			(r_pht_update_slot == 2'd1) ? {r_pht_update_out[7:4], t_pht_val, r_pht_update_out[1:0]} :
 			(r_pht_update_slot == 2'd2) ? {r_pht_update_out[7:6], t_pht_val, r_pht_update_out[3:0]} :
 			{t_pht_val, r_pht_update_out[5:0]};
-`ifdef ENABLE_MINI_TAGE
 	/* tagged-table update, from the fetch-time copies of the entries (blind writes:
 	 * no read at retire).  Provider = the longest table that hit for this branch's
 	 * slot (T2, then T1), else the bimodal; alt = the next shorter one.  Only the
@@ -1424,7 +1406,6 @@ endfunction
 		    end
 	       end
 	  end
-`endif
      end
    
    always_comb
@@ -1437,7 +1418,6 @@ endfunction
 	if(t_bpu_alloc)
 	  begin
 	     r_bpu_tbl[r_bpu_idx] <= r_pht_idx;
-`ifdef ENABLE_MINI_TAGE
 	     r_bpu_t1_idx[r_bpu_idx] <= r_t1_idx;
 	     r_bpu_t1_tag[r_bpu_idx] <= r_t1_tag;
 	     r_bpu_t1_hit[r_bpu_idx] <= t_t1_hit;
@@ -1446,11 +1426,9 @@ endfunction
 	     r_bpu_t2_tag[r_bpu_idx] <= r_t2_tag;
 	     r_bpu_t2_hit[r_bpu_idx] <= t_t2_hit;
 	     r_bpu_t2_ent[r_bpu_idx] <= r_t2_out;
-`endif
 	  end
      end
 
-`ifdef ENABLE_MINI_TAGE
    always_ff@(posedge clk)
      begin
 	r_t1_idx <= t_t1_n_idx;
@@ -1486,7 +1464,6 @@ endfunction
       .wr_en(t_t2_wr),
       .rd_data(r_t2_out)
       );
-`endif
 
    always_ff@(posedge clk)
      begin
@@ -1674,7 +1651,6 @@ endfunction
 	    .rd_data(r_jump_out0)
 	    );
 
-`ifdef ENABLE_L1I_2WAY
    ram1r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1I_NUM_SETS))
    valid_array1 (
 	   .clk(clk),
@@ -1749,19 +1725,6 @@ endfunction
 	   .wr_en(t_lru_wr),
 	   .rd_data(r_lru_out)
 	   );
-`else
-   always_comb
-     begin
-	r_valid_out1 = 1'b0;
-	r_tag_out1 = 'd0;
-	r_array_out1 = 'd0;
-	r_jump_out1 = 'd0;
-	r_lru_out = 1'b0;
-	t_lru_wr = 1'b0;
-	t_lru_val = 1'b0;
-	t_lru_idx = 'd0;
-     end
-`endif
 	    
 	     
    always_comb

@@ -85,40 +85,23 @@
  * metastability) at a small IPC cost -- kept per functional>IPC.  Bump to 3 for full IPC. */
 `define LG_INT_SCHED_ENTRIES 3
 
-//gshare branch predictor
+//PHT: the PC-indexed bimodal under the mini-TAGE tagged tables
 `ifdef FORMAL
  `define LG_PHT_SZ 2
 `else
  `define LG_PHT_SZ 14
 `endif
 
-/* history length == index width: a plain gshare XORs the newest LG_PHT_SZ outcomes
- * into the index.  Folding a longer (64) history into 14 bits tripled compress
- * mispredicts (29 -> 10.8 /kinsn with the short history, CPI -13%): random-outcome
- * branches pollute the index so the predictable ones never train. */
-/* ENABLE_MINI_TAGE: the PHT becomes a PC-indexed bimodal and two tagged tables (T1:
- * 16b history, T2: 48b) of 2^LG_TAGE_SZ per-fetch-line entries {valid, tag, slot, 3b ctr,
- * 2b useful}, each indexed by line pc ^ folded global history; the longest hit overrides
- * the bimodal for the one slot its entry was allocated to.  Single-cycle lookup; update at retire from fetch-time
- * metadata held in the front-end bpu table.  ISS sweep (1K entries, 16b history,
- * 16K bimodal): go 14.45 / m88ksim 0.71 / compress 9.37 cond MPKI vs gshare
- * 14.98 / 1.09 / 10.71. */
-`define ENABLE_MINI_TAGE 1
-`ifdef ENABLE_MINI_TAGE
- /* two tagged tables: T1 folds the newest 16 outcomes, T2 (long) folds all 48;
-  * the folds in l1i.sv are written for exactly these widths */
- `define GBL_HIST_LEN 48
- `define LG_TAGE_SZ 10
- `define TAGE_TAG_W 9
-`else
- `define GBL_HIST_LEN `LG_PHT_SZ
-`endif
-
-/* branch-predictor update state stays in the front end: each fetch group's PHT index
- * is written to a 2^LG_BPU_TBL_SZ-entry table in l1i, and only that table index rides
- * through decode/ROB to retire (rv64core 291b0cb).  64 entries >> the ~30 insns that
- * can be in flight (FQ 8 + DQ 4 + ROB 16 + stage regs), so a live entry never wraps. */
-`define LG_BPU_TBL_SZ 6
+/* Mini-TAGE: the PHT is a PC-indexed bimodal (one entry per 16B fetch line, a 2b
+ * counter per slot) plus two tagged tables (T1: 16b history, T2: 48b) of 2^LG_TAGE_SZ
+ * per-fetch-line entries {valid, tag, slot, 3b ctr, 2b useful}, each indexed by line
+ * pc ^ folded global history; the longest hit overrides the bimodal for the one slot
+ * its entry was allocated to.  Single-cycle lookup; update at retire from fetch-time
+ * metadata held in the front-end bpu table.  The folds in l1i.sv are written for
+ * exactly these widths. */
+`define GBL_HIST_LEN 48
+`define LG_TAGE_SZ 10
+`define TAGE_TAG_W 9
 
 /* branch-predictor update state stays in the front end: each fetch group's PHT index
  * is written to a 2^LG_BPU_TBL_SZ-entry table in l1i, and only that table index rides
@@ -212,11 +195,9 @@
 `endif
 
 
-/* ENABLE_L1I_2WAY: a second L1I way of LG_L1I_NUM_SETS sets (2 x 16KB = 32KB with the
- * default 1024 sets).  Same index bits per way as the direct-mapped L1I, so no new VIPT
- * alias bits.  1-bit/set LRU.  Retired-stream I-cache model: m88ksim 52-65 -> 3-12 MPKI,
- * go 40-45 -> 8-14 MPKI (16KB DM -> 32KB 2-way). */
-`define ENABLE_L1I_2WAY 1
+/* L1I: 2 ways of LG_L1I_NUM_SETS sets (2 x 16KB = 32KB with the default 1024 sets).
+ * 16KB per way keeps the index inside the VIPT alias bits the direct-mapped L1I already
+ * had.  1-bit/set LRU. */
 `ifndef LG_L1I_NUM_SETS
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
