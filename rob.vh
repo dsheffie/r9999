@@ -49,7 +49,7 @@ typedef struct packed {
    logic			 cache_inval; /* CACHE Hit-Invalidate: drop line WITHOUT writeback (DMA-in) */
    logic [(`M_WIDTH-1):0]	 data;
    logic [7:0]			 opcode;
-   logic [`LG_PHT_SZ-1:0] 	 pht_idx;
+   logic [`LG_BPU_TBL_SZ-1:0] 	 bpu_idx;
    /* PREDICTED direction, kept alongside the RESOLVED take_br so a capture can
     * separate "predictor said taken" from "branch resolved taken".  The
     * 2026-08-29 captures showed a bnez that took wrongly with faulted=0, i.e.
@@ -122,7 +122,7 @@ typedef struct packed {
    logic cache_is_d;
    logic cache_inval;
    logic [7:0] opcode;
-   logic [`LG_PHT_SZ-1:0] pht_idx;
+   logic [`LG_BPU_TBL_SZ-1:0] bpu_idx;
    logic br_pred;
    logic oldest_first;
    logic mode_when_fetched;
@@ -192,7 +192,7 @@ typedef struct packed {
    logic [(`M_WIDTH-1):0] pc;
    logic [(`M_WIDTH-1):0] pred_target;
    logic 		  pred;
-   logic [(`LG_PHT_SZ-1):0] pht_idx;
+   logic [`LG_BPU_TBL_SZ-1:0] bpu_idx;
    logic		    misaligned;
    logic		    bad_va;       /* i-side AdEL: mipsseg bad_perms (access-level / VA out-of-range) */
    logic		    tlb_miss;

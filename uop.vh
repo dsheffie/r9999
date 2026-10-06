@@ -509,7 +509,7 @@ typedef struct packed {
    logic 		       cache_inval; /* CACHE Hit-Invalidate: drop the line WITHOUT writeback (DMA-in) */
    logic 		       is_fp;   /* compute FP op (routes to the FP issue queue) */
    logic 		       cpu_ce1; /* CpU is for CP1 (Status.CU1=0) -> Cause.CE=1 (vs CP0 CpU = CE=0) */
-   logic [`LG_PHT_SZ-1:0]      pht_idx;
+   logic [`LG_BPU_TBL_SZ-1:0]      bpu_idx;
    logic		       mode_when_fetched;
 `ifdef VERILATOR
    logic [31:0] 	       clear_id;

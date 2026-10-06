@@ -165,7 +165,7 @@ module core_l1d_l1i(clk,
    logic 			restart_valid;
    logic 			clr_link_reg;
    logic 			restart_ack;
-   logic [`LG_PHT_SZ-1:0] 	branch_pht_idx;
+   logic [`LG_BPU_TBL_SZ-1:0] 	branch_bpu_idx;
    logic 			took_branch;
 
    logic 			t_retire_delay_slot;
@@ -991,7 +991,7 @@ module core_l1d_l1i(clk,
 	      .branch_pc(t_branch_pc),
 	      .took_branch(took_branch),
 	      .branch_fault(t_branch_fault),
-	      .branch_pht_idx(branch_pht_idx),
+	      .branch_bpu_idx(branch_bpu_idx),
 	      .retire_valid(retire_valid),
 	      .retired_call(retired_call),
 	      .retired_ret(retired_ret),
@@ -1078,7 +1078,7 @@ module core_l1d_l1i(clk,
 	     .branch_pc_valid(t_branch_pc_valid),
 	     .branch_fault(t_branch_fault),
 	     .took_branch(took_branch),
-	     .branch_pht_idx(branch_pht_idx),
+	     .branch_bpu_idx(branch_bpu_idx),
 	     .restart_pc(restart_pc),
 	     .restart_src_pc(restart_src_pc),
 	     .restart_src_is_indirect(restart_src_is_indirect),

@@ -102,6 +102,12 @@
  * branches pollute the index so the predictable ones never train. */
 `define GBL_HIST_LEN `LG_PHT_SZ
 
+/* branch-predictor update state stays in the front end: each fetch group's PHT index
+ * is written to a 2^LG_BPU_TBL_SZ-entry table in l1i, and only that table index rides
+ * through decode/ROB to retire (rv64core 291b0cb).  64 entries >> the ~30 insns that
+ * can be in flight (FQ 8 + DQ 4 + ROB 16 + stage regs), so a live entry never wraps. */
+`define LG_BPU_TBL_SZ 6
+
 //page size
 `define LG_PG_SZ 12
 

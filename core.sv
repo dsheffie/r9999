@@ -111,7 +111,7 @@ module core(clk,
 	    branch_pc_valid,
 	    branch_fault,
 	    took_branch,
-	    branch_pht_idx,
+	    branch_bpu_idx,
 	    restart_pc,
 	    restart_src_pc,
 	    restart_src_is_indirect,
@@ -292,7 +292,7 @@ module core(clk,
    output logic 		 branch_pc_valid;
    output logic 		 branch_fault;
    output logic 		 took_branch;
-   output logic [`LG_PHT_SZ-1:0] branch_pht_idx;
+   output logic [`LG_BPU_TBL_SZ-1:0] branch_bpu_idx;
    
    /* mem port */
    input logic 	 core_mem_req_ack;
@@ -503,7 +503,7 @@ module core(clk,
       r.cache_is_d = e.cache_is_d;
       r.cache_inval = e.cache_inval;
       r.opcode = e.opcode;
-      r.pht_idx = e.pht_idx;
+      r.bpu_idx = e.bpu_idx;
       r.br_pred = e.br_pred;
       r.oldest_first = e.oldest_first;
       r.mode_when_fetched = e.mode_when_fetched;
@@ -585,7 +585,7 @@ module core(clk,
       r.cache_inval = m.cache_inval;
       r.data = c.data;
       r.opcode = m.opcode;
-      r.pht_idx = m.pht_idx;
+      r.bpu_idx = m.bpu_idx;
       r.br_pred = m.br_pred;
       r.oldest_first = m.oldest_first;
       r.tlb_refill = c.tlb_refill;
@@ -789,7 +789,7 @@ module core(clk,
    logic 		     n_took_branch, r_took_branch;
    logic 		     n_branch_valid, r_branch_valid;
    logic 		     n_branch_fault,r_branch_fault;
-   logic [`LG_PHT_SZ-1:0]    n_branch_pht_idx, r_branch_pht_idx;
+   logic [`LG_BPU_TBL_SZ-1:0] n_branch_bpu_idx, r_branch_bpu_idx;
          
    logic 		     n_restart_valid,r_restart_valid;
    logic 		     n_has_delay_slot, r_has_delay_slot;
@@ -1502,7 +1502,7 @@ module core(clk,
 					 t_rob_head.pdst,
 					 t_rob_head.exec_cycle,
 					 r_rt_gap,
-					 t_rob_head.pht_idx[10:0],
+					 {{(11-`LG_BPU_TBL_SZ){1'b0}}, t_rob_head.bpu_idx},   /* was pht_idx[10:0]; same 11b slot */
 					 t_rob_head.br_pred,
 					 w_rt_flags[6:0],
 					 t_rob_head.ldst,
@@ -1528,7 +1528,7 @@ module core(clk,
 					 t_rob_next_head.pdst,
 					 t_rob_next_head.exec_cycle,
 					 r_rt_gap,
-					 t_rob_next_head.pht_idx[10:0],
+					 {{(11-`LG_BPU_TBL_SZ){1'b0}}, t_rob_next_head.bpu_idx},   /* was pht_idx[10:0]; same 11b slot */
 					 t_rob_next_head.br_pred,
 					 w_rt_flags2[6:0],
 					 t_rob_next_head.ldst,
@@ -1800,7 +1800,7 @@ module core(clk,
    assign branch_pc = r_branch_pc;
    assign branch_pc_valid = r_branch_valid;
    assign branch_fault = r_branch_fault;
-   assign branch_pht_idx = r_branch_pht_idx;
+   assign branch_bpu_idx = r_branch_bpu_idx;
    
    assign took_branch = r_took_branch;
    
@@ -1918,7 +1918,7 @@ module core(clk,
 	     r_took_branch <= 1'b0;
 	     r_branch_valid <= 1'b0;
 	     r_branch_fault <= 1'b0;
-	     r_branch_pht_idx <= 'd0;
+	     r_branch_bpu_idx <= 'd0;
 	     r_in_delay_slot <= 1'b0;
 	     r_restart_valid <= 1'b0;
 	     r_has_delay_slot <= 1'b0;
@@ -1962,7 +1962,7 @@ module core(clk,
 	     r_took_branch <= n_took_branch;
 	     r_branch_valid <= n_branch_valid;
 	     r_branch_fault <= n_branch_fault;
-	     r_branch_pht_idx <= n_branch_pht_idx;
+	     r_branch_bpu_idx <= n_branch_bpu_idx;
 	     r_in_delay_slot <= n_in_delay_slot;
 	     r_restart_valid <= n_restart_valid;
 	     r_has_delay_slot <= n_has_delay_slot;
@@ -3381,7 +3381,7 @@ module core(clk,
 	n_took_branch = 1'b0;
 	n_branch_valid = 1'b0;
 	n_branch_fault = 1'b0;
-	n_branch_pht_idx = 'd0;
+	n_branch_bpu_idx = 'd0;
 	
 	if(t_retire)
 	  begin
@@ -3442,7 +3442,7 @@ module core(clk,
 	     n_took_branch = t_next_head_br ? t_rob_next_head.take_br : t_rob_head.take_br;
 	     n_branch_valid = t_next_head_br ? t_rob_next_head.is_br :  t_rob_head.is_br;
 	     n_branch_fault = t_rob_head.faulted;
-	     n_branch_pht_idx = t_next_head_br ? t_rob_next_head.pht_idx : t_rob_head.pht_idx;
+	     n_branch_bpu_idx = t_next_head_br ? t_rob_next_head.bpu_idx : t_rob_head.bpu_idx;
 	  end // if (t_retire)
 	
      end // always_comb
@@ -3505,7 +3505,7 @@ module core(clk,
 	t_rob_tail.in_delay_slot = r_in_delay_slot;
 	t_rob_tail.data = 'd0;
 	t_rob_tail.opcode = t_alloc_uop.op;
-	t_rob_tail.pht_idx = t_alloc_uop.pht_idx;
+	t_rob_tail.bpu_idx = t_alloc_uop.bpu_idx;
 	t_rob_tail.br_pred = t_alloc_uop.br_pred;
 	t_rob_tail.oldest_first = t_uop.oldest_first;
 	
@@ -3555,7 +3555,7 @@ module core(clk,
 	
 	t_rob_next_tail.in_delay_slot = r_in_delay_slot;
 	t_rob_next_tail.data = 'd0;
-	t_rob_next_tail.pht_idx = t_alloc_uop2.pht_idx;
+	t_rob_next_tail.bpu_idx = t_alloc_uop2.bpu_idx;
 	t_rob_next_tail.br_pred = t_alloc_uop2.br_pred;
 	t_rob_next_tail.oldest_first = t_uop2.oldest_first;
 	
@@ -4535,7 +4535,7 @@ module core(clk,
 		     .insn(insn.data),
 		     .pc(insn.pc), 
 		     .insn_pred(insn.pred), 
-		     .pht_idx(insn.pht_idx),
+		     .bpu_idx(insn.bpu_idx),
 		     .insn_pred_target(insn.pred_target),
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		     .fetch_cycle(insn.fetch_cycle),
@@ -4561,7 +4561,7 @@ module core(clk,
 		     .insn(insn_two.data),
 		     .pc(insn_two.pc), 
 		     .insn_pred(insn_two.pred), 
-		     .pht_idx(insn_two.pht_idx),
+		     .bpu_idx(insn_two.bpu_idx),
 		     .insn_pred_target(insn_two.pred_target),
 `ifdef ENABLE_CYCLE_ACCOUNTING
 		     .fetch_cycle(insn_two.fetch_cycle),

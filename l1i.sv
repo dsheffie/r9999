@@ -54,7 +54,7 @@ module l1i(clk,
 	   branch_pc,
 	   took_branch,
 	   branch_fault,
-	   branch_pht_idx,
+	   branch_bpu_idx,
 	   
 	   insn,
 	   insn_valid,
@@ -125,7 +125,7 @@ module l1i(clk,
    input logic 			took_branch;
    input logic 			branch_fault;
    
-   input logic [`LG_PHT_SZ-1:0] branch_pht_idx;
+   input logic [`LG_BPU_TBL_SZ-1:0] branch_bpu_idx;
 
    
    output insn_fetch_t insn;
@@ -198,6 +198,13 @@ module l1i(clk,
    logic [`LG_PHT_SZ-1:0] 		  n_pht_idx,r_pht_idx;
    logic [`LG_PHT_SZ-1:0] 		  r_pht_update_idx;
    logic [`LG_PHT_SZ-1:0] 		  t_retire_pht_idx;
+   /* branch-predictor update state kept in the front end: every pushed fetch group
+    * writes its PHT index here and its insns carry only r_bpu_idx (rv64core 291b0cb).
+    * At retire the core hands back branch_bpu_idx and the PHT index is looked up. */
+   localparam N_BPU_TBL = 1 << `LG_BPU_TBL_SZ;
+   logic [`LG_PHT_SZ-1:0] 		  r_bpu_tbl[N_BPU_TBL-1:0];
+   logic [`LG_BPU_TBL_SZ-1:0] 		  r_bpu_idx;
+   logic 				  t_bpu_alloc;
    
    logic 				  r_take_br;
    
@@ -1158,7 +1165,7 @@ endfunction
 	t_insn.pc = r_cache_pc;
 	t_insn.pred_target = n_pc;
 	t_insn.pred = t_take_br;
-	t_insn.pht_idx = r_pht_idx;
+	t_insn.bpu_idx = r_bpu_idx;
 	t_insn.is_branch = (t_pd != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn.fetch_cycle = r_cycle;
@@ -1176,7 +1183,7 @@ endfunction
 	 * truncated at any branch (slots 2-4 could never BE branches), but with
 	 * predicted-taken grouping they can, and they then trained entry 0 -- 2.85
 	 * -> 18.8 mispredicts/kiloinsn. */
-	t_insn2.pht_idx = r_pht_idx;
+	t_insn2.bpu_idx = r_bpu_idx;
 	t_insn2.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd1) != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn2.fetch_cycle = r_cycle;
@@ -1189,7 +1196,7 @@ endfunction
 	t_insn3.pc = r_cache_pc + 'd8;
 	t_insn3.pred_target = t_gb_take2 ? n_pc : 'd0;
 	t_insn3.pred = t_gb_take2;
-	t_insn3.pht_idx = r_pht_idx;
+	t_insn3.bpu_idx = r_bpu_idx;
 	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
 	 * sit in slot 2, and a hardcoded 0 left ITS delay slot looking like an
 	 * ordinary insn to decode's delay-slot tracker -> irq/xflush injection
@@ -1206,7 +1213,7 @@ endfunction
 	t_insn4.pc = r_cache_pc + 'd12;
 	t_insn4.pred_target = 'd0;
 	t_insn4.pred = 1'b0;
-	t_insn4.pht_idx = r_pht_idx;
+	t_insn4.bpu_idx = r_bpu_idx;
 	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
 	 * sit in slot 3, and a hardcoded 0 left ITS delay slot looking like an
 	 * ordinary insn to decode's delay-slot tracker -> irq/xflush injection
@@ -1227,7 +1234,7 @@ endfunction
 
    always_comb
      begin
-	t_retire_pht_idx = branch_pht_idx;
+	t_retire_pht_idx = r_bpu_tbl[branch_bpu_idx];
      end
 
    
@@ -1304,6 +1311,24 @@ endfunction
 			{t_pht_val, r_pht_update_out[5:0]};
      end
    
+   always_comb
+     begin
+	t_bpu_alloc = t_push_insn | t_push_insn2 | t_push_insn3 | t_push_insn4;
+     end
+
+   always_ff@(posedge clk)
+     begin
+	if(t_bpu_alloc)
+	  begin
+	     r_bpu_tbl[r_bpu_idx] <= r_pht_idx;
+	  end
+     end
+
+   always_ff@(posedge clk)
+     begin
+	r_bpu_idx <= reset ? 'd0 : (t_bpu_alloc ? r_bpu_idx + 'd1 : r_bpu_idx);
+     end
+
    always_ff@(posedge clk)
      begin
 	if(reset)
