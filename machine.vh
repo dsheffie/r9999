@@ -55,14 +55,10 @@
 
 /* Pipeline performance knobs (PERF_TOPDOWN.md has the measurements).  All off by
  * default; area/timing cost not yet characterized.
- *   ENABLE_FETCH_BR_GROUP: a predicted-taken direct branch in fetch slot 1/2 is
- *     pushed with the insns before it and its delay slot, then one resteer bubble
- *     (was: branch alone, delay slot alone).  dhrystone -6.5%.
  *   ENABLE_SCHED_BYPASS: when no ALU scheduler entry is ready, a ready uop-queue
  *     head issues directly instead of spending a cycle in the scheduler.
  *   ENABLE_UQ_DUAL_POP: move up to two uops/cycle from the uop queue into the
  *     ALU scheduler (allocation pushes two, the queue used to pop one). */
-//`define ENABLE_FETCH_BR_GROUP 1
 //`define ENABLE_SCHED_BYPASS 1
 //`define ENABLE_UQ_DUAL_POP 1
 
@@ -100,7 +96,29 @@
  * into the index.  Folding a longer (64) history into 14 bits tripled compress
  * mispredicts (29 -> 10.8 /kinsn with the short history, CPI -13%): random-outcome
  * branches pollute the index so the predictable ones never train. */
-`define GBL_HIST_LEN `LG_PHT_SZ
+/* ENABLE_MINI_TAGE: the PHT becomes a PC-indexed bimodal and two tagged tables (T1:
+ * 16b history, T2: 48b) of 2^LG_TAGE_SZ per-fetch-line entries {valid, tag, slot, 3b ctr,
+ * 2b useful}, each indexed by line pc ^ folded global history; the longest hit overrides
+ * the bimodal for the one slot its entry was allocated to.  Single-cycle lookup; update at retire from fetch-time
+ * metadata held in the front-end bpu table.  ISS sweep (1K entries, 16b history,
+ * 16K bimodal): go 14.45 / m88ksim 0.71 / compress 9.37 cond MPKI vs gshare
+ * 14.98 / 1.09 / 10.71. */
+`define ENABLE_MINI_TAGE 1
+`ifdef ENABLE_MINI_TAGE
+ /* two tagged tables: T1 folds the newest 16 outcomes, T2 (long) folds all 48;
+  * the folds in l1i.sv are written for exactly these widths */
+ `define GBL_HIST_LEN 48
+ `define LG_TAGE_SZ 10
+ `define TAGE_TAG_W 9
+`else
+ `define GBL_HIST_LEN `LG_PHT_SZ
+`endif
+
+/* branch-predictor update state stays in the front end: each fetch group's PHT index
+ * is written to a 2^LG_BPU_TBL_SZ-entry table in l1i, and only that table index rides
+ * through decode/ROB to retire (rv64core 291b0cb).  64 entries >> the ~30 insns that
+ * can be in flight (FQ 8 + DQ 4 + ROB 16 + stage regs), so a live entry never wraps. */
+`define LG_BPU_TBL_SZ 6
 
 /* branch-predictor update state stays in the front end: each fetch group's PHT index
  * is written to a 2^LG_BPU_TBL_SZ-entry table in l1i, and only that table index rides
@@ -194,6 +212,11 @@
 `endif
 
 
+/* ENABLE_L1I_2WAY: a second L1I way of LG_L1I_NUM_SETS sets (2 x 16KB = 32KB with the
+ * default 1024 sets).  Same index bits per way as the direct-mapped L1I, so no new VIPT
+ * alias bits.  1-bit/set LRU.  Retired-stream I-cache model: m88ksim 52-65 -> 3-12 MPKI,
+ * go 40-45 -> 8-14 MPKI (16KB DM -> 32KB 2-way). */
+`define ENABLE_L1I_2WAY 1
 `ifndef LG_L1I_NUM_SETS
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2

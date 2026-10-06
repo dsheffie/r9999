@@ -21,7 +21,12 @@ module compute_pht_idx(pc, hist, idx);
    /* index per 16B LINE (bit 4 up): the entry now holds a counter for each of the
     * 4 slots, so the low bits that used to select between adjacent instructions
     * are supplied by the slot mux instead. */
+`ifdef ENABLE_MINI_TAGE
+   /* mini-TAGE: the PHT is the PC-indexed bimodal; history goes to the tagged table */
+   assign idx = pc[`LG_PHT_SZ+3:4];
+`else
    assign idx = hist ^ pc[`LG_PHT_SZ+3:4];
+`endif
    
 endmodule
 
@@ -175,7 +180,7 @@ module l1i(clk,
    input logic 				  tlb_entry_in_valid;
    input 				  tlb_data_t tlb_entry_in;
       
-   logic [N_TAG_BITS-1:0] 		  t_cache_tag, r_cache_tag, r_tag_out;
+   logic [N_TAG_BITS-1:0] 		  t_cache_tag, r_cache_tag, r_tag_out0, r_tag_out1;
 
    logic 				  r_pht_update;
    /* PHT entry holds FOUR packed 2-bit counters, one per instruction slot in the
@@ -205,6 +210,50 @@ module l1i(clk,
    logic [`LG_PHT_SZ-1:0] 		  r_bpu_tbl[N_BPU_TBL-1:0];
    logic [`LG_BPU_TBL_SZ-1:0] 		  r_bpu_idx;
    logic 				  t_bpu_alloc;
+   /* per-slot predicted direction: the bimodal/gshare counter MSBs, with the tagged
+    * table's slot overridden on a hit (ENABLE_MINI_TAGE) */
+   logic [3:0] 				  t_pred_vec;
+`ifdef ENABLE_MINI_TAGE
+   /* tagged table entry: [16] valid, [15:7] tag, [6:5] slot, [4:2] 3b ctr, [1:0] useful */
+   localparam T1_W = 1 + `TAGE_TAG_W + 2 + 3 + 2;
+   localparam N_T1 = 1 << `LG_TAGE_SZ;
+   logic [`LG_TAGE_SZ-1:0] 		  t_t1_n_idx, r_t1_idx;
+   logic [`TAGE_TAG_W-1:0] 		  t_t1_n_tag, r_t1_tag;
+   logic [T1_W-1:0] 			  r_t1_out;
+   logic 				  t_t1_hit;
+   /* per fetch group, in the front end */
+   logic [`LG_TAGE_SZ-1:0] 		  r_bpu_t1_idx[N_BPU_TBL-1:0];
+   logic [`TAGE_TAG_W-1:0] 		  r_bpu_t1_tag[N_BPU_TBL-1:0];
+   logic 				  r_bpu_t1_hit[N_BPU_TBL-1:0];
+   logic [T1_W-1:0] 			  r_bpu_t1_ent[N_BPU_TBL-1:0];
+   /* retire stage (aligned with r_pht_update_out) */
+   logic [`LG_TAGE_SZ-1:0] 		  r_t1u_idx;
+   logic [`TAGE_TAG_W-1:0] 		  r_t1u_tag;
+   logic 				  r_t1u_hit;
+   logic [T1_W-1:0] 			  r_t1u_ent;
+   logic 				  t_t1_provider, t_t1_wr;
+   logic [T1_W-1:0] 			  t_t1_wr_data;
+   logic [2:0] 				  t_t1_ctr;
+   logic [1:0] 				  t_t1_u;
+   /* T2: same geometry, long (48b) history */
+   logic [`LG_TAGE_SZ-1:0] 		  t_t2_n_idx, r_t2_idx;
+   logic [`TAGE_TAG_W-1:0] 		  t_t2_n_tag, r_t2_tag;
+   logic [T1_W-1:0] 			  r_t2_out;
+   logic 				  t_t2_hit;
+   logic [`LG_TAGE_SZ-1:0] 		  r_bpu_t2_idx[N_BPU_TBL-1:0];
+   logic [`TAGE_TAG_W-1:0] 		  r_bpu_t2_tag[N_BPU_TBL-1:0];
+   logic 				  r_bpu_t2_hit[N_BPU_TBL-1:0];
+   logic [T1_W-1:0] 			  r_bpu_t2_ent[N_BPU_TBL-1:0];
+   logic [`LG_TAGE_SZ-1:0] 		  r_t2u_idx;
+   logic [`TAGE_TAG_W-1:0] 		  r_t2u_tag;
+   logic 				  r_t2u_hit;
+   logic [T1_W-1:0] 			  r_t2u_ent;
+   logic 				  t_t2_provider, t_t2_wr;
+   logic [T1_W-1:0] 			  t_t2_wr_data;
+   logic [2:0] 				  t_t2_ctr;
+   logic [1:0] 				  t_t2_u;
+   logic 				  t_prov_pred, t_alt_pred, t_t1_free, t_t2_free;
+`endif
    
    logic 				  r_take_br;
    
@@ -212,23 +261,26 @@ module l1i(clk,
    logic [BTB_ENTRIES-1:0] 		  r_btb_valid;
    
    
-   logic [(4*WORDS_PER_CL)-1:0] 	  r_jump_out;
+   logic [(4*WORDS_PER_CL)-1:0] 	  r_jump_out0, r_jump_out1, t_jump_out;
    
    logic [`LG_L1I_NUM_SETS-1:0] 	    t_cache_idx, r_cache_idx;   
-   logic [L1I_CL_LEN_BITS-1:0] 		    r_array_out;   
+   logic [L1I_CL_LEN_BITS-1:0] 		    r_array_out0, r_array_out1, t_array_out;
    logic 				    r_mem_req_valid, n_mem_req_valid;
    logic [(`PA_WIDTH-1):0] r_mem_req_addr, n_mem_req_addr;
    logic				    r_mem_req_cacheable,n_mem_req_cacheable;
    
    
 
-   insn_fetch_t r_fq[N_FQ_ENTRIES-1:0];
+   /* 2-wide fetch queue in two banks: entry i lives in bank i[0] at row i>>1.  The
+    * (at most two) pushes per cycle and the two decode reads are always consecutive
+    * entries, so each bank sees one write and one read per cycle (1W1R -> LUTRAM). */
+   localparam N_FQ_ROWS = N_FQ_ENTRIES/2;
+   insn_fetch_t r_fq_b0[N_FQ_ROWS-1:0];
+   insn_fetch_t r_fq_b1[N_FQ_ROWS-1:0];
    
    logic [`LG_FQ_ENTRIES:0] r_fq_head_ptr, n_fq_head_ptr;
    logic [`LG_FQ_ENTRIES:0] r_fq_next_head_ptr, n_fq_next_head_ptr;
    logic [`LG_FQ_ENTRIES:0] r_fq_next_tail_ptr, n_fq_next_tail_ptr;
-   logic [`LG_FQ_ENTRIES:0] r_fq_next3_tail_ptr, n_fq_next3_tail_ptr;
-   logic [`LG_FQ_ENTRIES:0] r_fq_next4_tail_ptr, n_fq_next4_tail_ptr;
    
    logic [`LG_FQ_ENTRIES:0] r_fq_tail_ptr, n_fq_tail_ptr;
    logic 		    r_resteer_bubble, n_resteer_bubble;
@@ -241,7 +293,7 @@ module l1i(clk,
    
    
    logic 		    fq_full, fq_next_empty, fq_empty;
-   logic 		    fq_full2, fq_full3, fq_full4;
+   logic 		    fq_full2;
    
    
    logic [(`M_WIDTH-1):0]   r_spec_return_stack [RETURN_STACK_ENTRIES-1:0];
@@ -327,10 +379,14 @@ endfunction
    logic 		  r_restart_req, n_restart_req;
    logic 		  r_restart_ack, n_restart_ack;
    logic 		  r_req, n_req;
-   logic 		  r_valid_out;
+   logic 		  r_valid_out0, r_valid_out1;
+   /* L1I way select / replacement: r_lru_out = the set's LRU way (read with the arrays),
+    * r_fill_way = the way the outstanding reload writes */
+   logic 		  r_lru_out, r_fill_way, n_fill_way;
+   logic 		  t_lru_wr, t_lru_val;
+   logic [`LG_L1I_NUM_SETS-1:0] t_lru_idx;
    logic 		  t_miss, t_hit;
-   logic 		  t_push_insn, t_push_insn2,
-			  t_push_insn3, t_push_insn4;
+   logic 		  t_push_insn, t_push_insn2;
    
    logic 		  t_clear_fq;
    logic 		  r_flush_req, n_flush_req;
@@ -339,19 +395,19 @@ endfunction
    logic 		  t_take_br, t_is_cflow;
    logic 		  t_update_spec_hist;
    
-   logic [31:0] 	  t_insn_data, t_insn_data2, t_insn_data3, t_insn_data4;
+   logic [31:0] 	  t_insn_data, t_insn_data2;
    logic [`M_WIDTH-1:0]   t_simm;
    logic 		  t_is_call, t_is_ret;
    logic [2:0] 		  t_branch_cnt;
    logic [4:0] 		  t_branch_marker, t_spec_branch_marker;
    logic [2:0] 		  t_first_branch;
-   /* ENABLE_FETCH_BR_GROUP: a predicted-taken direct branch in slot 1/2 of the
-    * fetch group is pushed together with the insns before it and its delay slot */
-   logic [3:0] 		  t_gb_pd1, t_gb_pd2;
-   logic 		  t_gb_ok1, t_gb_ok2;
-   logic 		  t_gb_take1, t_gb_take2;
-   logic [`M_WIDTH-1:0]   t_gb_pc1, t_gb_pc2, t_gb_target1, t_gb_target2;
-   logic [`M_WIDTH-1:0]   t_gb_simm1, t_gb_simm2;
+   /* branch pair: a predicted-taken direct branch in slot 1 of the fetch group is
+    * pushed together with the insn before it; its delay slot is fetched next */
+   logic [3:0] 		  t_gb_pd1;
+   logic 		  t_gb_ok1;
+   logic 		  t_gb_take1;
+   logic [`M_WIDTH-1:0]   t_gb_pc1, t_gb_target1;
+   logic [`M_WIDTH-1:0]   t_gb_simm1;
 
    logic 		  t_init_pht;
    logic [`LG_PHT_SZ-1:0] r_init_pht_idx, n_init_pht_idx;
@@ -366,7 +422,7 @@ endfunction
    
    
    localparam SEXT = `M_WIDTH-16;
-   insn_fetch_t t_insn, t_insn2, t_insn3, t_insn4;
+   insn_fetch_t t_insn, t_insn2;
    logic [3:0] t_pd, r_pd;
 
    
@@ -400,8 +456,6 @@ endfunction
 	n_fq_head_ptr = r_fq_head_ptr;
 	n_fq_next_head_ptr = r_fq_next_head_ptr;
 	n_fq_next_tail_ptr = r_fq_next_tail_ptr;
-	n_fq_next3_tail_ptr = r_fq_next3_tail_ptr;
-	n_fq_next4_tail_ptr = r_fq_next4_tail_ptr;
 	
 	fq_empty = (r_fq_head_ptr == r_fq_tail_ptr);
 	fq_next_empty = (r_fq_next_head_ptr == r_fq_tail_ptr);
@@ -412,42 +466,21 @@ endfunction
 	fq_full2 = (r_fq_head_ptr != r_fq_next_tail_ptr) &&
 		   (r_fq_head_ptr[`LG_FQ_ENTRIES-1:0] == r_fq_next_tail_ptr[`LG_FQ_ENTRIES-1:0]) || fq_full;
 	
-	fq_full3 = (r_fq_head_ptr != r_fq_next3_tail_ptr) &&
-		   (r_fq_head_ptr[`LG_FQ_ENTRIES-1:0] == r_fq_next3_tail_ptr[`LG_FQ_ENTRIES-1:0]) || fq_full2;
-	
-	fq_full4 = (r_fq_head_ptr != r_fq_next4_tail_ptr) &&
-		   (r_fq_head_ptr[`LG_FQ_ENTRIES-1:0] == r_fq_next4_tail_ptr[`LG_FQ_ENTRIES-1:0]) || fq_full3;
-	
-	insn = r_fq[r_fq_head_ptr[`LG_FQ_ENTRIES-1:0]];
-	insn_two = r_fq[r_fq_next_head_ptr[`LG_FQ_ENTRIES-1:0]];
+	/* head and next_head are consecutive entries, so they sit in opposite banks */
+	insn = r_fq_head_ptr[0] ? r_fq_b1[r_fq_head_ptr[`LG_FQ_ENTRIES-1:1]] :
+	       r_fq_b0[r_fq_head_ptr[`LG_FQ_ENTRIES-1:1]];
+	insn_two = r_fq_next_head_ptr[0] ? r_fq_b1[r_fq_next_head_ptr[`LG_FQ_ENTRIES-1:1]] :
+		   r_fq_b0[r_fq_next_head_ptr[`LG_FQ_ENTRIES-1:1]];
 
-	if(t_push_insn4)
-	  begin
-	     n_fq_tail_ptr = r_fq_tail_ptr + 'd4;
-	     n_fq_next_tail_ptr = r_fq_next_tail_ptr + 'd4;
-	     n_fq_next3_tail_ptr = r_fq_next3_tail_ptr + 'd4;
-	     n_fq_next4_tail_ptr = r_fq_next4_tail_ptr + 'd4;
-	  end
-	else if(t_push_insn3)
-	  begin
-	     n_fq_tail_ptr = r_fq_tail_ptr + 'd3;
-	     n_fq_next_tail_ptr = r_fq_next_tail_ptr + 'd3;
-	     n_fq_next3_tail_ptr = r_fq_next3_tail_ptr + 'd3;
-	     n_fq_next4_tail_ptr = r_fq_next4_tail_ptr + 'd3;
-	  end
-	else if(t_push_insn2)
+	if(t_push_insn2)
 	  begin
 	     n_fq_tail_ptr = r_fq_tail_ptr + 'd2;
 	     n_fq_next_tail_ptr = r_fq_next_tail_ptr + 'd2;
-	     n_fq_next3_tail_ptr = r_fq_next3_tail_ptr + 'd2;
-	     n_fq_next4_tail_ptr = r_fq_next4_tail_ptr + 'd2;
 	  end
 	else if(t_push_insn)
 	  begin
 	     n_fq_tail_ptr = r_fq_tail_ptr + 'd1;
 	     n_fq_next_tail_ptr = r_fq_next_tail_ptr + 'd1;
-	     n_fq_next3_tail_ptr = r_fq_next3_tail_ptr + 'd1;
-	     n_fq_next4_tail_ptr = r_fq_next4_tail_ptr + 'd1;
 	  end
 	
 	if(insn_ack && !insn_ack_two)
@@ -462,40 +495,51 @@ endfunction
 	  end
      end // always_comb
 
+   /* bank write port: the tail entry goes to bank tail[0]; a second push goes to
+    * the other bank at next_tail's row */
+   logic 		  t_fq_wr0, t_fq_wr1;
+   logic [`LG_FQ_ENTRIES-2:0] t_fq_wr_row0, t_fq_wr_row1;
+   insn_fetch_t t_fq_wr_data0, t_fq_wr_data1;
+   always_comb
+     begin
+	t_fq_wr0 = 1'b0;
+	t_fq_wr1 = 1'b0;
+	t_fq_wr_row0 = r_fq_tail_ptr[`LG_FQ_ENTRIES-1:1];
+	t_fq_wr_row1 = r_fq_tail_ptr[`LG_FQ_ENTRIES-1:1];
+	t_fq_wr_data0 = t_insn;
+	t_fq_wr_data1 = t_insn;
+	if(t_push_insn | t_push_insn2)
+	  begin
+	     if(r_fq_tail_ptr[0])
+	       begin
+		  t_fq_wr1 = 1'b1;
+		  t_fq_wr_row1 = r_fq_tail_ptr[`LG_FQ_ENTRIES-1:1];
+		  t_fq_wr_data1 = t_insn;
+		  t_fq_wr0 = t_push_insn2;
+		  t_fq_wr_row0 = r_fq_next_tail_ptr[`LG_FQ_ENTRIES-1:1];
+		  t_fq_wr_data0 = t_insn2;
+	       end
+	     else
+	       begin
+		  t_fq_wr0 = 1'b1;
+		  t_fq_wr_row0 = r_fq_tail_ptr[`LG_FQ_ENTRIES-1:1];
+		  t_fq_wr_data0 = t_insn;
+		  t_fq_wr1 = t_push_insn2;
+		  t_fq_wr_row1 = r_fq_next_tail_ptr[`LG_FQ_ENTRIES-1:1];
+		  t_fq_wr_data1 = t_insn2;
+	       end
+	  end
+     end // always_comb
+
    always_ff@(posedge clk)
      begin
-	if(t_push_insn)
+	if(t_fq_wr0)
 	  begin
-	     //$display("t_insn.pc = %x, t_clear_fq=%b", t_insn.pc,t_clear_fq);
-	     r_fq[r_fq_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn;
+	     r_fq_b0[t_fq_wr_row0] <= t_fq_wr_data0;
 	  end
-	else if(t_push_insn2)
+	if(t_fq_wr1)
 	  begin
-	     //$display("t_insn.pc = %x, t_clear_fq=%b", t_insn.pc,t_clear_fq);
-	     //$display("t_insn2.pc = %x", t_insn2.pc);	     
-	     r_fq[r_fq_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn;
-	     r_fq[r_fq_next_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn2;
-	  end
-	else if(t_push_insn3)
-	  begin
-	     //$display("t_insn.pc = %x, t_clear_fq=%b", t_insn.pc,t_clear_fq);	     	     
-	     //$display("t_insn2.pc = %x", t_insn2.pc);
-	     //$display("t_insn3.pc = %x", t_insn3.pc);	     	     	     
-	     r_fq[r_fq_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn;
-	     r_fq[r_fq_next_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn2;
-	     r_fq[r_fq_next3_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn3;	  	     
-	  end
-	else if(t_push_insn4)
-	  begin
-	     //$display("push4 cycle = %d, r_valid_out =%b, r_tag_out =%d, r_cache_tag = %d, r_cache_pc = %x", r_cycle, r_valid_out,r_tag_out,r_cache_tag,r_cache_pc);
-	     //$display("t_insn.pc = %x,  bytes = %x, t_clear_fq=%b,hit=%b", t_insn.pc,t_insn.data,t_clear_fq,t_hit);	     
-	     //$display("t_insn2.pc = %x, bytes = %x", t_insn2.pc,t_insn2.data);
-	     //$display("t_insn3.pc = %x", t_insn3.pc);
-	     //$display("t_insn4.pc = %x", t_insn4.pc);	     	     	     
-	     r_fq[r_fq_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn;
-	     r_fq[r_fq_next_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn2;
-	     r_fq[r_fq_next3_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn3;
-	     r_fq[r_fq_next4_tail_ptr[`LG_FQ_ENTRIES-1:0]] <= t_insn4;	  	     	     
+	     r_fq_b1[t_fq_wr_row1] <= t_fq_wr_data1;
 	  end
      end // always_ff@ (posedge clk)
 
@@ -607,7 +651,17 @@ endfunction
    /* For mapped (kuseg) addresses use TLB-translated PA; unmapped uses mipsseg output directly */
    assign w_tlb_pc = (r_mapped && w_eff_hit) ? w_eff_pa : r_la_pc[`PA_WIDTH-1:0];
    
-   wire w_hit = (r_tag_out == w_tlb_pc[(`PA_WIDTH-1):TAG_LSB]);
+   wire w_hit0 = r_valid_out0 & (r_tag_out0 == w_tlb_pc[(`PA_WIDTH-1):TAG_LSB]);
+`ifdef ENABLE_L1I_2WAY
+   wire w_hit1 = r_valid_out1 & (r_tag_out1 == w_tlb_pc[(`PA_WIDTH-1):TAG_LSB]);
+`else
+   wire w_hit1 = 1'b0;
+`endif
+   always_comb
+     begin
+	t_array_out = w_hit1 ? r_array_out1 : r_array_out0;
+	t_jump_out = w_hit1 ? r_jump_out1 : r_jump_out0;
+     end
    //always@(negedge clk)
    //begin
    //if(r_req)
@@ -622,6 +676,7 @@ endfunction
      begin
 	n_pc = r_pc;
 	n_miss_pc = r_miss_pc;
+	n_fill_way = r_fill_way;
 	n_cache_pc = 'd0;
 	n_state = r_state;
 	n_restart_ack = 1'b0;
@@ -651,45 +706,44 @@ endfunction
 	  end
 	else
 	  begin
-	     t_miss = r_req & !(r_valid_out & (r_tag_out == w_tlb_pc[`PA_WIDTH-1:TAG_LSB]));
-	     t_hit  = r_req & (r_valid_out & (r_tag_out == w_tlb_pc[`PA_WIDTH-1:TAG_LSB]));
+	     t_miss = r_req & !(w_hit0 | w_hit1);
+	     t_hit  = r_req & (w_hit0 | w_hit1);
 	  end
 
 	t_insn_idx = r_cache_pc[WORD_STOP-1:WORD_START];
 	
-	t_pd = select_pd(r_jump_out, t_insn_idx);
+	t_pd = select_pd(t_jump_out, t_insn_idx);
 
-	t_insn_data  = select_cl32(r_array_out, t_insn_idx);
-	t_insn_data2 = select_cl32(r_array_out, t_insn_idx + 2'd1);
-	t_insn_data3 = select_cl32(r_array_out, t_insn_idx + 2'd2);
-	t_insn_data4 = select_cl32(r_array_out, t_insn_idx + 2'd3);
+	t_insn_data  = select_cl32(t_array_out, t_insn_idx);
+	t_insn_data2 = select_cl32(t_array_out, t_insn_idx + 2'd1);
 
 
 	t_branch_marker = {1'b1,
-			   select_pd(r_jump_out, 'd3) != 4'd0,
-                           select_pd(r_jump_out, 'd2) != 4'd0,
-                           select_pd(r_jump_out, 'd1) != 4'd0,
-                           select_pd(r_jump_out, 'd0) != 4'd0
+			   select_pd(t_jump_out, 'd3) != 4'd0,
+                           select_pd(t_jump_out, 'd2) != 4'd0,
+                           select_pd(t_jump_out, 'd1) != 4'd0,
+                           select_pd(t_jump_out, 'd0) != 4'd0
                            } >> t_insn_idx;
 
 	/* the 2-bit counter for the instruction actually being fetched */
-	t_pht_out = (t_insn_idx == 2'd0) ? r_pht_out_vec[1:0] :
-		    (t_insn_idx == 2'd1) ? r_pht_out_vec[3:2] :
-		    (t_insn_idx == 2'd2) ? r_pht_out_vec[5:4] :
-		    r_pht_out_vec[7:6];
+	/* only the MSB (the direction) is consumed; the LSB stays the bimodal's */
+	t_pht_out = (t_insn_idx == 2'd0) ? {t_pred_vec[0], r_pht_out_vec[0]} :
+		    (t_insn_idx == 2'd1) ? {t_pred_vec[1], r_pht_out_vec[2]} :
+		    (t_insn_idx == 2'd2) ? {t_pred_vec[2], r_pht_out_vec[4]} :
+		    {t_pred_vec[3], r_pht_out_vec[6]};
 
 	/* Predicted-TAKEN per slot: a conditional branch (pd==1) predicted not-taken
 	 * does NOT end the fetch group, and neither does a non-branch.  This is the
 	 * whole point -- the old marker used (pd != 0), so ~7-8% of instructions
 	 * (not-taken conditional branches) truncated a group for no reason. */
-	t_tcb0 = ~((((select_pd(r_jump_out, 'd0) == 4'd1) & ~r_pht_out_vec[1]) |
-		    (select_pd(r_jump_out, 'd0) == 4'd0)));
-	t_tcb1 = ~((((select_pd(r_jump_out, 'd1) == 4'd1) & ~r_pht_out_vec[3]) |
-		    (select_pd(r_jump_out, 'd1) == 4'd0)));
-	t_tcb2 = ~((((select_pd(r_jump_out, 'd2) == 4'd1) & ~r_pht_out_vec[5]) |
-		    (select_pd(r_jump_out, 'd2) == 4'd0)));
-	t_tcb3 = ~((((select_pd(r_jump_out, 'd3) == 4'd1) & ~r_pht_out_vec[7]) |
-		    (select_pd(r_jump_out, 'd3) == 4'd0)));
+	t_tcb0 = ~((((select_pd(t_jump_out, 'd0) == 4'd1) & ~t_pred_vec[0]) |
+		    (select_pd(t_jump_out, 'd0) == 4'd0)));
+	t_tcb1 = ~((((select_pd(t_jump_out, 'd1) == 4'd1) & ~t_pred_vec[1]) |
+		    (select_pd(t_jump_out, 'd1) == 4'd0)));
+	t_tcb2 = ~((((select_pd(t_jump_out, 'd2) == 4'd1) & ~t_pred_vec[2]) |
+		    (select_pd(t_jump_out, 'd2) == 4'd0)));
+	t_tcb3 = ~((((select_pd(t_jump_out, 'd3) == 4'd1) & ~t_pred_vec[3]) |
+		    (select_pd(t_jump_out, 'd3) == 4'd0)));
 
 	t_spec_branch_marker = ({1'b1, t_tcb3, t_tcb2, t_tcb1, t_tcb0} >> t_insn_idx);
 
@@ -710,47 +764,34 @@ endfunction
 	    t_first_branch = 'd7;
 	endcase
 
-	/* in-group taken branch at slot 1 or 2 (relative to t_insn_idx): only
-	 * direct targets -- conditional (1, predicted taken by the same counter
-	 * t_tcb* used), likely (2), j (3), b (8).  Calls (5/9) push the return
-	 * stack with their own pc and BTB/return targets (4/6/7) are looked up
-	 * for the head slot, so those keep the branch-alone path.  The delay slot
-	 * must be in the same 16B line (idx + k + 1 <= 3). */
-	t_gb_pd1 = select_pd(r_jump_out, t_insn_idx + 2'd1);
-	t_gb_pd2 = select_pd(r_jump_out, t_insn_idx + 2'd2);
+	/* branch pair: the first predicted-taken insn is slot 1 (relative to
+	 * t_insn_idx) and is a direct branch -- conditional (1, predicted taken by
+	 * the same counter t_tcb* used), likely (2), j (3), b (8).  Calls (5/9)
+	 * push the return stack with their own pc and BTB/return targets (4/6/7)
+	 * are looked up for the head slot, so those keep the branch-alone path.
+	 * [slot 0, branch] are pushed together; the delay slot (next 16B line when
+	 * idx == 2) is fetched sequentially next cycle, then the target. */
+	t_gb_pd1 = select_pd(t_jump_out, t_insn_idx + 2'd1);
 	t_gb_pc1 = r_cache_pc + 'd4;
-	t_gb_pc2 = r_cache_pc + 'd8;
 	t_gb_simm1 = {{SEXT{t_insn_data2[15]}},t_insn_data2[15:0]};
-	t_gb_simm2 = {{SEXT{t_insn_data3[15]}},t_insn_data3[15:0]};
 	t_gb_target1 = (t_gb_pd1 == 4'd3) ? {t_gb_pc1[`M_WIDTH-1:28], t_insn_data2[25:0], 2'd0} :
 		       ((t_gb_pc1 + 'd4) + {t_gb_simm1[`M_WIDTH-3:0], 2'd0});
-	t_gb_target2 = (t_gb_pd2 == 4'd3) ? {t_gb_pc2[`M_WIDTH-1:28], t_insn_data3[25:0], 2'd0} :
-		       ((t_gb_pc2 + 'd4) + {t_gb_simm2[`M_WIDTH-3:0], 2'd0});
-	t_gb_ok1 = 1'b0;
-	t_gb_ok2 = 1'b0;
-`ifdef ENABLE_FETCH_BR_GROUP
-	t_gb_ok1 = (t_first_branch == 'd1) && (t_insn_idx <= 2'd1) && !fq_full3 &&
+	t_gb_ok1 = (t_first_branch == 'd1) && (t_insn_idx <= 2'd2) && !fq_full2 &&
 		   ((t_gb_pd1 == 4'd1) || (t_gb_pd1 == 4'd2) || (t_gb_pd1 == 4'd3) || (t_gb_pd1 == 4'd8));
-	t_gb_ok2 = (t_first_branch == 'd2) && (t_insn_idx == 2'd0) && !fq_full4 &&
-		   ((t_gb_pd2 == 4'd1) || (t_gb_pd2 == 4'd2) || (t_gb_pd2 == 4'd3) || (t_gb_pd2 == 4'd8));
-`endif
 
-	t_branch_cnt = {2'd0, select_pd(r_jump_out, 'd0) != 4'd0} +
-		       {2'd0, select_pd(r_jump_out, 'd1) != 4'd0} +
-		       {2'd0, select_pd(r_jump_out, 'd2) != 4'd0} +
-		       {2'd0, select_pd(r_jump_out, 'd3) != 4'd0};
+	t_branch_cnt = {2'd0, select_pd(t_jump_out, 'd0) != 4'd0} +
+		       {2'd0, select_pd(t_jump_out, 'd1) != 4'd0} +
+		       {2'd0, select_pd(t_jump_out, 'd2) != 4'd0} +
+		       {2'd0, select_pd(t_jump_out, 'd3) != 4'd0};
 	
 		
 	t_simm = {{SEXT{t_insn_data[15]}},t_insn_data[15:0]};
 	t_clear_fq = 1'b0;
 	t_push_insn = 1'b0;
 	t_push_insn2 = 1'b0;
-	t_push_insn3 = 1'b0;
-	t_push_insn4 = 1'b0;
 	t_take_br = 1'b0;
 	t_is_cflow = 1'b0;
 	t_gb_take1 = 1'b0;
-	t_gb_take2 = 1'b0;
 	t_update_spec_hist = 1'b0;
 	t_is_call = 1'b0;
 	t_is_ret = 1'b0;
@@ -856,6 +897,10 @@ endfunction
 		    n_mem_req_valid = 1'b1;
 		    n_miss_pc = r_cache_pc;
 		    n_pc = r_pc;
+`ifdef ENABLE_L1I_2WAY
+		    /* victim: an invalid way first, else the set's LRU way */
+		    n_fill_way = !r_valid_out0 ? 1'b0 : !r_valid_out1 ? 1'b1 : r_lru_out;
+`endif
 		 end
 	       else if(t_hit && !fq_full)
 		 begin
@@ -947,52 +992,31 @@ endfunction
 			 /* the array was read sequentially this cycle, so the target
 			  * costs one resteer bubble (vs. two single-insn cycles for
 			  * the branch and its delay slot on the branch-alone path) */
-			 if(t_gb_ok2)
+			 if(t_gb_ok1)
 			   begin
-			      t_push_insn4 = 1'b1;
-			      t_gb_take2 = 1'b1;
-			      t_update_spec_hist = 1'b1;
-			      n_pc = t_gb_target2;
-			      n_resteer_bubble = 1'b1;
-			   end
-			 else if(t_gb_ok1)
-			   begin
-			      t_push_insn3 = 1'b1;
+			      /* [slot 0, taken branch]: fetch the delay slot next, then the
+			       * target (r_pc), exactly as the branch-alone path does */
+			      t_push_insn2 = 1'b1;
 			      t_gb_take1 = 1'b1;
 			      t_update_spec_hist = 1'b1;
+			      n_delay_slot = 1'b1;
+			      n_cache_pc = r_cache_pc + 'd8;
+			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):TAG_LSB];
 			      n_pc = t_gb_target1;
-			      n_resteer_bubble = 1'b1;
-			   end
-			 else if(t_first_branch == 'd4 && !fq_full4)
-			   begin
-			      t_push_insn4 = 1'b1;
-			      t_cache_idx = r_cache_idx + 'd1;
-			      n_cache_pc = r_cache_pc + 'd16;
-			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):TAG_LSB];
-			      n_pc = r_cache_pc + 'd20;
-			   end
-			 else if(t_first_branch == 'd3 && !fq_full3)
-			   begin
-			      t_push_insn3 = 1'b1;
-			      n_cache_pc = r_cache_pc + 'd12;
-			      n_pc = r_cache_pc + 'd16;
-			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):TAG_LSB];
-			      if(t_insn_idx != 0)
+			      if(t_insn_idx == 2'd2)
 				begin
 				   t_cache_idx = r_cache_idx + 'd1;
 				end
-			      //n_resteer_bubble = 1'b1;
 			   end
-			 else if(t_first_branch == 'd2 && !fq_full2)
+			 else if(t_first_branch >= 'd2 && !fq_full2)
 			   begin
-			      //$display("t_branch_locs = %b", t_branch_locs);
+			      /* two sequential insns (no predicted-taken cflow among them);
+			       * idx <= 2 here since the 16B line end bounds t_first_branch */
 			      t_push_insn2 = 1'b1;
-			      n_pc = r_cache_pc + 'd8;
-			      //guaranteed to end-up on another cacheline
 			      n_cache_pc = r_cache_pc + 'd8;
 			      t_cache_tag = n_cache_pc[(`PA_WIDTH-1):TAG_LSB];
 			      n_pc = r_cache_pc + 'd12;
-			      if(t_insn_idx == 2)
+			      if(t_insn_idx == 2'd2)
 				begin
 				   t_cache_idx = r_cache_idx + 'd1;
 				end
@@ -1000,7 +1024,7 @@ endfunction
 			 else
 			   begin
 			      t_push_insn = 1'b1;
-			   end // else: !if(t_first_branch == 'd2 && !fq_full2)
+			   end
 		      end // if (!(t_is_cflow || r_delay_slot))
 		    //else if(t_is_cflow && !r_delay_slot && t_insn_idx != 'd3 && !fq_full2)
 		    //begin
@@ -1184,51 +1208,47 @@ endfunction
 	 * predicted-taken grouping they can, and they then trained entry 0 -- 2.85
 	 * -> 18.8 mispredicts/kiloinsn. */
 	t_insn2.bpu_idx = r_bpu_idx;
-	t_insn2.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd1) != 4'd0);
+	t_insn2.is_branch = (select_pd(t_jump_out, t_insn_idx + 2'd1) != 4'd0);
 `ifdef	ENABLE_CYCLE_ACCOUNTING
 	t_insn2.fetch_cycle = r_cycle;
 `endif
-	t_insn3.data = t_insn_data3;
-	t_insn3.misaligned = 1'b0;
-	t_insn3.tlb_miss = 1'b0;
-	t_insn3.tlb_invalid = 1'b0;
-	t_insn3.bad_va = 1'b0;
-	t_insn3.pc = r_cache_pc + 'd8;
-	t_insn3.pred_target = t_gb_take2 ? n_pc : 'd0;
-	t_insn3.pred = t_gb_take2;
-	t_insn3.bpu_idx = r_bpu_idx;
-	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
-	 * sit in slot 2, and a hardcoded 0 left ITS delay slot looking like an
-	 * ordinary insn to decode's delay-slot tracker -> irq/xflush injection
-	 * could replace a delay slot (IRIX swtch lost `lw s2` -> KERNEL FAULT). */
-	t_insn3.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd2) != 4'd0);
-`ifdef	ENABLE_CYCLE_ACCOUNTING
-	t_insn3.fetch_cycle = r_cycle;
-`endif
-	t_insn4.data = t_insn_data4;
-	t_insn4.misaligned = 1'b0;
-	t_insn4.tlb_miss = 1'b0;
-	t_insn4.tlb_invalid = 1'b0;
-	t_insn4.bad_va = 1'b0;
-	t_insn4.pc = r_cache_pc + 'd12;
-	t_insn4.pred_target = 'd0;
-	t_insn4.pred = 1'b0;
-	t_insn4.bpu_idx = r_bpu_idx;
-	/* predecode, like slots 0/1: with predicted-taken fetch groups a branch can
-	 * sit in slot 3, and a hardcoded 0 left ITS delay slot looking like an
-	 * ordinary insn to decode's delay-slot tracker -> irq/xflush injection
-	 * could replace a delay slot (IRIX swtch lost `lw s2` -> KERNEL FAULT). */
-	t_insn4.is_branch = (select_pd(r_jump_out, t_insn_idx + 2'd3) != 4'd0);
-`ifdef	ENABLE_CYCLE_ACCOUNTING
-	t_insn4.fetch_cycle = r_cycle;
-`endif
      end // always_comb
    
-   logic t_wr_valid_ram_en, t_valid_ram_value;
+   logic t_wr_valid_ram_en0, t_wr_valid_ram_en1, t_valid_ram_value;
    logic [`LG_L1I_NUM_SETS-1:0] t_valid_ram_idx;
 
    
    compute_pht_idx cpi0 (.pc(n_cache_pc), .hist(r_spec_gbl_hist), .idx(n_pht_idx));
+
+   always_comb
+     begin
+	t_pred_vec = {r_pht_out_vec[7], r_pht_out_vec[5], r_pht_out_vec[3], r_pht_out_vec[1]};
+`ifdef ENABLE_MINI_TAGE
+	/* tagged table: index/tag from the same pc + history the PHT index uses, so the
+	 * registered read lines up with r_cache_pc.  Fold is written for 16b history,
+	 * 10b index, 9b tag. */
+	t_t1_n_idx = n_cache_pc[`LG_TAGE_SZ+3:4] ^ r_spec_gbl_hist[9:0] ^ {4'd0, r_spec_gbl_hist[15:10]};
+	t_t1_n_tag = n_cache_pc[`LG_TAGE_SZ+`TAGE_TAG_W+3:`LG_TAGE_SZ+4] ^ r_spec_gbl_hist[15:7] ^
+		     {r_spec_gbl_hist[6:0], 2'd0};
+	/* T2 folds all 48 history bits (5 index chunks, 6 tag chunks, offset) */
+	t_t2_n_idx = n_cache_pc[`LG_TAGE_SZ+3:4] ^ r_spec_gbl_hist[9:0] ^ r_spec_gbl_hist[19:10] ^
+		     r_spec_gbl_hist[29:20] ^ r_spec_gbl_hist[39:30] ^ {2'd0, r_spec_gbl_hist[47:40]};
+	t_t2_n_tag = n_cache_pc[`LG_TAGE_SZ+`TAGE_TAG_W+3:`LG_TAGE_SZ+4] ^ r_spec_gbl_hist[47:39] ^
+		     r_spec_gbl_hist[38:30] ^ r_spec_gbl_hist[29:21] ^ r_spec_gbl_hist[20:12] ^
+		     r_spec_gbl_hist[11:3] ^ {r_spec_gbl_hist[2:0], 6'd0};
+	t_t1_hit = r_t1_out[16] && (r_t1_out[15:7] == r_t1_tag);
+	t_t2_hit = r_t2_out[16] && (r_t2_out[15:7] == r_t2_tag);
+	if(t_t1_hit)
+	  begin
+	     t_pred_vec[r_t1_out[6:5]] = r_t1_out[4];
+	  end
+	/* longest matching history wins its slot */
+	if(t_t2_hit)
+	  begin
+	     t_pred_vec[r_t2_out[6:5]] = r_t2_out[4];
+	  end
+`endif
+     end
 
    
 
@@ -1240,7 +1260,8 @@ endfunction
    
    always_comb
      begin
-	t_wr_valid_ram_en = mem_rsp_valid || r_state == FLUSH_CACHE;
+	t_wr_valid_ram_en0 = (mem_rsp_valid && !r_fill_way) || r_state == FLUSH_CACHE;
+	t_wr_valid_ram_en1 = (mem_rsp_valid && r_fill_way) || r_state == FLUSH_CACHE;
 	t_valid_ram_value = (r_state != FLUSH_CACHE);
 	t_valid_ram_idx = mem_rsp_valid ? r_miss_pc[IDX_STOP-1:IDX_START] : r_cache_idx;
      end
@@ -1309,11 +1330,106 @@ endfunction
 			(r_pht_update_slot == 2'd1) ? {r_pht_update_out[7:4], t_pht_val, r_pht_update_out[1:0]} :
 			(r_pht_update_slot == 2'd2) ? {r_pht_update_out[7:6], t_pht_val, r_pht_update_out[3:0]} :
 			{t_pht_val, r_pht_update_out[5:0]};
+`ifdef ENABLE_MINI_TAGE
+	/* tagged-table update, from the fetch-time copies of the entries (blind writes:
+	 * no read at retire).  Provider = the longest table that hit for this branch's
+	 * slot (T2, then T1), else the bimodal; alt = the next shorter one.  Only the
+	 * provider trains.  A provider mispredict allocates in the first longer table
+	 * whose entry is free (!valid || u == 0), else ages every longer candidate. */
+	t_t2_provider = r_t2u_hit && (r_t2u_ent[6:5] == r_pht_update_slot);
+	t_t1_provider = !t_t2_provider && r_t1u_hit && (r_t1u_ent[6:5] == r_pht_update_slot);
+	t_t1_free = !r_t1u_ent[16] || (r_t1u_ent[1:0] == 2'd0);
+	t_t2_free = !r_t2u_ent[16] || (r_t2u_ent[1:0] == 2'd0);
+	t_prov_pred = t_t2_provider ? r_t2u_ent[4] : t_t1_provider ? r_t1u_ent[4] : t_pht_old[1];
+	t_alt_pred = (t_t2_provider && r_t1u_hit && (r_t1u_ent[6:5] == r_pht_update_slot)) ? r_t1u_ent[4] :
+		     t_pht_old[1];
+	t_t1_ctr = r_t1u_ent[4:2];
+	t_t1_u = r_t1u_ent[1:0];
+	t_t2_ctr = r_t2u_ent[4:2];
+	t_t2_u = r_t2u_ent[1:0];
+	t_t1_wr = 1'b0;
+	t_t2_wr = 1'b0;
+	t_t1_wr_data = r_t1u_ent;
+	t_t2_wr_data = r_t2u_ent;
+	if(t_init_pht)
+	  begin
+	     t_t1_wr = 1'b1;
+	     t_t1_wr_data = 'd0;
+	     t_t2_wr = 1'b1;
+	     t_t2_wr_data = 'd0;
+	  end
+	else if(r_pht_update)
+	  begin
+	     /* train the provider */
+	     if(t_t2_provider)
+	       begin
+		  t_do_pht_wr = 1'b0;
+		  t_t2_ctr = r_take_br ? ((t_t2_ctr == 3'd7) ? 3'd7 : t_t2_ctr + 3'd1) :
+			     ((t_t2_ctr == 3'd0) ? 3'd0 : t_t2_ctr - 3'd1);
+		  if((t_prov_pred == r_take_br) && (t_prov_pred != t_alt_pred) && (t_t2_u != 2'd3))
+		    begin
+		       t_t2_u = t_t2_u + 2'd1;
+		    end
+		  t_t2_wr = 1'b1;
+		  t_t2_wr_data = {1'b1, r_t2u_ent[15:7], r_t2u_ent[6:5], t_t2_ctr, t_t2_u};
+	       end
+	     else if(t_t1_provider)
+	       begin
+		  t_do_pht_wr = 1'b0;
+		  t_t1_ctr = r_take_br ? ((t_t1_ctr == 3'd7) ? 3'd7 : t_t1_ctr + 3'd1) :
+			     ((t_t1_ctr == 3'd0) ? 3'd0 : t_t1_ctr - 3'd1);
+		  if((t_prov_pred == r_take_br) && (t_prov_pred != t_alt_pred) && (t_t1_u != 2'd3))
+		    begin
+		       t_t1_u = t_t1_u + 2'd1;
+		    end
+		  t_t1_wr = 1'b1;
+		  t_t1_wr_data = {1'b1, r_t1u_ent[15:7], r_t1u_ent[6:5], t_t1_ctr, t_t1_u};
+	       end
+	     /* provider mispredicted: allocate in a longer table */
+	     if(t_prov_pred != r_take_br)
+	       begin
+		  if(!t_t2_provider && !t_t1_provider)
+		    begin
+		       /* bimodal provided: candidates T1 then T2 */
+		       if(t_t1_free)
+			 begin
+			    t_t1_wr = 1'b1;
+			    t_t1_wr_data = {1'b1, r_t1u_tag, r_pht_update_slot, r_take_br ? 3'd4 : 3'd3, 2'd0};
+			 end
+		       else if(t_t2_free)
+			 begin
+			    t_t2_wr = 1'b1;
+			    t_t2_wr_data = {1'b1, r_t2u_tag, r_pht_update_slot, r_take_br ? 3'd4 : 3'd3, 2'd0};
+			 end
+		       else
+			 begin
+			    t_t1_wr = 1'b1;
+			    t_t1_wr_data = {r_t1u_ent[16:2], r_t1u_ent[1:0] - 2'd1};
+			    t_t2_wr = 1'b1;
+			    t_t2_wr_data = {r_t2u_ent[16:2], r_t2u_ent[1:0] - 2'd1};
+			 end
+		    end
+		  else if(t_t1_provider)
+		    begin
+		       /* T1 provided: the only longer candidate is T2 */
+		       t_t2_wr = 1'b1;
+		       if(t_t2_free)
+			 begin
+			    t_t2_wr_data = {1'b1, r_t2u_tag, r_pht_update_slot, r_take_br ? 3'd4 : 3'd3, 2'd0};
+			 end
+		       else
+			 begin
+			    t_t2_wr_data = {r_t2u_ent[16:2], r_t2u_ent[1:0] - 2'd1};
+			 end
+		    end
+	       end
+	  end
+`endif
      end
    
    always_comb
      begin
-	t_bpu_alloc = t_push_insn | t_push_insn2 | t_push_insn3 | t_push_insn4;
+	t_bpu_alloc = t_push_insn | t_push_insn2;
      end
 
    always_ff@(posedge clk)
@@ -1321,8 +1437,56 @@ endfunction
 	if(t_bpu_alloc)
 	  begin
 	     r_bpu_tbl[r_bpu_idx] <= r_pht_idx;
+`ifdef ENABLE_MINI_TAGE
+	     r_bpu_t1_idx[r_bpu_idx] <= r_t1_idx;
+	     r_bpu_t1_tag[r_bpu_idx] <= r_t1_tag;
+	     r_bpu_t1_hit[r_bpu_idx] <= t_t1_hit;
+	     r_bpu_t1_ent[r_bpu_idx] <= r_t1_out;
+	     r_bpu_t2_idx[r_bpu_idx] <= r_t2_idx;
+	     r_bpu_t2_tag[r_bpu_idx] <= r_t2_tag;
+	     r_bpu_t2_hit[r_bpu_idx] <= t_t2_hit;
+	     r_bpu_t2_ent[r_bpu_idx] <= r_t2_out;
+`endif
 	  end
      end
+
+`ifdef ENABLE_MINI_TAGE
+   always_ff@(posedge clk)
+     begin
+	r_t1_idx <= t_t1_n_idx;
+	r_t1_tag <= t_t1_n_tag;
+	r_t1u_idx <= r_bpu_t1_idx[branch_bpu_idx];
+	r_t1u_tag <= r_bpu_t1_tag[branch_bpu_idx];
+	r_t1u_hit <= r_bpu_t1_hit[branch_bpu_idx];
+	r_t1u_ent <= r_bpu_t1_ent[branch_bpu_idx];
+	r_t2_idx <= t_t2_n_idx;
+	r_t2_tag <= t_t2_n_tag;
+	r_t2u_idx <= r_bpu_t2_idx[branch_bpu_idx];
+	r_t2u_tag <= r_bpu_t2_tag[branch_bpu_idx];
+	r_t2u_hit <= r_bpu_t2_hit[branch_bpu_idx];
+	r_t2u_ent <= r_bpu_t2_ent[branch_bpu_idx];
+     end
+
+   ram1r1w #(.WIDTH(T1_W), .LG_DEPTH(`LG_TAGE_SZ)) t1
+     (
+      .clk(clk),
+      .rd_addr(t_t1_n_idx),
+      .wr_addr(t_init_pht ? r_init_pht_idx[`LG_TAGE_SZ-1:0] : r_t1u_idx),
+      .wr_data(t_t1_wr_data),
+      .wr_en(t_t1_wr),
+      .rd_data(r_t1_out)
+      );
+
+   ram1r1w #(.WIDTH(T1_W), .LG_DEPTH(`LG_TAGE_SZ)) t2
+     (
+      .clk(clk),
+      .rd_addr(t_t2_n_idx),
+      .wr_addr(t_init_pht ? r_init_pht_idx[`LG_TAGE_SZ-1:0] : r_t2u_idx),
+      .wr_data(t_t2_wr_data),
+      .wr_en(t_t2_wr),
+      .rd_data(r_t2_out)
+      );
+`endif
 
    always_ff@(posedge clk)
      begin
@@ -1356,16 +1520,16 @@ endfunction
 
 `ifdef TOPDOWN
    /* per-cycle fetch group size and why the group ended (top.cc topdown_fetch):
-    * 0 full 4, 1 cut at the 16B line end, 2 cut before a predicted-taken cflow,
+    * 0 full 2, 1 cut at the 16B line end, 2 cut before a predicted-taken cflow,
     * 3 the cflow insn alone, 4 its delay slot alone, 5 fetch queue full,
     * 6 resteer bubble, 7 miss/tlb/other state, 8 restart/flush redirect,
-    * 9 group ending in a taken branch + its delay slot (ENABLE_FETCH_BR_GROUP) */
+    * 9 branch pair: [insn, predicted-taken direct branch] */
    import "DPI-C" function void topdown_fetch(input int npush, input int why, input int fq_cnt);
    logic [3:0] t_td_why;
    logic [2:0] t_td_n;
    always_comb
      begin
-	t_td_n = t_push_insn4 ? 3'd4 : t_push_insn3 ? 3'd3 : t_push_insn2 ? 3'd2 : t_push_insn ? 3'd1 : 3'd0;
+	t_td_n = t_push_insn2 ? 3'd2 : t_push_insn ? 3'd1 : 3'd0;
 	t_td_why = 4'd7;
 	if(r_state != ACTIVE)
 	  begin
@@ -1395,11 +1559,11 @@ endfunction
 	  begin
 	     t_td_why = 4'd3;
 	  end
-	else if(t_gb_take1 | t_gb_take2)
+	else if(t_gb_take1)
 	  begin
 	     t_td_why = 4'd9;
 	  end
-	else if(t_td_n == 3'd4)
+	else if(t_td_n == 3'd2)
 	  begin
 	     t_td_why = 4'd0;
 	  end
@@ -1433,12 +1597,12 @@ endfunction
 	//$display("%b %b %b %b", t_push_insn, t_push_insn2, t_push_insn3, t_push_insn4);
 	record_fetch(t_push_insn ? 32'd1 : 32'd0,
 		     t_push_insn2 ? 32'd1 : 32'd0,
-		     t_push_insn3 ? 32'd1 : 32'd0,
-		     t_push_insn4 ? 32'd1 : 32'd0,
+		     32'd0,
+		     32'd0,
 		     {{ZP{1'b0}}, t_insn.pc},
 		     {{ZP{1'b0}}, t_insn2.pc},
-		     {{ZP{1'b0}}, t_insn3.pc},
-		     {{ZP{1'b0}}, t_insn4.pc},
+		     64'd0,
+		     64'd0,
 		     r_resteer_bubble ? 32'd1 : 32'd0,
 		     fq_full ? 32'd1 : 32'd0);
 	
@@ -1459,40 +1623,6 @@ endfunction
       .rd_data1(r_pht_update_out)
       );
          
-   ram1r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1I_NUM_SETS))
-   valid_array (
-	   .clk(clk),
-	   .rd_addr(t_cache_idx),
-	   .wr_addr(t_valid_ram_idx),
-	   .wr_data(t_valid_ram_value),
-	   .wr_en(t_wr_valid_ram_en),
-	   .rd_data(r_valid_out)
-	   );
-
-   
-   ram1r1w #(.WIDTH(N_TAG_BITS), .LG_DEPTH(`LG_L1I_NUM_SETS))
-   tag_array (
-	   .clk(clk),
-	   .rd_addr(t_cache_idx),
-	   .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
-	   .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
-	   .wr_en(mem_rsp_valid),
-	   .rd_data(r_tag_out)
-	   );
-   
-   ram1r1w #(.WIDTH(L1I_CL_LEN_BITS), .LG_DEPTH(`LG_L1I_NUM_SETS)) 
-   insn_array (
-	   .clk(clk),
-	   .rd_addr(t_cache_idx),
-	   .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
-	   .wr_data({bswap32(mem_rsp_load_data[127:96]),
-		     bswap32(mem_rsp_load_data[95:64]),
-		     bswap32(mem_rsp_load_data[63:32]), 
-		     bswap32(mem_rsp_load_data[31:0])}),
-	   .wr_en(mem_rsp_valid),
-	   .rd_data(r_array_out)
-	   );
-
    wire [3:0] w_pd0, w_pd1, w_pd2, w_pd3;
    predecode pd0 (.insn_(mem_rsp_load_data[31:0]),   .pd(w_pd0));
    predecode pd1 (.insn_(mem_rsp_load_data[63:32]),  .pd(w_pd1));
@@ -1500,15 +1630,138 @@ endfunction
    predecode pd3 (.insn_(mem_rsp_load_data[127:96]), .pd(w_pd3));   
    
    
+   ram1r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1I_NUM_SETS))
+   valid_array0 (
+	   .clk(clk),
+	   .rd_addr(t_cache_idx),
+	   .wr_addr(t_valid_ram_idx),
+	   .wr_data(t_valid_ram_value),
+	   .wr_en(t_wr_valid_ram_en0),
+	   .rd_data(r_valid_out0)
+	   );
+
+   
+   ram1r1w #(.WIDTH(N_TAG_BITS), .LG_DEPTH(`LG_L1I_NUM_SETS))
+   tag_array0 (
+	   .clk(clk),
+	   .rd_addr(t_cache_idx),
+	   .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
+	   .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
+	   .wr_en(mem_rsp_valid && !r_fill_way),
+	   .rd_data(r_tag_out0)
+	   );
+   
+   ram1r1w #(.WIDTH(L1I_CL_LEN_BITS), .LG_DEPTH(`LG_L1I_NUM_SETS)) 
+   insn_array0 (
+	   .clk(clk),
+	   .rd_addr(t_cache_idx),
+	   .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
+	   .wr_data({bswap32(mem_rsp_load_data[127:96]),
+		     bswap32(mem_rsp_load_data[95:64]),
+		     bswap32(mem_rsp_load_data[63:32]), 
+		     bswap32(mem_rsp_load_data[31:0])}),
+	   .wr_en(mem_rsp_valid && !r_fill_way),
+	   .rd_data(r_array_out0)
+	   );
+
    ram1r1w #(.WIDTH(4*WORDS_PER_CL), .LG_DEPTH(`LG_L1I_NUM_SETS))
-   pd_data (
+   pd_data0 (
 	    .clk(clk),
 	    .rd_addr(t_cache_idx),
 	    .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
 	    .wr_data({w_pd3,w_pd2,w_pd1,w_pd0}),
-	    .wr_en(mem_rsp_valid),
-	    .rd_data(r_jump_out)
+	    .wr_en(mem_rsp_valid && !r_fill_way),
+	    .rd_data(r_jump_out0)
 	    );
+
+`ifdef ENABLE_L1I_2WAY
+   ram1r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1I_NUM_SETS))
+   valid_array1 (
+	   .clk(clk),
+	   .rd_addr(t_cache_idx),
+	   .wr_addr(t_valid_ram_idx),
+	   .wr_data(t_valid_ram_value),
+	   .wr_en(t_wr_valid_ram_en1),
+	   .rd_data(r_valid_out1)
+	   );
+
+   
+   ram1r1w #(.WIDTH(N_TAG_BITS), .LG_DEPTH(`LG_L1I_NUM_SETS))
+   tag_array1 (
+	   .clk(clk),
+	   .rd_addr(t_cache_idx),
+	   .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
+	   .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
+	   .wr_en(mem_rsp_valid && r_fill_way),
+	   .rd_data(r_tag_out1)
+	   );
+   
+   ram1r1w #(.WIDTH(L1I_CL_LEN_BITS), .LG_DEPTH(`LG_L1I_NUM_SETS)) 
+   insn_array1 (
+	   .clk(clk),
+	   .rd_addr(t_cache_idx),
+	   .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
+	   .wr_data({bswap32(mem_rsp_load_data[127:96]),
+		     bswap32(mem_rsp_load_data[95:64]),
+		     bswap32(mem_rsp_load_data[63:32]), 
+		     bswap32(mem_rsp_load_data[31:0])}),
+	   .wr_en(mem_rsp_valid && r_fill_way),
+	   .rd_data(r_array_out1)
+	   );
+
+   ram1r1w #(.WIDTH(4*WORDS_PER_CL), .LG_DEPTH(`LG_L1I_NUM_SETS))
+   pd_data1 (
+	    .clk(clk),
+	    .rd_addr(t_cache_idx),
+	    .wr_addr(r_miss_pc[IDX_STOP-1:IDX_START]),
+	    .wr_data({w_pd3,w_pd2,w_pd1,w_pd0}),
+	    .wr_en(mem_rsp_valid && r_fill_way),
+	    .rd_data(r_jump_out1)
+	    );
+
+   /* 1 bit/set LRU: the way NOT used most recently; a hit marks the other way, a fill
+    * marks the way that was not filled */
+   always_comb
+     begin
+	t_lru_wr = 1'b0;
+	t_lru_val = 1'b0;
+	t_lru_idx = r_cache_idx;
+	if(mem_rsp_valid)
+	  begin
+	     t_lru_wr = 1'b1;
+	     t_lru_val = !r_fill_way;
+	     t_lru_idx = r_miss_pc[IDX_STOP-1:IDX_START];
+	  end
+	else if(t_hit)
+	  begin
+	     t_lru_wr = 1'b1;
+	     t_lru_val = w_hit0;
+	     t_lru_idx = r_cache_idx;
+	  end
+     end
+
+   ram1r1w #(.WIDTH(1), .LG_DEPTH(`LG_L1I_NUM_SETS))
+   lru_array (
+	   .clk(clk),
+	   .rd_addr(t_cache_idx),
+	   .wr_addr(t_lru_idx),
+	   .wr_data(t_lru_val),
+	   .wr_en(t_lru_wr),
+	   .rd_data(r_lru_out)
+	   );
+`else
+   always_comb
+     begin
+	r_valid_out1 = 1'b0;
+	r_tag_out1 = 'd0;
+	r_array_out1 = 'd0;
+	r_jump_out1 = 'd0;
+	r_lru_out = 1'b0;
+	t_lru_wr = 1'b0;
+	t_lru_val = 1'b0;
+	t_lru_idx = 'd0;
+     end
+`endif
 	    
 	     
    always_comb
@@ -1569,7 +1822,7 @@ endfunction
 	  end
 	else if(t_update_spec_hist)
 	  begin
-	     n_spec_gbl_hist = {r_spec_gbl_hist[`GBL_HIST_LEN-2:0], t_take_br | t_gb_take1 | t_gb_take2};
+	     n_spec_gbl_hist = {r_spec_gbl_hist[`GBL_HIST_LEN-2:0], t_take_br | t_gb_take1};
 	  end
      end // always_comb
 
@@ -1610,6 +1863,7 @@ endfunction
 	     r_init_pht_idx <= 'd0;
 	     r_pc <= 'd0;
 	     r_miss_pc <= 'd0;
+	     r_fill_way <= 1'b0;
 	     r_cache_pc <= 'd0;
 	     r_restart_ack <= 1'b0;
 	     r_cache_idx <= 'd0;
@@ -1621,8 +1875,6 @@ endfunction
 	     r_fq_head_ptr <= 'd0;
 	     r_fq_next_head_ptr <= 'd1;
 	     r_fq_next_tail_ptr <= 'd1;
-	     r_fq_next3_tail_ptr <= 'd1;
-	     r_fq_next4_tail_ptr <= 'd1;
 	     r_fq_tail_ptr <= 'd0;
 	     r_restart_req <= 1'b0;
 	     r_flush_req <= 1'b0;
@@ -1644,6 +1896,7 @@ endfunction
 	     r_init_pht_idx <= n_init_pht_idx;
 	     r_pc <= n_pc;
 	     r_miss_pc <= n_miss_pc;
+	     r_fill_way <= n_fill_way;
 	     r_cache_pc <= n_cache_pc;
 	     r_restart_ack <= n_restart_ack;
 	     r_cache_idx <= t_cache_idx;
@@ -1655,8 +1908,6 @@ endfunction
 	     r_fq_head_ptr <= t_clear_fq ? 'd0 : n_fq_head_ptr;
 	     r_fq_next_head_ptr <= t_clear_fq ? 'd1 : n_fq_next_head_ptr;
 	     r_fq_next_tail_ptr <= t_clear_fq ? 'd1 : n_fq_next_tail_ptr;
-	     r_fq_next3_tail_ptr <= t_clear_fq ? 'd2 : n_fq_next3_tail_ptr;
-	     r_fq_next4_tail_ptr <= t_clear_fq ? 'd3 : n_fq_next4_tail_ptr;
 	     r_fq_tail_ptr <= t_clear_fq ? 'd0 : n_fq_tail_ptr;
 	     r_restart_req <= n_restart_req;
 	     r_flush_req <= n_flush_req;
