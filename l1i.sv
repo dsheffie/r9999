@@ -1769,7 +1769,11 @@ endfunction
 	n_spec_rs_tos = r_spec_rs_tos;
 	if(n_restart_ack)
 	  begin
-	     n_spec_rs_tos = r_arch_rs_tos;
+	     /* n_arch, not r_arch: the retire of the mispredicted branch itself
+	      * (retired_call/ret, flopped in core) arrives the same cycle as
+	      * restart_valid, so r_arch_* is one push/pop stale here.  Mirrors
+	      * the n_arch_gbl_hist restore below. */
+	     n_spec_rs_tos = n_arch_rs_tos;
 	  end
 	else if(t_is_call)
 	  begin
@@ -1790,6 +1794,11 @@ endfunction
 	else if(n_restart_ack)
 	  begin
 	     r_spec_return_stack <= r_arch_return_stack;
+	     /* the mispredicted call's own arch push lands this same cycle */
+	     if(retire_reg_valid && retire_valid && retired_call)
+	       begin
+		  r_spec_return_stack[r_arch_rs_tos] <= retire_reg_data;
+	       end
 	  end
      end // always_ff@ (posedge clk)
    
