@@ -2919,7 +2919,12 @@ module core(clk,
 	       n_xtlb_refill = 1'b0;
 	       n_has_badvaddr = 1'b0;
 	       n_save_to_tlb_regs = 1'b0;
-	       n_badvaddr = r_addrs[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
+	       /* a fetch fault's BadVAddr is its own pc (already in the mrob); only
+		* memory ops need r_addrs, so r_addrs has a single (mem-response)
+		* write port and can map to LUTRAM */
+	       n_badvaddr = ((t_rob_head.opcode == FETCH_TLB_MISS) | (t_rob_head.opcode == FETCH_TLB_INVALID) |
+			     (t_rob_head.opcode == FETCH_MISALIGNED) | (t_rob_head.opcode == FETCH_ADDR_ERROR)) ?
+			    t_rob_head.pc : r_addrs[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
 	       if(t_rob_head.is_break)
 		 begin
 		    n_pending_break = 1'b1;
@@ -4005,15 +4010,6 @@ module core(clk,
 		  end
 		  r_addrs[core_mem_rsp.rob_ptr] <= core_mem_rsp.data[`M_WIDTH-1:0];
 	       end
-	     /* Fetch-fault BadVAddr: latch the faulting fetch PC into r_addrs at
-	      * ALLOC, UNCONDITIONALLY -- a fetch fault carries no mem op, so this
-	      * must NOT be gated on core_mem_rsp_valid (ARCH_FAULT reads BadVAddr
-	      * from here).  Previously nested in the mem-rsp block, which left
-	      * fetch-fault BadVAddr stale unless a load happened to respond that cycle. */
-	     if(t_alloc && (t_uop.op == FETCH_TLB_MISS || t_uop.op == FETCH_TLB_INVALID || t_uop.op == FETCH_MISALIGNED || t_uop.op == FETCH_ADDR_ERROR))
-	       r_addrs[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.pc;
-	     if(t_alloc_two && (t_uop2.op == FETCH_TLB_MISS || t_uop2.op == FETCH_TLB_INVALID || t_uop2.op == FETCH_MISALIGNED || t_uop2.op == FETCH_ADDR_ERROR))
-	       r_addrs[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.pc;
 	  end
      end // always_ff@ (posedge clk)
 
