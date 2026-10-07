@@ -139,6 +139,12 @@
  * loads are held until answered, plain stores until retired and written; slots
  * also index the l1d-side store buffer */
 `define LG_MEM_SCHED_ENTRIES 3
+/* usable LSU slots, at most 1 << LG_MEM_SCHED_ENTRIES.  A smaller count (e.g. 12
+ * of 16) never allocates the top slots, so their valid bits are constant 0 and
+ * synthesis prunes their state in exec and the l1d store buffer */
+`ifndef MEM_SCHED_ENTRIES
+ `define MEM_SCHED_ENTRIES (1 << `LG_MEM_SCHED_ENTRIES)
+`endif
 /* mem data queue */
 `define LG_MEM_DQ_ENTRIES 2
 /* mem uop queue */

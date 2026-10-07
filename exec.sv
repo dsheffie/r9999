@@ -489,6 +489,7 @@ module exec(clk,
    /* LSU: the memory scheduler (rv64core's age-matrix scheduler, extended to
     * hold loads until answered and stores until written -- see the LSU block) */
    localparam N_MEM_SCHED_ENTRIES = 1<<`LG_MEM_SCHED_ENTRIES;
+   localparam logic [N_MEM_SCHED_ENTRIES-1:0] MEM_SCHED_USABLE = {N_MEM_SCHED_ENTRIES{1'b1}} >> (N_MEM_SCHED_ENTRIES - `MEM_SCHED_ENTRIES);
    uop_t r_mem_sched_uops[N_MEM_SCHED_ENTRIES-1:0];
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_valid, n_mem_sched_valid;
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ld, n_mem_sched_ld;          /* simple load */
@@ -2986,7 +2987,7 @@ module exec(clk,
    always_comb
      begin
 	/* uq -> scheduler whenever a slot is free (rv64core) */
-	t_pop_mem_uq = (!t_mem_uq_empty) && ((&r_mem_sched_valid) == 1'b0) && !t_flash_clear;
+	t_pop_mem_uq = (!t_mem_uq_empty) && ((&(r_mem_sched_valid | ~MEM_SCHED_USABLE)) == 1'b0) && !t_flash_clear;
 
      end
 
@@ -3053,7 +3054,7 @@ module exec(clk,
 	end // block: mem_rdy
    endgenerate
 
-   find_lowest_set_bit#(`LG_MEM_SCHED_ENTRIES) ffs_mem_sched_alloc( .in(~r_mem_sched_valid),
+   find_lowest_set_bit#(`LG_MEM_SCHED_ENTRIES) ffs_mem_sched_alloc( .in(~r_mem_sched_valid & MEM_SCHED_USABLE),
 								   .y(t_mem_sched_alloc_ptr));
    find_lowest_set_bit#(`LG_MEM_SCHED_ENTRIES) ffs_mem_sched_select( .in(w_mem_sched_oldest_ready),
 								    .y(t_mem_sched_pick_ptr));
@@ -3254,6 +3255,8 @@ module exec(clk,
 		  n_mem_sched_matrix[i] = n_mem_sched_matrix[i] & t_mem_survive;
 	       end
 	  end
+	/* unusable slots stay invalid: a constant synthesis can see */
+	n_mem_sched_valid = n_mem_sched_valid & MEM_SCHED_USABLE;
      end // always_comb
 
    always_ff@(posedge clk)
