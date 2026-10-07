@@ -304,6 +304,100 @@ function logic is_mult(opcode_t op);
    return x;
 endfunction // is_mult
 
+/* SECOND_EXEC_PORT: ops the cheap ALU executes -- single-cycle integer results with
+ * no branch/jump, overflow trap, HI/LO, FCR or CP0 side.  Must match the ALU2 case
+ * in exec.sv arm for arm. */
+function logic is_cheap_int(opcode_t op);
+   logic     x;
+   case(op)
+     SLL:
+       x = 1'b1;
+     SRA:
+       x = 1'b1;
+     SRL:
+       x = 1'b1;
+     SRAV:
+       x = 1'b1;
+     SLLV:
+       x = 1'b1;
+     SRLV:
+       x = 1'b1;
+     DSLL:
+       x = 1'b1;
+     DSLL32:
+       x = 1'b1;
+     DSRL:
+       x = 1'b1;
+     DSRL32:
+       x = 1'b1;
+     DSRA:
+       x = 1'b1;
+     DSRA32:
+       x = 1'b1;
+     DSLLV:
+       x = 1'b1;
+     DSRLV:
+       x = 1'b1;
+     DSRAV:
+       x = 1'b1;
+     ADDU:
+       x = 1'b1;
+     DADDU:
+       x = 1'b1;
+     SUBU:
+       x = 1'b1;
+     DSUBU:
+       x = 1'b1;
+     NEG:
+       x = 1'b1;
+     AND:
+       x = 1'b1;
+     MOV:
+       x = 1'b1;
+     OR:
+       x = 1'b1;
+     XOR:
+       x = 1'b1;
+     NOR:
+       x = 1'b1;
+     NOT:
+       x = 1'b1;
+     SLT:
+       x = 1'b1;
+     SLTU:
+       x = 1'b1;
+     MOVIU:
+       x = 1'b1;
+     SNEZ:
+       x = 1'b1;
+     SGTZ:
+       x = 1'b1;
+     SLTZ:
+       x = 1'b1;
+     ANDI:
+       x = 1'b1;
+     ORI:
+       x = 1'b1;
+     XORI:
+       x = 1'b1;
+     LUI:
+       x = 1'b1;
+     ADDIU:
+       x = 1'b1;
+     DADDIU:
+       x = 1'b1;
+     MOVI:
+       x = 1'b1;
+     SLTI:
+       x = 1'b1;
+     SLTIU:
+       x = 1'b1;
+     default:
+       x = 1'b0;
+   endcase
+   return x;
+endfunction // is_cheap_int
+
 /* CP0 ordering: every CP0 writer bumps a sequence number at alloc and at retire
  * (core.sv r_cp0_alloc_seq / r_cp0_retire_seq); every CP0 reader snapshots the alloc
  * sequence into uop.cp0_seq and issues only once exec's commit sequence has caught up,

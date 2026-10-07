@@ -858,6 +858,10 @@ module core(clk,
     * one port), so the banked rob writes below never collide. */
    complete_t t_complete_bundle_2;
    logic 		     t_complete_valid_2;
+   /* SECOND_EXEC_PORT cheap-ALU completions: complete + data only (constant 0
+    * without the knob) */
+   complete_t t_complete_bundle_3;
+   logic 		     t_complete_valid_3;
    
    logic 		     t_any_complete;
    
@@ -3794,6 +3798,10 @@ module core(clk,
 	       begin
 		  r_rob_complete[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:0]] <= t_complete_bundle_2.complete;
 	       end
+	     if(t_complete_valid_3)
+	       begin
+		  r_rob_complete[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:0]] <= t_complete_bundle_3.complete;
+	       end
 
 	     if(core_mem_rsp_valid)
 	       begin
@@ -3828,6 +3836,8 @@ module core(clk,
 	  $display("[STALECOMPL] cyc=%0d port1 rob=%0d state=%0d", r_cycle, t_complete_bundle_1.rob_ptr, r_state);
 	if(!reset && !t_clr_rob && (r_state == ACTIVE) && t_complete_valid_2 && !r_rob_inflight[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:0]])
 	  $display("[STALECOMPL] cyc=%0d port2 rob=%0d state=%0d", r_cycle, t_complete_bundle_2.rob_ptr, r_state);
+	if(!reset && !t_clr_rob && (r_state == ACTIVE) && t_complete_valid_3 && !r_rob_inflight[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:0]])
+	  $display("[STALECOMPL] cyc=%0d port3 rob=%0d state=%0d", r_cycle, t_complete_bundle_3.rob_ptr, r_state);
 	if(!reset && !t_clr_rob && (r_state == ACTIVE) && core_mem_rsp_valid && !r_rob_inflight[core_mem_rsp.rob_ptr])
 	  $display("[STALECOMPL] cyc=%0d mem rob=%0d state=%0d", r_cycle, core_mem_rsp.rob_ptr, r_state);
      end
@@ -3996,6 +4006,27 @@ module core(clk,
 		  /* FP IEEE flags side-band (1W), read at retire (see core_fcsr_*) */
 		  r_fp_flags[t_complete_bundle_2.rob_ptr[`LG_ROB_ENTRIES-1:0]] <= t_complete_bundle_2.fp_flags;
 	       end
+	     if(t_complete_valid_3)
+	       begin
+		  /* cheap ALU: nothing faults or branches, so only the result (and the
+		   * debug stamps port 1 writes) -- the rest was set at allocation */
+		  if(t_complete_bundle_3.rob_ptr[0]) begin
+		     r_rob_odd[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= t_complete_bundle_3.data;
+		     r_rob_odd[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
+		     r_rob_odd[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:0];
+`ifdef ENABLE_CYCLE_ACCOUNTING
+		     r_rob_odd[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
+`endif
+		  end
+		  else begin
+		     r_rob_even[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= t_complete_bundle_3.data;
+		     r_rob_even[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
+		     r_rob_even[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:0];
+`ifdef ENABLE_CYCLE_ACCOUNTING
+		     r_rob_even[t_complete_bundle_3.rob_ptr[`LG_ROB_ENTRIES-1:1]].complete_cycle <= r_cycle;
+`endif
+		  end
+	       end
 	     if(core_mem_rsp_valid)
 	       begin
 		  if(core_mem_rsp.rob_ptr[0]) begin
@@ -4074,6 +4105,10 @@ module core(clk,
 	  begin
 	     t_clr_mask[t_complete_bundle_2.rob_ptr] = 1'b1;
 	  end
+	if(t_complete_valid_3)
+	  begin
+	     t_clr_mask[t_complete_bundle_3.rob_ptr] = 1'b1;
+	  end
 	if(core_mem_rsp_valid)
 	  begin
 	     t_clr_mask[core_mem_rsp.rob_ptr] = 1'b1;
@@ -4104,6 +4139,10 @@ module core(clk,
 		  if(t_complete_valid_2)
 		    begin
 		       r_rob_inflight[t_complete_bundle_2.rob_ptr] <= 1'b0;
+		    end
+		  if(t_complete_valid_3)
+		    begin
+		       r_rob_inflight[t_complete_bundle_3.rob_ptr] <= 1'b0;
 		    end
 		  if(core_mem_rsp_valid)
 		    begin
@@ -4590,7 +4629,7 @@ module core(clk,
    
    always_comb
      begin
-	t_any_complete = t_complete_valid_1 | t_complete_valid_2 | core_mem_rsp_valid;
+	t_any_complete = t_complete_valid_1 | t_complete_valid_2 | t_complete_valid_3 | core_mem_rsp_valid;
 	t_push_1 = t_alloc && !t_fold_uop;
 	t_push_2 = t_alloc_two && !t_fold_uop2;
      end
@@ -4698,6 +4737,8 @@ module core(clk,
 	   .complete_valid_1(t_complete_valid_1),
 	   .complete_bundle_2(t_complete_bundle_2),
 	   .complete_valid_2(t_complete_valid_2),
+	   .complete_bundle_3(t_complete_bundle_3),
+	   .complete_valid_3(t_complete_valid_3),
 
 	   .mem_req(t_mem_req),
 	   .mem_req_valid(t_mem_req_valid),

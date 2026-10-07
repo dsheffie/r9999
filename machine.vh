@@ -62,6 +62,23 @@
 //`define ENABLE_SCHED_BYPASS 1
 //`define ENABLE_UQ_DUAL_POP 1
 
+/* SECOND_EXEC_PORT: rv64core's second integer port -- a cheap ALU with its own
+ * 4-entry scheduler (LG_INT_SCHED2_ENTRIES), RF read ports 4/5, RF write port 2
+ * (rf6r3w) and ROB completion port 3.  Cheap = single-cycle integer ops with no
+ * branch/jump, trap, HI/LO, FCR or CP0 (is_cheap_int in exec.sv).  The uop queue
+ * pops up to two per cycle, at most one into each scheduler (rv64core swizzle).
+ * Off by default. */
+//`define SECOND_EXEC_PORT 1
+`define LG_INT_SCHED2_ENTRIES 2
+`ifdef SECOND_EXEC_PORT
+ `ifdef ENABLE_SCHED_BYPASS
+  `SECOND_EXEC_PORT_EXCLUDES_ENABLE_SCHED_BYPASS /* undefined: stops the build */
+ `endif
+ `ifdef ENABLE_UQ_DUAL_POP
+  `SECOND_EXEC_PORT_EXCLUDES_ENABLE_UQ_DUAL_POP /* undefined: stops the build */
+ `endif
+`endif
+
 /* Register the L1D -> core response instead of driving it combinationally.
  *
  * rv64core does this unconditionally (l1d.sv: BOTH arms of its `ifdef FOUR_CYCLE_L1D
