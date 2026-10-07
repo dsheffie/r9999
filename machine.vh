@@ -322,6 +322,9 @@
 `define PRID_VALUE  `PRID_R4400
 
 `define LG_BTB_SZ 7
+/* mini-ITTAGE: one tagged indirect-target table over the PC-indexed BTB (see l1i.sv) */
+`define LG_ITT_SZ 8
+`define ITT_TAG_W 9
 
 /* Poison for a COLD/INVALID branch-target prediction.  MUST NOT be zero.
  *

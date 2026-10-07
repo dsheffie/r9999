@@ -160,8 +160,6 @@ module core_l1d_l1i(clk,
    
 
    logic [(`M_WIDTH-1):0] 	restart_pc;
-   logic [(`M_WIDTH-1):0] 	restart_src_pc;
-   logic 			restart_src_is_indirect;
    logic 			restart_valid;
    logic 			clr_link_reg;
    logic 			restart_ack;
@@ -170,6 +168,8 @@ module core_l1d_l1i(clk,
 
    logic 			t_retire_delay_slot;
    logic [(`M_WIDTH-1):0] 	t_branch_pc;
+   logic [(`M_WIDTH-1):0] 	t_branch_target;
+   logic 			t_branch_is_indirect;
    logic 			t_branch_pc_valid;
    logic 			t_branch_fault;
 
@@ -978,8 +978,6 @@ module core_l1d_l1i(clk,
 	      .flush_req(flush_req_l1i ),
 	      .flush_complete(l1i_flush_complete),
 	      .restart_pc(restart_pc),
-	      .restart_src_pc(restart_src_pc),
-	      .restart_src_is_indirect(restart_src_is_indirect),
 	      .dbg_arch_hist(w_dbg_arch_hist),
 	      .dbg_spec_hist(w_dbg_spec_hist),
 	      .restart_valid(restart_valid),
@@ -989,6 +987,8 @@ module core_l1d_l1i(clk,
 	      .retire_reg_valid(retire_reg_valid),	      
 	      .branch_pc_valid(t_branch_pc_valid),
 	      .branch_pc(t_branch_pc),
+	      .branch_target(t_branch_target),
+	      .branch_is_indirect(t_branch_is_indirect),
 	      .took_branch(took_branch),
 	      .branch_fault(t_branch_fault),
 	      .branch_bpu_idx(branch_bpu_idx),
@@ -1075,13 +1075,15 @@ module core_l1d_l1i(clk,
 	     .insn_valid_two(insn_valid2),
 	     .insn_ack_two(insn_ack2),
 	     .branch_pc(t_branch_pc),
+	     .branch_target(t_branch_target),
+	     .branch_is_indirect(t_branch_is_indirect),
 	     .branch_pc_valid(t_branch_pc_valid),
 	     .branch_fault(t_branch_fault),
 	     .took_branch(took_branch),
 	     .branch_bpu_idx(branch_bpu_idx),
 	     .restart_pc(restart_pc),
-	     .restart_src_pc(restart_src_pc),
-	     .restart_src_is_indirect(restart_src_is_indirect),
+	     .restart_src_pc(),
+	     .restart_src_is_indirect(),
 	     .restart_valid(restart_valid),
 	     .clr_link_reg(clr_link_reg),
 	     .restart_ack(restart_ack),

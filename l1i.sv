@@ -36,8 +36,6 @@ module l1i(clk,
 	   flush_req,
 	   flush_complete,
 	   restart_pc,
-	   restart_src_pc,
-	   restart_src_is_indirect,
 	   dbg_arch_hist,
 	   dbg_spec_hist,
 	   restart_valid,
@@ -50,6 +48,8 @@ module l1i(clk,
 	   retire_reg_valid,
 	   branch_pc_valid,
 	   branch_pc,
+	   branch_target,
+	   branch_is_indirect,
 	   took_branch,
 	   branch_fault,
 	   branch_bpu_idx,
@@ -95,8 +95,6 @@ module l1i(clk,
    output logic       flush_complete;
    //restart signals
    input logic [`M_WIDTH-1:0] restart_pc;
-   input logic [`M_WIDTH-1:0] restart_src_pc;
-   input logic 	      restart_src_is_indirect;
    /* Global history, read back over the existing trace-index debug port.
     * ARCH is the RETIRED history (updated at branch retirement); SPEC is the
     * speculative copy the PHT is actually indexed with.  Dumping BOTH lets a
@@ -119,6 +117,8 @@ module l1i(clk,
 
    input logic 			branch_pc_valid;
    input logic [`M_WIDTH-1:0] 		branch_pc;
+   input logic [`M_WIDTH-1:0] 		branch_target;      /* retiring indirect jump's target */
+   input logic 				branch_is_indirect;
    
    input logic 			took_branch;
    input logic 			branch_fault;
@@ -350,6 +350,28 @@ endfunction
    logic [(`M_WIDTH-1):0] r_pc, n_pc, r_miss_pc, n_miss_pc;
    logic [(`M_WIDTH-1):0] r_cache_pc, n_cache_pc;
    logic [(`M_WIDTH-1):0] r_btb_pc;
+   /* BTB: PC-indexed last target, the default indirect predictor; its index is recorded
+    * per fetch group so retire trains the entry it predicted from */
+   logic [`LG_BTB_SZ-1:0] t_btb_n_idx, r_btb_idx;
+   logic [`LG_BTB_SZ-1:0] r_bpu_btb_idx[N_BPU_TBL-1:0];
+   /* mini-ITTAGE: one tagged table {valid, tag, 2b conf, target} indexed by pc ^ global
+    * history; on a tag hit it overrides the BTB for an indirect jump.  Allocated only when
+    * the BTB mispredicts, so monomorphic jumps stay in the BTB.  Blind-written at retire
+    * from the fetch-group metadata, like the TAGE tables. */
+   localparam ITT_W = 1 + `ITT_TAG_W + 2 + `M_WIDTH;
+   logic [`LG_ITT_SZ-1:0] t_itt_n_idx, r_itt_idx;
+   logic [`ITT_TAG_W-1:0] t_itt_n_tag, r_itt_tag;
+   logic [ITT_W-1:0] 	  r_itt_out, t_itt_wr_data;
+   logic 		  t_itt_hit, t_itt_wr;
+   logic [`LG_ITT_SZ-1:0] r_bpu_itt_idx[N_BPU_TBL-1:0];
+   logic [`ITT_TAG_W-1:0] r_bpu_itt_tag[N_BPU_TBL-1:0];
+   logic 		  r_bpu_itt_hit[N_BPU_TBL-1:0];
+   logic [ITT_W-1:0] 	  r_bpu_itt_ent[N_BPU_TBL-1:0];   /* the slot as read at fetch */
+   logic [`LG_ITT_SZ-1:0] t_ittu_idx;
+   logic [`ITT_TAG_W-1:0] t_ittu_tag;
+   logic 		  t_ittu_hit;
+   logic [1:0] 		  t_ittu_conf;
+   logic [ITT_W-1:0] 	  t_ittu_ent;
 
    wire [`M_WIDTH-1:0]		  w_la_pc;
    logic [`M_WIDTH-1:0]		  r_la_pc, r_tlb_pc;
@@ -534,24 +556,83 @@ endfunction
 	  end
      end // always_ff@ (posedge clk)
 
+   /* mini-ITTAGE lookup + retire update.  Entry layout: [ITT_W-1] valid,
+    * [ITT_W-2 -: ITT_TAG_W] tag, [M_WIDTH+1:M_WIDTH] conf, [M_WIDTH-1:0] target. */
+   always_comb
+     begin
+	t_itt_hit = r_itt_out[ITT_W-1] && (r_itt_out[ITT_W-2:`M_WIDTH+2] == r_itt_tag);
+	t_ittu_idx = r_bpu_itt_idx[branch_bpu_idx];
+	t_ittu_tag = r_bpu_itt_tag[branch_bpu_idx];
+	t_ittu_hit = r_bpu_itt_hit[branch_bpu_idx];
+	t_ittu_ent = r_bpu_itt_ent[branch_bpu_idx];
+	t_ittu_conf = t_ittu_ent[`M_WIDTH+1:`M_WIDTH];
+	t_itt_wr = 1'b0;
+	t_itt_wr_data = {1'b1, t_ittu_tag, t_ittu_conf, branch_target};
+	if(t_init_pht)
+	  begin
+	     t_itt_wr = 1'b1;
+	     t_itt_wr_data = 'd0;
+	  end
+	else if(branch_pc_valid && branch_is_indirect)
+	  begin
+	     if(t_ittu_hit)
+	       begin
+		  /* the ITT provided: confirm, or weaken and finally replace the target */
+		  t_itt_wr = 1'b1;
+		  if(!branch_fault)
+		    begin
+		       t_itt_wr_data = {1'b1, t_ittu_tag, (t_ittu_conf == 2'd3) ? 2'd3 : t_ittu_conf + 2'd1, branch_target};
+		    end
+		  else if(t_ittu_conf != 2'd0)
+		    begin
+		       t_itt_wr_data = {t_ittu_ent[ITT_W-1:`M_WIDTH+2], t_ittu_conf - 2'd1, t_ittu_ent[`M_WIDTH-1:0]};
+		    end
+		  else
+		    begin
+		       t_itt_wr_data = {1'b1, t_ittu_tag, 2'd0, branch_target};
+		    end
+	       end
+	     else if(branch_fault)
+	       begin
+		  /* the BTB provided and missed: allocate here (if the slot is free), else age it */
+		  t_itt_wr = 1'b1;
+		  t_itt_wr_data = (!t_ittu_ent[ITT_W-1] || (t_ittu_conf == 2'd0)) ?
+				  {1'b1, t_ittu_tag, 2'd0, branch_target} :
+				  {t_ittu_ent[ITT_W-1:`M_WIDTH+2], t_ittu_conf - 2'd1, t_ittu_ent[`M_WIDTH-1:0]};
+	       end
+	  end
+     end
+
+   ram1r1w #(.WIDTH(ITT_W), .LG_DEPTH(`LG_ITT_SZ)) itt
+     (
+      .clk(clk),
+      .rd_addr(t_itt_n_idx),
+      .wr_addr(t_init_pht ? r_init_pht_idx[`LG_ITT_SZ-1:0] : t_ittu_idx),
+      .wr_data(t_itt_wr_data),
+      .wr_en(t_itt_wr),
+      .rd_data(r_itt_out)
+      );
+
    always_ff@(posedge clk)
      begin
 	if(reset) 
 	  begin
 	     r_btb_valid <= 'd0;
 	  end
-	else if(restart_valid && restart_src_is_indirect)
+	else if(branch_pc_valid && branch_is_indirect)
 	  begin
-	     r_btb_valid[restart_src_pc[(`LG_BTB_SZ+1):2]] <= 1'b1;
+	     r_btb_valid[r_bpu_btb_idx[branch_bpu_idx]] <= 1'b1;
 	  end
      end // always_ff@ (posedge clk)
 
    
    always_ff@(posedge clk)
      begin
-	if(restart_valid && restart_src_is_indirect)
+	/* train on every retired indirect jump (not just at a mispredict's restart),
+	 * at the index its fetch group looked up */
+	if(branch_pc_valid && branch_is_indirect)
 	  begin
-	     r_btb[restart_src_pc[(`LG_BTB_SZ+1):2]] <= restart_pc;
+	     r_btb[r_bpu_btb_idx[branch_bpu_idx]] <= branch_target;
 	  end	
      end // always_ff@ (posedge clk)
 
@@ -559,7 +640,10 @@ endfunction
      begin
 	/* cold/invalid entry -> POISON, not zero: see BTB_POISON_PC in machine.vh */
 	r_btb_pc <= reset ? `BTB_POISON_PC : 
-		    r_btb_valid[n_cache_pc[(`LG_BTB_SZ+1):2]] ? r_btb[n_cache_pc[(`LG_BTB_SZ+1):2]] : `BTB_POISON_PC;
+		    r_btb_valid[t_btb_n_idx] ? r_btb[t_btb_n_idx] : `BTB_POISON_PC;
+	r_btb_idx <= t_btb_n_idx;
+	r_itt_idx <= t_itt_n_idx;
+	r_itt_tag <= t_itt_n_tag;
 	
      end
 
@@ -962,7 +1046,7 @@ endfunction
 			 n_delay_slot = 1'b1;
 			 t_take_br = 1'b1;
 			 t_is_call = (t_pd == 4'd6);
-			 n_pc = r_btb_pc;
+			 n_pc = t_itt_hit ? r_itt_out[`M_WIDTH-1:0] : r_btb_pc;
 			 //$display("predicted target for %x is %x", r_cache_pc, n_pc);			 
 		      end
 		    
@@ -1212,6 +1296,10 @@ endfunction
 	 * registered read lines up with r_cache_pc.  Fold is written for 16b history,
 	 * 10b index, 9b tag. */
 	t_t1_n_idx = n_cache_pc[`LG_TAGE_SZ+3:4] ^ r_spec_gbl_hist[9:0] ^ {4'd0, r_spec_gbl_hist[15:10]};
+	t_btb_n_idx = n_cache_pc[(`LG_BTB_SZ+1):2];
+	/* mini-ITTAGE: word pc ^ the newest 16 history bits (as T1), separate tag fold */
+	t_itt_n_idx = n_cache_pc[`LG_ITT_SZ+1:2] ^ r_spec_gbl_hist[7:0] ^ r_spec_gbl_hist[15:8];
+	t_itt_n_tag = n_cache_pc[`LG_ITT_SZ+`ITT_TAG_W+1:`LG_ITT_SZ+2] ^ r_spec_gbl_hist[15:7] ^ {r_spec_gbl_hist[6:0], 2'd0};
 	t_t1_n_tag = n_cache_pc[`LG_TAGE_SZ+`TAGE_TAG_W+3:`LG_TAGE_SZ+4] ^ r_spec_gbl_hist[15:7] ^
 		     {r_spec_gbl_hist[6:0], 2'd0};
 	/* T2 folds all 48 history bits (5 index chunks, 6 tag chunks, offset) */
@@ -1418,6 +1506,11 @@ endfunction
 	if(t_bpu_alloc)
 	  begin
 	     r_bpu_tbl[r_bpu_idx] <= r_pht_idx;
+	     r_bpu_btb_idx[r_bpu_idx] <= r_btb_idx;
+	     r_bpu_itt_idx[r_bpu_idx] <= r_itt_idx;
+	     r_bpu_itt_tag[r_bpu_idx] <= r_itt_tag;
+	     r_bpu_itt_hit[r_bpu_idx] <= t_itt_hit;
+	     r_bpu_itt_ent[r_bpu_idx] <= r_itt_out;
 	     r_bpu_t1_idx[r_bpu_idx] <= r_t1_idx;
 	     r_bpu_t1_tag[r_bpu_idx] <= r_t1_tag;
 	     r_bpu_t1_hit[r_bpu_idx] <= t_t1_hit;

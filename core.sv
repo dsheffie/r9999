@@ -108,6 +108,8 @@ module core(clk,
 	    insn_valid_two,
 	    insn_ack_two,	    
 	    branch_pc,
+	    branch_target,
+	    branch_is_indirect,
 	    branch_pc_valid,
 	    branch_fault,
 	    took_branch,
@@ -289,6 +291,9 @@ module core(clk,
    input logic 			 restart_ack;
    
    output logic [(`M_WIDTH-1):0] branch_pc;
+   /* retiring indirect jump (not a return) and its resolved target: trains the BTB */
+   output logic [(`M_WIDTH-1):0] branch_target;
+   output logic 		 branch_is_indirect;
    output logic 		 branch_pc_valid;
    output logic 		 branch_fault;
    output logic 		 took_branch;
@@ -786,6 +791,10 @@ module core(clk,
    logic [31:0] 	     r_restart_retired;
    
    logic [(`M_WIDTH-1):0]    n_branch_pc, r_branch_pc;
+   
+   logic [(`M_WIDTH-1):0] 	n_branch_target, r_branch_target;
+   
+   logic 				n_branch_is_indirect, r_branch_is_indirect;
    logic 		     n_took_branch, r_took_branch;
    logic 		     n_branch_valid, r_branch_valid;
    logic 		     n_branch_fault,r_branch_fault;
@@ -1798,6 +1807,8 @@ module core(clk,
 
    
    assign branch_pc = r_branch_pc;
+   assign branch_target = r_branch_target;
+   assign branch_is_indirect = r_branch_is_indirect;
    assign branch_pc_valid = r_branch_valid;
    assign branch_fault = r_branch_fault;
    assign branch_bpu_idx = r_branch_bpu_idx;
@@ -1915,6 +1926,8 @@ module core(clk,
 	     r_restart_why <= RST_WHY_NONE;
 	     r_restart_head_ptr <= 'd0;
 	     r_branch_pc <= 'd0;
+	     r_branch_target <= 'd0;
+	     r_branch_is_indirect <= 1'b0;
 	     r_took_branch <= 1'b0;
 	     r_branch_valid <= 1'b0;
 	     r_branch_fault <= 1'b0;
@@ -1959,6 +1972,8 @@ module core(clk,
 	     r_restart_why <= n_restart_why;
 	     r_restart_head_ptr <= n_restart_head_ptr;
 	     r_branch_pc <= n_branch_pc;
+	     r_branch_target <= n_branch_target;
+	     r_branch_is_indirect <= n_branch_is_indirect;
 	     r_took_branch <= n_took_branch;
 	     r_branch_valid <= n_branch_valid;
 	     r_branch_fault <= n_branch_fault;
@@ -3383,6 +3398,8 @@ module core(clk,
 	n_retire_fp_prf_free = r_retire_fp_prf_free;
 	
 	n_branch_pc = {{HI_EBITS{1'b0}}, 32'd0};
+	n_branch_target = 'd0;
+	n_branch_is_indirect = 1'b0;
 	n_took_branch = 1'b0;
 	n_branch_valid = 1'b0;
 	n_branch_fault = 1'b0;
@@ -3444,6 +3461,9 @@ module core(clk,
 	      * delay slot retiring together the branch is in the HEAD slot (at most one
 	      * branch retires per cycle -- see t_retire_two) */
 	     n_branch_pc = t_next_head_br ? t_rob_next_head.pc : t_rob_head.pc;
+	     n_branch_target = t_next_head_br ? t_rob_next_head.target_pc : t_rob_head.target_pc;
+	     n_branch_is_indirect = t_next_head_br ? (t_rob_next_head.is_indirect && !t_rob_next_head.is_ret) :
+				    (t_rob_head.is_indirect && !t_rob_head.is_ret);
 	     n_took_branch = t_next_head_br ? t_rob_next_head.take_br : t_rob_head.take_br;
 	     n_branch_valid = t_next_head_br ? t_rob_next_head.is_br :  t_rob_head.is_br;
 	     n_branch_fault = t_rob_head.faulted;
