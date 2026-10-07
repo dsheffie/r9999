@@ -2525,6 +2525,9 @@ endfunction
 		  w_one_memop_ok &&
 		  (core_mem_req.commit || !r_rob_inflight[{core_mem_req.restart_id, core_mem_req.rob_ptr}]);
 	
+	/* whole-struct default first: every field is set just below, but Verilator 4.200's
+	 * latch check does not count field-by-field assignment as assigning the struct */
+	n_core_mem_rsp = 'd0;
 	n_core_mem_rsp.data = r_req.addr;
 	n_core_mem_rsp.rob_ptr = r_req.rob_ptr;
 	n_core_mem_rsp.dst_ptr = r_req.dst_ptr;
