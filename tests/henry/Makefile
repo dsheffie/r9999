@@ -19,7 +19,7 @@ LDFLAGS := -T henry.ld -nostdlib -G 0 -static
 
 CRT0    := henry_crt0.o
 
-TESTS   := hello.elf contest.elf fp_capacity.elf
+TESTS   := hello.elf contest.elf fp_capacity.elf memlat.elf
 
 all: $(TESTS)
 
