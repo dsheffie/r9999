@@ -51,7 +51,7 @@
  * WNS +0.204 (worst path unchanged = ITLB CAM, not the bypass).  Comment out to
  * fall back to the plain enqueue-then-dequeue path. */
 
-//`define ENABLE_L1D_SKID 1
+`define ENABLE_L1D_SKID 1
 
 /* Pipeline performance knobs (PERF_TOPDOWN.md has the measurements).  All off by
  * default; area/timing cost not yet characterized.
