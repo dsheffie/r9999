@@ -649,6 +649,13 @@ endfunction
    
    logic	r_mem_req_valid, n_mem_req_valid;
    logic [(`PA_WIDTH-1):0] r_mem_req_addr, n_mem_req_addr;
+   /* stage C2: the L1D set a request's line lives in travels WITH the request
+    * (port 2 -> MQ -> r_req -> fill), instead of being re-derived from the PA.
+    * C2a: always the PA index (cycle-identical); C2b: the VA index. */
+   logic [`LG_L1D_NUM_SETS-1:0] r_mem_req_idx, n_mem_req_idx;   /* the fill's set */
+   logic [`LG_L1D_NUM_SETS-1:0] r_req_idx, n_req_idx;           /* r_req's set */
+   logic [`LG_L1D_NUM_SETS-1:0] t_req2_idx;                     /* r_req2's set */
+   logic [`LG_L1D_NUM_SETS-1:0] t_mq_push_idx;
    logic [L1D_CL_LEN_BITS-1:0] r_mem_req_store_data, n_mem_req_store_data;
    
    logic [4:0] 		       r_mem_req_opcode, n_mem_req_opcode;
@@ -792,7 +799,7 @@ endfunction
     * is 32B-aligned, so addr[LG_L1D_CL_LEN]=0 and +16 just increments the index).
     * From r_req.addr (stable) -- NOT r_cache_idx, which the FLUSH_CL_WAIT default
     * t_cache_idx='d0 clobbers to 0 during the mem-rsp wait. */
-   wire [`LG_L1D_NUM_SETS-1:0] w_beat2_idx = r_req.addr[IDX_STOP-1:IDX_START] + 1'b1;
+   wire [`LG_L1D_NUM_SETS-1:0] w_beat2_idx = r_req_idx + 1'b1;
    /* D-Index (FLUSH_CL funnel) second-beat set: flush_cl_addr's set + 1. */
    wire [`LG_L1D_NUM_SETS-1:0] w_flush_cl_idx1 = flush_cl_addr[IDX_STOP-1:IDX_START] + 1'b1;
    logic r_chop_wait, n_chop_wait;
@@ -993,6 +1000,7 @@ endfunction
      begin
 	t_remapped_req2 = r_req2;
 	t_remapped_req2.addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
+	t_req2_idx = w_mapped_addr[IDX_STOP-1:IDX_START];   /* C2a: the PA set */
 	/* For a TLB-MAPPED access, cacheability comes from the matched page's C
 	 * field (CCA==3 -> cached) rather than mipsseg's segment default; for an
 	 * unmapped (direct) access keep the segment decision in r_req2.cached.
@@ -1025,6 +1033,7 @@ endfunction
     * older stores at issue (lsu_older_st), still holding the same store (epoch). */
    localparam N_LSU = 1 << `LG_MEM_SCHED_ENTRIES;
    logic [`PA_WIDTH-1:0] r_sb_pa[N_LSU-1:0];
+   logic [`LG_L1D_NUM_SETS-1:0] r_sb_idx[N_LSU-1:0];   /* the store's L1D set (C2) */
    logic [15:0] 	 r_sb_mask[N_LSU-1:0];
    mem_op_t		 r_sb_op[N_LSU-1:0];
    logic [N_LSU-1:0] 	 r_sb_cached;
@@ -1042,6 +1051,7 @@ endfunction
 	if(t_sb_wr)
 	  begin
 	     r_sb_pa[r_req2.lsu_idx] <= w_mapped_addr;
+	     r_sb_idx[r_req2.lsu_idx] <= t_req2_idx;
 	     r_sb_mask[r_req2.lsu_idx] <= make_mask(r_req2);
 	     r_sb_op[r_req2.lsu_idx] <= r_req2.op;
 	     r_sb_cached[r_req2.lsu_idx] <= t_remapped_req2.cached;
@@ -1134,10 +1144,12 @@ endfunction
    always_comb
      begin
 	t_mq_push_req = t_remapped_req2;
+	t_mq_push_idx = t_req2_idx;
 	if(r_req2.commit)
 	  begin
 	     t_mq_push_req = r_req2;
 	     t_mq_push_req.addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, r_sb_pa[r_req2.lsu_idx]};
+	     t_mq_push_idx = r_sb_idx[r_req2.lsu_idx];
 	     t_mq_push_req.op = r_sb_op[r_req2.lsu_idx];
 	     t_mq_push_req.data = r_sb_data[r_req2.lsu_idx];
 	     t_mq_push_req.cached = r_sb_cached[r_req2.lsu_idx];
@@ -1465,7 +1477,7 @@ endfunction
 	else if(t_push_miss)
 	  begin
 	     r_mem_q[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0] ] <= t_mq_push_req;
-	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_mq_push_req.addr[IDX_STOP-1:IDX_START];
+	     r_mq_addr[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_mq_push_idx;
 	     /* only stores carry a mask; loads store 0 (mirror nu_l1d:924) */
 	     r_mq_mask[r_mq_tail_ptr[`LG_MRQ_ENTRIES-1:0]] <= t_mq_mask & {16{r_req2.is_store}};
 	  end
@@ -1525,7 +1537,7 @@ endfunction
 	/* hit-under-miss: the port-2 read raced the outstanding fill (or the dirty
 	 * victim writeback) of its set -- its RAM output is not trustworthy */
 	r_fill_conflict2 <= reset ? 1'b0 : (t_got_req2 && (r_state == INJECT_RELOAD) &&
-					    (t_cache_idx2 == r_mem_req_addr[IDX_STOP-1:IDX_START]));
+					    (t_cache_idx2 == r_mem_req_idx));
 	r_hit_busy_addrs2 <= t_got_req2 ? w_hit_busy_addrs2 : {{N_MQ_ENTRIES{1'b1}}};
      end
 
@@ -1603,6 +1615,7 @@ endfunction
 	     r_mem_req_mask <= 'd0;
 	     
 	     r_mem_req_addr <= 'd0;
+	     r_mem_req_idx <= 'd0;
 	     r_mem_req_store_data <= 'd0;
 	     r_mem_req_opcode <= 'd0;
 	     r_core_mem_rsp_valid <= 1'b0;
@@ -1666,6 +1679,7 @@ endfunction
 	     r_mem_req_cacheable <= n_mem_req_cacheable;
 	     r_mem_req_mask <= n_mem_req_mask;
 	     r_mem_req_addr <= n_mem_req_addr;
+	     r_mem_req_idx <= n_mem_req_idx;
 	     r_mem_req_store_data <= n_mem_req_store_data;
 	     r_mem_req_opcode <= n_mem_req_opcode;
 	     r_core_mem_rsp_valid <= n_core_mem_rsp_valid;
@@ -1703,13 +1717,14 @@ endfunction
    always_ff@(posedge clk)
      begin
 	r_req <= n_req;
+	r_req_idx <= n_req_idx;
 	r_req2 <= n_req2;
 	r_core_mem_rsp <= n_core_mem_rsp;
      end
 
    always_comb
      begin
-	t_array_wr_addr = mem_rsp_valid ? r_mem_req_addr[IDX_STOP-1:IDX_START] : r_cache_idx;
+	t_array_wr_addr = mem_rsp_valid ? r_mem_req_idx : r_cache_idx;
 	t_array_wr_data = mem_rsp_valid ? mem_rsp_load_data : t_array_data;
 	t_array_wr_en = w_cacheable_mem_rsp_valid || t_wr_array;
      end
@@ -1729,7 +1744,7 @@ endfunction
    	if(w_cacheable_mem_rsp_valid)
    	  begin
    	     $display("cycle %d : CACHERELOAD from addr %x -> set %d data %x", 
-   		      r_cycle, r_mem_req_addr, r_mem_req_addr[IDX_STOP-1:IDX_START], t_array_wr_data);
+   		      r_cycle, r_mem_req_addr, r_mem_req_idx, t_array_wr_data);
    	  end
 
      end
@@ -1741,11 +1756,11 @@ endfunction
       .rd_addr0(t_cache_idx),
       .rd_addr1(t_cache_idx2),
 `ifdef FORMAL_DPRELOAD
-      .wr_addr(w_dpreload ? r_cache_idx : r_mem_req_addr[IDX_STOP-1:IDX_START]),
+      .wr_addr(w_dpreload ? r_cache_idx : r_mem_req_idx),
       .wr_data(w_dpreload ? fml_pre_tag : r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
       .wr_en(w_cacheable_mem_rsp_valid | w_dpreload),
 `else
-      .wr_addr(r_mem_req_addr[IDX_STOP-1:IDX_START]),
+      .wr_addr(r_mem_req_idx),
       .wr_data(r_mem_req_addr[`PA_WIDTH-1:TAG_LSB]),
       .wr_en(w_cacheable_mem_rsp_valid),
 `endif
@@ -1787,7 +1802,7 @@ endfunction
 	  end
 	else if(w_cacheable_mem_rsp_valid)
 	  begin
-	     t_dirty_wr_addr = r_mem_req_addr[IDX_STOP-1:IDX_START];
+	     t_dirty_wr_addr = r_mem_req_idx;
 	     t_write_dirty_en = 1'b1;
 	  end
 	else if(t_wr_array)
@@ -1829,7 +1844,7 @@ endfunction
 	  end
 	else if(w_cacheable_mem_rsp_valid)
 	  begin
-	     t_valid_wr_addr = r_mem_req_addr[IDX_STOP-1:IDX_START];
+	     t_valid_wr_addr = r_mem_req_idx;
 	     t_valid_value = !r_inhibit_write;
 	     t_write_valid_en = 1'b1;
 	  end
@@ -2591,6 +2606,7 @@ endfunction
 	t_push_miss = 1'b0;
 	
 	n_req = r_req;
+	n_req_idx = r_req_idx;
 	n_req2 = r_req2;
 	
 	core_mem_req_ack = 1'b0;
@@ -2599,6 +2615,7 @@ endfunction
 	n_mem_req_cacheable = r_mem_req_cacheable;
 	n_mem_req_mask = r_mem_req_mask;
 	n_mem_req_addr = r_mem_req_addr;
+	n_mem_req_idx = r_mem_req_idx;
 	n_mem_req_store_data = r_mem_req_store_data;
 	n_mem_req_opcode = r_mem_req_opcode;
 	t_pop_mq = 1'b0;
@@ -2679,7 +2696,7 @@ endfunction
 	n_lock_cache = r_lock_cache;
 	
 	t_mh_block = r_got_req && r_last_wr && 
-		     (r_cache_idx == t_mem_head.addr[IDX_STOP-1:IDX_START] );
+		     (r_cache_idx == r_mq_addr[r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0]] );
 	
 	/* store->load forward match is INDEX-ONLY (matches rv64core nu_l1d). The
 	 * incoming load's PHYSICAL tag is not available here: the dtlb pa output is
@@ -2711,7 +2728,7 @@ endfunction
 			   !(r_valid_out2 && r_dirty_out2) &&
 			   /* the victim port 2 read (VA index) must be the set the fill
 			    * replaces (PA index): differs only when the L1D exceeds a page */
-			   (r_cache_idx2 == t_remapped_req2.addr[IDX_STOP-1:IDX_START]);
+			   (r_cache_idx2 == t_req2_idx);
 
 	/* fill -> load bypass response (w_fill_bypass): built from the port-1 defaults
 	 * above; a deferred one (r_fill_rsp_pend) goes out in the always-free next slot */
@@ -2928,14 +2945,16 @@ endfunction
 			       * earlier; r_req becomes the fill's owner (w_fill_bypass) */
 			      t_direct_fill = 1'b1;
 			      n_req = t_remapped_req2;
+			      n_req_idx = t_req2_idx;
 			      n_reload_issue = 1'b1;
-			      t_miss_idx = t_remapped_req2.addr[IDX_STOP-1:IDX_START];
+			      t_miss_idx = t_req2_idx;
 			      t_miss_addr = t_remapped_req2.addr;
 			      n_inhibit_write = 1'b0;
 			      n_lock_cache = 1'b0;
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_mask = 16'hffff;
 			      n_mem_req_addr = {t_remapped_req2.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_idx = t_req2_idx;
 			      n_mem_req_opcode = MEM_LW;
 			      n_mem_req_valid = 1'b1;
 			      n_state = INJECT_RELOAD;
@@ -3003,6 +3022,7 @@ endfunction
 			      t_got_miss = 1'b1;
 			      t_mark_invalid = 1'b1;
 			      n_mem_req_addr = w_line_pa;
+			      n_mem_req_idx = r_cache_idx;
 			      n_mem_req_opcode = MEM_WB;
 			      n_mem_req_store_data = t_data;
 			      n_mem_req_cacheable = 1'b1;
@@ -3029,6 +3049,7 @@ endfunction
 			      if(r_valid_out && (r_tag_out == r_cache_tag))
 				t_mark_invalid = 1'b1;
 			      n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_idx = r_req_idx;
 			      n_mem_req_opcode = MEM_INVL;
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_mask = 16'hffff;
@@ -3070,6 +3091,7 @@ endfunction
 			      if(r_dirty_out)
 				begin
 				   n_mem_req_addr = w_line_pa;
+				   n_mem_req_idx = r_cache_idx;
 				   n_mem_req_cacheable = 1'b1;
 				   n_mem_req_opcode = MEM_SW;
 				   n_mem_req_store_data = t_data;
@@ -3106,6 +3128,7 @@ endfunction
 			 n_mem_req_valid = 1'b1;
 			 n_mem_req_opcode = r_req.is_store ? MEM_SW : MEM_LW;
 			 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+			 n_mem_req_idx = r_req_idx;
 			 n_mem_req_store_data = t_array_data;
 			 t_got_miss = 1'b1;
 			 
@@ -3145,6 +3168,7 @@ endfunction
 			   begin
 			      n_reload_issue = 1'b1;
 			      n_mem_req_addr = w_line_pa;
+			      n_mem_req_idx = r_cache_idx;
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_opcode = MEM_SW;
 			      n_mem_req_store_data = t_data;
@@ -3195,6 +3219,7 @@ endfunction
 			    if((rr_cache_idx == r_cache_idx) && rr_last_wr)
 			      begin
 				 n_mem_req_addr = w_line_pa;
+				 n_mem_req_idx = r_cache_idx;
 			    n_lock_cache = 1'b1;
 			    n_mem_req_opcode = MEM_SW;
 			    n_state = WAIT_INJECT_RELOAD;
@@ -3204,6 +3229,7 @@ endfunction
 			      begin
 				 n_lock_cache = 1'b0;
 				 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}};
+				 n_mem_req_idx = r_req_idx;
 				 n_mem_req_opcode = MEM_LW;				 
 				 n_state = INJECT_RELOAD;
 				 n_mem_req_valid = 1'b1;
@@ -3234,7 +3260,8 @@ endfunction
 			    /* retired plain store: data is in the entry, no graduation wait */
 			    t_pop_mq = 1'b1;
 			    n_req = t_mem_head;
-			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+			    n_req_idx = r_mq_addr[r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0]];
+			    t_cache_idx = r_mq_addr[r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0]];
 			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 			    t_addr = t_mem_head.addr;
 			    t_got_req = 1'b1;
@@ -3249,7 +3276,8 @@ endfunction
 			     * the MQ entry carries. */
 			    t_pop_mq = 1'b1;
 			    n_req = t_mem_head;
-			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+			    n_req_idx = r_mq_addr[r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0]];
+			    t_cache_idx = r_mq_addr[r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0]];
 			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 			    t_addr = t_mem_head.addr;
 			    t_got_req = 1'b1;
@@ -3265,7 +3293,8 @@ endfunction
 			     * device access by the port-1 uncached arm */
 			    t_pop_mq = 1'b1;
 			    n_req = t_mem_head;
-			    t_cache_idx = t_mem_head.addr[IDX_STOP-1:IDX_START];
+			    n_req_idx = r_mq_addr[r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0]];
+			    t_cache_idx = r_mq_addr[r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0]];
 			    t_cache_tag = t_mem_head.addr[`PA_WIDTH-1:TAG_LSB];
 			    t_addr = t_mem_head.addr;
 			    t_got_req = 1'b1;
@@ -3436,7 +3465,7 @@ endfunction
 		    n_inhibit_write = 1'b0;
 		    n_uncache_wb_dirty = 1'b0;
 		    t_got_req = 1'b1;
-		    t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
+		    t_cache_idx = r_req_idx;
 		    t_cache_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
 		    t_addr = r_req.addr;
 		    n_state = ACTIVE;
@@ -3444,7 +3473,7 @@ endfunction
 	    end
 	  HANDLE_RELOAD:
 	    begin
-	       t_cache_idx = r_req.addr[IDX_STOP-1:IDX_START];
+	       t_cache_idx = r_req_idx;
 	       t_cache_tag = r_req.addr[`PA_WIDTH-1:TAG_LSB];
 	       n_last_wr = n_req.is_store;
 	       t_got_req = 1'b1;
@@ -3467,6 +3496,7 @@ endfunction
 		    if(r_valid_out && (r_tag_out == w_cl_addr[`PA_WIDTH-1:TAG_LSB]))
 		      t_mark_invalid = 1'b1;
 		    n_mem_req_addr = {w_cl_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_idx = w_cl_addr[IDX_STOP-1:IDX_START];
 		    n_mem_req_opcode = MEM_INVL;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_mask = 16'hffff;
@@ -3485,6 +3515,7 @@ endfunction
 		     * over the DMA data) -- ~/code/murphi/r9999_caches.m. */
 		    t_mark_invalid = 1'b1;
 		    n_mem_req_addr = w_line_pa;
+		    n_mem_req_idx = r_cache_idx;
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_store_data = t_data;
@@ -3588,6 +3619,7 @@ endfunction
 		    t_got_miss = 1'b1;
 		    t_mark_invalid = 1'b1;
 		    n_mem_req_addr = w_line_pa;
+		    n_mem_req_idx = r_cache_idx;
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_store_data = t_data;
 		    n_mem_req_cacheable = 1'b1;
@@ -3605,6 +3637,7 @@ endfunction
 		    if(r_valid_out && (r_tag_out == r_cache_tag))
 		      t_mark_invalid = 1'b1;
 		    n_mem_req_addr = {(r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN] + 1'b1),{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_idx = w_beat2_idx;
 		    n_mem_req_opcode = MEM_INVL;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_mask = 16'hffff;
@@ -3617,6 +3650,7 @@ endfunction
 	    begin
 	       t_cache_idx = r_cache_idx;
 	       n_mem_req_addr = w_pg_line;
+	       n_mem_req_idx = w_pg_line[IDX_STOP-1:IDX_START];
 	       n_mem_req_cacheable = 1'b1;
 	       n_mem_req_mask = 16'hffff;
 	       n_mem_req_valid = 1'b1;
@@ -3679,6 +3713,7 @@ endfunction
 	       else
 		 begin
 		    n_mem_req_addr = w_line_pa;
+		    n_mem_req_idx = r_cache_idx;
 	       n_mem_req_opcode = MEM_SW;
 	       n_mem_req_store_data = t_data;
 	       n_state = (r_cache_idx == (L1D_NUM_SETS-1)) ? FLUSH_CACHE_LAST_WAIT : FLUSH_CACHE_WAIT;
