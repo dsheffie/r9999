@@ -1,4 +1,5 @@
 #include "top.hh"
+#include <deque>
 #include "sgi_indy.hh"
 
 /* l2.sv's `ifdef VERILATOR` L2DBG descriptor-line tracer DPI probes are only
@@ -37,6 +38,42 @@ bool globals::trace_fp = false;
 
 static state_t *s = nullptr;
 static state_t *ss = nullptr;
+
+/* Co-sim TLB mirror (as henry_tb): itlb.sv's tlb_wr_log DPI hook (ENABLE_TLB_MIRROR)
+ * hands every RTL TLBWI/TLBWR to the checker, and the ISS TLB is written ONLY from
+ * this lossless queue (g_iss_tlb_ext suppresses the ISS's own tlbwi/tlbwr).  Without
+ * it the ISS's tlbwr picked its own Random slot, the two 48-entry TLBs drifted, and
+ * the checker took refills the RTL did not (checkpoint co-sim desyncs). */
+struct pend_tlb_t { int idx; uint64_t ehi, elo0, elo1; uint32_t pm; };
+static std::deque<pend_tlb_t> g_pend_tlb;
+extern void iss_apply_tlb_write(state_t *s, int idx, uint64_t ehi, uint64_t elo0, uint64_t elo1, uint32_t pm);
+extern bool g_iss_tlb_ext;
+extern bool g_iss_os_mode;
+extern "C" void tlb_wr_log(int entry, long long ehi, long long elo0, long long elo1, int pm) {
+  g_pend_tlb.push_back({ entry, (uint64_t)ehi, (uint64_t)elo0, (uint64_t)elo1, (uint32_t)pm << 13 });
+}
+/* mfc0/dmfc0 of Random (1) or Count (9) reads a value that changes every cycle; the
+ * RTL samples it when the mfc0 executes, the checker steps at retire, so the two can
+ * never agree exactly.  Adopt the RTL's result for these (the checker still checks
+ * everything else the instruction does). */
+static inline void adopt_timing_cp0(uint32_t insn, state_t *rtl, state_t *iss) {
+  const uint32_t op = insn >> 26, fmt = (insn >> 21) & 31, rd = (insn >> 11) & 31;
+  if(op == 0x10 && (fmt == 0 || fmt == 1) && (rd == 1 || rd == 9)) {
+    const uint32_t rt = (insn >> 16) & 31;
+    iss->gpr[rt] = rtl->gpr[rt];
+  }
+}
+
+/* The hook fires at the negedge, after the cycle's checker steps, so apply the queue
+ * BEFORE every ISS step: an instruction retiring after a TLB write must see it. */
+static inline void iss_step(state_t *iss) {
+  while(!g_pend_tlb.empty()) {
+    const pend_tlb_t &p = g_pend_tlb.front();
+    iss_apply_tlb_write(iss, p.idx, p.ehi, p.elo0, p.elo1, p.pm);
+    g_pend_tlb.pop_front();
+  }
+  execMips(iss);
+}
 static uint64_t insns_retired = 0;
 static uint64_t pipestart = 0, pipeend = ~(0UL);
 static pipeline_logger *pl = nullptr;
@@ -632,6 +669,7 @@ int main(int argc, char **argv) {
   namespace po = boost::program_options; 
   // Initialize Verilators variables
   bool enable_checker = true;
+  bool os_mode = false;
   bool magic_halt = true;
   /* Physical address of the simulator halt register (kseg1 0xBFD00000). */
   static const uint32_t MAGIC_HALT_PHYS = 0x1FD00000u;
@@ -657,6 +695,7 @@ int main(int argc, char **argv) {
     desc.add_options() 
       ("help", "Print help messages")
       ("checker,c", po::value<bool>(&enable_checker)->default_value(true), "use checker")
+      ("os-mode", po::value<bool>(&os_mode)->default_value(false), "the binary runs an OS (Linux checkpoint): SYSCALL/BREAK trap to the kernel in the checker ISS, like the RTL, instead of halting it")
       ("file,f", po::value<std::string>(&mips_binary), "mips binary")
       ("heartbeat,h", po::value<uint64_t>(&heartbeat)->default_value(1<<24), "heartbeat for stats")
       ("log,l", po::value<std::string>(&log_name), "stats log filename")
@@ -870,6 +909,8 @@ int main(int argc, char **argv) {
   tb->single_step = single_step;
   tb->step = 0;
   double t0 = timestamp();
+  g_iss_tlb_ext = enable_checker;   /* checker ISS TLB = the RTL's (tlb_wr_log mirror) */
+  g_iss_os_mode = os_mode;          /* checker ISS: SYSCALL/BREAK trap to the kernel */
   while(!Verilated::gotFinish() && (globals::cycle < max_cycle) && (insns_retired < max_icnt)) {
     /* EARLY-RETIRE PROBE: how many instructions have actually retired by cycle N?
      * Needed to interpret BMC depth: a formal run that is "clean to frame 30" is
@@ -972,6 +1013,9 @@ int main(int argc, char **argv) {
      * returns the real cycle count, causing a checker register mismatch. */
     if(enable_checker) {
       ss->cpr0[CPR0_COUNT] = (uint32_t)tb->cp0_count;
+      /* Random too: timing-dependent, and the ISS TLB comes from the RTL mirror, so
+       * the ISS's own Random only matters for the kernel's mfc0 Random reads */
+      ss->cpr0[CPR0_RANDOM] = (uint32_t)tb->cp0_random;
       /* Likewise Cause.IP[7:0]: the pending bits are timing-dependent (IP7 is set
        * when Count reaches Compare -- at reset both are 0), and the ISS does not
        * model them, so any handler's raw `mfc0 Cause` mismatched (0x8030 vs 0x30)
@@ -1077,7 +1121,8 @@ int main(int argc, char **argv) {
       if( enable_checker) {
 	if((uint32_t)tb->retire_pc == (uint32_t)ss->pc) {
 	  //std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";
-	  execMips(ss);
+	  iss_step(ss);
+	  adopt_timing_cp0(get_insn(tb->retire_pc & 0x1fffffffu, s), s, ss);
 	  /* If checker just executed BREAK or SYSCALL, stop gracefully */
 	  if(ss->brk) {
 	    break;
@@ -1193,12 +1238,12 @@ int main(int argc, char **argv) {
 	     * exception and sets sim->pc to bfc00180).  If it now matches the
 	     * retiring handler PC, advance one more step to restore the
 	     * normal invariant: ss->pc == next_retire_pc. */
-	    execMips(ss);
+	    iss_step(ss);
 	    if(ss->brk) {
 	      break;
 	    }
 	    if((uint32_t)tb->retire_pc == (uint32_t)ss->pc) {
-	      execMips(ss);
+	      iss_step(ss);
 	      if(ss->brk) {
 		break;
 	      }
@@ -1291,7 +1336,8 @@ int main(int argc, char **argv) {
 
     if(enable_checker && tb->retire_two_valid) {
       if((uint32_t)tb->retire_two_pc == (uint32_t)ss->pc) {
-	execMips(ss);
+	iss_step(ss);
+	adopt_timing_cp0(get_insn(tb->retire_two_pc & 0x1fffffffu, s), s, ss);
 	if(ss->brk) {
 	  break;
 	}
@@ -1342,6 +1388,9 @@ int main(int argc, char **argv) {
 		<< getAsmString(get_insn(tb->epc, s), tb->epc)
 		<< "\n";
       break;
+    }
+    if(!enable_checker) {
+      g_pend_tlb.clear();   /* no checker: nothing consumes the mirror */
     }
     inflight[tb->inflight & 31]++;
     max_inflight = std::max(max_inflight, static_cast<uint32_t>(tb->inflight));

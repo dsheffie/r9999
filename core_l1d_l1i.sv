@@ -113,6 +113,7 @@ module core_l1d_l1i(clk,
 		    snoop_req_ack,
 		    took_irq,
 		    cp0_count,
+		    cp0_random,
 		    dbg_head_pc,
 		    dbg_head_status,
 		    dbg_head_fetch_cycle,
@@ -340,6 +341,7 @@ module core_l1d_l1i(clk,
    output logic		 snoop_req_ack;
    output logic			 took_irq;
    output logic [31:0]		 cp0_count;
+   output logic [5:0]		 cp0_random;   /* CP0 Random (co-sim checker sync) */
    output logic [31:0]  dbg_head_pc;
    output logic [31:0]  dbg_head_status;
    output logic [31:0]  dbg_head_fetch_cycle;
@@ -1156,6 +1158,7 @@ module core_l1d_l1i(clk,
 	     .l2_flush_done(l2_flush_done),
 	     .took_irq(took_irq),
 	     .cp0_count(cp0_count),
+	     .cp0_random(cp0_random),
 	     .dbg_head_pc(dbg_head_pc),
 	     .dbg_head_status(dbg_head_status),
 	     .dbg_head_fetch_cycle(dbg_head_fetch_cycle),

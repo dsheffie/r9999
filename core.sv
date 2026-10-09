@@ -187,6 +187,7 @@ module core(clk,
 	    tlb_entry_out_valid,
 	    took_irq,
 	    cp0_count,
+	    cp0_random,
 	    
 	    l1i_flush_done,
 	    l1d_flush_done,
@@ -384,6 +385,7 @@ module core(clk,
    output logic				  tlb_entry_out_valid;
    output logic				  took_irq;
    output logic [31:0]			  cp0_count;
+   output logic [5:0]			  cp0_random;
    
    
    output logic				  l1i_flush_done;
@@ -431,6 +433,7 @@ module core(clk,
    wire					  w_fr;    /* Status.FR (FP reg mode) from exec -> decode FR=0 odd-reg gate */
    wire					  w_irq_pending;
    wire [31:0]				  w_cp0_count;
+   wire [5:0]				  w_cp0_random;
    
    
    logic [`M_WIDTH-1:0]			  r_epc, n_epc;
@@ -1778,6 +1781,7 @@ module core(clk,
 
    assign took_irq  = t_wr_epc & (r_cause == 5'd0);
    assign cp0_count = w_cp0_count;
+   assign cp0_random = w_cp0_random;
    assign l1i_flush_done = n_l1i_flush_complete;
    assign l1d_flush_done = n_l1d_flush_complete;
    assign l2_flush_done = n_l2_flush_complete;
@@ -4734,7 +4738,8 @@ module core(clk,
 	   .retired_rob_ptr(retired_rob_ptr),
 	   .retired_rob_ptr_two(retired_rob_ptr_two),
 	   .irq_pending(w_irq_pending),
-	   .cp0_count(w_cp0_count)
+	   .cp0_count(w_cp0_count),
+	   .cp0_random(w_cp0_random)
 	   );
 
 

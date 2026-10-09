@@ -128,7 +128,8 @@ module exec(clk,
 	    tlb_entry_out,
 	    tlb_entry_out_valid,
 	    irq_pending,
-	    cp0_count
+	    cp0_count,
+	    cp0_random
 	    );
    input logic clk;
    input logic reset;
@@ -178,6 +179,7 @@ module exec(clk,
    output logic			fr;    /* Status.FR (FP reg mode) -> decode FR=0 odd-reg gate */
    output logic			irq_pending;
    output logic [31:0]		cp0_count;
+   output logic [5:0]		cp0_random;   /* CP0 Random, for the co-sim checker (timing-dependent) */
 
    
    output logic [7:0]		putchar_fifo_out;
@@ -4544,6 +4546,7 @@ module exec(clk,
    /* interrupt is pending when IE=1, EXL=0, ERL=0, and any (IP & IM) bit set */
    assign irq_pending = r_sr_ie & ~r_sr_exl & ~r_sr_erl & |(w_ip & r_sr_im);
    assign cp0_count   = r_count;
+   assign cp0_random  = r_random;
 
    
    always_comb

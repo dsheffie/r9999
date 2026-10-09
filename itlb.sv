@@ -156,8 +156,15 @@ module itlb(clk,
      end
 
 `ifdef ENABLE_STORE_CHECK
+ `define ITLB_WR_LOG
+`endif
+`ifdef ENABLE_TLB_MIRROR
+ `define ITLB_WR_LOG
+`endif
+`ifdef ITLB_WR_LOG
    /* Co-sim TLB mirror: on every runtime TLB write (TLBWI/TLBWR), hand the installed
-    * entry to the golden ISS (henry_tb) already packed into the ISS's CP0 bit layout --
+    * entry to the golden ISS (henry_tb, ooo_core top.cc) already packed into the ISS's
+    * CP0 bit layout --
     * EntryHi[63:62]=R,[39:13]=VPN2,[7:0]=ASID; EntryLo[33:6]=PFN,[5:3]=C,[2]=D,[1]=V,[0]=G.
     * Keeps the ISS's 48-entry TLB bit-identical to the RTL's (see iss_apply_tlb_write). */
    import "DPI-C" function void tlb_wr_log(input int entry, input longint ehi,
