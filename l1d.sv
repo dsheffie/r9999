@@ -96,6 +96,7 @@ module l1d(clk,
 	   dma_inval_ack,
 	   probe_req,
 	   probe_addr,
+	   probe_colour,
 	   probe_ack,
 	   probe_dirty,
 	   probe_data,
@@ -121,6 +122,7 @@ module l1d(clk,
 	   mem_req_ack,
 	   mem_req_valid, 
 	   mem_req_addr, 
+	   mem_req_colour,
 	   mem_req_store_data, 
 	   mem_req_opcode,
 	   mem_req_cacheable,
@@ -188,6 +190,7 @@ module l1d(clk,
     * (probe_dirty, probe_data) if dirty. */
    input logic 		      probe_req;
    input logic [`PA_WIDTH-1:0] probe_addr;
+   input logic [`L1D_N_COLOUR-1:0] probe_colour;   /* stage C2: the set colour to probe (L2 pidx) */
    output logic 	      probe_ack;
    output logic 	      probe_dirty;
    output logic [127:0]       probe_data;
@@ -234,6 +237,7 @@ module l1d(clk,
    
    output logic mem_req_valid;
    output logic [(`PA_WIDTH-1):0] mem_req_addr;
+   output logic [`L1D_N_COLOUR-1:0] mem_req_colour;   /* stage C2: the colour of the set this line lives at */
    output logic [L1D_CL_LEN_BITS-1:0] mem_req_store_data;
    output logic [4:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
@@ -415,6 +419,9 @@ endfunction
     * which is what lets stage C store lines at their VA index. */
    localparam IDX_IN_PG = TAG_LSB - IDX_START;
    wire [`PA_WIDTH-1:0] 		  w_line_pa = {r_tag_out, r_cache_idx[IDX_IN_PG-1:0], {`LG_L1D_CL_LEN{1'b0}}};
+   /* the in-page part of a set index; the bits above it are the set's colour */
+   localparam [`LG_L1D_NUM_SETS-1:0] IDX_PG_MASK = (1 << IDX_IN_PG) - 1;
+   localparam N_COLOUR = `L1D_N_COLOUR;
    logic 				  r_valid_out, r_dirty_out;
    logic [L1D_CL_LEN_BITS-1:0] 		  r_array_out, t_data, t_data2;
    
@@ -673,6 +680,7 @@ endfunction
    logic [31:0] 			 r_cycle;
    assign flush_complete = r_flush_complete;
    assign mem_req_addr = r_mem_req_addr;
+   assign mem_req_colour = N_COLOUR'(r_mem_req_idx >> IDX_IN_PG);
    assign mem_req_store_data = r_mem_req_store_data;
    assign mem_req_opcode = r_mem_req_opcode;
    assign mem_req_valid = r_mem_req_valid;
@@ -1000,7 +1008,13 @@ endfunction
      begin
 	t_remapped_req2 = r_req2;
 	t_remapped_req2.addr = {{(`M_WIDTH-`PA_WIDTH){1'b0}}, w_mapped_addr};
-	t_req2_idx = w_mapped_addr[IDX_STOP-1:IDX_START];   /* C2a: the PA set */
+`ifdef L1D_PA_INDEX
+	t_req2_idx = w_mapped_addr[IDX_STOP-1:IDX_START];   /* (old behaviour) the PA set */
+`else
+	/* stage C2: lines live at their VA set -- the set port 2 already read.  A
+	 * synonym (same PA, other colour) misses here and the L2 probes the old copy. */
+	t_req2_idx = r_req2.addr[IDX_STOP-1:IDX_START];
+`endif
 	/* For a TLB-MAPPED access, cacheability comes from the matched page's C
 	 * field (CCA==3 -> cached) rather than mipsseg's segment default; for an
 	 * unmapped (direct) access keep the segment decision in r_req2.cached.
@@ -1515,7 +1529,7 @@ endfunction
       for(genvar i = 0; i < N_MQ_ENTRIES; i=i+1)
 	begin
 	   assign w_hit_busy_addrs[i] = (t_pop_mq && r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0] == i) ? 1'b0 :
-					r_mq_addr_valid[i] ? r_mq_addr[i] == t_cache_idx :
+					r_mq_addr_valid[i] ? ((r_mq_addr[i] & IDX_PG_MASK) == (t_cache_idx & IDX_PG_MASK)) :
 					1'b0;
 	   /* byte-overlap between an in-flight (store) MQ entry and the incoming port-2
 	    * request.  Loads in the MQ carry mask 0 -> no intersect.  A load overlapping
@@ -1523,7 +1537,7 @@ endfunction
 	    * disjoint-byte accesses to the same set are released to hit.  Mirrors nu_l1d. */
 	   assign w_addr_intersect[i] = (|(r_mq_mask[i] & t_req_mask));
 	   assign w_hit_busy_addrs2[i] = //(t_pop_mq && r_mq_head_ptr[`LG_MRQ_ENTRIES-1:0] == i) ? 1'b0 :
-					 r_mq_addr_valid[i] ? ((r_mq_addr[i] == t_cache_idx2) & w_addr_intersect[i]) : 1'b0;
+					 r_mq_addr_valid[i] ? (((r_mq_addr[i] & IDX_PG_MASK) == (t_cache_idx2 & IDX_PG_MASK)) & w_addr_intersect[i]) : 1'b0;
 	end
    endgenerate
    
@@ -3756,7 +3770,7 @@ endfunction
 	     n_prb_save = t_cache_idx;
 	     n_prb_ret = r_state;
 	     n_prb_tag = probe_addr[`PA_WIDTH-1:TAG_LSB];
-	     t_cache_idx = probe_addr[IDX_STOP-1:IDX_START];
+	     t_cache_idx = (probe_addr[IDX_STOP-1:IDX_START] & IDX_PG_MASK) | (`LG_L1D_NUM_SETS'(probe_colour) << IDX_IN_PG);
 	     n_state = PROBE_CHK;
 	  end
 	/* a request from a flushed era (rv64core restart_id): ack and drop it */

@@ -53,6 +53,7 @@ TESTS := hello/hello.elf \
          cache/test_flush_l2_full.elf \
          cache/test_l2_evict.elf \
          cache/test_l1i_probe.elf \
+         cache/test_l1_synonym.elf \
          cache/test_uc_wb_alias.elf \
          devregs/test_devregs.elf \
          addr64/test_badvaddr.elf
@@ -234,6 +235,13 @@ cache/test_flush_l2_full.elf: cache/test_flush_l2_full.S $(STARTUP) $(COMMON)/si
 cache/test_l2_evict.elf: cache/test_l2_evict.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l2_evict.S -o cache/test_l2_evict.o
 	$(LD) $(LDFLAGS) $(STARTUP) cache/test_l2_evict.o -o $@
+
+# VIPT synonym single-copy.  Only MEANINGFUL at LG_L1D_NUM_SETS > 8: at <=4KB both
+# VAs pick the same set and it passes trivially.  See the header for the three
+# configurations it is meant to distinguish.
+cache/test_l1_synonym.elf: cache/test_l1_synonym.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l1_synonym.S -o cache/test_l1_synonym.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_l1_synonym.o -o $@
 
 cache/test_l1i_probe.elf: cache/test_l1i_probe.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_l1i_probe.S -o cache/test_l1i_probe.o

@@ -21,6 +21,7 @@ module l2(clk,
 	  l1_mem_req_store_data,
 	  l1_mem_req_opcode,
 	  l1_mem_req_from_d,
+	  l1_mem_req_colour,
 	  l2_nocache,
 
 	  //l2 -> l1
@@ -51,6 +52,7 @@ module l2(clk,
 	  // stage B: back-invalidate probe to the L1D
 	  probe_req,
 	  probe_addr,
+	  probe_colour,
 	  probe_ack,
 	  probe_dirty,
 	  probe_data
@@ -87,6 +89,9 @@ module l2(clk,
    /* the granted request is the L1D's (the arbiter's address mux selects the L1D unless
     * it is in GNT_L1I) -- presence tracking only records L1D fills */
    input logic       l1_mem_req_from_d;
+   /* stage C2: the L1D set colour (index bits above the page offset) the request's
+    * line lives at in the VA-indexed L1D -- what pidx records */
+   input logic [`L1D_N_COLOUR-1:0] l1_mem_req_colour;
 
    output logic        l1_mem_rsp_valid;
    output logic [127:0] l1_mem_load_data;
@@ -113,22 +118,30 @@ module l2(clk,
     * probe_ack; a dirty L1D copy comes back on probe_data and is what gets written back. */
    output logic 	      probe_req;
    output logic [`PA_WIDTH-1:0] probe_addr;
+   output logic [`L1D_N_COLOUR-1:0] probe_colour;   /* the L1D set colour to probe (= pidx) */
    input logic 		      probe_ack;
    input logic 		      probe_dirty;
    input logic [127:0] 	      probe_data;
    logic 		      r_probe_req, n_probe_req;
    logic [`PA_WIDTH-1:0]      r_probe_addr, n_probe_addr;
+   logic [`L1D_N_COLOUR-1:0]  r_probe_colour, n_probe_colour;
+   /* why the probe was sent (stats only): 0 L1I-miss eviction, 1 L1D-miss eviction of an
+    * line (any colour), 2 alias on a fill, 3 alias on an INVL, 4 alias on a PGDROP */
+   logic [2:0] 		      r_probe_reason, n_probe_reason;
    logic 		      r_probed, n_probed;
    logic 		      r_probe_dirty, n_probe_dirty;
    logic [127:0] 	      r_probe_data, n_probe_data;
    assign probe_req = r_probe_req;
    assign probe_addr = r_probe_addr;
+   assign probe_colour = r_probe_colour;
    always_ff@(posedge clk)
      begin
 	if(reset)
 	  begin
 	     r_probe_req <= 1'b0;
 	     r_probe_addr <= 'd0;
+	     r_probe_colour <= 'd0;
+	     r_probe_reason <= 'd0;
 	     r_probed <= 1'b0;
 	     r_probe_dirty <= 1'b0;
 	     r_probe_data <= 'd0;
@@ -137,6 +150,8 @@ module l2(clk,
 	  begin
 	     r_probe_req <= n_probe_req;
 	     r_probe_addr <= n_probe_addr;
+	     r_probe_colour <= n_probe_colour;
+	     r_probe_reason <= n_probe_reason;
 	     r_probed <= n_probed;
 	     r_probe_dirty <= n_probe_dirty;
 	     r_probe_data <= n_probe_data;
@@ -285,15 +300,29 @@ module l2(clk,
    localparam L1D_IDX_STOP = `LG_L1D_CL_LEN + `LG_L1D_NUM_SETS;
    localparam N_PIDX = (L1D_IDX_STOP > `LG_PG_SZ) ? (L1D_IDX_STOP - `LG_PG_SZ) : 1;
    logic 		r_from_d, n_from_d;
+   logic [`L1D_N_COLOUR-1:0] r_req_colour, n_req_colour;
    logic [N_PIDX:0] 	t_pres, w_pres;
    logic 		t_wr_pres;
-   wire [N_PIDX-1:0] 	w_req_pidx = (L1D_IDX_STOP > `LG_PG_SZ) ?
-					r_saveaddr[L1D_IDX_STOP-1:`LG_PG_SZ] : 'd0;
+   /* stage C2: the colour comes WITH the request (the L1D is VA-indexed, so it is no
+    * longer a function of the PA) */
+   wire [N_PIDX-1:0] 	w_req_pidx = r_req_colour;
 
    reg_ram1rw #(.WIDTH(N_PIDX+1), .LG_DEPTH(LG_L2_LINES)) pres_ram
      (.clk(clk), .addr(t_idx), .wr_data(t_pres), .wr_en(t_wr_pres), .rd_data(w_pres));
 
    wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
+   /* stage C2 alias (push, the R10000 PIdx scheme): an L1D request for a line the L1D
+    * holds at a DIFFERENT colour -- probe that copy out first (it comes back if dirty).
+    * Only for ops whose line the L1D did not supply itself: a fill (LW), an invalidate
+    * (INVL) and a page drop (PGDROP); WB/SW carry the L1D's own copy (colour == pidx).
+    * C2_NO_ALIAS_PROBE (sim only) is the negative control: synonyms then duplicate. */
+`ifdef C2_NO_ALIAS_PROBE
+   wire w_alias = 1'b0;
+`else
+   wire w_alias = r_from_d && !r_is_uncache && w_hit && w_pres[N_PIDX] &&
+		  (w_pres[N_PIDX-1:0] != w_req_pidx) &&
+		  ((r_opcode == 5'd4) || (r_opcode == MEM_INVL) || (r_opcode == MEM_PGDROP));
+`endif
    wire 		w_need_wb = w_valid ? w_dirty : 1'b0;
       
    always_ff@(posedge clk)
@@ -307,6 +336,7 @@ module l2(clk,
 	     r_tag <= 'd0;
 	     r_opcode <= 5'd0;
 	     r_from_d <= 1'b0;
+	     r_req_colour <= 'd0;
 	     r_addr <= 'd0;
 	     r_saveaddr <= 'd0;
 	     r_mem_req <= 1'b0;
@@ -342,6 +372,7 @@ module l2(clk,
 	     r_tag <= n_tag;
 	     r_opcode <= n_opcode;
 	     r_from_d <= n_from_d;
+	     r_req_colour <= n_req_colour;
 	     r_addr <= n_addr;
 	     r_saveaddr <= n_saveaddr;
 	     r_mem_req <= n_mem_req;
@@ -532,6 +563,7 @@ module l2(clk,
 	n_tag = r_tag;
 	n_opcode = r_opcode;
 	n_from_d = r_from_d;
+	n_req_colour = r_req_colour;
 	n_addr = r_addr;
 	n_saveaddr = r_saveaddr;
 	
@@ -539,6 +571,8 @@ module l2(clk,
 	n_snoop_ack = 1'b0;
 	n_probe_req = r_probe_req;
 	n_probe_addr = r_probe_addr;
+	n_probe_colour = r_probe_colour;
+	n_probe_reason = r_probe_reason;
 	n_probed = r_probed;
 	n_probe_dirty = r_probe_dirty;
 	n_probe_data = r_probe_data;
@@ -596,6 +630,7 @@ module l2(clk,
 	       n_saveaddr = {l1_mem_req_addr[`PA_WIDTH-1:4], 4'd0};
 	       n_opcode = l1_mem_req_opcode;
 	       n_from_d = l1_mem_req_from_d;
+	       n_req_colour = l1_mem_req_colour;
 	       n_probed = 1'b0;
 	       n_probe_dirty = 1'b0;
 	       n_store_data = l1_mem_req_store_data;
@@ -715,6 +750,23 @@ module l2(clk,
 			 n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 		      end
 		 end
+	       else if(w_alias && !r_probed)
+		 begin
+		    /* stage C2: probe the other-colour copy out of the L1D; the arms below
+		     * then run with r_probed set and use r_probe_data if it was dirty.
+		     * Stay in CHECK_VALID_AND_TAG (t_idx holds, so w_* stay put). */
+		    n_probe_req = 1'b1;
+		    n_probe_addr = {w_tag, t_idx, 4'd0};
+		    n_probe_colour = w_pres[N_PIDX-1:0];
+		    n_probe_reason = (r_opcode == 5'd4) ? 3'd2 : (r_opcode == MEM_INVL) ? 3'd3 : 3'd4;
+		    if(r_probe_req && probe_ack)
+		      begin
+			 n_probe_req = 1'b0;
+			 n_probed = 1'b1;
+			 n_probe_dirty = probe_dirty;
+			 n_probe_data = probe_data;
+		      end
+		 end
 	       else if(r_opcode == MEM_INVL)
 		 begin
 		    /* CACHE-Invalidate: drop the L2 line if present, then ack.
@@ -733,9 +785,10 @@ module l2(clk,
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
 			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
-			 if(w_dirty)
+			 if(w_dirty || r_probe_dirty)
 			   begin
-			      n_mem_req_store_data = w_d0;
+			      /* a dirty other-colour L1D copy (alias probe) is the newest data */
+			      n_mem_req_store_data = r_probe_dirty ? r_probe_data : w_d0;
 			      n_addr = {w_tag, t_idx, 4'd0};
 			      n_mem_opcode = 5'd7;
 			      n_store_mask = 16'hffff;
@@ -766,7 +819,7 @@ module l2(clk,
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
 			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
 		      end
-		    n_rsp_data = {127'd0, w_hit & w_dirty};
+		    n_rsp_data = {127'd0, w_hit & (w_dirty | r_probe_dirty)};
 		    n_state = IDLE;
 		    n_rsp_valid = 1'b1;
 		 end
@@ -824,6 +877,16 @@ module l2(clk,
 			      t_pres = {1'b1, w_req_pidx};
 			   end
 			 n_rsp_data =  w_d0;
+			 if(r_probe_dirty)
+			   begin
+			      /* the alias probe returned the L1D's dirty copy: it is the
+			       * newest data -- serve it and keep it here, dirty */
+			      n_rsp_data = r_probe_data;
+			      t_d0 = r_probe_data;
+			      t_wr_d0 = 1'b1;
+			      t_wr_dirty = 1'b1;
+			      t_dirty = 1'b1;
+			   end
 			 n_state = IDLE;
 			 n_rsp_valid = 1'b1;
 			 //n_cache_hits = r_cache_hits + 64'd1;			 
@@ -844,13 +907,17 @@ module l2(clk,
 			 t_wr_d0 = 1'b1;
 		      end
 		 end
-	       else if(!r_from_d && w_valid && w_pres[N_PIDX] && !r_probed)
+	       else if(w_valid && w_pres[N_PIDX] && !r_probed)
 		 begin
-		    /* stage B: an L1I miss is about to evict a line the L1D may hold --
-		     * back-invalidate it there first (it comes back if dirty).  Stay in
-		     * CHECK_VALID_AND_TAG (t_idx holds, so w_* stay put) until the ack. */
+		    /* rule 1: before evicting a line the L1D may hold (pd), back-invalidate it
+		     * there at pidx -- whoever caused the eviction (L1I miss, or an L1D miss at
+		     * any colour: with a VA-indexed L1D the victim can sit in another set).
+		     * Stay in CHECK_VALID_AND_TAG (t_idx holds, so w_* stay put) until the ack;
+		     * a dirty copy comes back and is what gets written back. */
 		    n_probe_req = 1'b1;
 		    n_probe_addr = {w_tag, t_idx, 4'd0};
+		    n_probe_colour = w_pres[N_PIDX-1:0];
+		    n_probe_reason = r_from_d ? 3'd1 : 3'd0;
 		    if(r_probe_req && probe_ack)
 		      begin
 			 n_probe_req = 1'b0;
@@ -872,6 +939,10 @@ module l2(clk,
 		      begin
 			 /* a dirty L1D copy (returned by the probe) is newer than the L2's */
 			 n_mem_req_store_data = r_probe_dirty ? r_probe_data : w_d0;
+			 /* consumed: the reload re-enters CHECK_VALID_AND_TAG and HITS, and the
+			  * fill arm must not mistake this victim's data for an alias copy of the
+			  * line being filled (it served D's data as T's code to the L1I) */
+			 n_probe_dirty = 1'b0;
 			 n_addr = {w_tag, t_idx, 4'd0};
 			 n_mem_opcode = 5'd7;
 			 n_store_mask = 16'hffff;

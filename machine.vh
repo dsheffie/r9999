@@ -204,6 +204,10 @@
  `define LG_L1D_NUM_SETS 10   // 1024 sets x 16B = 16KB
 `endif
 `endif
+/* L1D set colour bits: the index bits above the page offset (2 at 16KB, 4 at 64KB);
+ * the inclusive L2 records the colour each line lives at (pidx).  1 when the L1D
+ * fits in a page (no colours; the bit is then always 0). */
+`define L1D_N_COLOUR (((`LG_L1D_CL_LEN + `LG_L1D_NUM_SETS) > `LG_PG_SZ) ? (`LG_L1D_CL_LEN + `LG_L1D_NUM_SETS - `LG_PG_SZ) : 1)
 
 
 /* L1I: 2 ways of LG_L1I_NUM_SETS sets (2 x 16KB = 32KB with the default 1024 sets).
