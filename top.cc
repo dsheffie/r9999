@@ -55,7 +55,10 @@ extern "C" void tlb_wr_log(int entry, long long ehi, long long elo0, long long e
 /* mfc0/dmfc0 of Random (1) or Count (9) reads a value that changes every cycle; the
  * RTL samples it when the mfc0 executes, the checker steps at retire, so the two can
  * never agree exactly.  Adopt the RTL's result for these (the checker still checks
- * everything else the instruction does). */
+ * everything else the instruction does).  The instruction word must come through the
+ * ISS TLB (iss_fetch_inst): get_insn(pc & 0x1fffffff) reads an unrelated physical page
+ * for user code, which once "adopted" the RTL's stale v0 into the ISS mid-delay-slot
+ * (the go-checkpoint divergence). */
 static inline void adopt_timing_cp0(uint32_t insn, state_t *rtl, state_t *iss) {
   const uint32_t op = insn >> 26, fmt = (insn >> 21) & 31, rd = (insn >> 11) & 31;
   if(op == 0x10 && (fmt == 0 || fmt == 1) && (rd == 1 || rd == 9)) {
@@ -1122,7 +1125,7 @@ int main(int argc, char **argv) {
 	if((uint32_t)tb->retire_pc == (uint32_t)ss->pc) {
 	  //std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";
 	  iss_step(ss);
-	  adopt_timing_cp0(get_insn(tb->retire_pc & 0x1fffffffu, s), s, ss);
+	  adopt_timing_cp0(iss_fetch_inst(ss, tb->retire_pc, nullptr), s, ss);
 	  /* If checker just executed BREAK or SYSCALL, stop gracefully */
 	  if(ss->brk) {
 	    break;
@@ -1337,7 +1340,7 @@ int main(int argc, char **argv) {
     if(enable_checker && tb->retire_two_valid) {
       if((uint32_t)tb->retire_two_pc == (uint32_t)ss->pc) {
 	iss_step(ss);
-	adopt_timing_cp0(get_insn(tb->retire_two_pc & 0x1fffffffu, s), s, ss);
+	adopt_timing_cp0(iss_fetch_inst(ss, tb->retire_two_pc, nullptr), s, ss);
 	if(ss->brk) {
 	  break;
 	}
