@@ -84,6 +84,11 @@
  * wakeup/select was on the critical path, so 8->4 is a WNS win (timing margin vs
  * metastability) at a small IPC cost -- kept per functional>IPC.  Bump to 3 for full IPC. */
 `define LG_INT_SCHED_ENTRIES 3
+/* usable ALU scheduler entries, at most 1 << LG_INT_SCHED_ENTRIES (e.g. 12 of 16);
+ * the top entries are never allocated and synthesis prunes them, as for the LSU */
+`ifndef INT_SCHED_ENTRIES
+ `define INT_SCHED_ENTRIES (1 << `LG_INT_SCHED_ENTRIES)
+`endif
 
 //PHT: the PC-indexed bimodal under the mini-TAGE tagged tables
 `ifdef FORMAL

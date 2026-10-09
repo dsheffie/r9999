@@ -300,6 +300,7 @@ module exec(clk,
    
    
    localparam N_INT_SCHED_ENTRIES = 1<<`LG_INT_SCHED_ENTRIES;
+   localparam logic [N_INT_SCHED_ENTRIES-1:0] INT_SCHED_USABLE = {N_INT_SCHED_ENTRIES{1'b1}} >> (N_INT_SCHED_ENTRIES - `INT_SCHED_ENTRIES);
    
    localparam N_MQ_ENTRIES = (1<<`LG_MQ_ENTRIES);
    localparam N_INT_PRF_ENTRIES = (1<<`LG_PRF_ENTRIES);
@@ -939,7 +940,7 @@ module exec(clk,
    
    wire [N_INT_SCHED_ENTRIES-1:0] w_alu_sched_oldest_ready;
    
-   find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc( .in(~r_alu_sched_valid),
+   find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc( .in(~r_alu_sched_valid & INT_SCHED_USABLE),
 							      .y(t_alu_sched_alloc_ptr));
 
    find_lowest_set_bit#(`LG_INT_SCHED_ENTRIES) ffs_int_sched_alloc2( .in(t_alu_sched_free2),
@@ -1246,7 +1247,7 @@ module exec(clk,
    /* second free entry: any free entry other than the first allocation's */
    always_comb
      begin
-	t_alu_sched_free2 = ~r_alu_sched_valid;
+	t_alu_sched_free2 = ~r_alu_sched_valid & INT_SCHED_USABLE;
 	t_alu_sched_free2[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]] = 1'b0;
      end
 
@@ -1254,7 +1255,7 @@ module exec(clk,
      begin
 	t_pop_uq = 1'b0;
 	t_uq_bypass = 1'b0;
-	t_alu_sched_full = (&r_alu_sched_valid);
+	t_alu_sched_full = (&(r_alu_sched_valid | ~INT_SCHED_USABLE));
 `ifdef ENABLE_SCHED_BYPASS
 	/* An entry written into the scheduler is not selectable until the next
 	 * cycle, so a uq-head uop whose operands are already ready would wait a
@@ -1291,12 +1292,13 @@ module exec(clk,
 	  begin
 	     if(t_pop_uq && !t_uq_bypass)
 	       begin
-		  r_alu_sched_valid[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= 1'b1;
+		  /* USABLE, not 1: unusable entries' valid bits are then a constant 0 */
+		  r_alu_sched_valid[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= INT_SCHED_USABLE[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]];
 		  r_alu_sched_uops[t_alu_sched_alloc_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= uq;
 	       end
 	     if(t_pop_uq2)
 	       begin
-		  r_alu_sched_valid[t_alu_sched_alloc2_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= 1'b1;
+		  r_alu_sched_valid[t_alu_sched_alloc2_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= INT_SCHED_USABLE[t_alu_sched_alloc2_ptr[`LG_INT_SCHED_ENTRIES-1:0]];
 		  r_alu_sched_uops[t_alu_sched_alloc2_ptr[`LG_INT_SCHED_ENTRIES-1:0]] <= uq2;
 	       end
 	     if(t_alu_entry_rdy != 'd0)
