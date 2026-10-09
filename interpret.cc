@@ -2667,8 +2667,10 @@ void execMips(state_t *s) {
 	    s->pc = (int32_t)s->cpr0[CPR0_ERROREPC] - 4;
 	    s->cpr0[CPR0_SR] &= ~SR_ERL;
 	  } else {
-	    /* Return from exception: PC = EPC, clear EXL */
-	    s->pc = (int32_t)s->cpr0[CPR0_EPC] - 4;
+	    /* Return from exception: PC = EPC, clear EXL.  The FULL 64-bit EPC: the 32-bit
+	     * cpr0 view returned n64 user code at 0x120002420 to 0x20002420 (an XTLB refill
+	     * and a false checker divergence; the RTL was right). */
+	    s->pc = s->cpr0_64[CPR0_EPC] - 4;
 	    s->cpr0[CPR0_SR] &= ~SR_EXL;
 	  }
 	  s->insn_histo[mipsInsn::ERET]++;
@@ -2742,9 +2744,13 @@ void execMips(state_t *s) {
 	     * takes the sign-extended low word (MIPS III MTC0 into a 64-bit CP0 register;
 	     * the RTL stages the full sign-extended GPR, exec.sv n_epc): zero-extending
 	     * EPC sent a 32-bit kernel's `mtc0 EPC; eret` to 0x00000000fce27900 (R=0),
-	     * which never matches its R=3 kseg3 TLB entry (NT 4.0 on interp_mips --jazz). */
-	    s->cpr0_64[rd] = (rd == CPR0_ENTRYHI) ? s->gpr[rt]
-	                                          : (uint64_t)(int64_t)(int32_t)s->gpr[rt];
+	     * which never matches its R=3 kseg3 TLB entry (NT 4.0 on interp_mips --jazz).
+	     * EPC and ErrorEPC take the FULL GPR, as the RTL does (exec.sv stages t_srcA
+	     * and n_epc = w_cp0_wr_data) and as Sail does (set_CP0EPC(rGPR(rt))): ERET
+	     * returns to the 64-bit view, so they must match the RTL bit for bit. */
+	    s->cpr0_64[rd] = ((rd == CPR0_ENTRYHI) || (rd == CPR0_EPC) || (rd == CPR0_ERROREPC))
+	                       ? s->gpr[rt]
+	                       : (uint64_t)(int64_t)(int32_t)s->gpr[rt];
 	    s->cpr0[rd] = (uint32_t)s->cpr0_64[rd];
 	  }
 	  /* CP0 reg 7 is the simulator putchar port */
