@@ -49,6 +49,14 @@ _exc_handler:
 _start:
     li      $t0, 0x00           /* Status: BEV=0, kernel, EXL=0, ERL=0, IE=0 */
     mtc0    $t0, $12
+    /* Timer quiet: the handler's raw `mfc0 $k0, Cause` is compared by the co-sim
+     * checker, and Cause.IP7 (Count==Compare) is cycle-timed in the RTL but not in
+     * the ISS -> a false k0 mismatch (0x8030 vs 0x30).  Writing Compare clears IP7;
+     * Count=1, Compare=0 keeps it clear for 2^32 increments.  Writes only: an
+     * mfc0 of Count would itself diverge (see tests/csmith/start_csmith.S). */
+    li      $t0, 1
+    mtc0    $t0, $9             /* Count = 1 */
+    mtc0    $0, $11             /* Compare = 0 (clears IP7) */
     nop
     nop
     nop
