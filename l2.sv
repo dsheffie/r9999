@@ -48,6 +48,8 @@ module l2(clk,
 	  snoop_req_valid,
 	  snoop_req_addr,
 	  snoop_req_ack,
+	  snoop_req_wbinv,
+	  snoop_done,
 
 	  // stage B: back-invalidate probe to the L1D
 	  probe_req,
@@ -113,6 +115,12 @@ module l2(clk,
    input logic 	       snoop_req_valid;
    input logic [`PA_WIDTH-1:0] snoop_req_addr;
    output logic        snoop_req_ack;
+   /* snoop op: 0 = discard (MEM_SNOOP_INVL: drop the L2 copy, no writeback, no L1D
+    * probe -- the DMA-in discard); 1 = WBINV: probe the L1D at pidx if pd, write any
+    * dirty copy (L1D or L2) back to DRAM, invalidate.  WBINV is architecturally
+    * invisible (it only evicts), so it can be injected at random as a stress. */
+   input logic 	       snoop_req_wbinv;
+   output logic        snoop_done;   /* pulses when a snoop has fully completed */
    /* inclusive-l2-v2 stage B: before evicting a line the L1D may hold (pd) on behalf of an
     * L1I miss, back-invalidate it in the L1D.  probe_req/probe_addr are held until
     * probe_ack; a dirty L1D copy comes back on probe_data and is what gets written back. */
@@ -126,7 +134,8 @@ module l2(clk,
    logic [`PA_WIDTH-1:0]      r_probe_addr, n_probe_addr;
    logic [`L1D_N_COLOUR-1:0]  r_probe_colour, n_probe_colour;
    /* why the probe was sent (stats only): 0 L1I-miss eviction, 1 L1D-miss eviction of an
-    * line (any colour), 2 alias on a fill, 3 alias on an INVL, 4 alias on a PGDROP */
+    * line (any colour), 2 alias on a fill, 3 alias on an INVL, 4 alias on a PGDROP,
+    * 5 external WBINV snoop */
    logic [2:0] 		      r_probe_reason, n_probe_reason;
    logic 		      r_probed, n_probed;
    logic 		      r_probe_dirty, n_probe_dirty;
@@ -159,6 +168,9 @@ module l2(clk,
      end
    logic 	       r_snoop_ack, n_snoop_ack;
    assign snoop_req_ack = r_snoop_ack;
+   logic 	       r_snp_wbinv, n_snp_wbinv;
+   logic 	       r_snoop_done, n_snoop_done;
+   assign snoop_done = r_snoop_done;
 `ifdef VERILATOR
    logic [63:0]        r_snoop_hit, n_snoop_hit, r_snoop_dirty, n_snoop_dirty;
 `endif
@@ -346,6 +358,8 @@ module l2(clk,
 	     r_reload <= 1'b0;
 	     r_req_ack <= 1'b0;
 	     r_snoop_ack <= 1'b0;
+	     r_snp_wbinv <= 1'b0;
+	     r_snoop_done <= 1'b0;
 `ifdef VERILATOR
 	     r_snoop_hit <= 64'd0;
 	     r_snoop_dirty <= 64'd0;
@@ -382,6 +396,8 @@ module l2(clk,
 	     r_reload <= n_reload;
 	     r_req_ack <= n_req_ack;
 	     r_snoop_ack <= n_snoop_ack;
+	     r_snp_wbinv <= n_snp_wbinv;
+	     r_snoop_done <= n_snoop_done;
 `ifdef VERILATOR
 	     r_snoop_hit <= n_snoop_hit;
 	     r_snoop_dirty <= n_snoop_dirty;
@@ -569,6 +585,8 @@ module l2(clk,
 	
 	n_req_ack = 1'b0;
 	n_snoop_ack = 1'b0;
+	n_snp_wbinv = r_snp_wbinv;
+	n_snoop_done = 1'b0;
 	n_probe_req = r_probe_req;
 	n_probe_addr = r_probe_addr;
 	n_probe_colour = r_probe_colour;
@@ -670,6 +688,11 @@ module l2(clk,
 		    n_saveaddr = {snoop_req_addr[`PA_WIDTH-1:4], 4'd0};
 		    n_opcode = MEM_SNOOP_INVL;
 		    n_snoop_ack = 1'b1;
+		    n_snp_wbinv = snoop_req_wbinv;
+		    /* a snoop is nobody's L1 request: no requester colour, no probe yet */
+		    n_from_d = 1'b0;
+		    n_probed = 1'b0;
+		    n_probe_dirty = 1'b0;
 		    /* IDLE presents t_idx to the SYNCHRONOUS tag/valid/dirty RAMs; their
 		     * output is valid only NEXT cycle.  Go through WAIT_FOR_RAM (as the
 		     * CPU path does) so CHECK_VALID_AND_TAG sees w_hit/w_dirty for THIS
@@ -823,6 +846,51 @@ module l2(clk,
 		    n_state = IDLE;
 		    n_rsp_valid = 1'b1;
 		 end
+	       else if((r_opcode == MEM_SNOOP_INVL) && r_snp_wbinv)
+		 begin
+		    /* WBINV snoop (inclusive L2): if the L1D may hold the line, probe it out
+		     * at pidx first (rule 1 of the protocol, for an external requester);
+		     * then write back whichever copy is dirty and invalidate. */
+		    if(w_hit && w_pres[N_PIDX] && !r_probed)
+		      begin
+			 n_probe_req = 1'b1;
+			 n_probe_addr = {w_tag, t_idx, 4'd0};
+			 n_probe_colour = w_pres[N_PIDX-1:0];
+			 n_probe_reason = 3'd5;
+			 if(r_probe_req && probe_ack)
+			   begin
+			      n_probe_req = 1'b0;
+			      n_probed = 1'b1;
+			      n_probe_dirty = probe_dirty;
+			      n_probe_data = probe_data;
+			   end
+		      end
+		    else if(w_hit)
+		      begin
+			 t_wr_valid = 1'b1; t_valid = 1'b0;
+			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
+			 if(w_dirty || r_probe_dirty)
+			   begin
+			      n_mem_req_store_data = r_probe_dirty ? r_probe_data : w_d0;
+			      n_addr = {w_tag, t_idx, 4'd0};
+			      n_mem_opcode = 5'd7;
+			      n_store_mask = 16'hffff;
+			      n_mem_req = 1'b1;
+			      n_got_mem_rsp_valid = 1'b0;
+			      n_state = UNCACHE_WB_DRAIN;   /* drain + turnaround, then done */
+			   end
+			 else
+			   begin
+			      n_state = IDLE;
+			      n_snoop_done = 1'b1;
+			   end
+		      end
+		    else
+		      begin
+			 n_state = IDLE;   /* not in the L2 -> not in the L1D (inclusion) */
+			 n_snoop_done = 1'b1;
+		      end
+		 end
 	       else if(r_opcode == MEM_SNOOP_INVL)
 		 begin
 		    /* DMA-coherence snoop discard: the SCSI DMA overwrote DRAM for this
@@ -847,6 +915,7 @@ module l2(clk,
 		      end
 `endif
 		    n_state = IDLE;
+		    n_snoop_done = 1'b1;
 		 end
 	       else if(r_opcode == MEM_WB)
 		 begin
@@ -1130,6 +1199,12 @@ module l2(clk,
 		     * follows the invalidate). */
 		    n_state = IDLE;
 		    n_rsp_valid = 1'b1;
+		 end
+	       else if(r_opcode == MEM_SNOOP_INVL)
+		 begin
+		    /* WBINV snoop writeback drained: no L1 response, signal completion */
+		    n_state = IDLE;
+		    n_snoop_done = 1'b1;
 		 end
 	       else
 		 begin

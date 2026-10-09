@@ -693,11 +693,20 @@ int main(int argc, char **argv) {
   std::map<uint64_t, double> tip_map;          /* full per-cycle attribution (TIP, ported from rv64core) */
   std::map<uint64_t, uint64_t> tip_insn_cnts;
   int64_t mem_reply_cycle = -1L;
+  /* --snoop-delay N (debug stress, inclusive L2): every line the L2 reads from DRAM
+   * is snooped WBINV (probe the L1D, write back, invalidate) N cycles later -- by
+   * then it is likely in the L1D, often dirty.  WBINV is architecturally invisible,
+   * so the co-sim checker must stay clean.  One snoop outstanding; queue capped. */
+  uint64_t snoop_delay = 0;
+  std::deque<std::pair<uint64_t, uint64_t>> snoop_q;   /* {due cycle, line PA} */
+  bool snoop_busy = false, snoop_acked = false;
+  uint64_t snoop_issued = 0, snoop_done_n = 0, snoop_dropped = 0;
   try {
     po::options_description desc("Options");
     desc.add_options() 
       ("help", "Print help messages")
       ("checker,c", po::value<bool>(&enable_checker)->default_value(true), "use checker")
+      ("snoop-delay", po::value<uint64_t>(&snoop_delay)->default_value(0), "debug: WBINV-snoop every line read from DRAM this many cycles later (0 = off)")
       ("os-mode", po::value<bool>(&os_mode)->default_value(false), "the binary runs an OS (Linux checkpoint): SYSCALL/BREAK trap to the kernel in the checker ISS, like the RTL, instead of halting it")
       ("file,f", po::value<std::string>(&mips_binary), "mips binary")
       ("heartbeat,h", po::value<uint64_t>(&heartbeat)->default_value(1<<24), "heartbeat for stats")
@@ -926,6 +935,28 @@ int main(int argc, char **argv) {
                   (unsigned long)globals::cycle, (unsigned long)insns_retired);
           last = insns_retired;
         }
+      }
+    }
+    /* --snoop-delay injector: drive the L2 snoop port (see snoop_q) */
+    if(snoop_delay) {
+      if(snoop_busy) {
+        if(!snoop_acked && tb->snoop_req_ack) {
+          snoop_acked = true;
+          tb->snoop_req_valid = 0;
+        }
+        if(snoop_acked && tb->snoop_done) {
+          snoop_busy = false;
+          ++snoop_done_n;
+        }
+      }
+      else if(!snoop_q.empty() && snoop_q.front().first <= globals::cycle) {
+        tb->snoop_req_valid = 1;
+        tb->snoop_req_wbinv = 1;
+        tb->snoop_req_addr = snoop_q.front().second;
+        snoop_q.pop_front();
+        snoop_busy = true;
+        snoop_acked = false;
+        ++snoop_issued;
       }
     }
     contextp->timeInc(1);  // 1 timeprecision periodd passes...
@@ -1414,6 +1445,14 @@ int main(int argc, char **argv) {
                   if(es) fprintf(stderr,"[memlat] RANDOM xorshift [%lu,%lu] seed=%lu\n",lmin,lmax,mls); }
         if(mls){ mls^=mls<<13; mls^=mls>>7; mls^=mls<<17; lat = lmin + (mls % (lmax-lmin+1)); } }
       mem_reply_cycle = globals::cycle + (tb->mem_req_opcode == 4 ? 1 : 2)*lat;
+      if(snoop_delay && (tb->mem_req_opcode == 4)) {
+        if(snoop_q.size() < 256) {
+          snoop_q.push_back({globals::cycle + snoop_delay, (uint64_t)tb->mem_req_addr & ~15ull});
+        }
+        else {
+          ++snoop_dropped;
+        }
+      }
     }
     
     if(/*tb->mem_req_valid*/mem_reply_cycle ==globals::cycle) {
@@ -1724,6 +1763,11 @@ int main(int argc, char **argv) {
       }
     }
     std::cout << "total_retire = " << total_retire << "\n";
+    if(snoop_delay) {
+      std::cout << "[snoopinj] delay " << snoop_delay << ": issued " << snoop_issued
+                << " completed " << snoop_done_n << " dropped (queue full) " << snoop_dropped
+                << " still queued " << snoop_q.size() << "\n";
+    }
     std::cout << "total_cycle  = " << total_cycle << "\n";
     std::cout << "total ipc    = " << static_cast<double>(total_retire) / total_cycle << "\n";
     /* L1D/L1I/L2 access+hit counters (l1d.sv).  Tied off at the henry_soc level,
