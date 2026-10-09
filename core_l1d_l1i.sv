@@ -111,6 +111,8 @@ module core_l1d_l1i(clk,
 		    snoop_req_valid,
 		    snoop_req_addr,
 		    snoop_req_ack,
+		    snoop_req_wbinv,
+		    snoop_done,
 		    took_irq,
 		    cp0_count,
 		    cp0_random,
@@ -339,6 +341,8 @@ module core_l1d_l1i(clk,
    input logic 		 snoop_req_valid;
    input logic [`PA_WIDTH-1:0] snoop_req_addr;
    output logic		 snoop_req_ack;
+   input logic 		 snoop_req_wbinv;   /* 1 = WBINV (probe + writeback + invalidate), 0 = discard */
+   output logic		 snoop_done;        /* the snoop has fully completed */
    output logic			 took_irq;
    output logic [31:0]		 cp0_count;
    output logic [5:0]		 cp0_random;   /* CP0 Random (co-sim checker sync) */
@@ -874,7 +878,9 @@ module core_l1d_l1i(clk,
 	       .mem_rsp_load_data(mem_rsp_load_data),
 	       .cache_accesses(l2_cache_accesses),
 	       .cache_hits(l2_cache_hits),
-		       .snoop_req_valid(1'b0)  /* task #51 DMA->L2 snoop tied off on main until the henry snoop FIFO is wired */,
+		       .snoop_req_valid(snoop_req_valid),
+		       .snoop_req_wbinv(snoop_req_wbinv),
+		       .snoop_done(snoop_done),
 		       .snoop_req_addr(snoop_req_addr),
 		       .snoop_req_ack(snoop_req_ack),
 	       .probe_req(w_probe_req),
@@ -1352,12 +1358,12 @@ module core_l1d_l1i(clk,
      end
    /* back-invalidate (L2 -> L1D probe) statistics by reason, counted where the L1D
     * answers (PROBE_CHK: n_prb_ack).  Reasons are l2cache.r_probe_reason. */
-   logic [63:0] r_bi_cnt[5][3];   /* [reason][0 probes, 1 L1D hit, 2 dirty] */
+   logic [63:0] r_bi_cnt[6][3];   /* [reason][0 probes, 1 L1D hit, 2 dirty] */
    always_ff@(posedge clk)
      begin
 	if(reset)
 	  begin
-	     for(integer r = 0; r < 5; r = r + 1)
+	     for(integer r = 0; r < 6; r = r + 1)
 	       begin
 		  r_bi_cnt[r][0] <= 'd0;
 		  r_bi_cnt[r][1] <= 'd0;
@@ -1381,6 +1387,7 @@ module core_l1d_l1i(clk,
 	$display("[BISTAT] alias_fill      %8d  %8d  %8d", r_bi_cnt[2][0], r_bi_cnt[2][1], r_bi_cnt[2][2]);
 	$display("[BISTAT] alias_invl      %8d  %8d  %8d", r_bi_cnt[3][0], r_bi_cnt[3][1], r_bi_cnt[3][2]);
 	$display("[BISTAT] alias_pgdrop    %8d  %8d  %8d", r_bi_cnt[4][0], r_bi_cnt[4][1], r_bi_cnt[4][2]);
+	$display("[BISTAT] snoop_wbinv     %8d  %8d  %8d", r_bi_cnt[5][0], r_bi_cnt[5][1], r_bi_cnt[5][2]);
      end
 `endif
 
