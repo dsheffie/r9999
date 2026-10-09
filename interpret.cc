@@ -2218,7 +2218,9 @@ void execMips(state_t *s) {
       }
       case 0x09: { /* jalr */
 	state_t::reg_t jaddr = s->gpr[rs];
-	s->gpr[31] = s->pc + 8;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
+	if(rd != 0) {
+	  s->gpr[rd] = s->pc + 8;   /* full 64-bit link (match RTL int_uop.pc+8; no 32b trunc) */
+	}
 	s->pc += 4;
 	if(!run_delay_slot<EL>(s))
 	  s->pc = jaddr;
@@ -2736,9 +2738,13 @@ void execMips(state_t *s) {
 	     * VA[63:62], so zero-extending here gives a kernel-mapped entry R=0 while any
 	     * kseg2/kseg3/xkseg VA has R=3 -- the entry could then NEVER match and the
 	     * checker took a spurious TLB refill where the RTL translated correctly.
-	     * interp_mips already carries this fix; r9999 had not. */
+	     * interp_mips already carries this fix; r9999 had not.  Every other register
+	     * takes the sign-extended low word (MIPS III MTC0 into a 64-bit CP0 register;
+	     * the RTL stages the full sign-extended GPR, exec.sv n_epc): zero-extending
+	     * EPC sent a 32-bit kernel's `mtc0 EPC; eret` to 0x00000000fce27900 (R=0),
+	     * which never matches its R=3 kseg3 TLB entry (NT 4.0 on interp_mips --jazz). */
 	    s->cpr0_64[rd] = (rd == CPR0_ENTRYHI) ? s->gpr[rt]
-	                                          : (uint64_t)(uint32_t)s->gpr[rt];
+	                                          : (uint64_t)(int64_t)(int32_t)s->gpr[rt];
 	    s->cpr0[rd] = (uint32_t)s->cpr0_64[rd];
 	  }
 	  /* CP0 reg 7 is the simulator putchar port */
