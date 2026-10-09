@@ -383,10 +383,12 @@ bool is_store_insn(state_t *s);
 #define PRID_R4400  0x00000440u   /* imp 0x04, rev 0x40 */
 #define PRID_R4600  0x00002020u   /* imp 0x20, rev 0x20 */
 #define PRID_R10000 0x00000900u   /* imp 0x09, rev 0x00 */
-/* IRIX /unix branches on PRId.IMP in start(): R4600 (0x20) takes the Indy
- * per-CPU init path; R4000/R4400 (0x04) diverges before KPTEBASE page-table
- * backing (MAME_QUESTIONS.md Q5).  Present R4600. */
-#define PRID_VALUE  PRID_R4600
+/* This ISS is the RTL's co-sim checker: it must report what the RTL reports
+ * (machine.vh PRID_VALUE = R4400), or every PRId read diverges.  (It once
+ * presented R4600 for booting IRIX in the ISS -- IRIX /unix branches on
+ * PRId.IMP in start(), MAME_QUESTIONS.md Q5; IRIX now boots on the RTL as an
+ * R4400, and standalone ISS work uses interp_mips.) */
+#define PRID_VALUE  PRID_R4400
 
 #define VA2PA(x) ((x & 0x1fffffff))
 
