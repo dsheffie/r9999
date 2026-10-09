@@ -409,6 +409,12 @@ endfunction
    logic [`LG_L1D_NUM_SETS-1:0] 	  t_cache_idx, r_cache_idx, rr_cache_idx;
    logic [N_TAG_BITS-1:0] 		  t_cache_tag, r_cache_tag, r_tag_out;
    logic [N_TAG_BITS-1:0] 		  rr_cache_tag;
+   /* PA of the line read out on port 1 (writeback / invalidate address).  The tag
+    * carries the alias bits (PA above the page offset), so only the in-page index bits
+    * come from r_cache_idx: the line's PA no longer depends on WHERE it is stored,
+    * which is what lets stage C store lines at their VA index. */
+   localparam IDX_IN_PG = TAG_LSB - IDX_START;
+   wire [`PA_WIDTH-1:0] 		  w_line_pa = {r_tag_out, r_cache_idx[IDX_IN_PG-1:0], {`LG_L1D_CL_LEN{1'b0}}};
    logic 				  r_valid_out, r_dirty_out;
    logic [L1D_CL_LEN_BITS-1:0] 		  r_array_out, t_data, t_data2;
    
@@ -2996,7 +3002,7 @@ endfunction
 			       * ACTIVE; a store fired this cycle would be dropped). */
 			      t_got_miss = 1'b1;
 			      t_mark_invalid = 1'b1;
-			      n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_addr = w_line_pa;
 			      n_mem_req_opcode = MEM_WB;
 			      n_mem_req_store_data = t_data;
 			      n_mem_req_cacheable = 1'b1;
@@ -3063,7 +3069,7 @@ endfunction
 			      n_state = UNCACHE_WB;
 			      if(r_dirty_out)
 				begin
-				   n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS], r_cache_idx, {`LG_L1D_CL_LEN{1'b0}}};
+				   n_mem_req_addr = w_line_pa;
 				   n_mem_req_cacheable = 1'b1;
 				   n_mem_req_opcode = MEM_SW;
 				   n_mem_req_store_data = t_data;
@@ -3138,7 +3144,7 @@ endfunction
 			 if(r_hit_busy_addr && r_is_retry || !r_hit_busy_addr)
 			   begin
 			      n_reload_issue = 1'b1;
-			      n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+			      n_mem_req_addr = w_line_pa;
 			      n_mem_req_cacheable = 1'b1;
 			      n_mem_req_opcode = MEM_SW;
 			      n_mem_req_store_data = t_data;
@@ -3188,7 +3194,7 @@ endfunction
 			    
 			    if((rr_cache_idx == r_cache_idx) && rr_last_wr)
 			      begin
-				 n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+				 n_mem_req_addr = w_line_pa;
 			    n_lock_cache = 1'b1;
 			    n_mem_req_opcode = MEM_SW;
 			    n_state = WAIT_INJECT_RELOAD;
@@ -3478,7 +3484,7 @@ endfunction
 		     * shadowed by the stale copy (read hits it, eviction writes it
 		     * over the DMA data) -- ~/code/murphi/r9999_caches.m. */
 		    t_mark_invalid = 1'b1;
-		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = w_line_pa;
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_cacheable = 1'b1;
 		    n_mem_req_store_data = t_data;
@@ -3581,7 +3587,7 @@ endfunction
 		 begin
 		    t_got_miss = 1'b1;
 		    t_mark_invalid = 1'b1;
-		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = w_line_pa;
 		    n_mem_req_opcode = MEM_WB;
 		    n_mem_req_store_data = t_data;
 		    n_mem_req_cacheable = 1'b1;
@@ -3672,7 +3678,7 @@ endfunction
 		 end
 	       else
 		 begin
-		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
+		    n_mem_req_addr = w_line_pa;
 	       n_mem_req_opcode = MEM_SW;
 	       n_mem_req_store_data = t_data;
 	       n_state = (r_cache_idx == (L1D_NUM_SETS-1)) ? FLUSH_CACHE_LAST_WAIT : FLUSH_CACHE_WAIT;
@@ -3962,7 +3968,7 @@ endfunction
     * about which path software used.  The line being invalidated is the one
     * currently indexed, so reconstruct its PA the same way the writeback arm does. */
    wire [`PA_WIDTH-1:0] w_cinv_pa_full =
-	{r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS], r_cache_idx, {`LG_L1D_CL_LEN{1'b0}}};
+	w_line_pa;
    wire [7:0] w_cinv_wr_idx = w_cinv_pa_full[11:4];
    wire       w_cinv_wr_en  = t_mark_invalid;
 
