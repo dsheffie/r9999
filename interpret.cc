@@ -173,9 +173,13 @@ void initState(state_t *s) {
   /* PRId: read-only processor id (R4000 family for now) */
   s->cpr0[CPR0_PRID] = PRID_VALUE;
   s->cpr0_64[CPR0_PRID] = PRID_VALUE;
-  /* Config: same constant as the RTL -- R4600 cache geometry (16K I$/D$, 32B
-   * lines, SC=1) so mlreset derives cachecolormask=1 (MAME_QUESTIONS.md Q5 r2) */
-  s->cpr0[CPR0_CONFIG] = 0x0002e4b3;
+  /* Config: the RTL's read-only constant (exec.sv 'd16) -- R4600 cache geometry
+   * (16K I$/D$, SC=1) so mlreset derives cachecolormask=1 (MAME_QUESTIONS.md Q5 r2),
+   * with DB=0 (16-byte lines, 0x..a3 not 0x..b3) to match LG_L1D_CL_LEN=4.  Writes
+   * are ignored, as in the RTL (mtc0/dmtc0 below), or a checkpoint's CP0 restore
+   * overwrote it and the kernel's next mfc0 Config diverged. */
+  s->cpr0[CPR0_CONFIG] = CONFIG_VALUE;
+  s->cpr0_64[CPR0_CONFIG] = CONFIG_VALUE;
 }
 
 /* Raise MIPS Reserved Instruction exception (ExcCode=10).
@@ -2685,7 +2689,10 @@ void execMips(state_t *s) {
 	    }
 	  }
 	  if(!found) {
-	    s->cpr0[CPR0_INDEX] |= (1u << 31); /* P=1 (probe failed) */
+	    /* P=1 (probe failed).  The R4400 leaves Index[5:0] undefined on a miss;
+	     * the RTL loads the probe result's index (0), so match it -- keeping the
+	     * stale index diverged the checker on the kernel's next mfc0 Index. */
+	    s->cpr0[CPR0_INDEX] = (1u << 31);
 	  }
 	  s->insn_histo[mipsInsn::TLBP]++;
 	  break;
@@ -2763,7 +2770,7 @@ void execMips(state_t *s) {
 	  s->insn_histo[mipsInsn::DMFC0]++;
 	  break;
 	case 0x4: /*mtc0*/
-	  if(rd != 15) { /* PRId (reg 15) is read-only */
+	  if(rd != 15 && rd != CPR0_CONFIG) { /* PRId and Config are read-only (as the RTL) */
 	    /* Sail mips_insts.sail execute(MTC0 ...EntryHi): EntryHi takes its value from
 	     * the FULL 64-bit GPR; every other CP0 register gets the usual 32-bit write.
 	     * EntryHi's R field is bits [63:62] and the TLB match compares it against
@@ -2791,7 +2798,7 @@ void execMips(state_t *s) {
 	  s->insn_histo[mipsInsn::MTC0]++;
 	  break;
 	case 0x5: /*dmtc0 -- write full 64-bit CP0 register */
-	  if(rd != 15) { /* PRId (reg 15) is read-only */
+	  if(rd != 15 && rd != CPR0_CONFIG) { /* PRId and Config are read-only (as the RTL) */
 	    s->cpr0_64[rd] = s->gpr[rt];
 	    s->cpr0[rd] = (uint32_t)s->gpr[rt];
 	  }
