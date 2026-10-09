@@ -321,6 +321,12 @@ run-fpu-cu1: fpu/fp_cu1.elf
 	@echo "== fpu/fp_cu1 (CU1=0 -> CpU CE=1 self-check; expect 'P') =="
 	$(SIM) --file fpu/fp_cu1.elf -c 0 2>/dev/null | grep -aoE '[PF]' | head -1
 
+# MIPS IV ops: interp_mips --cpu r5000 executes them, the default R4400 traps (RI / FPE).
+# Self-contained like fp_unimpl; reads PRId, so one ELF expects 'P' under both models.
+fpu/fp_mips4.elf: fpu/fp_mips4.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c fpu/fp_mips4.S -o fpu/fp_mips4.o
+	$(LD) $(LDFLAGS) fpu/fp_mips4.o -o $@
+
 # FR=0 odd-register FP-compute -> Reserved Instruction. -c0 only.
 run-fpu-unimpl: fpu/fp_unimpl.elf
 	@echo "== fpu/fp_unimpl (unimpl COP1 -> FPE.E self-check; expect 'P') =="
