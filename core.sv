@@ -409,7 +409,12 @@ module core(clk,
    generate
       if(`M_WIDTH==64)
 	begin
-	   assign w_in_64b_mode = w_in_64b_kernel_mode | 
+	   /* must match decode_mips.sv (70538bc): 64-bit OPS are always valid in
+	    * kernel mode -- KX gates only addressing and the XTLB vector.  This copy
+	    * feeds only the P-mode-hazard guard (mode_when_fetched is decode's value)
+	    * and debug prints; still requiring KX here made the guard fire on any RI
+	    * in kernel mode with KX=0 (tests/fpu/fp_mips4: the first movn). */
+	   assign w_in_64b_mode = in_kernel_mode |
 				  w_in_64b_user_mode | 
 				  w_in_64b_supervisor_mode;
 	end
