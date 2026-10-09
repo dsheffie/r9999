@@ -972,6 +972,14 @@ int main(int argc, char **argv) {
      * returns the real cycle count, causing a checker register mismatch. */
     if(enable_checker) {
       ss->cpr0[CPR0_COUNT] = (uint32_t)tb->cp0_count;
+      /* Likewise Cause.IP[7:0]: the pending bits are timing-dependent (IP7 is set
+       * when Count reaches Compare -- at reset both are 0), and the ISS does not
+       * model them, so any handler's raw `mfc0 Cause` mismatched (0x8030 vs 0x30)
+       * whenever IP7 happened to be pending.  The RTL reads exactly cause_ip
+       * (exec.sv w_ip) in Cause[15:8]. */
+      const uint32_t cause_ip = ((uint32_t)tb->cause_ip & 0xffu) << 8;
+      ss->cpr0[CPR0_CAUSE]    = (ss->cpr0[CPR0_CAUSE] & ~0xff00u) | cause_ip;
+      ss->cpr0_64[CPR0_CAUSE] = (ss->cpr0_64[CPR0_CAUSE] & ~0xff00ull) | cause_ip;
     }
 
 
@@ -980,7 +988,7 @@ int main(int argc, char **argv) {
      * in WRITE_EPC (retire_valid is 0 at that point) so the checker sees
      * RTL and sim both at bfc00180 when the handler starts retiring. */
     if(tb->took_irq && enable_checker) {
-      raise_int(ss, (uint32_t)tb->epc);
+      raise_int(ss, (uint64_t)tb->epc);
     }
 
     /* TIP: full per-cycle attribution (rv64core top.cc parity). ROB-empty ->

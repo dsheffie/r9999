@@ -203,14 +203,16 @@ static inline void set_exc_pc(state_t *s) {
    * register written on an exception (BadVAddr/EntryHi/Context/XContext, in
    * tlb_set_fault_state) already updates both arrays; EPC was the one that did
    * not, so after any exception dmfc0 returned a STALE EPC from whenever dmtc0
-   * last wrote it.  eret was unaffected because it reads the 32-bit copy. */
+   * last wrote it.  The 64-bit view holds the FULL pc: eret returns to it, and
+   * sext32((uint32_t)pc) truncated n64 user code (0x120000fec -> 0x20000fec), so
+   * the checker resumed at the wrong address after a user TLB miss. */
   if(s->in_delay_slot) {
     s->cpr0[CPR0_EPC]    = (uint32_t)(s->pc - 4);
-    s->cpr0_64[CPR0_EPC] = sext32((uint32_t)(s->pc - 4));
+    s->cpr0_64[CPR0_EPC] = s->pc - 4;
     s->cpr0[CPR0_CAUSE] |=  (1u << 31);
   } else {
     s->cpr0[CPR0_EPC]    = (uint32_t)s->pc;
-    s->cpr0_64[CPR0_EPC] = sext32((uint32_t)s->pc);
+    s->cpr0_64[CPR0_EPC] = s->pc;
     s->cpr0[CPR0_CAUSE] &= ~(1u << 31);
   }
 }
@@ -268,6 +270,12 @@ static void take_exception_fpe(state_t *s) {
   s->fcr1[CP1_CR31]  |= (1u << 17);
   s->pc = sext32(exc_vector_general(s));
 }
+
+/* This ISS is the co-sim checker for an R4400 (MIPS III) RTL, which has no MIPS IV:
+ * movn/movz/movci and COP1X raise RI, and the COP1 .fmt movc/movz/movn, recip and
+ * rsqrt raise the FP Unimplemented exception (the RTL FP_UNIMPL catch-all).  Their
+ * MIPS IV implementations stay below for a MIPS IV model; true would re-enable them. */
+static const bool ISS_MIPS4 = false;
 
 static void raise_ri(state_t *s, uint32_t inst) {
   fprintf(stderr, "unimplemented: opcode=0x%02x funct=0x%02x @ pc=0x%08x\n",
@@ -342,10 +350,10 @@ static void raise_trap(state_t *s) {
   s->pc = sext32(exc_vector_general(s));
 }
 
-void raise_int(state_t *s, uint32_t epc, uint32_t ip) {
+void raise_int(state_t *s, uint64_t epc, uint32_t ip) {
   s->ll_link_valid = false;   /* interrupt breaks the LL/SC link */
-  s->cpr0[CPR0_EPC]   = epc;
-  s->cpr0_64[CPR0_EPC] = sext32(epc);   /* keep the dmfc0-visible shadow in step */
+  s->cpr0[CPR0_EPC]   = (uint32_t)epc;
+  s->cpr0_64[CPR0_EPC] = epc;   /* the full RTL EPC: eret returns to the 64-bit view */
   /* Cause.IP[7:0] = the REAL pending bits (from the RTL's w_ip in the checker),
    * ExcCode=0 (Int), BD=0.  Was hardcoded to IP[7] (timer) which mis-dispatched
    * every software (IP[1]) / device (IP[2]) interrupt in the IRIX ISR. */
@@ -1984,19 +1992,29 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	    _truncw(inst, s);
 	    break;
 	  case 0x11:
-	    _fmovc(inst, s);
-	    break;
 	  case 0x12:
-	    _fmovz(inst, s);
-	    break;
 	  case 0x13:
-	    _fmovn(inst, s);
-	    break;
 	  case 0x15:
-	    do_fp_op<fpOperation::recip>(inst, s);
-	    break;
 	  case 0x16:
-	    do_fp_op<fpOperation::rsqrt>(inst, s);
+	    if(!ISS_MIPS4) {
+	      take_exception_fpe(s);   /* MIPS IV .fmt op on an R4400 */
+	      return;
+	    }
+	    if((inst & 63) == 0x11) {
+	      _fmovc(inst, s);
+	    }
+	    else if((inst & 63) == 0x12) {
+	      _fmovz(inst, s);
+	    }
+	    else if((inst & 63) == 0x13) {
+	      _fmovn(inst, s);
+	    }
+	    else if((inst & 63) == 0x15) {
+	      do_fp_op<fpOperation::recip>(inst, s);
+	    }
+	    else {
+	      do_fp_op<fpOperation::rsqrt>(inst, s);
+	    }
 	    break;
 	  case 0x20:
 	    /* cvt.s */
@@ -2180,7 +2198,11 @@ void execMips(state_t *s) {
 	  s->insn_histo[mipsInsn::SLL]++;
 	}
 	break;
-      case 0x01: /* movci */
+      case 0x01: /* movci (MIPS IV) */
+	if(!ISS_MIPS4) {
+	  raise_ri(s, inst);
+	  return;
+	}
 	_movci(inst,s);
 	break;
       case 0x02: /* srl */
@@ -2432,12 +2454,20 @@ void execMips(state_t *s) {
 	s->insn_histo[mipsInsn::SLTU]++;
 	break;
       }
-      case 0x0B: /* movn */
+      case 0x0B: /* movn (MIPS IV) */
+	if(!ISS_MIPS4) {
+	  raise_ri(s, inst);
+	  return;
+	}
 	s->gpr[rd] = (s->gpr[rt] != 0) ? s->gpr[rs] : s->gpr[rd];
 	s->pc +=4;
 	s->insn_histo[mipsInsn::MOVN]++;
 	break;
-      case 0x0A: /* movz */
+      case 0x0A: /* movz (MIPS IV) */
+	if(!ISS_MIPS4) {
+	  raise_ri(s, inst);
+	  return;
+	}
 	s->gpr[rd] = (s->gpr[rt] == 0) ? s->gpr[rs] : s->gpr[rd];
 	s->pc += 4;
 	s->insn_histo[mipsInsn::MOVZ]++;	
@@ -2782,8 +2812,13 @@ void execMips(state_t *s) {
   }
   else if(isCoproc1) 
     execCoproc1<EL>(inst,s);
-  else if(isCoproc1x)
+  else if(isCoproc1x) {
+    if(!ISS_MIPS4) {
+      raise_ri(s, inst);   /* COP1X is MIPS IV */
+      return;
+    }
     execCoproc1x<EL>(inst,s);
+  }
   else if(isCoproc2) {
     printf("coproc2 unimplemented\n");  exit(-1);
   }

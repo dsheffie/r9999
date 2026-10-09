@@ -335,7 +335,7 @@ void execMips(state_t *s);
 /* co-sim retire_trace: fetch the BE instruction word at a virtual PC via the ISS TLB
  * (code is identical in RTL & ISS memory); *ppa gets the PA.  0 on untranslatable PC. */
 uint32_t iss_fetch_inst(state_t *s, uint64_t vpc, uint32_t *ppa);
-void raise_int(state_t *s, uint32_t epc, uint32_t ip = (1u << 7));
+void raise_int(state_t *s, uint64_t epc, uint32_t ip = (1u << 7));
 
 
 std::ostream &operator<<(std::ostream &out, const state_t & s);
