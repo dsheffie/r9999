@@ -390,7 +390,7 @@ bool is_store_insn(state_t *s);
  * R4400, and standalone ISS work uses interp_mips.) */
 #define PRID_VALUE  PRID_R4400
 /* CP0 Config: the RTL's read-only constant (exec.sv 'd16); keep in sync. */
-#define CONFIG_VALUE 0x0002e4a3u
+#define CONFIG_VALUE 0x0002e483u
 
 #define VA2PA(x) ((x & 0x1fffffff))
 

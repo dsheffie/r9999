@@ -4671,18 +4671,16 @@ module exec(clk,
 	    end
 	  'd16:
 	    begin
-	       /* Config = R4600 value (0x0002e4b3): 16 KB I$ + 16 KB D$, 32-byte
-		* lines, SC (bit 17) = no secondary cache.  IRIX's mlreset derives
-		* cachecolormask from these cache-size fields; the R4600 value gives
-		* cachecolormask=1 so pagecoloralign converges (MAME_QUESTIONS.md Q5
-		* round-2).  SC=1 still makes the kernel skip the scache probe.
-		* DB=0 (0x..a3 vs R4600's 0x..b3) advertises a 16-byte L1 line so IRIX's
-		* dma_cache_inv strides by 16 to match r9999's LG_L1D_CL_LEN=4 (R4600
-		* hardcodes a 32-byte line, ignoring Config DB, which would skip every
-		* other 16B line).  Pairs with the R4400 PRId in machine.vh.  NB: the
-		* SCSI disk-attach clobber that first pointed here was actually an L2
-		* stale-dirty-bit bug (fixed in l2.sv), not the cache-line stride. */
-	       t_csr0_val = 'h0002e4a3;
+	       /* Config = 0x0002e483: an R4400 (machine.vh PRId) with 16 KB I$ +
+		* 16 KB D$ and 16-byte I and D lines (IB=DB=0), matching r9999's
+		* LG_L1D_CL_LEN=4 L1s.  SC (bit 17) = 1: no secondary cache visible,
+		* so the kernel skips the scache probe.  IRIX's mlreset derives
+		* cachecolormask from the cache-size fields (MAME_QUESTIONS.md Q5).
+		* A CACHE op acts on the one 16-byte block containing its address;
+		* IRIX on an R4400 PRId walks every cache op at a 16-byte stride
+		* regardless of IB/DB (measured in interp_mips, 2026-10-10).  Was
+		* 0x0002e4a3 (IB=1, a 32-byte I line r9999 does not have). */
+	       t_csr0_val = 'h0002e483;
 	    end
 	  'd23:
 	    begin

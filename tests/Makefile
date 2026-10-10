@@ -53,6 +53,8 @@ TESTS := hello/hello.elf \
          cache/test_flush_l2_full.elf \
          cache/test_l2_evict.elf \
          cache/test_uc_wb_alias.elf \
+         cache/test_cache_oneline.elf \
+         cache/test_index_oneline.elf \
          devregs/test_devregs.elf \
          addr64/test_badvaddr.elf
 
@@ -237,6 +239,16 @@ cache/test_l2_evict.elf: cache/test_l2_evict.S $(STARTUP) $(COMMON)/sim.h $(COMM
 cache/test_uc_wb_alias.elf: cache/test_uc_wb_alias.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_uc_wb_alias.S -o cache/test_uc_wb_alias.o
 	$(LD) $(LDFLAGS) $(STARTUP) cache/test_uc_wb_alias.o -o $@
+
+# one CACHE op touches exactly its own 16B line (Config DB=0). Self-contained (own
+# vectors, no crt0), RTL-only; oracle via ooo_core --memdump (see the .S headers).
+cache/test_cache_oneline.elf: cache/test_cache_oneline.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_cache_oneline.S -o cache/test_cache_oneline.o
+	$(LD) $(LDFLAGS) cache/test_cache_oneline.o -o $@
+
+cache/test_index_oneline.elf: cache/test_index_oneline.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_index_oneline.S -o cache/test_index_oneline.o
+	$(LD) $(LDFLAGS) cache/test_index_oneline.o -o $@
 
 # Code-coherence tests run under the co-sim checker (RTL must match the
 # coherent interpreter). inval_nowb is RTL-only (-c 0): the coherent interp
