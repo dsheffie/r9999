@@ -5,10 +5,12 @@
  * an R4400 PRId walks every cache op at a 16B stride (measured in the ISS, 2026-10-10),
  * so the old 32B "double beat" was never needed and broke inclusion at page ends.
  *
- * TLB[0]: VA 0x00100000 -> PA 0x08101000 (cached).
- *   A   sw 0xAAAAAAAA via VA 0x00100200 (PA 0x08101200 -> set 0x120, dirty)
- *   A16 sw 0xBBBBBBBB via VA 0x00100210 (PA 0x08101210 -> set 0x121, dirty)
- *   C   sw 0xCCCCCCCC via VA 0x00100300 (PA 0x08101300 -> set 0x130, dirty)
+ * TLB[0] odd page: VA 0x00101000 -> PA 0x08101000 (cached).  VA and PA have the SAME
+ * colour (bits [13:12] = 01), so the line sits in the same set whether the L1D is
+ * PA-indexed (main) or VA-indexed (inclusive-l2-v2 C2b, like a real R4400):
+ *   A   sw 0xAAAAAAAA via VA 0x00101200 (PA 0x08101200 -> set 0x120, dirty)
+ *   A16 sw 0xBBBBBBBB via VA 0x00101210 (PA 0x08101210 -> set 0x121, dirty)
+ *   C   sw 0xCCCCCCCC via VA 0x00101300 (PA 0x08101300 -> set 0x130, dirty)
  *   cache 0x01, (0x80001200)  -- Index op selects set 0x120 (16KB L1D: bits [13:4]).
  *     The funnel writes the line back by its REAL cached tag, so set 0x120 ->
  *     0x08101200.  Set 0x121 (A16) must stay untouched.  (The 4KB-L1D version used
@@ -54,26 +56,27 @@ _start:
     li      $t0, 1
     mtc0    $t0, $6
 
-    /* TLB[0]: VA 0x00100000 -> PA 0x08101000, cached */
+    /* TLB[0]: VA 0x00100000 -> PA 0x08101000 (even, unused) and VA 0x00101000 ->
+     * PA 0x08101000 (odd, used: same colour as its PA), cached */
     li      $t0, 0x00100000
     mtc0    $t0, $10
     li      $t0, 0x0020405f
     mtc0    $t0, $2
-    li      $t0, 0x0020409f
+    li      $t0, 0x0020405f
     mtc0    $t0, $3
     mtc0    $zero, $0
     tlbwi
 
     /* dirty line A (set 0x20) */
-    li      $t2, 0x00100200
+    li      $t2, 0x00101200
     li      $t3, 0xAAAAAAAA
     sw      $t3, 0($t2)
     /* dirty line A+16 (set 0x21, same 32B block, NOT separately cache-op'd) */
-    li      $t2, 0x00100210
+    li      $t2, 0x00101210
     li      $t3, 0xBBBBBBBB
     sw      $t3, 0($t2)
     /* dirty a control line in a different 32B block (set 0x30) */
-    li      $t2, 0x00100300
+    li      $t2, 0x00101300
     li      $t3, 0xCCCCCCCC
     sw      $t3, 0($t2)
 
