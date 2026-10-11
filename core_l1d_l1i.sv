@@ -1331,6 +1331,27 @@ module core_l1d_l1i(clk,
 				   end
 				 else
 				   begin
+				      if((r_preschk_incl + t_incl) < 'd20)
+					begin
+					   $display("[PRESCHK] NOT-IN-L2: L1D set %0d pa %x dirty %b | L2 idx %x valid %b tag %x pres %b | l1d state %0d mem_req_idx %0d | l2 state %0d",
+						    i, pa, dcache.dc_dirty.b0.r_ram[i], l2i[`LG_L2_NUM_SETS-1:0],
+						    l2cache.valid_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.tag_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]],
+						    dcache.r_state, dcache.r_mem_req_idx, l2cache.r_state);
+					   $display("[PRESCHK]   L1D set %0d history: last valid write cyc %0d state %0d val %0d | last fill cyc %0d pa %x state %0d",
+						    i, dcache.dbg_v_cyc[i], dcache.dbg_v_state[i], dcache.dbg_v_val[i],
+						    dcache.dbg_f_cyc[i], dcache.dbg_f_pa[i], dcache.dbg_f_state[i]);
+					   $display("[PRESCHK]   L2 idx %x history: last valid/tag write cyc %0d state %0d op %0d uncache %0d valid %0d->%0d tag %x->%x pres %b probed %0d | last pres write cyc %0d op %0d val %b (now cyc %0d)",
+						    l2i[`LG_L2_NUM_SETS-1:0],
+						    l2cache.dbg_v_cyc[l2i[`LG_L2_NUM_SETS-1:0]], l2cache.dbg_v_state[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_v_op[l2i[`LG_L2_NUM_SETS-1:0]], l2cache.dbg_v_unc[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_v_oldval[l2i[`LG_L2_NUM_SETS-1:0]], l2cache.dbg_v_newval[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_v_oldtag[l2i[`LG_L2_NUM_SETS-1:0]], l2cache.dbg_v_newtag[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_v_pres[l2i[`LG_L2_NUM_SETS-1:0]][2:0], l2cache.dbg_v_probed[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_p_cyc[l2i[`LG_L2_NUM_SETS-1:0]], l2cache.dbg_p_op[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_p_val[l2i[`LG_L2_NUM_SETS-1:0]][2:0], dcache.r_cycle);
+					end
 				      t_incl = t_incl + 'd1;
 				   end
 			      end
@@ -1358,12 +1379,12 @@ module core_l1d_l1i(clk,
      end
    /* back-invalidate (L2 -> L1D probe) statistics by reason, counted where the L1D
     * answers (PROBE_CHK: n_prb_ack).  Reasons are l2cache.r_probe_reason. */
-   logic [63:0] r_bi_cnt[6][3];   /* [reason][0 probes, 1 L1D hit, 2 dirty] */
+   logic [63:0] r_bi_cnt[7][3];   /* [reason][0 probes, 1 L1D hit, 2 dirty] */
    always_ff@(posedge clk)
      begin
 	if(reset)
 	  begin
-	     for(integer r = 0; r < 6; r = r + 1)
+	     for(integer r = 0; r < 7; r = r + 1)
 	       begin
 		  r_bi_cnt[r][0] <= 'd0;
 		  r_bi_cnt[r][1] <= 'd0;
@@ -1388,6 +1409,7 @@ module core_l1d_l1i(clk,
 	$display("[BISTAT] alias_invl      %8d  %8d  %8d", r_bi_cnt[3][0], r_bi_cnt[3][1], r_bi_cnt[3][2]);
 	$display("[BISTAT] alias_pgdrop    %8d  %8d  %8d", r_bi_cnt[4][0], r_bi_cnt[4][1], r_bi_cnt[4][2]);
 	$display("[BISTAT] snoop_wbinv     %8d  %8d  %8d", r_bi_cnt[5][0], r_bi_cnt[5][1], r_bi_cnt[5][2]);
+	$display("[BISTAT] snoop_drop      %8d  %8d  %8d", r_bi_cnt[6][0], r_bi_cnt[6][1], r_bi_cnt[6][2]);
      end
 `endif
 

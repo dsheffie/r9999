@@ -698,6 +698,7 @@ int main(int argc, char **argv) {
    * then it is likely in the L1D, often dirty.  WBINV is architecturally invisible,
    * so the co-sim checker must stay clean.  One snoop outstanding; queue capped. */
   uint64_t snoop_delay = 0;
+  uint64_t snoop_every = 1, snoop_seen = 0;   /* snoop 1 of every snoop_every DRAM line reads */
   std::deque<std::pair<uint64_t, uint64_t>> snoop_q;   /* {due cycle, line PA} */
   bool snoop_busy = false, snoop_acked = false;
   uint64_t snoop_issued = 0, snoop_done_n = 0, snoop_dropped = 0;
@@ -707,6 +708,7 @@ int main(int argc, char **argv) {
       ("help", "Print help messages")
       ("checker,c", po::value<bool>(&enable_checker)->default_value(true), "use checker")
       ("snoop-delay", po::value<uint64_t>(&snoop_delay)->default_value(0), "debug: WBINV-snoop every line read from DRAM this many cycles later (0 = off)")
+      ("snoop-every", po::value<uint64_t>(&snoop_every)->default_value(1), "debug: with --snoop-delay, snoop only 1 of every N lines read from DRAM (frequency knob)")
       ("os-mode", po::value<bool>(&os_mode)->default_value(false), "the binary runs an OS (Linux checkpoint): SYSCALL/BREAK trap to the kernel in the checker ISS, like the RTL, instead of halting it")
       ("file,f", po::value<std::string>(&mips_binary), "mips binary")
       ("heartbeat,h", po::value<uint64_t>(&heartbeat)->default_value(1<<24), "heartbeat for stats")
@@ -1445,7 +1447,7 @@ int main(int argc, char **argv) {
                   if(es) fprintf(stderr,"[memlat] RANDOM xorshift [%lu,%lu] seed=%lu\n",lmin,lmax,mls); }
         if(mls){ mls^=mls<<13; mls^=mls>>7; mls^=mls<<17; lat = lmin + (mls % (lmax-lmin+1)); } }
       mem_reply_cycle = globals::cycle + (tb->mem_req_opcode == 4 ? 1 : 2)*lat;
-      if(snoop_delay && (tb->mem_req_opcode == 4)) {
+      if(snoop_delay && (tb->mem_req_opcode == 4) && ((snoop_seen++ % snoop_every) == 0)) {
         if(snoop_q.size() < 256) {
           snoop_q.push_back({globals::cycle + snoop_delay, (uint64_t)tb->mem_req_addr & ~15ull});
         }

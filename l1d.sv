@@ -1739,6 +1739,54 @@ endfunction
      end
 `endif
 
+`ifdef VERILATOR
+   /* sim-only: an INVL/PGDROP tells the L2 "I dropped my copy at this colour", so the
+    * L2 does not probe.  Flag one sent for a line the L1D still holds at the index it
+    * reports, unless this cycle's invalidate hits that set. */
+   int unsigned dbg_invl_keep_n = 0;
+   always_ff@(posedge clk)
+     begin
+	if(!reset && n_mem_req_valid && !r_mem_req_valid &&
+	   ((n_mem_req_opcode == MEM_INVL) || (n_mem_req_opcode == MEM_PGDROP)) &&
+	   dc_valid.b0.r_ram[n_mem_req_idx] &&
+	   (dc_tag.b0.r_ram[n_mem_req_idx] == n_mem_req_addr[`PA_WIDTH-1:TAG_LSB]) &&
+	   !(t_mark_invalid && (t_valid_wr_addr == n_mem_req_idx)) &&
+	   (dbg_invl_keep_n < 40))
+	  begin
+	     $display("[l1d-invl-keep] cyc=%0d state=%0d op=%0d pa=%x req_idx=%0d cache_idx=%0d mark_inv=%b inv_addr=%0d cl_is_dma=%b",
+		      r_cycle, r_state, n_mem_req_opcode, n_mem_req_addr, n_mem_req_idx, r_cache_idx,
+		      t_mark_invalid, t_valid_wr_addr, r_cl_is_dma);
+	     dbg_invl_keep_n <= dbg_invl_keep_n + 1;
+	  end
+     end // always_ff
+`endif
+
+`ifdef VERILATOR
+   /* sim-only per-set history, read by the PRESCHK inclusion checker in
+    * core_l1d_l1i.sv: the last valid-bit write and the last fill of each set */
+   int unsigned dbg_v_cyc [1 << `LG_L1D_NUM_SETS];
+   int 	        dbg_v_state [1 << `LG_L1D_NUM_SETS];
+   bit 	        dbg_v_val [1 << `LG_L1D_NUM_SETS];
+   int unsigned dbg_f_cyc [1 << `LG_L1D_NUM_SETS];
+   longint unsigned dbg_f_pa [1 << `LG_L1D_NUM_SETS];
+   int 	        dbg_f_state [1 << `LG_L1D_NUM_SETS];
+   always_ff@(posedge clk)
+     begin
+	if(t_write_valid_en)
+	  begin
+	     dbg_v_cyc[t_valid_wr_addr] <= r_cycle;
+	     dbg_v_state[t_valid_wr_addr] <= int'(r_state);
+	     dbg_v_val[t_valid_wr_addr] <= t_valid_value;
+	  end
+	if(w_cacheable_mem_rsp_valid)
+	  begin
+	     dbg_f_cyc[r_mem_req_idx] <= r_cycle;
+	     dbg_f_pa[r_mem_req_idx] <= longint'(r_mem_req_addr);
+	     dbg_f_state[r_mem_req_idx] <= int'(r_state);
+	  end
+     end // always_ff
+`endif
+
  ram2r1w #(.WIDTH(N_TAG_BITS), .LG_DEPTH(`LG_L1D_NUM_SETS)) dc_tag
      (
       .clk(clk),
@@ -3032,8 +3080,10 @@ endfunction
 			       * scrub the L2 copy (MEM_INVL, no WB -- DMA-in drop).
 			       * t_got_miss: see WB arm. */
 			      t_got_miss = 1'b1;
+`ifndef DBG_BREAK_CHOP_INVAL   /* sim negative control for [l1d-invl-keep]: keep the L1D copy */
 			      if(r_valid_out && (r_tag_out == r_cache_tag))
 				t_mark_invalid = 1'b1;
+`endif
 			      n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN],{`LG_L1D_CL_LEN{1'b0}}};
 			      n_mem_req_idx = r_req_idx;
 			      n_mem_req_opcode = MEM_INVL;
@@ -3367,6 +3417,20 @@ endfunction
 	       n_prb_ack = 1'b1;
 	       n_prb_dirty = t_prb_hit && r_dirty_out;
 	       n_prb_data = r_array_out;
+	       /* D3 (in-transit writeback): if this L1D is waiting on its own writeback of
+		* the probed line (MEM_SW victim / MEM_WB CACHE op -- the line was already
+		* invalidated when it was issued), that dirty data is not in the array but
+		* is still newer than the L2's.  The L2 serves one request to completion and
+		* takes a snoop only in IDLE, so the writeback has not been accepted yet:
+		* hand its data over in the ack.  Without it a DMA-out between this probe
+		* and the writeback's landing would read stale DRAM. */
+	       if((r_prb_ret != ACTIVE) &&
+		  ((r_mem_req_opcode == MEM_SW) || (r_mem_req_opcode == MEM_WB)) &&
+		  (r_mem_req_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN] == probe_addr[`PA_WIDTH-1:`LG_L1D_CL_LEN]))
+		 begin
+		    n_prb_dirty = 1'b1;
+		    n_prb_data = r_mem_req_store_data;
+		 end
 	       n_prb_seen = 1'b1;
 	       t_cache_idx = r_prb_save;
 	       n_state = r_prb_ret;

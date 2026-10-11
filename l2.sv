@@ -135,7 +135,7 @@ module l2(clk,
    logic [`L1D_N_COLOUR-1:0]  r_probe_colour, n_probe_colour;
    /* why the probe was sent (stats only): 0 L1I-miss eviction, 1 L1D-miss eviction of an
     * line (any colour), 2 alias on a fill, 3 alias on an INVL, 4 alias on a PGDROP,
-    * 5 external WBINV snoop */
+    * 5 external WBINV snoop, 6 external DROP snoop */
    logic [2:0] 		      r_probe_reason, n_probe_reason;
    logic 		      r_probed, n_probed;
    logic 		      r_probe_dirty, n_probe_dirty;
@@ -173,6 +173,7 @@ module l2(clk,
    assign snoop_done = r_snoop_done;
 `ifdef VERILATOR
    logic [63:0]        r_snoop_hit, n_snoop_hit, r_snoop_dirty, n_snoop_dirty;
+   logic [63:0]        r_pd_drop_n;   /* sim: [l2-pd-drop] print limiter */
 `endif
    
    
@@ -322,6 +323,23 @@ module l2(clk,
    reg_ram1rw #(.WIDTH(N_PIDX+1), .LG_DEPTH(LG_L2_LINES)) pres_ram
      (.clk(clk), .addr(t_idx), .wr_data(t_pres), .wr_en(t_wr_pres), .rd_data(w_pres));
 
+`ifdef VERILATOR
+   /* sim-only per-index history, read by the PRESCHK inclusion checker: the last
+    * valid/tag write and the last presence write of each L2 index */
+   int unsigned dbg_v_cyc [1 << LG_L2_LINES];
+   int 	        dbg_v_state [1 << LG_L2_LINES];
+   int 	        dbg_v_op [1 << LG_L2_LINES];
+   bit 	        dbg_v_oldval [1 << LG_L2_LINES];
+   longint unsigned dbg_v_oldtag [1 << LG_L2_LINES];
+   bit 	        dbg_v_newval [1 << LG_L2_LINES];
+   longint unsigned dbg_v_newtag [1 << LG_L2_LINES];
+   int 	        dbg_v_pres [1 << LG_L2_LINES];
+   bit 	        dbg_v_probed [1 << LG_L2_LINES];
+   bit 	        dbg_v_unc [1 << LG_L2_LINES];
+   int unsigned dbg_p_cyc [1 << LG_L2_LINES];
+   int 	        dbg_p_op [1 << LG_L2_LINES];
+   int 	        dbg_p_val [1 << LG_L2_LINES];
+`endif
    wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
    /* stage C2 alias (push, the R10000 PIdx scheme): an L1D request for a line the L1D
     * holds at a DIFFERENT colour -- probe that copy out first (it comes back if dirty).
@@ -363,6 +381,7 @@ module l2(clk,
 `ifdef VERILATOR
 	     r_snoop_hit <= 64'd0;
 	     r_snoop_dirty <= 64'd0;
+	     r_pd_drop_n <= 64'd0;
 `endif
 	     r_store_data <= 'd0;
 	     r_store_mask <= 'd0;	     
@@ -401,6 +420,41 @@ module l2(clk,
 `ifdef VERILATOR
 	     r_snoop_hit <= n_snoop_hit;
 	     r_snoop_dirty <= n_snoop_dirty;
+	     if(t_wr_valid | t_wr_tag)
+	       begin
+		  dbg_v_cyc[t_idx] <= r_cycle;
+		  dbg_v_state[t_idx] <= int'(r_state);
+		  dbg_v_op[t_idx] <= int'(r_opcode);
+		  dbg_v_oldval[t_idx] <= w_valid;
+		  dbg_v_oldtag[t_idx] <= longint'(w_tag);
+		  dbg_v_newval[t_idx] <= t_wr_valid ? t_valid : w_valid;
+		  dbg_v_newtag[t_idx] <= t_wr_tag ? longint'(r_tag) : longint'(w_tag);
+		  dbg_v_pres[t_idx] <= int'(w_pres);
+		  dbg_v_probed[t_idx] <= r_probed;
+		  dbg_v_unc[t_idx] <= r_is_uncache;
+	       end
+	     if(t_wr_pres)
+	       begin
+		  dbg_p_cyc[t_idx] <= r_cycle;
+		  dbg_p_op[t_idx] <= int'(r_opcode);
+		  dbg_p_val[t_idx] <= int'(t_pres);
+	       end
+	     /* inclusion invariant (sim): a line the L1D may hold (pd) must not be
+	      * dropped or replaced unless this op already probed it out */
+	     /* MEM_WB/MEM_SW carry the L1D's own copy, which the L1D invalidated (pd is
+	      * conservative), so they are exempt; so is a same-colour L1D INVL/PGDROP */
+	     if(t_wr_valid && w_valid && w_pres[N_PIDX] && !r_probed &&
+		(r_opcode != MEM_WB) && (r_opcode != 5'd7) &&
+		/* an L1D INVL/PGDROP at the line's own colour: the L1D just looked
+		 * there, so pd is merely stale (conservative) */
+		!(((r_opcode == MEM_INVL) || (r_opcode == MEM_PGDROP)) && r_from_d &&
+		  (w_pres[N_PIDX-1:0] == w_req_pidx)) &&
+		((!t_valid && w_hit) || (t_wr_tag && (r_tag != w_tag))) && (r_pd_drop_n < 64'd40))
+	       begin
+		  $display("[l2-pd-drop] cyc=%0d state=%0d opcode=%0d uncache=%b idx=%x tag=%x pres=%b valid<=%b",
+			   r_cycle, r_state, r_opcode, r_is_uncache, t_idx, w_tag, w_pres, t_valid);
+		  r_pd_drop_n <= r_pd_drop_n + 64'd1;
+	       end
 	     if((r_cycle[23:0] == 24'd0) & ((r_snoop_hit != 64'd0) | (r_snoop_dirty != 64'd0)))
 	       $display("[snoopstat] cyc=%0d snoop_hits=%0d dirty=%0d", r_cycle, r_snoop_hit, r_snoop_dirty);
 `endif
@@ -891,6 +945,23 @@ module l2(clk,
 			 n_snoop_done = 1'b1;
 		      end
 		 end
+	       else if((r_opcode == MEM_SNOOP_INVL) && w_hit && w_pres[N_PIDX] && !r_probed)
+		 begin
+		    /* DROP snoop (the DMA-in post-drop) on a line the L1D may hold: the L2 is
+		     * inclusive, so the L1D copy goes too -- probe it out at pidx; whatever
+		     * comes back (even dirty) is discarded with the L2 copy below. */
+		    n_probe_req = 1'b1;
+		    n_probe_addr = {w_tag, t_idx, 4'd0};
+		    n_probe_colour = w_pres[N_PIDX-1:0];
+		    n_probe_reason = 3'd6;
+		    if(r_probe_req && probe_ack)
+		      begin
+			 n_probe_req = 1'b0;
+			 n_probed = 1'b1;
+			 n_probe_dirty = probe_dirty;
+			 n_probe_data = probe_data;
+		      end
+		 end
 	       else if(r_opcode == MEM_SNOOP_INVL)
 		 begin
 		    /* DMA-coherence snoop discard: the SCSI DMA overwrote DRAM for this
@@ -903,6 +974,7 @@ module l2(clk,
 		    if(w_hit)
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
+			 t_wr_dirty = 1'b1; t_dirty = 1'b0;   /* no stale dirty bit left behind */
 		      end
 `ifdef VERILATOR
 		    if(w_hit)
