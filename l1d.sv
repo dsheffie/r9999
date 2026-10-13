@@ -3674,9 +3674,11 @@ endfunction
 		     * MEM_SW response lands in FLUSH_CACHE_WAIT, where
 		     * w_cacheable_mem_rsp_valid (INJECT_RELOAD only) never writes the
 		     * valid bit, so without this the line stayed VALID+DIRTY after a
-		     * whole-cache flush and a later eviction wrote the stale line back
-		     * over whatever a device had DMA'd there since.  An external flush
-		     * must leave every line in I. */
+		     * whole-cache flush: the L2 cleared pd on the SW, the L2 flush then
+		     * dropped its copy (inclusion broken), DMA data landed under a stale
+		     * L1D copy, and a later eviction wrote the stale line back over it.
+		     * An external flush must leave every line in I.  A probe during the
+		     * wait is served from the in-transit data (D3). */
 		    t_mark_invalid = 1'b1;
 		    n_mem_req_addr = w_line_pa;
 		    n_mem_req_idx = r_cache_idx;
