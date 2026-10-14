@@ -3442,6 +3442,14 @@ endfunction
 		 end
 	       else
 		 begin
+		    /* dirty: write it back AND invalidate it now, like FLUSH_CL.  The
+		     * MEM_SW response lands in FLUSH_CACHE_WAIT, where
+		     * w_cacheable_mem_rsp_valid (INJECT_RELOAD only) never writes the
+		     * valid bit, so without this the line stayed VALID+DIRTY after a
+		     * whole-cache flush and a later eviction wrote the stale line back
+		     * over whatever a device had DMA'd there since.  An external flush
+		     * must leave every line in I. */
+		    t_mark_invalid = 1'b1;
 		    n_mem_req_addr = {r_tag_out[N_TAG_BITS-1:LG_ALIAS_BITS],r_cache_idx,{`LG_L1D_CL_LEN{1'b0}}};
 	       n_mem_req_opcode = MEM_SW;
 	       n_mem_req_store_data = t_data;
