@@ -392,6 +392,11 @@ tlb/test_iside_alias.elf: tlb/test_iside_alias.S $(STARTUP) $(COMMON)/sim.h $(CO
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c tlb/test_iside_alias.S -o tlb/test_iside_alias.o
 	$(LD) $(LDFLAGS) $(STARTUP) tlb/test_iside_alias.o -o $@
 
+# 32-bit addressing mode sign-extends EA[31:0] (NT 3.1 TEB idiom: lui 0x8000; lw -0xb58)
+tlb/test_sext32_kuseg.elf: tlb/test_sext32_kuseg.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c tlb/test_sext32_kuseg.S -o tlb/test_sext32_kuseg.o
+	$(LD) $(LDFLAGS) $(STARTUP) tlb/test_sext32_kuseg.o -o $@
+
 # VIPT L1 alias tests (D-side synonym + I-side false-hit).  Run at >=8KB L1 to
 # actually exercise aliasing via a deliberately mis-colored TLB -- the 1:1-va2pa
 # co-sim golden can't model that, so run -c 0 self-check and grep the console.

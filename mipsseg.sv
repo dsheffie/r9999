@@ -40,77 +40,96 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg, bad_perms,
 	end
    endgenerate
 
+   /* 32-bit addressing mode (KX/SX/UX clear for the current mode): the effective
+    * address is the sign-extension of EA[31:0] (R4000 User's Manual).  The AGU adds
+    * 64 bits, so a base built with lui of a bit-31-set constant plus a negative
+    * offset (NT 3.1 ntdll: `lui 0x8000; lw -off` for the TEB at useg 0x7ffff4a8)
+    * yields 0xffffffff_7ffff4a8 -- a useg address with hi32 set, which then missed
+    * the user TLB entry (R/VPN2 compared in full, tlb.sv).  Re-sign-extending is a
+    * no-op for well-formed addresses.  64-bit addressing is untouched. */
+   wire [`M_WIDTH-1:0] w_va;
+   generate
+      if(`M_WIDTH==64)
+	begin
+	   assign w_va = w_in_64b_mode ? v_addr : {{32{v_addr[31]}}, v_addr[31:0]};
+	end
+      else
+	begin
+	   assign w_va = v_addr;
+	end
+   endgenerate
+
    /* supervisor segment (sseg): 32b/compat 0xC0000000-0xDFFFFFFF (cksseg),
     * 64b xsseg VA[63:62]==01.  Used only for the supervisor access-level check. */
-   wire w_compat32 = (`M_WIDTH < 64) || !w_in_64b_mode || (v_addr[63:32] == 32'hFFFF_FFFF);
-   wire w_is_sseg  = w_compat32 ? (v_addr[31:29] == 3'b110)
-				: ((`M_WIDTH == 64) && (v_addr[63:62] == 2'b01));
+   wire w_compat32 = (`M_WIDTH < 64) || !w_in_64b_mode || (w_va[63:32] == 32'hFFFF_FFFF);
+   wire w_is_sseg  = w_compat32 ? (w_va[31:29] == 3'b110)
+				: ((`M_WIDTH == 64) && (w_va[63:62] == 2'b01));
 
    /* VA out of range (Sail TLBTranslate MAX_VA): a MAPPED, non-compat 64b VA must
     * fit in SEGBITS, i.e. VA[61:`SEGBITS]==0, else AdEL/AdES.  compat = the sign-
     * extended 32b form (VA[61:31] all-1, e.g. ckseg/cksseg) is exempt; unmapped
     * segs skip this (they get the PA>MAX_PA check in tlb.sv). */
    wire w_va_oor = (`M_WIDTH == 64) && w_in_64b_mode &&
-		   ~(&v_addr[61:31]) && (|v_addr[61:`SEGBITS]);
+		   ~(&w_va[61:31]) && (|w_va[61:`SEGBITS]);
 
    always_comb
      begin
 	cache  = 1'b0;
 	mapped = 1'b0;
 	seg    = 2'd0;
-	l_addr = v_addr;
+	l_addr = w_va;
 
-	if(`M_WIDTH == 64 && w_in_64b_mode && v_addr[63:62] == 2'b10)
-	  begin /* xkphys: unmapped, PA = v_addr[58:0], cached iff CCA==3 */
+	if(`M_WIDTH == 64 && w_in_64b_mode && w_va[63:62] == 2'b10)
+	  begin /* xkphys: unmapped, PA = w_va[58:0], cached iff CCA==3 */
 	     mapped = 1'b0;
-	     cache  = (v_addr[61:59] == 3'b011);
-	     l_addr = {5'b0, v_addr[58:0]};
+	     cache  = (w_va[61:59] == 3'b011);
+	     l_addr = {5'b0, w_va[58:0]};
 	     seg    = 2'd0;
 	  end
-	else if(`M_WIDTH < 64 || !w_in_64b_mode || v_addr[63:32] == 32'hFFFF_FFFF)
+	else if(`M_WIDTH < 64 || !w_in_64b_mode || w_va[63:32] == 32'hFFFF_FFFF)
 	  begin
 	     /* 32-bit compat (or 32-bit mode, or sign-extended 64b address) */
 	     if(w_seg[3] == 1'b0)
 	       begin /* kuseg */
 		  cache = 1'b1;
 		  mapped = 1'b1;
-		  l_addr = v_addr;
+		  l_addr = w_va;
 		  seg = 'd3;
 	       end
 	     else if(w_seg[3:1] == 3'b100)
 	       begin /* kseg0 */
 		  mapped = 1'b0;
 		  cache = 1'b1;
-		  l_addr = {{ZP{1'b0}}, v_addr[28:0]};
+		  l_addr = {{ZP{1'b0}}, w_va[28:0]};
 		  seg = 'd0;
 	       end
 	     else if(w_seg[3:1] == 3'b101)
 	       begin /* kseg1 */
 		  mapped = 1'b0;
 		  cache = 1'b0;
-		  l_addr = {{ZP{1'b0}}, v_addr[28:0]};
+		  l_addr = {{ZP{1'b0}}, w_va[28:0]};
 		  seg = 'd1;
 	       end
 	     else
 	       begin /* kseg2 */
 		  mapped = 1'b1;
 		  cache = 1'b0;
-		  l_addr = v_addr;
+		  l_addr = w_va;
 		  seg = 'd2;
 	       end
 	  end
-	else if(`M_WIDTH == 64 && v_addr[63:62] == 2'b00)
+	else if(`M_WIDTH == 64 && w_va[63:62] == 2'b00)
 	  begin /* xkuseg: TLB mapped, cached */
 	     cache  = 1'b1;
 	     mapped = 1'b1;
-	     l_addr = v_addr;
+	     l_addr = w_va;
 	     seg    = 2'd3;
 	  end
 	else
 	  begin /* xkseg: TLB mapped, uncached */
 	     mapped = 1'b1;
 	     cache  = 1'b0;
-	     l_addr = v_addr;
+	     l_addr = w_va;
 	     seg    = 2'd2;
 	  end
 

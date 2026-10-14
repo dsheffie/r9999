@@ -504,6 +504,15 @@ static inline bool is_64b_addr_mode(state_t *s) {
 }
 
 static uint32_t va_translate(state_t *s, uint64_t va, tlb_op op) {
+  /* 32-bit ADDRESSING mode (KX/SX/UX clear for the current mode): the effective
+   * address is the sign-extension of EA[31:0].  `lui 0x8000; lw -off` (NT 3.1 ntdll
+   * reading its TEB at useg 0x7ffff4a8) otherwise produces 0xffffffff_7ffff4a8 and
+   * misses the user TLB entry.  Gated on the addressing mode, not in_64b_mode() (which
+   * is true for ALL kernel mode): KX=0 kernel accesses are 32-bit too.  Mirrors
+   * mipsseg.sv's w_va; a no-op for well-formed addresses. */
+  if(!is_64b_addr_mode(s)) {
+    va = (uint64_t)(int64_t)(int32_t)va;
+  }
   if(op == tlb_op::load) g_iss_last_ld_va = va;
   uint32_t hi32 = (uint32_t)(va >> 32);
   uint32_t lo32 = (uint32_t)va;
