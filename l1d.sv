@@ -197,7 +197,7 @@ module l1d(clk,
    /* injected page op (XPG_WBINV / XPG_INV): walk the page's lines at flush_cl_addr
     * (page-aligned PA, held by the core like the CACHE-op address), flush_cl_inval =
     * drop (XPG_INV).  Per line, L1D then L2 -- the core is drained at the ROB head, so
-    * the order is free (~/code/murphi/r9999_pagewalk.m):
+    * the order is free (formal/murphi/r9999_pagewalk.m):
     *   WBINV: L1D dirty hit -> MEM_WB (to DRAM, L2 copy dropped); otherwise invalidate
     *          an L1D hit and MEM_INVL (L2 writes back if dirty, then drops).
     *   INV:   invalidate an L1D hit, MEM_PGDROP (L2 drops without writeback).
@@ -3553,7 +3553,7 @@ endfunction
 		     * coherence bug).  Invalidate the line too: Index_WB_Inv_D must
 		     * not leave it VALID+DIRTY, or a later DMA-in to that line is
 		     * shadowed by the stale copy (read hits it, eviction writes it
-		     * over the DMA data) -- ~/code/murphi/r9999_caches.m. */
+		     * over the DMA data) -- formal/murphi/r9999_caches.m. */
 		    t_mark_invalid = 1'b1;
 		    n_mem_req_addr = w_line_pa;
 		    n_mem_req_idx = r_cache_idx;

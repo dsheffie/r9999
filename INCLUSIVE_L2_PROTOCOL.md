@@ -1,7 +1,7 @@
 # Inclusive L2 with back-invalidate probes: protocol spec (inclusive-l2-v2)
 
 This is the RTL-facing summary of what the Murphi models established.
-- **Model:** `~/code/murphi/r9999_incl.m`, generated from `r9999_main.m` (the model of main `3b78e9b`) by `gen/make_incl.py` with `gen/{rsp_inline,tagonly,presence,dmasnoop}.py`. Edit the generators, not the `.m`.
+- **Model:** `formal/murphi/r9999_incl.m`, generated from `r9999_main.m` (the model of main `3b78e9b`) by `gen/make_incl.py` with `gen/{rsp_inline,tagonly,presence,dmasnoop}.py`. Edit the generators, not the `.m`.
 - **Runners:** `run_main.sh`, `run_incl.sh`, `run_snp.sh` (`BIG=1 MEM=<MB>` for hash compaction).
 - **Rumur** (`apt install rumur`) reads the same files: 3x faster, no compaction.
 
@@ -85,7 +85,7 @@ D3 is the general hazard. Dirty data can be **in transit** in the L1-to-L2 reque
 
 ## Next: VA-indexed L1D with L2 alias tracking (dsheffie 2026-10-02: presence bits always on; DMA later)
 
-**Model:** `~/code/murphi/r9999_va.m` (runner `run_va.sh`).
+**Model:** `formal/murphi/r9999_va.m` (runner `run_va.sh`; push = `ALIAS_PULL=0`).
 - The L1D has one line per VA colour.
 - The L2 line holds `pd` plus `pidx`, the colour where the L1D holds it.
 - There is AT MOST ONE L1D copy per PA.
