@@ -80,10 +80,18 @@
 
 `define BIG_ENDIAN 1
 
+/* TINY_CORE: a deliberately small core (LSU 4, ALU scheduler 4, L1D 4KB, L1I 2x4KB,
+ * L2 16KB; ROB stays 16) for fast synth/impl turnaround when core performance does not
+ * matter -- SoC/device bring-up (e.g. Newport).  Sizes passed explicitly still win. */
+
 /* ALU int matrix scheduler: 4 entries (LG=2), downsized from 8 (LG=3).  The O(N^2)
  * wakeup/select was on the critical path, so 8->4 is a WNS win (timing margin vs
  * metastability) at a small IPC cost -- kept per functional>IPC.  Bump to 3 for full IPC. */
-`define LG_INT_SCHED_ENTRIES 3
+`ifdef TINY_CORE
+ `define LG_INT_SCHED_ENTRIES 2
+`else
+ `define LG_INT_SCHED_ENTRIES 3
+`endif
 /* usable ALU scheduler entries, at most 1 << LG_INT_SCHED_ENTRIES (e.g. 12 of 16);
  * the top entries are never allocated and synthesis prunes them, as for the LSU */
 `ifndef INT_SCHED_ENTRIES
@@ -143,7 +151,11 @@
 /* LSU (exec.sv): age-ordered pool fed by the in-order mem uop queue.  Simple
  * loads are held until answered, plain stores until retired and written; slots
  * also index the l1d-side store buffer */
-`define LG_MEM_SCHED_ENTRIES 3
+`ifdef TINY_CORE
+ `define LG_MEM_SCHED_ENTRIES 2
+`else
+ `define LG_MEM_SCHED_ENTRIES 3
+`endif
 /* usable LSU slots, at most 1 << LG_MEM_SCHED_ENTRIES.  A smaller count (e.g. 12
  * of 16) never allocates the top slots, so their valid bits are constant 0 and
  * synthesis prunes their state in exec and the l1d store buffer */
@@ -200,6 +212,8 @@
 `ifndef LG_L1D_NUM_SETS
 `ifdef FORMAL
  `define LG_L1D_NUM_SETS 2
+`elsif TINY_CORE
+ `define LG_L1D_NUM_SETS 8    // 256 sets x 16B = 4KB (one page: no colours)
 `else
  `define LG_L1D_NUM_SETS 10   // 1024 sets x 16B = 16KB
 `endif
@@ -216,6 +230,8 @@
 `ifndef LG_L1I_NUM_SETS
 `ifdef FORMAL
  `define LG_L1I_NUM_SETS 2
+`elsif TINY_CORE
+ `define LG_L1I_NUM_SETS 8    // 2 x 4KB
 `else
  `define LG_L1I_NUM_SETS 10   // 1024 sets x 16B = 16KB (4KB direct-mapped thrashed dhry_henny code -> L1I conflict misses)
 `endif
@@ -235,6 +251,8 @@
 `ifndef LG_L2_NUM_SETS
 `ifdef FORMAL
  `define LG_L2_NUM_SETS 2
+`elsif TINY_CORE
+ `define LG_L2_NUM_SETS 10       /* 1024 lines x 16B = 16KB */
 `elsif ENABLE_L2_TINY
  `define LG_L2_NUM_SETS 2        /* 4 lines x 16B = 64B -- effectively no retention */
 `else
