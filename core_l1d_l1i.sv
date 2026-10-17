@@ -508,6 +508,7 @@ module core_l1d_l1i(clk,
    logic 	r_dn_l1d, n_dn_l1d;
    wire 	w_l2_flush_complete;
    wire 	w_l1_mem_rsp_valid;   
+   wire 	w_l1_mem_rsp_bad;
    logic 	memq_empty;   
    assign in_flush_mode = r_flush;
    wire [7:0] w_asid;
@@ -864,6 +865,7 @@ module core_l1d_l1i(clk,
 		       .l2_nocache(l2_nocache),
 	       
 	       .l1_mem_rsp_valid(w_l1_mem_rsp_valid),
+	       .l1_mem_rsp_bad(w_l1_mem_rsp_bad),
 	       .l1_mem_load_data(w_l1_mem_load_data),
 	       
 	       .mem_req_ack(),
@@ -989,6 +991,7 @@ module core_l1d_l1i(clk,
 
 	       
 	       .mem_rsp_valid(l1d_mem_rsp_valid),
+	       .mem_rsp_bad(w_l1_mem_rsp_bad),
 	       .mem_rsp_load_data(w_l1_mem_load_data),
 
 	       .cache_accesses(l1d_cache_accesses),

@@ -26,6 +26,7 @@ module l2(clk,
 
 	  //l2 -> l1
 	  l1_mem_rsp_valid,
+	  l1_mem_rsp_bad,
 	  l1_mem_load_data,
 
 	  //l2 -> mem
@@ -96,6 +97,7 @@ module l2(clk,
    input logic [`L1D_N_COLOUR-1:0] l1_mem_req_colour;
 
    output logic        l1_mem_rsp_valid;
+   output logic        l1_mem_rsp_bad;     /* uncached load answered with a bus error */
    output logic [127:0] l1_mem_load_data;
    
    input logic 	mem_req_ack;
@@ -198,6 +200,7 @@ module l2(clk,
    logic 		   r_req_ack, n_req_ack;
    
    logic 		   r_rsp_valid, n_rsp_valid;
+   logic 		   r_rsp_bad, n_rsp_bad;
    logic [127:0] 	   r_rsp_data, n_rsp_data;
    logic [127:0] 	   r_store_data, n_store_data;
    logic [15:0]		   r_store_mask, n_store_mask;
@@ -278,6 +281,7 @@ module l2(clk,
    assign mem_req_mask = r_store_mask;
    
    assign l1_mem_rsp_valid = r_rsp_valid;
+   assign l1_mem_rsp_bad = r_rsp_bad;
    assign l1_mem_load_data = r_rsp_data;
    assign l1_mem_req_ack = r_req_ack;
    
@@ -373,6 +377,7 @@ module l2(clk,
 	     r_mem_opcode <= 5'd0;
 	     r_rsp_data <= 'd0;
 	     r_rsp_valid <= 1'b0;
+	     r_rsp_bad <= 1'b0;
 	     r_reload <= 1'b0;
 	     r_req_ack <= 1'b0;
 	     r_snoop_ack <= 1'b0;
@@ -412,6 +417,7 @@ module l2(clk,
 	     r_mem_opcode <= n_mem_opcode;
 	     r_rsp_data <= n_rsp_data;
 	     r_rsp_valid <= n_rsp_valid;
+	     r_rsp_bad <= n_rsp_bad;
 	     r_reload <= n_reload;
 	     r_req_ack <= n_req_ack;
 	     r_snoop_ack <= n_snoop_ack;
@@ -662,6 +668,7 @@ module l2(clk,
 
 	n_rsp_data = r_rsp_data;
 	n_rsp_valid = 1'b0;
+	n_rsp_bad = 1'b0;
 
 	n_reload = r_reload;
 	n_store_data = r_store_data;
@@ -1243,6 +1250,7 @@ module l2(clk,
 		 begin
 		    n_rsp_valid = 1'b1;
 		    n_rsp_data = mem_rsp_load_data;
+		    n_rsp_bad = mem_rsp_bad;      /* e.g. an MC GIO time-out: the load takes DBE */
 		    n_state = IDLE;
 		    n_mem_req = 1'b0;
 		 end

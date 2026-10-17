@@ -13,6 +13,7 @@ typedef struct packed {
    logic       overflow;
    logic       trap;
    logic       is_bad_addr;
+   logic       is_bus_err;   /* the memory response came back bad: DBE (cause 7) */
    logic       is_ret;
    logic       is_call;
    logic       is_irq;
@@ -141,6 +142,7 @@ typedef struct packed {
    logic overflow;
    logic trap;
    logic is_bad_addr;
+   logic is_bus_err;
    logic [(`M_WIDTH-1):0] target_pc;
    logic take_br;
    logic [(`M_WIDTH-1):0] data;
@@ -296,6 +298,7 @@ typedef struct packed {
    logic 		       fp_hi;
    logic [31:0]		       fp_pres;
    logic 		       bad_addr;
+   logic 		       bus_err;    /* the bus answered with an error (MC): DBE */
    logic		       tlb_refill;
    logic		       tlb_invalid;
    logic		       tlb_modified;

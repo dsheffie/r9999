@@ -130,6 +130,7 @@ module l1d(clk,
 	   //reply from memory system
 	   mem_rsp_valid,
 	   mem_rsp_load_data,
+	   mem_rsp_bad,
 	   cache_accesses,
 	   cache_hits
 	   );
@@ -245,6 +246,7 @@ module l1d(clk,
    
    input logic 				  mem_rsp_valid;
    input logic [L1D_CL_LEN_BITS-1:0] 	  mem_rsp_load_data;
+   input logic 				  mem_rsp_bad;        /* uncached load answered with a bus error */
 
    
    output logic [63:0] 			 cache_accesses;
@@ -2689,6 +2691,7 @@ endfunction
 	n_core_mem_rsp.fp_hi = r_req.fp_hi;
 	n_core_mem_rsp.fp_pres = r_req.fp_pres;
 	n_core_mem_rsp.bad_addr = 1'b0;
+	n_core_mem_rsp.bus_err = 1'b0;
 	
 	n_core_mem_rsp.tlb_refill = 1'b0;
 	n_core_mem_rsp.tlb_invalid = 1'b0;
@@ -3490,8 +3493,9 @@ endfunction
 		    //$display("data returns for uncached load");
 		    t_pt1 = "P";
 		    n_core_mem_rsp.data = t_rsp_data[`M_WIDTH-1:0];
-                    n_core_mem_rsp.dst_valid = r_req.dst_valid;
+                    n_core_mem_rsp.dst_valid = r_req.dst_valid & !mem_rsp_bad;
 		    n_core_mem_rsp.bad_addr = r_req.bad_addr;		    
+		    n_core_mem_rsp.bus_err = mem_rsp_bad;   /* DBE at retirement */
                     n_core_mem_rsp_valid = 1'b1;
 		    n_state = ACTIVE;		    
 		 end

@@ -537,6 +537,7 @@ module core(clk,
       r.overflow = e.overflow;
       r.trap = e.trap;
       r.is_bad_addr = e.is_bad_addr;
+      r.is_bus_err = e.is_bus_err;
       r.target_pc = e.target_pc;
       r.take_br = e.take_br;
       r.data = e.data;
@@ -569,6 +570,7 @@ module core(clk,
       r.overflow = c.overflow;
       r.trap = c.trap;
       r.is_bad_addr = c.is_bad_addr;
+      r.is_bus_err = c.is_bus_err;
       r.is_ret = m.is_ret;
       r.is_call = m.is_call;
       r.is_irq = m.is_irq;
@@ -2487,6 +2489,7 @@ module core(clk,
 			t_rob_head.is_cpu |
 			t_rob_head.is_fpe |
 			t_rob_head.is_bad_addr |
+			t_rob_head.is_bus_err |
 			t_rob_head.overflow | 
 			t_rob_head.trap | 
 			t_rob_head.is_irq |
@@ -2992,6 +2995,12 @@ module core(clk,
 		    n_pending_bad_addr = 1'b1;
 		    n_has_badvaddr = 1'b1;
 		    n_cause = t_rob_head.is_store ? 5'd5 : 5'd4;
+		 end
+	       else if(t_rob_head.is_bus_err)
+		 begin
+		    /* Data Bus Error: the MC answered the load with an error.  Precise,
+		     * EPC at the load; BadVAddr is not written (R4000). */
+		    n_cause = 5'd7;
 		 end
 	       else if(t_rob_head.is_irq)
 		 begin
@@ -3531,6 +3540,7 @@ module core(clk,
 	t_rob_tail.tlb_index = 6'd0;
 	
 	t_rob_tail.is_bad_addr = 1'b0;
+	t_rob_tail.is_bus_err = 1'b0;
 	t_rob_tail.take_br = 1'b0;
 	t_rob_tail.is_br = t_alloc_uop.is_br;
 	t_rob_tail.is_store = is_store(t_alloc_uop.op);
@@ -3583,6 +3593,7 @@ module core(clk,
 	t_rob_next_tail.is_cpu = 1'b0;
 	t_rob_next_tail.cpu_ce1 = 1'b0;
 	t_rob_next_tail.is_bad_addr = 1'b0;
+	t_rob_next_tail.is_bus_err = 1'b0;
 	t_rob_next_tail.take_br = 1'b0;
 	t_rob_next_tail.is_br = t_alloc_uop2.is_br;	
 	t_rob_next_tail.is_store = is_store(t_alloc_uop2.op);
@@ -4009,13 +4020,14 @@ module core(clk,
 	       begin
 		  if(core_mem_rsp.rob_ptr[0]) begin
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= core_mem_rsp.data;
-		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= core_mem_rsp.bad_addr | core_mem_rsp.tlb_refill | core_mem_rsp.tlb_invalid | core_mem_rsp.tlb_modified;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= core_mem_rsp.bad_addr | core_mem_rsp.bus_err | core_mem_rsp.tlb_refill | core_mem_rsp.tlb_invalid | core_mem_rsp.tlb_modified;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_refill <= core_mem_rsp.tlb_refill;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_invalid <= core_mem_rsp.tlb_invalid;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_modified <= core_mem_rsp.tlb_modified;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_hit <= core_mem_rsp.tlb_hit;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_index <= core_mem_rsp.tlb_index;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_bad_addr <= core_mem_rsp.bad_addr;
+		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_bus_err <= core_mem_rsp.bus_err;
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
 		     r_rob_odd[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:0];
 `ifdef ENABLE_CYCLE_ACCOUNTING
@@ -4024,13 +4036,14 @@ module core(clk,
 		  end
 		  else begin
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].data <= core_mem_rsp.data;
-		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= core_mem_rsp.bad_addr | core_mem_rsp.tlb_refill | core_mem_rsp.tlb_invalid | core_mem_rsp.tlb_modified;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].faulted <= core_mem_rsp.bad_addr | core_mem_rsp.bus_err | core_mem_rsp.tlb_refill | core_mem_rsp.tlb_invalid | core_mem_rsp.tlb_modified;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_refill <= core_mem_rsp.tlb_refill;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_invalid <= core_mem_rsp.tlb_invalid;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_modified <= core_mem_rsp.tlb_modified;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_hit <= core_mem_rsp.tlb_hit;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].tlb_index <= core_mem_rsp.tlb_index;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_bad_addr <= core_mem_rsp.bad_addr;
+		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].is_bus_err <= core_mem_rsp.bus_err;
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].exec_cycle <= r_cycle[7:0];
 		     r_rob_even[core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:1]].wr_echo <= core_mem_rsp.rob_ptr[`LG_ROB_ENTRIES-1:0];
 `ifdef ENABLE_CYCLE_ACCOUNTING
