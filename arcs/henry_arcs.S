@@ -341,6 +341,7 @@ s_e13: .asciz "OSLoadPartition=scsi(0)disk(1)rdisk(0)partition(0)"
 s_e14: .asciz "OSLoadFilename=/unix"
 s_e15: .asciz "OSLoader=sash"
 s_e16: .asciz "kernname=scsi(0)disk(1)rdisk(0)partition(0)/unix"
+s_e18: .asciz "monitor=h"
 #ifdef SINGLE_USER
 /* boot to single-user: the kernel reads initstate via arcs_getenv and compares
  * it to "SINGLE" (IP22.c), dropping init to the single-user root shell instead
@@ -364,7 +365,7 @@ arcs_envp_arr:
     .word   ARCS_BB+(s_e10-arcs_argv_blob), ARCS_BB+(s_e11-arcs_argv_blob)
     .word   ARCS_BB+(s_e12-arcs_argv_blob), ARCS_BB+(s_e13-arcs_argv_blob)
     .word   ARCS_BB+(s_e14-arcs_argv_blob), ARCS_BB+(s_e15-arcs_argv_blob)
-    .word   ARCS_BB+(s_e16-arcs_argv_blob)
+    .word   ARCS_BB+(s_e16-arcs_argv_blob), ARCS_BB+(s_e18-arcs_argv_blob)
 #ifdef SINGLE_USER
     .word   ARCS_BB+(s_e17-arcs_argv_blob)
 #endif
@@ -413,12 +414,33 @@ stub_mdesc:
     move    $v0, $zero
 
 /* char *GetEnvironmentVariable(char *name): the real PROM reads NVRAM env vars;
- * we synthesize the two the kernel needs at boot.  Default: return the eaddr
- * (MAC) string for every query (etoh parses it; harmless for others).  With
- * -DSINGLE_USER, a query whose name starts with 'i' (initstate) returns "SINGLE"
- * so the kernel's IP22.c init drops to the single-user root shell. */
+ * we synthesize the ones the kernel needs at boot.  "mon..." (monitor) returns "h":
+ * the 1280x1024 high-resolution monitor -- a 24-bit Newport (board revision 0)
+ * takes its video timing from it, as MAME's XL24 needs `setenv monitor h`.
+ * Default: return the eaddr (MAC) string for every other query (etoh parses it;
+ * harmless for others).  With -DSINGLE_USER, a query whose name starts with 'i'
+ * (initstate) returns "SINGLE" so the kernel's IP22.c init drops to the
+ * single-user root shell. */
     .globl  stub_getenv
 stub_getenv:
+    beq     $a0, $zero, 3f          /* null name -> the default below */
+    nop
+    lbu     $t0, 0($a0)
+    li      $t1, 'm'
+    bne     $t0, $t1, 3f
+    nop
+    lbu     $t0, 1($a0)
+    li      $t1, 'o'
+    bne     $t0, $t1, 3f
+    nop
+    lbu     $t0, 2($a0)
+    li      $t1, 'n'
+    bne     $t0, $t1, 3f
+    nop
+    la      $v0, monitor_str
+    jr      $ra
+    nop
+3:
 #ifdef SINGLE_USER
     beq     $a0, $zero, 2f          /* null name -> eaddr (safe default) */
     nop
@@ -497,6 +519,8 @@ arch_name:
     .align  2
 eaddr_str:
     .asciz  "08:00:69:12:34:56"     /* getenv("eaddr") -> SGI MAC (etoh parses this) */
+monitor_str:
+    .asciz  "h"                     /* getenv("monitor") -> the 1280x1024 monitor */
 #ifdef SINGLE_USER
 single_str:
     .asciz  "SINGLE"                /* getenv("initstate") -> single-user boot */
