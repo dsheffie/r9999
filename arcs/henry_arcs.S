@@ -70,6 +70,16 @@ fsbl:
     sw      $t0, 0($t1)
     nop
 
+    /* (-1b) enable GIO bus time-outs, MC CPUCTRL1.ABORT_EN (bit 4), as the SGI PROM
+     * does: an access to empty GIO space then completes with a bus error (DBE)
+     * instead of hanging.  IRIX's and Linux's GIO probes rely on it; Linux only
+     * read-modify-writes CPUCTRL1 (henry docs/bus-errors.md). */
+    lui     $t1, 0xbfa0
+    lw      $t0, 0xc($t1)           /* MC CPUCTRL1 (kseg1 0xbfa0000c) */
+    ori     $t0, $t0, 0x0010
+    sw      $t0, 0xc($t1)
+    nop
+
     /* (0) FSBL: copy the SPB/romvec block PROM(_spb_lma) -> RAM 0xA0001000.
      * 0xA0001000 is kseg1 (uncached, so the kernel's later reads see it) and the
      * System Memory Alias lands it in real DRAM @ 0x08001000. */
@@ -103,21 +113,22 @@ fsbl:
 3:
     /* (1b) program the station MAC into the ds1386 bbRAM @0xbfbe04e8..fc
      * (HPC3 base 0x1fb80000 + bbram EADDR offset 0x604e8), so IRIX if_ec reads a
-     * valid address instead of 00:00:00:00:00:00.  One byte per word, in [31:24]
-     * (same lane convention as hpc3.sv reads).  MAC = 08:00:69:12:34:56 (real SGI
-     * OUI; matches eaddr_str and the interp_mips bbRAM). */
+     * valid address instead of 00:00:00:00:00:00.  One byte per word, in the word's
+     * low byte (byte offset +3): bbRAM is plain memory (henry_soc leaves it to DRAM)
+     * and readers do lw + `& 0xff`.  MAC = 08:00:69:12:34:56 (real SGI OUI; matches
+     * eaddr_str and the interp_mips bbRAM). */
     lui     $t0, 0xbfbe
     ori     $t0, $t0, 0x04e8        /* &bbram[EADDR], kseg1 uncached */
-    lui     $t1, 0x0800
+    ori     $t1, $zero, 0x08
     sw      $t1, 0($t0)             /* byte 0 = 0x08 */
     sw      $zero, 4($t0)           /* byte 1 = 0x00 */
-    lui     $t1, 0x6900
+    ori     $t1, $zero, 0x69
     sw      $t1, 8($t0)             /* byte 2 = 0x69 */
-    lui     $t1, 0x1200
+    ori     $t1, $zero, 0x12
     sw      $t1, 12($t0)            /* byte 3 = 0x12 */
-    lui     $t1, 0x3400
+    ori     $t1, $zero, 0x34
     sw      $t1, 16($t0)            /* byte 4 = 0x34 */
-    lui     $t1, 0x5600
+    ori     $t1, $zero, 0x56
     sw      $t1, 20($t0)            /* byte 5 = 0x56 */
     /* TEMP DEBUG: read back 0x604e8 (t0) via lw and lbu, print both as hex over SCC */
     lui     $t4, 0xbfbd
