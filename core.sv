@@ -89,12 +89,15 @@ module core(clk,
 	    ready_for_resume,
 	    flush_req_l1d,
 	    flush_req_l1i,
+	    flush_line_req_l1i,
+	    flush_line_idx_l1i,
 	    flush_cl_req,
 	    flush_cl_addr,
 	    flush_cl_inval,
 	    flush_pg_req,
 	    l1d_flush_complete,
 	    l1i_flush_complete,
+	    l1i_flush_line_complete,
 	    l2_flush_complete,
 	    ext_flush_req,
 	    ext_flush_done,
@@ -252,6 +255,9 @@ module core(clk,
    output logic 		ready_for_resume;
    output logic 		flush_req_l1d;
    output logic 		flush_req_l1i;
+   /* I-side CACHE op: invalidate one L1I set (both ways) instead of the whole L1I */
+   output logic 		flush_line_req_l1i;
+   output logic [`LG_L1I_NUM_SETS-1:0] flush_line_idx_l1i;
    
    output logic flush_cl_req;
    output logic [(`M_WIDTH-1):0] flush_cl_addr;
@@ -261,6 +267,7 @@ module core(clk,
 
    input logic			 l1d_flush_complete;
    input logic			 l1i_flush_complete;
+   input logic			 l1i_flush_line_complete;
    input logic			 l2_flush_complete;
    /* ARM-requested whole-cache flush (via core_l1d_l1i).  Handled like an IRQ:
     * while pending, decode replaces a non-delay-slot instruction with a
@@ -904,6 +911,8 @@ module core(clk,
    logic r_post_restart_arm;  /* arms at RAT->ACTIVE restart edge, stamps first alloc, disarms */
    logic 		     n_flush_req_l1d, r_flush_req_l1d;
    logic 		     n_flush_req_l1i, r_flush_req_l1i;
+   logic 		     n_flush_line_req_l1i, r_flush_line_req_l1i;
+   logic [`LG_L1I_NUM_SETS-1:0] n_flush_line_idx_l1i, r_flush_line_idx_l1i;
    
    logic 		     n_flush_cl_req, r_flush_cl_req;
    logic [(`M_WIDTH-1):0]    n_flush_cl_addr, r_flush_cl_addr;
@@ -1186,6 +1195,8 @@ module core(clk,
 				      
    assign flush_req_l1d = r_flush_req_l1d;
    assign flush_req_l1i = r_flush_req_l1i;
+   assign flush_line_req_l1i = r_flush_line_req_l1i;
+   assign flush_line_idx_l1i = r_flush_line_idx_l1i;
    assign flush_cl_req = r_flush_cl_req;
    assign flush_cl_addr = r_flush_cl_addr;
    assign flush_cl_inval = r_flush_cl_inval;
@@ -1926,6 +1937,8 @@ module core(clk,
 	if(reset)
 	  begin
 	     r_flush_req_l1i <= 1'b0;
+	     r_flush_line_req_l1i <= 1'b0;
+	     r_flush_line_idx_l1i <= 'd0;
 	     r_flush_req_l1d <= 1'b0;
 	     r_flush_cl_req <= 1'b0;
 	     r_flush_cl_addr <= 'd0;
@@ -1973,6 +1986,8 @@ module core(clk,
 	  begin
 	     r_flush_req_l1d <= n_flush_req_l1d;
 	     r_flush_req_l1i <= n_flush_req_l1i;
+	     r_flush_line_req_l1i <= n_flush_line_req_l1i;
+	     r_flush_line_idx_l1i <= n_flush_line_idx_l1i;
 	     r_flush_cl_req <= n_flush_cl_req;
 	     r_flush_cl_addr <= n_flush_cl_addr;
 	     r_flush_cl_inval <= n_flush_cl_inval;
@@ -2416,6 +2431,8 @@ module core(clk,
 	n_ds_done = r_ds_done;
 	n_flush_req_l1d = 1'b0;
 	n_flush_req_l1i = 1'b0;
+	n_flush_line_req_l1i = 1'b0;
+	n_flush_line_idx_l1i = r_flush_line_idx_l1i;
 	n_flush_cl_req = 1'b0;
 	n_flush_cl_addr = r_flush_cl_addr;
 	n_flush_cl_inval = r_flush_cl_inval;
@@ -2428,7 +2445,7 @@ module core(clk,
 	n_got_bad_addr = r_got_bad_addr;
 	n_got_restart_ack = r_got_restart_ack;
 	n_ready_for_resume = 1'b0;
-	n_l1i_flush_complete = r_l1i_flush_complete || l1i_flush_complete;
+	n_l1i_flush_complete = r_l1i_flush_complete || l1i_flush_complete || l1i_flush_line_complete;
 	n_l1d_flush_complete = r_l1d_flush_complete || l1d_flush_complete;
 	n_l2_flush_complete = r_l2_flush_complete || l2_flush_complete;
 	n_xflush_pend = r_xflush_pend | ext_flush_req;
@@ -2802,7 +2819,7 @@ module core(clk,
 `endif
 			 /* CACHE op: D-side does a surgical per-line writeback of the
 			  * addressed line to L2 (flush_cl at EA = rob.data); I-side
-			  * nukes the whole L1I (the arbiter chains an L2 flush). Fake
+			  * invalidates the addressed L1I set (flush_line). Fake
 			  * the completes of the caches we don't touch so CACHE_FLUSH's
 			  * uniform all-three wait still fires. Restart afterward to
 			  * refetch (mandatory once L1I is gone; harmless for D). */
@@ -2837,8 +2854,16 @@ module core(clk,
 			   end
 			 else
 			   begin
-			      n_flush_req_l1i = 1'b1;
+			      /* I-side op (Index/Hit Invalidate_I, Fill_I, Index tag ops, and
+			       * the secondary-I ops r9999 routes here): invalidate the one L1I
+			       * set the EA indexes, both ways -- a superset of what each op
+			       * needs.  Was a whole-L1I flush per op: IRIX's
+			       * __cache_wb_inval runs one op per 16B over a whole DMA buffer
+			       * (userdma -> _bclean_caches), ~29% of all cycles under Doom. */
+			      n_flush_line_req_l1i = 1'b1;
+			      n_flush_line_idx_l1i = t_rob_head.data[`LG_L1D_CL_LEN+`LG_L1I_NUM_SETS-1:`LG_L1D_CL_LEN];
 			      n_l1d_flush_complete = 1'b1;          /* not flushing L1D */
+			      n_l2_flush_complete  = 1'b1;          /* no L2 work for an L1I line */
 			   end
 			 n_state = CACHE_FLUSH;
 		      end

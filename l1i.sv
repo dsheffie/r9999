@@ -35,6 +35,9 @@ module l1i(clk,
 	   in_64b_user_mode,
 	   flush_req,
 	   flush_complete,
+	   flush_line_req,
+	   flush_line_idx,
+	   flush_line_complete,
 	   restart_pc,
 	   dbg_arch_hist,
 	   dbg_spec_hist,
@@ -93,6 +96,12 @@ module l1i(clk,
    
    input logic 	      flush_req;
    output logic       flush_complete;
+   /* per-line invalidate (I-side CACHE ops): clear both ways of one set, instead of
+    * the whole-cache flush above.  Separate handshake, so the L1/L2 flush sequencers
+    * never see it. */
+   input logic 	      flush_line_req;
+   input logic [`LG_L1I_NUM_SETS-1:0] flush_line_idx;
+   output logic       flush_line_complete;
    //restart signals
    input logic [`M_WIDTH-1:0] restart_pc;
    /* Global history, read back over the existing trace-index debug port.
@@ -404,6 +413,10 @@ endfunction
    logic 		  t_clear_fq;
    logic 		  r_flush_req, n_flush_req;
    logic 		  r_flush_complete, n_flush_complete;
+   logic 		  r_fline_req, n_fline_req;      /* a per-line invalidate is pending */
+   logic [`LG_L1I_NUM_SETS-1:0] r_fline_idx, n_fline_idx;
+   logic 		  r_fline_one, n_fline_one;      /* FLUSH_CACHE clears just one set */
+   logic 		  r_fline_complete, n_fline_complete;
    logic 		  n_delay_slot, r_delay_slot;
    logic 		  t_take_br, t_is_cflow;
    logic 		  t_update_spec_hist;
@@ -447,6 +460,7 @@ endfunction
 
 
    assign flush_complete = r_flush_complete;
+   assign flush_line_complete = r_fline_complete;
    
    assign insn_valid = !fq_empty;
    assign insn_valid_two = !(fq_next_empty || fq_empty);
@@ -752,6 +766,10 @@ endfunction
 	n_state = r_state;
 	n_restart_ack = 1'b0;
 	n_flush_req = r_flush_req | flush_req;
+	n_fline_req = r_fline_req | flush_line_req;
+	n_fline_idx = flush_line_req ? flush_line_idx : r_fline_idx;
+	n_fline_one = r_fline_one;
+	n_fline_complete = 1'b0;
 	n_flush_complete = 1'b0;
 	n_delay_slot = r_delay_slot;
 	t_cache_idx = 'd0;
@@ -913,6 +931,14 @@ endfunction
 		    t_clear_fq = 1'b1;
 		    n_state = FLUSH_CACHE;
 		    t_cache_idx = 0;
+		 end
+	       else if(n_fline_req)
+		 begin
+		    n_fline_req = 1'b0;
+		    t_clear_fq = 1'b1;
+		    n_state = FLUSH_CACHE;
+		    t_cache_idx = n_fline_idx;
+		    n_fline_one = 1'b1;
 		 end
 	       else if(n_restart_req)
 		 begin
@@ -1130,6 +1156,14 @@ endfunction
 		    n_state = FLUSH_CACHE;
 		    t_cache_idx = 0;
 		 end
+	       else if(n_fline_req)
+		 begin
+		    n_fline_req = 1'b0;
+		    t_clear_fq = 1'b1;
+		    n_state = FLUSH_CACHE;
+		    t_cache_idx = n_fline_idx;
+		    n_fline_one = 1'b1;
+		 end
 	       else if(n_restart_req)
 		 begin
 		    n_restart_ack = 1'b1;
@@ -1150,7 +1184,14 @@ endfunction
 	    end
 	  FLUSH_CACHE:
 	    begin
-	       if(r_cache_idx == (L1I_NUM_SETS-1))
+	       if(r_fline_one)
+		 begin
+		    /* per-line invalidate: this cycle cleared set r_cache_idx (both ways) */
+		    n_fline_one = 1'b0;
+		    n_fline_complete = 1'b1;
+		    n_state = IDLE;
+		 end
+	       else if(r_cache_idx == (L1I_NUM_SETS-1))
 		 begin
 		    //$display("REQ FLUSHING COMPLETE at %d", r_cycle);
 		    n_flush_complete = 1'b1;
@@ -1175,6 +1216,14 @@ endfunction
 		    t_clear_fq = 1'b1;
 		    n_state = FLUSH_CACHE;
 		    t_cache_idx = 0;		    
+		 end
+	       else if(n_fline_req)
+		 begin
+		    n_fline_req = 1'b0;
+		    t_clear_fq = 1'b1;
+		    n_state = FLUSH_CACHE;
+		    t_cache_idx = n_fline_idx;
+		    n_fline_one = 1'b1;
 		 end
 	       else if(n_restart_req)
 		 begin
@@ -1205,6 +1254,14 @@ endfunction
 		    t_clear_fq = 1'b1;
 		    n_state = FLUSH_CACHE;
 		    t_cache_idx = 0;
+		 end
+	       else if(n_fline_req)
+		 begin
+		    n_fline_req = 1'b0;
+		    t_clear_fq = 1'b1;
+		    n_state = FLUSH_CACHE;
+		    t_cache_idx = n_fline_idx;
+		    n_fline_one = 1'b1;
 		 end
 	       else if(n_restart_req)
 		 begin
@@ -1944,6 +2001,10 @@ endfunction
 	     r_restart_req <= 1'b0;
 	     r_flush_req <= 1'b0;
 	     r_flush_complete <= 1'b0;
+	     r_fline_req <= 1'b0;
+	     r_fline_idx <= 'd0;
+	     r_fline_one <= 1'b0;
+	     r_fline_complete <= 1'b0;
 	     r_delay_slot <= 1'b0;
 	     r_spec_rs_tos <= RETURN_STACK_ENTRIES-1;
 	     r_arch_rs_tos <= RETURN_STACK_ENTRIES-1;
@@ -1977,6 +2038,10 @@ endfunction
 	     r_restart_req <= n_restart_req;
 	     r_flush_req <= n_flush_req;
 	     r_flush_complete <= n_flush_complete;
+	     r_fline_req <= n_fline_req;
+	     r_fline_idx <= n_fline_idx;
+	     r_fline_one <= n_fline_one;
+	     r_fline_complete <= n_fline_complete;
 	     r_delay_slot <= n_delay_slot;
 	     r_spec_rs_tos <= n_spec_rs_tos;
 	     r_arch_rs_tos <= n_arch_rs_tos;

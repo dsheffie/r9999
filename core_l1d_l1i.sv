@@ -377,6 +377,9 @@ module core_l1d_l1i(clk,
    logic 				  flush_pg_req;
    wire 				  l1d_flush_complete;
    wire 				  l1i_flush_complete;
+   /* per-line L1I invalidate (I-side CACHE ops), core <-> l1i only */
+   wire 				  w_flush_line_req_l1i, w_l1i_flush_line_complete;
+   wire [`LG_L1I_NUM_SETS-1:0] 		  w_flush_line_idx_l1i;
 
    
    mem_req_t core_mem_req;
@@ -1010,6 +1013,9 @@ module core_l1d_l1i(clk,
 	      .in_64b_supervisor_mode(w_in_64b_supervisor_mode),
 	      .in_64b_user_mode(w_in_64b_user_mode),
 	      .flush_req(flush_req_l1i ),
+	      .flush_line_req(w_flush_line_req_l1i),
+	      .flush_line_idx(w_flush_line_idx_l1i),
+	      .flush_line_complete(w_l1i_flush_line_complete),
 	      .flush_complete(l1i_flush_complete),
 	      .restart_pc(restart_pc),
 	      .dbg_arch_hist(w_dbg_arch_hist),
@@ -1089,7 +1095,10 @@ module core_l1d_l1i(clk,
 	     .resume_pc(resume_pc),
 	     .ready_for_resume(ready_for_resume),  
 	     .flush_req_l1d(flush_req_l1d),
-	     .flush_req_l1i(flush_req_l1i),	     
+	     .flush_req_l1i(flush_req_l1i),
+	     .flush_line_req_l1i(w_flush_line_req_l1i),
+	     .flush_line_idx_l1i(w_flush_line_idx_l1i),
+	     .l1i_flush_line_complete(w_l1i_flush_line_complete),	     
 	     .flush_cl_req(flush_cl_req),
 	     .flush_cl_addr(flush_cl_addr),
 	     .flush_cl_inval(flush_cl_inval),
