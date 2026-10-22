@@ -1,35 +1,25 @@
 /*
- * henry_arcs.S  --  IP22-faithful synthetic ARCS/FSBL firmware for the Henry SoC.
- * One blob boots BOTH IP22 Linux (-> /init) and IRIX 6.5 (-> banner): the FSBL is
- * OS-neutral and the driver/TB patches the kentry slot per kernel. (Was arcs_linux.S;
- * the old stub-style arcs_irix.S and the minimal arcs_fw.S are superseded/removed.)
+ * henry_arcs.S  --  asm shim for the Henry synthetic ARCS/FSBL firmware.
  *
- * Structured like a real IP22: a first-stage boot loader (FSBL) lives in the
- * Boot PROM at kseg1 0xBFC00000 (phys 0x1fc00000, the CPU reset vector). At
- * reset the FSBL COPIES the small SPB/romvec block from the PROM into RAM at
- * kseg1 0xA0001000 (phys 0x1000), then stages the sash argv/envp and jumps to
- * the kernel.  The ARCS callback stubs stay in the PROM; the romvec entries
- * (copied to 0xA0001000) point back at them.
+ * Only the parts that MUST be assembly live here; the firmware body (SPB relocation,
+ * console, MAC, Newport bring-up, argv staging, ARCS callbacks) is C in henry_fw.c
+ * and henry_newport.c.  What stays asm, and why:
+ *   - the reset vector @0xBFC00000 and the driver-patched kentry slot @0xBFC00008;
+ *   - the MC early init (MEMCFG, GIO abort-enable) -- runs before the stack's RAM is
+ *     configured, so it cannot call into C;
+ *   - the stack setup and the final jump into the kernel (exact register control);
+ *   - the SPB/romvec/pvec and argv/envp DATA, whose byte layout the kernel reads.
  *
- * Why FSBL+copy instead of loading the whole blob at 0x1000: with the IP22
- * "System Memory Alias" (mc.pdf 4) phys 0x0..0x7ffff maps into the bottom of
- * main DRAM @ 0x08000000, where the kernel _text loads at phys 0x08004000.
- * The full 16 KB blob at 0x1000 (->0x08001000) would overlap _text; copying
- * only the ~3 KB SPB there (below _text) does not, and the stub code stays in
- * the PROM shadow far from the kernel.  See arcs_linux.ld.
- *
- * Loaded as one flat blob into the PROM region (the address map shadows it into
- * DRAM); core resets to 0xBFC00000.  Build: see the Makefile arcs_linux target.
+ * One blob boots BOTH IP22 Linux (-> /init) and IRIX 6.5 (-> banner); the driver/TB
+ * patches the kentry slot per kernel.  Loaded flat into the PROM region; the core
+ * resets to 0xBFC00000.  Build: see the Makefile.  See also henry_arcs.ld.
  */
 
 #include "sim.h"
 
 /* Free-RAM descriptor base: reserve the low 16 KiB of main memory (phys
- * 0x08000000..0x08003fff) -- with the System Memory Alias that region backs the
- * CPU exception vectors (phys 0/0x80, aliased here) and the SPB the FSBL copies
- * to phys 0x1000.  It sits below the kernel _text @ 0x08004000, so reporting
- * free RAM from 0x08004000 keeps the kernel mm from freeing/allocating over the
- * vectors (which on real IP22 the firmware likewise reserves). */
+ * 0x08000000..0x08003fff) -- the CPU exception vectors (aliased) and the SPB the FSBL
+ * copies to phys 0x1000 live there, below the kernel _text @ 0x08004000. */
 #ifndef ARCS_RAM_BASE
 #define ARCS_RAM_BASE   0x08004000
 #endif
@@ -40,279 +30,104 @@
 #define ARCS_RAM_PAGES   (ARCS_RAM_SIZE >> 12)
 
     .set    ARCS_BB,   0x88fff000       /* runtime base for the argv/envp blob */
-    .set    ARCS_ARGC, 8
-    .set    ARCS_KENTRY, 0x88005960     /* default kernel entry; the driver/TB patches the slot @0xBFC00008 */
+    .set    ARCS_KENTRY, 0x88005960     /* default kernel entry; the driver/TB patches @0xBFC00008 */
 
     .set    mips3
     .set    noreorder
     .set    noat
 
 /* ====================================================================
- * PROM: first-stage boot loader @ 0xBFC00000 (the CPU reset vector).
+ * PROM: reset vector + minimal early init @ 0xBFC00000.
  * ==================================================================== */
     .section .arcs_boot, "ax"
     .globl  arcs_boot
 arcs_boot:
-    b       fsbl                    /* 0xBFC00000: skip the patch slot */
+    b       _start                  /* 0xBFC00000: skip the patch slot */
     nop
     .globl  arcs_kentry_slot
 arcs_kentry_slot:                   /* 0xBFC00008: driver patches kernel e_entry (BE) */
     .word   ARCS_KENTRY
-fsbl:
-    /* (-1) program MC MEMCFG0 = 256 MB (2x128MB banks) so IRIX hinv sees full RAM.
-     * MC base 0x1fa00000 + MEMCFG0 offset 0xc4 = kseg1 0xbfa000c4; value 0x3f203f40.
-     * (The committed source was missing this; the deployed FSBL carried it as an
-     * uncommitted edit -- see reference_ip22_mc_memcfg. Restored here.) */
+
+_start:
+    /* (-1) MC MEMCFG0 = 256 MB (2x128MB banks) so IRIX hinv sees full RAM.
+     * MC base 0x1fa00000 + MEMCFG0 offset 0xc4 = kseg1 0xbfa000c4.  Must run before
+     * the C stack, which lives in RAM this enables. */
     lui     $t0, 0x3f20
     ori     $t0, $t0, 0x3f40        /* MEMCFG0 = 0x3f203f40 (2 banks x 128MB) */
     lui     $t1, 0xbfa0
-    ori     $t1, $t1, 0x00c4        /* &MC MEMCFG0 */
-    sw      $t0, 0($t1)
+    sw      $t0, 0xc4($t1)
     nop
 
-    /* (-1b) enable GIO bus time-outs, MC CPUCTRL1.ABORT_EN (bit 4), as the SGI PROM
-     * does: an access to empty GIO space then completes with a bus error (DBE)
-     * instead of hanging.  IRIX's and Linux's GIO probes rely on it; Linux only
-     * read-modify-writes CPUCTRL1 (henry docs/bus-errors.md). */
-    lui     $t1, 0xbfa0
+    /* (-1b) MC CPUCTRL1.ABORT_EN (bit 4): a GIO access no slave answers then completes
+     * with a bus error instead of hanging -- IRIX's and Linux's GIO probes need it. */
     lw      $t0, 0xc($t1)           /* MC CPUCTRL1 (kseg1 0xbfa0000c) */
     ori     $t0, $t0, 0x0010
     sw      $t0, 0xc($t1)
     nop
 
-    /* (0) FSBL: copy the SPB/romvec block PROM(_spb_lma) -> RAM 0xA0001000.
-     * 0xA0001000 is kseg1 (uncached, so the kernel's later reads see it) and the
-     * System Memory Alias lands it in real DRAM @ 0x08001000. */
-    la      $t0, _spb_lma           /* src in PROM */
-    li      $t1, 0xA0001000         /* dst in RAM */
-    la      $t2, _spb_size
-    addu    $t2, $t0, $t2           /* src end */
-1:  lw      $t3, 0($t0)
-    sw      $t3, 0($t1)
-    addiu   $t0, $t0, 4
-    addiu   $t1, $t1, 4
-    bne     $t0, $t2, 1b
+    /* set up a stack just below the argv blob (0x88ffe000, scratch RAM above the
+     * kernel image) and hand off to the C firmware body, which does not return. */
+    lui     $sp, 0x88ff
+    ori     $sp, $sp, 0xe000
+    move    $fp, $sp
+    jal     fsbl_main
+    nop
+1:  b       1b                      /* fsbl_main jumps to the kernel; never returns */
     nop
 
-    /* (1) SCC heartbeat: poll RR0.TxEmpty @0xbfbd9830, write DATA @0xbfbd9837 */
-    lui     $t4, 0xbfbd
-    ori     $t5, $t4, 0x9830
-    ori     $t6, $t4, 0x9837
-    la      $t1, arcs_hb_str
-2:  lbu     $t2, 0($t1)
-    beq     $t2, $zero, 3f
-    nop
-9:  lbu     $t3, 0($t5)
-    andi    $t3, $t3, 0x04
-    beq     $t3, $zero, 9b
-    nop
-    sb      $t2, 0($t6)
-    addiu   $t1, $t1, 1
-    b       2b
-    nop
-3:
-    /* (1b) program the station MAC into the ds1386 bbRAM @0xbfbe04e8..fc
-     * (HPC3 base 0x1fb80000 + bbram EADDR offset 0x604e8), so IRIX if_ec reads a
-     * valid address instead of 00:00:00:00:00:00.  One byte per word, in the word's
-     * low byte (byte offset +3): bbRAM is plain memory (henry_soc leaves it to DRAM)
-     * and readers do lw + `& 0xff`.  MAC = 08:00:69:12:34:56 (real SGI OUI; matches
-     * eaddr_str and the interp_mips bbRAM). */
-    lui     $t0, 0xbfbe
-    ori     $t0, $t0, 0x04e8        /* &bbram[EADDR], kseg1 uncached */
-    ori     $t1, $zero, 0x08
-    sw      $t1, 0($t0)             /* byte 0 = 0x08 */
-    sw      $zero, 4($t0)           /* byte 1 = 0x00 */
-    ori     $t1, $zero, 0x69
-    sw      $t1, 8($t0)             /* byte 2 = 0x69 */
-    ori     $t1, $zero, 0x12
-    sw      $t1, 12($t0)            /* byte 3 = 0x12 */
-    ori     $t1, $zero, 0x34
-    sw      $t1, 16($t0)            /* byte 4 = 0x34 */
-    ori     $t1, $zero, 0x56
-    sw      $t1, 20($t0)            /* byte 5 = 0x56 */
-    /* TEMP DEBUG: read back 0x604e8 (t0) via lw and lbu, print both as hex over SCC */
-    lui     $t4, 0xbfbd
-    ori     $t5, $t4, 0x9830        /* SCC RR0 status (TxEmpty = bit 0x04) */
-    ori     $t6, $t4, 0x9837        /* SCC data */
-    move    $t9, $zero              /* lbu all 6 MAC bytes at t0+{0,4,8,12,16,20} */
-dbg_macl:
-    addu    $a2, $t0, $t9
-    lw      $t8, 0($a2)             /* IRIX Guiness path: lw then & 0xff */
-    andi    $t8, $t8, 0xff
-    bal     dbg_phex
-    nop
-    addiu   $t9, $t9, 4
-    sltiu   $a3, $t9, 24
-    bne     $a3, $zero, dbg_macl
-    nop
-dbg_nl:
-    lbu     $a0, 0($t5)             /* newline: poll TxEmpty */
-    andi    $a0, $a0, 0x04
-    beq     $a0, $zero, dbg_nl
-    nop
-    ori     $a0, $zero, 0x0a
-    sb      $a0, 0($t6)
-    /* TEMP DEBUG: read NMC93CS56 eeprom words 125,126,127 (MAC) via Microwire, print */
-    ori     $s0, $zero, 125
-    ori     $s1, $zero, 128
-dbg_ee_loop:
-    move    $a0, $s0
-    bal     ee_read                 /* $v0 = 16-bit eeprom word */
-    nop
-    move    $t8, $v0
-    bal     dbg_phex
-    nop
-    addiu   $s0, $s0, 1
-    bne     $s0, $s1, dbg_ee_loop
-    nop
-dbg_ee_nl:
-    lbu     $a0, 0($t5)
-    andi    $a0, $a0, 0x04
-    beq     $a0, $zero, dbg_ee_nl
-    nop
-    ori     $a0, $zero, 0x0a
-    sb      $a0, 0($t6)
-    b       dbg_done
-    nop
-dbg_phex:                           /* print $t8 as 8 hex nibbles + space; leaf (uses ra) */
-    ori     $t7, $zero, 8
-dbg_ph_loop:
-    srl     $a0, $t8, 28
-    andi    $a0, $a0, 0xf
-    sltiu   $a1, $a0, 10
-    beq     $a1, $zero, dbg_ph_af
-    nop
-    addiu   $a0, $a0, 0x30          /* '0'..'9' */
-    b       dbg_ph_emit
-    nop
-dbg_ph_af:
-    addiu   $a0, $a0, 0x57          /* 'a'..'f' */
-dbg_ph_emit:
-    lbu     $a1, 0($t5)
-    andi    $a1, $a1, 0x04
-    beq     $a1, $zero, dbg_ph_emit
-    nop
-    sb      $a0, 0($t6)
-    sll     $t8, $t8, 4
-    addiu   $t7, $t7, -1
-    bne     $t7, $zero, dbg_ph_loop
-    nop
-dbg_ph_sp:                          /* trailing space */
-    lbu     $a1, 0($t5)
-    andi    $a1, $a1, 0x04
-    beq     $a1, $zero, dbg_ph_sp
-    nop
-    ori     $a0, $zero, 0x20
-    sb      $a0, 0($t6)
-    jr      $ra
+/* jump_kernel(argc, argv, envp, entry): a0=argc a1=argv a2=envp a3=entry already
+ * (O32), so Linux/IRIX see the ARCS convention; just transfer to the kernel. */
+    .globl  jump_kernel
+jump_kernel:
+    jr      $a3
     nop
 
-/* ee_read: NMC93CS56 Microwire READ of word $a0 -> $v0 (16-bit). Leaf (uses ra).
- * ctrl reg @ HPC3 0x30008 = kseg1 0xbfbb0008. bits: 0x01 EPROT 0x02 CSEL 0x04 ECLK
- * 0x08 DATO 0x10 DATI.  Mirrors ip22-nvram.c ip22_eeprom_read(). t1 = shadow ctrl. */
-ee_read:
-    lui     $t0, 0xbfbb
-    ori     $t0, $t0, 0x0008
-    /* cs_on: all low, then CSEL, then ECLK */
-    sw      $zero, 0($t0)
-    ori     $t1, $zero, 0x02        /* CSEL */
-    sw      $t1, 0($t0)
-    ori     $t1, $t1, 0x04          /* + ECLK */
-    sw      $t1, 0($t0)
-    /* ser_cmd = 0xc000 | (reg<<5), clock 11 bits MSB-first */
-    sll     $a1, $a0, 5
-    ori     $t3, $zero, 0xc000      /* READ opcode (start+10) in low 16 bits */
-    or      $a1, $a1, $t3
-    andi    $a1, $a1, 0xffff
-    ori     $a2, $zero, 11
-ee_c:
-    andi    $t4, $a1, 0x8000        /* DATO = bit15 */
-    ori     $t1, $zero, 0x02        /* CSEL, ECLK=0, DATO=0 */
-    beq     $t4, $zero, ee_c0
-    nop
-    ori     $t1, $t1, 0x08          /* DATO=1 */
-ee_c0:
-    sw      $t1, 0($t0)             /* ECLK=0 */
-    ori     $t1, $t1, 0x04
-    sw      $t1, 0($t0)             /* ECLK=1 (rising) */
-    sll     $a1, $a1, 1
-    addiu   $a2, $a2, -1
-    bne     $a2, $zero, ee_c
-    nop
-    ori     $t1, $zero, 0x06        /* DATO=0, CSEL+ECLK */
-    sw      $t1, 0($t0)
-    /* clock 16 data bits out of DATI, MSB-first */
-    move    $v0, $zero
-    ori     $a2, $zero, 16
-ee_d:
-    ori     $t1, $zero, 0x02        /* CSEL, ECLK=0 */
-    sw      $t1, 0($t0)
-    ori     $t1, $t1, 0x04
-    sw      $t1, 0($t0)             /* ECLK=1 (rising) */
-    sll     $v0, $v0, 1
-    lw      $t2, 0($t0)
-    andi    $t2, $t2, 0x10          /* DATI */
-    beq     $t2, $zero, ee_d0
-    nop
-    ori     $v0, $v0, 1
-ee_d0:
-    addiu   $a2, $a2, -1
-    bne     $a2, $zero, ee_d
-    nop
-    /* cs_off */
-    ori     $t1, $zero, 0x02
-    sw      $t1, 0($t0)             /* ECLK=0 */
-    sw      $zero, 0($t0)           /* CSEL=0 */
-    ori     $t1, $zero, 0x01
-    sw      $t1, 0($t0)             /* EPROT=1 */
-    ori     $t1, $zero, 0x05
-    sw      $t1, 0($t0)             /* + ECLK=1 */
-    jr      $ra
-    nop
-dbg_done:
-
-    /* (2) copy the argv/envp blob to kseg0 0x88fff000 */
-    la      $t0, arcs_argv_blob
-    la      $t2, arcs_argv_blob_end
-    li      $t1, ARCS_BB
-4:  lbu     $t3, 0($t0)
-    sb      $t3, 0($t1)
-    addiu   $t0, $t0, 1
-    addiu   $t1, $t1, 1
-    bne     $t0, $t2, 4b
-    nop
-
-    /* (3) entry regs + jump to the kernel */
-    /* a0=argc, a1=argv, a2=envp. Linux consumes these; IRIX ignores a1/a2 and
-     * reads everything from the SPB -- so this one convention boots both. */
-    li      $a0, ARCS_ARGC
-    li      $a1, ARCS_BB
-    addiu   $a2, $a1, (arcs_envp_arr - arcs_argv_blob)   /* a2 = envp array */
-    addiu   $a1, $a1, (arcs_argv_arr - arcs_argv_blob)   /* a1 = argv array */
-    move    $a3, $zero
-    move    $v0, $zero
-    move    $v1, $zero
-    move    $t0, $zero
-    move    $t1, $zero
-    move    $t2, $zero
-    move    $t3, $zero
-    move    $t4, $zero
-    move    $t5, $zero
-    move    $t6, $zero
-    move    $t7, $zero
-    move    $t8, $zero
-    move    $t9, $zero
-    la      $k0, arcs_kentry_slot   /* 0xBFC00008, kseg1 uncached -> sees driver patch */
-    lw      $k0, 0($k0)
-    jr      $k0
-    nop
+/* ====================================================================
+ * PROM: data the ARCS callbacks (henry_fw.c) return.
+ * ==================================================================== */
+    .section .arcs_code, "a"
 
     .align  2
-arcs_hb_str:
-    .asciz  "r9999 PROM: CPU alive, handing off to the kernel\n"
+    .globl  eaddr_str
+eaddr_str:
+    .asciz  "08:00:69:12:34:56"     /* getenv("eaddr") -> SGI MAC (etoh parses this) */
+    .globl  monitor_str
+monitor_str:
+    .asciz  "h"                     /* getenv("monitor") -> the 1280x1024 monitor */
+#ifdef SINGLE_USER
+    .globl  single_str
+single_str:
+    .asciz  "SINGLE"                /* getenv("initstate") -> single-user boot */
+#endif
 
-/* sash argv/envp blob (mirrors pseudo_bios.cc); pointers computed for runtime
- * base ARCS_BB = 0x88fff000.  Copied there by the FSBL above. */
+/* ARCS memory descriptor { ULONG Type; ULONG BasePage; ULONG PageCount; }
+ * Type 2 = FreeContiguous (Linux arc memory.c: type 2 = free RAM). */
+    .align  3
+    .globl  mdesc_ram
+mdesc_ram:
+    .word   2
+    .word   ARCS_RAM_BASE_PG
+    .word   ARCS_RAM_PAGES
+
+/* Root ARCS component; only ->iname ("SGI-IP22") is typically read. */
+    .align  3
+    .globl  root_component
+root_component:
+    .word   1                   /* class  */
+    .word   1                   /* type   */
+    .word   0                   /* flags  */
+    .short  0                   /* version */
+    .short  0                   /* revision */
+    .word   0                   /* key    */
+    .word   0                   /* affinity mask */
+    .word   0                   /* config data size */
+    .word   8                   /* identifier length */
+    .word   arch_name           /* identifier -> "SGI-IP22" */
+arch_name:
+    .asciz  "SGI-IP22"
+
+/* sash argv/envp blob (mirrors pseudo_bios.cc); pointers computed for runtime base
+ * ARCS_BB = 0x88fff000.  fsbl_main copies it there and derives argv/envp. */
     .align  2
     .globl  arcs_argv_blob
 arcs_argv_blob:
@@ -343,19 +158,17 @@ s_e15: .asciz "OSLoader=sash"
 s_e16: .asciz "kernname=scsi(0)disk(1)rdisk(0)partition(0)/unix"
 s_e18: .asciz "monitor=h"
 #ifdef SINGLE_USER
-/* boot to single-user: the kernel reads initstate via arcs_getenv and compares
- * it to "SINGLE" (IP22.c), dropping init to the single-user root shell instead
- * of multi-user. Built into a separate henry_arcs_single.bin; the FPGA/default
- * henry_arcs.bin (no -DSINGLE_USER) stays multi-user. */
 s_e17: .asciz "initstate=SINGLE"
 #endif
     .align  2
+    .globl  arcs_argv_arr
 arcs_argv_arr:
     .word   ARCS_BB+(s_a0-arcs_argv_blob), ARCS_BB+(s_a1-arcs_argv_blob)
     .word   ARCS_BB+(s_a2-arcs_argv_blob), ARCS_BB+(s_a3-arcs_argv_blob)
     .word   ARCS_BB+(s_a4-arcs_argv_blob), ARCS_BB+(s_a5-arcs_argv_blob)
     .word   ARCS_BB+(s_a6-arcs_argv_blob), ARCS_BB+(s_a7-arcs_argv_blob)
     .word   0
+    .globl  arcs_envp_arr
 arcs_envp_arr:
     .word   ARCS_BB+(s_e0-arcs_argv_blob),  ARCS_BB+(s_e1-arcs_argv_blob)
     .word   ARCS_BB+(s_e2-arcs_argv_blob),  ARCS_BB+(s_e3-arcs_argv_blob)
@@ -374,162 +187,9 @@ arcs_envp_arr:
 arcs_argv_blob_end:
 
 /* ====================================================================
- * PROM: ARCS callback stubs + the data they return (O32: args a0..a3, ret v0).
- * The romvec (in the SPB block @ 0xA0001000) points here (PROM addresses).
- * ==================================================================== */
-    .section .arcs_code, "ax"
-
-/* LONG Write(handle, void *buf, ULONG len, ULONG *cnt): write to CP0 putchar. */
-    .globl  stub_write
-stub_write:
-    move    $t0, $a2
-    move    $t1, $a1
-1:  blez    $t0, 2f
-    nop
-    lb      $t2, 0($t1)
-9:  mfc0    $t3, $7
-    andi    $t3, $t3, 1
-    bne     $t3, $zero, 9b
-    nop
-    mtc0    $t2, $7
-    addiu   $t1, $t1, 1
-    b       1b
-    addiu   $t0, $t0, -1
-2:  beq     $a3, $zero, 3f
-    nop
-    sw      $a2, 0($a3)
-3:  jr      $ra
-    move    $v0, $zero
-
-/* MEMORYDESCRIPTOR *GetMemoryDescriptor(MEMORYDESCRIPTOR *cur):
- * first call (cur==NULL) returns our one free-RAM descriptor; then NULL. */
-    .globl  stub_mdesc
-stub_mdesc:
-    bne     $a0, $zero, 1f
-    nop
-    la      $v0, mdesc_ram
-    jr      $ra
-    nop
-1:  jr      $ra
-    move    $v0, $zero
-
-/* char *GetEnvironmentVariable(char *name): the real PROM reads NVRAM env vars;
- * we synthesize the ones the kernel needs at boot.  "mon..." (monitor) returns "h":
- * the 1280x1024 high-resolution monitor -- a 24-bit Newport (board revision 0)
- * takes its video timing from it, as MAME's XL24 needs `setenv monitor h`.
- * Default: return the eaddr (MAC) string for every other query (etoh parses it;
- * harmless for others).  With -DSINGLE_USER, a query whose name starts with 'i'
- * (initstate) returns "SINGLE" so the kernel's IP22.c init drops to the
- * single-user root shell. */
-    .globl  stub_getenv
-stub_getenv:
-    beq     $a0, $zero, 3f          /* null name -> the default below */
-    nop
-    lbu     $t0, 0($a0)
-    li      $t1, 'm'
-    bne     $t0, $t1, 3f
-    nop
-    lbu     $t0, 1($a0)
-    li      $t1, 'o'
-    bne     $t0, $t1, 3f
-    nop
-    lbu     $t0, 2($a0)
-    li      $t1, 'n'
-    bne     $t0, $t1, 3f
-    nop
-    la      $v0, monitor_str
-    jr      $ra
-    nop
-3:
-#ifdef SINGLE_USER
-    beq     $a0, $zero, 2f          /* null name -> eaddr (safe default) */
-    nop
-    lbu     $t0, 0($a0)             /* first char of the requested var name */
-    li      $t1, 'i'                /* 'initstate' -> "SINGLE" */
-    bne     $t0, $t1, 2f
-    nop
-    la      $v0, single_str
-    jr      $ra
-    nop
-2:
-#endif
-    la      $v0, eaddr_str
-    jr      $ra
-    nop
-
-/* COMPONENT *GetChild(COMPONENT *cur): root for NULL query, else NULL. */
-    .globl  stub_child
-stub_child:
-    bne     $a0, $zero, 1f
-    nop
-    la      $v0, root_component
-    jr      $ra
-    nop
-1:  jr      $ra
-    move    $v0, $zero
-
-/* COMPONENT *GetPeer(COMPONENT *cur): no peers -> NULL. */
-    .globl  stub_peer
-stub_peer:
-    jr      $ra
-    move    $v0, $zero
-
-/* Default: return 0 cleanly. */
-    .globl  stub_default
-stub_default:
-    jr      $ra
-    move    $v0, $zero
-
-/* Halt/PowerDown/Restart/Reboot: stop the simulator (magic-halt register). */
-    .globl  stub_halt
-stub_halt:
-    li      $k0, 0xBFD00000
-    li      $k1, 1
-    sw      $k1, 0($k0)
-1:  b       1b
-    nop
-
-/* ARCS memory descriptor { ULONG Type; ULONG BasePage; ULONG PageCount; }
- * Type 2 = FreeContiguous (Linux arc memory.c: type 2 = free RAM). */
-    .align  3
-    .globl  mdesc_ram
-mdesc_ram:
-    .word   2
-    .word   ARCS_RAM_BASE_PG
-    .word   ARCS_RAM_PAGES
-
-/* Root ARCS component; only ->iname ("SGI-IP22") is typically read. */
-    .align  3
-    .globl  root_component
-root_component:
-    .word   1                   /* class  */
-    .word   1                   /* type   */
-    .word   0                   /* flags  */
-    .short  0                   /* version */
-    .short  0                   /* revision */
-    .word   0                   /* key    */
-    .word   0                   /* affinity mask */
-    .word   0                   /* config data size */
-    .word   8                   /* identifier length */
-    .word   arch_name           /* identifier -> "SGI-IP22" */
-
-arch_name:
-    .asciz  "SGI-IP22"
-
-    .align  2
-eaddr_str:
-    .asciz  "08:00:69:12:34:56"     /* getenv("eaddr") -> SGI MAC (etoh parses this) */
-monitor_str:
-    .asciz  "h"                     /* getenv("monitor") -> the 1280x1024 monitor */
-#ifdef SINGLE_USER
-single_str:
-    .asciz  "SINGLE"                /* getenv("initstate") -> single-user boot */
-#endif
-
-/* ====================================================================
- * RAM image: ARCS System Parameter Block + romvec + pvec, linked at kseg1
- * 0xA0001000 but STORED in the PROM (LMA); the FSBL copies it here at reset.
- * The kernel reads PROMBLOCK == 0xA0001000.
+ * RAM image: ARCS SPB + romvec + pvec, linked at kseg1 0xA0001000 but STORED in the
+ * PROM (LMA); fsbl_relocate_spb() copies it to VMA at reset.  romvec entries point at
+ * the C callbacks in henry_fw.c.
  * ==================================================================== */
     .section .arcs_spb, "a"
     .globl  arcs_spb
