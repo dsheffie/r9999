@@ -500,6 +500,7 @@ module exec(clk,
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_ser, n_mem_sched_ser;        /* CACHE hit op: serializing */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_old1, n_mem_sched_old1;      /* SC/SCD: a held store that issues only when oldest */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_mg, n_mem_sched_mg;          /* LWL/LWR/LDL/LDR: needs the old rt (captured) before issue */
+   logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_mv, n_mem_sched_mv;          /* MFC1/MTC1/DMFC1/DMTC1: register move, no memory ordering */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_issued, n_mem_sched_issued;  /* address pass issued */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_sd_sel, n_mem_sched_sd_sel;  /* store data read issued */
    logic [N_MEM_SCHED_ENTRIES-1:0] r_mem_sched_sd_ok, n_mem_sched_sd_ok;    /* store data in the l1d */
@@ -523,7 +524,7 @@ module exec(clk,
    logic [`LG_MEM_SCHED_ENTRIES:0] t_mem_cmt_ptr, t_mem_sd_ptr;
    uop_t t_picked_mem_uop;
    logic 	t_mem_issue, t_mem_issue_addr, t_mem_issue_cmt;
-   logic 	t_mem_uq_generic_load, t_mem_uq_plain_store, t_mem_uq_serial, t_mem_uq_old1, t_mem_uq_merge;
+   logic 	t_mem_uq_generic_load, t_mem_uq_plain_store, t_mem_uq_serial, t_mem_uq_old1, t_mem_uq_merge, t_mem_uq_move;
    /* the issued op, one stage on (AGU) */
    logic [`LG_MEM_SCHED_ENTRIES-1:0] r_mem_uq_lsu_idx;
    logic 	r_mem_uq_lsu_hold, r_mem_uq_commit, r_mem_uq_color;
@@ -3029,7 +3030,8 @@ module exec(clk,
 				     ((r_mem_sched_uops[i].fp_srcB_valid && !r_mem_sched_uops[i].is_store) ?
 				      !r_fp_prf_inflight[r_mem_sched_uops[i].srcB] : 1'b1);
 		t_mem_elig[i] = t_mem_entry_rdy[i] &
-				((t_mem_strict[i] | r_mem_sched_old1[i]) ? ((|r_mem_sched_matrix[i]) == 1'b0) :
+				(r_mem_sched_mv[i] ? 1'b1 :
+				 (t_mem_strict[i] | r_mem_sched_old1[i]) ? ((|r_mem_sched_matrix[i]) == 1'b0) :
 				 ((|(r_mem_sched_matrix[i] & t_mem_pending)) == 1'b0));
 		/* retired store, no older store still to commit, data in the l1d: commit
 		 * it (commits stay in program order through the exec mem_q and the MQ,
@@ -3098,7 +3100,7 @@ module exec(clk,
    /* entry classes (registered state only) */
    always_comb
      begin
-	t_mem_strict = r_mem_sched_valid & ~r_mem_sched_ld & ~r_mem_sched_st;
+	t_mem_strict = r_mem_sched_valid & ~r_mem_sched_ld & ~r_mem_sched_st & ~r_mem_sched_mv;
 	t_mem_st_live = r_mem_sched_valid & r_mem_sched_st;
 	t_mem_pending = t_mem_strict | (t_mem_st_live & ~r_mem_sched_issued);
      end // always_comb
@@ -3126,9 +3128,9 @@ module exec(clk,
 	  begin
 	     t_mem_select_entry[t_mem_sched_select_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = 1'b1;
 	  end
-	/* freed: a strict op at issue, a simple load at its data response, a plain
-	 * store when the l1d has written it */
-	t_mem_free_entry = t_mem_select_entry & t_mem_strict & ~r_mem_sched_ser & {N_MEM_SCHED_ENTRIES{t_mem_issue_addr}};
+	/* freed: a strict op or FP<->GPR move at issue, a simple load at its data
+	 * response, a plain store when the l1d has written it */
+	t_mem_free_entry = t_mem_select_entry & (t_mem_strict | r_mem_sched_mv) & ~r_mem_sched_ser & {N_MEM_SCHED_ENTRIES{t_mem_issue_addr}};
 	if(mem_rsp_valid && mem_rsp_lsu_hold && (r_mem_sched_ld[mem_rsp_lsu_idx] | r_mem_sched_ser[mem_rsp_lsu_idx]))
 	  begin
 	     t_mem_free_entry[mem_rsp_lsu_idx] = 1'b1;
@@ -3152,6 +3154,10 @@ module exec(clk,
 	t_mem_uq_serial = (t_mem_uq.op == CHWB) | (t_mem_uq.op == CHWBINV) | (t_mem_uq.op == CHINV);
 	/* SC/SCD check the link on their address pass: every older op must be gone */
 	t_mem_uq_old1 = (t_mem_uq.op == SC) | (t_mem_uq.op == SCD);
+	/* GPR<->FPR moves only borrow the mem pipe as a cross-register-file path (MEM_MOV,
+	 * echoed by the l1d with no cache access): no memory ordering either way */
+	t_mem_uq_move = (t_mem_uq.op == MFC1) | (t_mem_uq.op == MTC1) |
+			(t_mem_uq.op == DMFC1) | (t_mem_uq.op == DMTC1);
      end // always_comb
 
    /* LSU state next-values */
@@ -3163,6 +3169,7 @@ module exec(clk,
 	n_mem_sched_ser = r_mem_sched_ser;
 	n_mem_sched_old1 = r_mem_sched_old1;
 	n_mem_sched_mg = r_mem_sched_mg;
+	n_mem_sched_mv = r_mem_sched_mv;
 	n_mem_sched_issued = r_mem_sched_issued;
 	n_mem_sched_sd_sel = r_mem_sched_sd_sel;
 	n_mem_sched_sd_ok = r_mem_sched_sd_ok;
@@ -3185,6 +3192,7 @@ module exec(clk,
 	     n_mem_sched_ser[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_serial;
 	     n_mem_sched_old1[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_old1;
 	     n_mem_sched_mg[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_merge;
+	     n_mem_sched_mv[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = t_mem_uq_move;
 	     n_mem_sched_ep[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]] = !r_mem_sched_ep[t_mem_sched_alloc_ptr[`LG_MEM_SCHED_ENTRIES-1:0]];
 	  end
 	if(t_mem_issue_addr)
@@ -3227,6 +3235,7 @@ module exec(clk,
 		  n_mem_sched_ser[i] = 1'b0;
 		  n_mem_sched_old1[i] = 1'b0;
 		  n_mem_sched_mg[i] = 1'b0;
+		  n_mem_sched_mv[i] = 1'b0;
 		  n_mem_sched_issued[i] = 1'b0;
 		  n_mem_sched_sd_sel[i] = 1'b0;
 		  n_mem_sched_sd_ok[i] = 1'b0;
@@ -3273,6 +3282,7 @@ module exec(clk,
 	     r_mem_sched_ser <= 'd0;
 	     r_mem_sched_old1 <= 'd0;
 	     r_mem_sched_mg <= 'd0;
+	     r_mem_sched_mv <= 'd0;
 	     r_mem_sched_issued <= 'd0;
 	     r_mem_sched_sd_sel <= 'd0;
 	     r_mem_sched_sd_ok <= 'd0;
@@ -3295,6 +3305,7 @@ module exec(clk,
 	     r_mem_sched_ser <= n_mem_sched_ser;
 	     r_mem_sched_old1 <= n_mem_sched_old1;
 	     r_mem_sched_mg <= n_mem_sched_mg;
+	     r_mem_sched_mv <= n_mem_sched_mv;
 	     r_mem_sched_issued <= n_mem_sched_issued;
 	     r_mem_sched_sd_sel <= n_mem_sched_sd_sel;
 	     r_mem_sched_sd_ok <= n_mem_sched_sd_ok;
