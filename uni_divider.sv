@@ -279,17 +279,22 @@ module uni_divider(clk,
 
    /* ---- FP normalize (fpu_iter) ---- */
    wire 	 w_rem_nz = (r_rem != 'd0);
+   /* .s stops early: left-align its short quotient/root to the .d bit positions
+    * (div: 27 bits -> [55:29], sqrt: 26 bits -> [54:29]); the zero fill is exact */
+   wire [55:0] 	 w_q = r_fmt ? r_q[55:0] :
+		       r_is_sqrt ? {1'b0, r_q[25:0], 29'd0} :
+		       {r_q[26:0], 29'd0};
    /* divide quotient q in (0.5,2), bit55 = 2^0: if set sig=Q[55:3], else shift up 1, exp-1 */
-   wire 	 w_div_ge1 = r_q[55];
-   wire [FW:0] 	 w_div_sig = w_div_ge1 ? r_q[55:3] : r_q[54:2];
-   wire 	 w_div_gd  = w_div_ge1 ? r_q[2] : r_q[1];
-   wire 	 w_div_rd  = w_div_ge1 ? r_q[1] : r_q[0];
-   wire 	 w_div_sd  = w_div_ge1 ? (r_q[0] | w_rem_nz) : w_rem_nz;
+   wire 	 w_div_ge1 = w_q[55];
+   wire [FW:0] 	 w_div_sig = w_div_ge1 ? w_q[55:3] : w_q[54:2];
+   wire 	 w_div_gd  = w_div_ge1 ? w_q[2] : w_q[1];
+   wire 	 w_div_rd  = w_div_ge1 ? w_q[1] : w_q[0];
+   wire 	 w_div_sd  = w_div_ge1 ? (w_q[0] | w_rem_nz) : w_rem_nz;
    wire signed [EW+2:0] w_div_ebase_norm = r_ebase - $signed({{(EW+2){1'b0}}, ~w_div_ge1});
    /* sqrt root Q (55b) = Y*2^54, Q[54] = hidden 1; always normalized */
-   wire [FW:0] 	 w_sqrt_sig = r_q[54:2];
-   wire 	 w_sqrt_gd  = r_q[1];
-   wire 	 w_sqrt_rd  = r_q[0];
+   wire [FW:0] 	 w_sqrt_sig = w_q[54:2];
+   wire 	 w_sqrt_gd  = w_q[1];
+   wire 	 w_sqrt_rd  = w_q[0];
    wire 	 w_sqrt_sd  = w_rem_nz;
 
    /* ---- integer pack (nu_divider PACK_OUTPUT): signs, then 32b sign-extension ---- */
@@ -434,13 +439,17 @@ module uni_divider(clk,
 		      begin
 			 n_rem = {{(RW-2){1'b0}}, w_rad[109:108]};
 			 n_src = w_rad[107:44];
-			 n_last = 'd54;		/* 55 root bits: 2^0 .. 2^-54 */
+			 /* 55 root bits (2^0 .. 2^-54) for .d; .s needs only 24 + guard + round =
+			  * 26 (its radicand bits past the 52 consumed are zero, so sticky = rem) */
+			 n_last = w_fmt_op ? 'd54 : 'd25;
 		      end
 		    else
 		      begin
 			 n_rem = {{(RW-FW-1){1'b0}}, sig_a};
 			 n_src = 'd0;
-			 n_last = 'd55;		/* 56 quotient bits: 2^0 .. 2^-55 */
+			 /* 56 quotient bits (2^0 .. 2^-55) for .d; .s needs 27 (2^0 .. 2^-26:
+			  * 24 + guard + round, +1 when Q < 1); the remainder supplies sticky */
+			 n_last = w_fmt_op ? 'd55 : 'd26;
 		      end
 		    /* special/denorm short-circuit straight to the round/pack stage */
 		    n_state = flush ? FP_WAITWB : (w_op_early | w_in_denorm) ? FP_ROUND : ITER;
