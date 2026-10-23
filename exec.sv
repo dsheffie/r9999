@@ -4186,12 +4186,12 @@ module exec(clk,
 	     r_shadow_tlb[r_tlb_index].asid     <= tlb_entry_out.asid;
 	     r_shadow_tlb[r_tlb_index].r        <= tlb_entry_out.r;
 	     r_shadow_tlb[r_tlb_index].vpn      <= tlb_entry_out.vpn;
-	     r_shadow_tlb[r_tlb_index].pfn0     <= tlb_entry_out.pfn0;
+	     r_shadow_tlb[r_tlb_index].pfn0     <= tlb_entry_out.pfn0[`TLB_PFN_WIDTH-1:0];
 	     r_shadow_tlb[r_tlb_index].d0       <= tlb_entry_out.d0;
 	     r_shadow_tlb[r_tlb_index].v0       <= tlb_entry_out.v0;
 	     r_shadow_tlb[r_tlb_index].g0       <= tlb_entry_out.g0;
 	     r_shadow_tlb[r_tlb_index].c0       <= tlb_entry_out.c0;
-	     r_shadow_tlb[r_tlb_index].pfn1     <= tlb_entry_out.pfn1;
+	     r_shadow_tlb[r_tlb_index].pfn1     <= tlb_entry_out.pfn1[`TLB_PFN_WIDTH-1:0];
 	     r_shadow_tlb[r_tlb_index].d1       <= tlb_entry_out.d1;
 	     r_shadow_tlb[r_tlb_index].v1       <= tlb_entry_out.v1;
 	     r_shadow_tlb[r_tlb_index].g1       <= tlb_entry_out.g1;
@@ -4239,7 +4239,7 @@ module exec(clk,
 	     n_entrylo0_v = r_tlb_entry.v0;
 	     n_entrylo0_d = r_tlb_entry.d0;
 	     n_entrylo0_c = r_tlb_entry.c0;	     
-	     n_entrylo0_pfn = r_tlb_entry.pfn0;	     
+	     n_entrylo0_pfn = {{(`PFN_WIDTH-`TLB_PFN_WIDTH){1'b0}}, r_tlb_entry.pfn0};	     
 	  end
 	else if(w_cp0_wr & w_cp0_wr_reg == 'd2)
 	  begin
@@ -4266,7 +4266,7 @@ module exec(clk,
 	     n_entrylo1_v = r_tlb_entry.v1;
 	     n_entrylo1_d = r_tlb_entry.d1;
 	     n_entrylo1_c = r_tlb_entry.c1;	     
-	     n_entrylo1_pfn = r_tlb_entry.pfn1;	     
+	     n_entrylo1_pfn = {{(`PFN_WIDTH-`TLB_PFN_WIDTH){1'b0}}, r_tlb_entry.pfn1};	     
 	  end	
 	else if(w_cp0_wr & w_cp0_wr_reg == 'd3)
 	  begin

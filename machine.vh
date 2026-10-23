@@ -286,6 +286,15 @@
  * it -- no translate-time PA-range check needed). 36-bit PA -> 24-bit PFN. */
 `define PFN_WIDTH (`PA_WIDTH - 12)
 
+/* PA bits the TLBs actually STORE (dtlb, itlb + micro-ITLB, exec's TLBR shadow):
+ * everything IP22/henry maps is below 0x20000000, so 29 bits; the stored PFN is
+ * zero-filled up to PFN_WIDTH on read and PA_WIDTH stays 36 everywhere else.  A
+ * PFN with bits set above TLB_PA_WIDTH aliases low (no PA-range check). */
+`ifndef TLB_PA_WIDTH
+ `define TLB_PA_WIDTH 29
+`endif
+`define TLB_PFN_WIDTH (`TLB_PA_WIDTH - 12)
+
 /* JTLB entry count -- the knob for the TLB-CAM timing tradeoff. R4000/R4400 is
  * architecturally 48 (IRIX + Linux both hardcode it by PRId -- there's no Config1
  * MMU-size reg on R4x00), so 48 is the default and the ONLY value IRIX accepts.

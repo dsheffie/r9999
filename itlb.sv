@@ -115,10 +115,10 @@ module itlb(clk,
 		       r_tlb[ri].vpn      <= ehi[39:13];
 		       r_tlb[ri].g0       <= elo0[0];  r_tlb[ri].v0 <= elo0[1];
 		       r_tlb[ri].d0       <= elo0[2];  r_tlb[ri].c0 <= elo0[5:3];
-		       r_tlb[ri].pfn0     <= elo0[(`PFN_WIDTH+5):6];
+		       r_tlb[ri].pfn0     <= elo0[(`TLB_PFN_WIDTH+5):6];
 		       r_tlb[ri].g1       <= elo1[0];  r_tlb[ri].v1 <= elo1[1];
 		       r_tlb[ri].d1       <= elo1[2];  r_tlb[ri].c1 <= elo1[5:3];
-		       r_tlb[ri].pfn1     <= elo1[(`PFN_WIDTH+5):6];
+		       r_tlb[ri].pfn1     <= elo1[(`TLB_PFN_WIDTH+5):6];
 		    end
 	       end
 	     else
@@ -142,12 +142,12 @@ module itlb(clk,
 	     r_tlb[tlb_entry_in.entry].asid     <= tlb_entry_in.asid;
 	     r_tlb[tlb_entry_in.entry].r        <= tlb_entry_in.r;
 	     r_tlb[tlb_entry_in.entry].vpn      <= tlb_entry_in.vpn;
-	     r_tlb[tlb_entry_in.entry].pfn0     <= tlb_entry_in.pfn0;
+	     r_tlb[tlb_entry_in.entry].pfn0     <= tlb_entry_in.pfn0[`TLB_PFN_WIDTH-1:0];
 	     r_tlb[tlb_entry_in.entry].d0       <= tlb_entry_in.d0;
 	     r_tlb[tlb_entry_in.entry].v0       <= tlb_entry_in.v0;
 	     r_tlb[tlb_entry_in.entry].g0       <= tlb_entry_in.g0;
 	     r_tlb[tlb_entry_in.entry].c0       <= tlb_entry_in.c0;
-	     r_tlb[tlb_entry_in.entry].pfn1     <= tlb_entry_in.pfn1;
+	     r_tlb[tlb_entry_in.entry].pfn1     <= tlb_entry_in.pfn1[`TLB_PFN_WIDTH-1:0];
 	     r_tlb[tlb_entry_in.entry].d1       <= tlb_entry_in.d1;
 	     r_tlb[tlb_entry_in.entry].v1       <= tlb_entry_in.v1;
 	     r_tlb[tlb_entry_in.entry].g1       <= tlb_entry_in.g1;
@@ -244,7 +244,7 @@ module itlb(clk,
    wire                w_odd     = (w_pgsz==3'd0) ? va[12] : (w_pgsz==3'd1) ? va[14] :
                                    (w_pgsz==3'd2) ? va[16] : (w_pgsz==3'd3) ? va[18] :
                                    (w_pgsz==3'd4) ? va[20] : (w_pgsz==3'd5) ? va[22] : va[24];
-   wire [`PFN_WIDTH-1:0] w_pfn   = w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0;
+   wire [`PFN_WIDTH-1:0] w_pfn   = {{(`PFN_WIDTH-`TLB_PFN_WIDTH){1'b0}}, (w_odd ? r_tlb[w_hit_idx].pfn1 : r_tlb[w_hit_idx].pfn0)};
    wire                w_dirty   = w_odd ? r_tlb[w_hit_idx].d1   : r_tlb[w_hit_idx].d0;
    wire                w_valid   = w_odd ? r_tlb[w_hit_idx].v1   : r_tlb[w_hit_idx].v0;
    wire [2:0]          w_cache   = w_odd ? r_tlb[w_hit_idx].c1   : r_tlb[w_hit_idx].c0;
@@ -286,7 +286,7 @@ module itlb(clk,
    logic [1:0]            r_u_r    [NU-1:0];
    logic [7:0]            r_u_asid [NU-1:0];
    logic                  r_u_g    [NU-1:0];
-   logic [`PFN_WIDTH-1:0] r_u_pfn0 [NU-1:0], r_u_pfn1 [NU-1:0];
+   logic [`TLB_PFN_WIDTH-1:0] r_u_pfn0 [NU-1:0], r_u_pfn1 [NU-1:0];
    logic                  r_u_v0   [NU-1:0], r_u_v1   [NU-1:0];
    logic [NU-1:0]         r_u_valid;
    integer 		  uu;
@@ -314,7 +314,7 @@ module itlb(clk,
    wire 		  w_u_any = |w_u_hits;
 
    /* one-hot select the matched entry's per-page fields */
-   logic [`PFN_WIDTH-1:0] t_u_pfn0, t_u_pfn1;
+   logic [`TLB_PFN_WIDTH-1:0] t_u_pfn0, t_u_pfn1;
    logic 		  t_u_v0, t_u_v1;
    logic [11:0] 	  t_u_pm;
    always_comb
@@ -346,7 +346,7 @@ module itlb(clk,
    wire                   w_u_odd = (w_u_pgsz==3'd0) ? va[12] : (w_u_pgsz==3'd1) ? va[14] :
                                     (w_u_pgsz==3'd2) ? va[16] : (w_u_pgsz==3'd3) ? va[18] :
                                     (w_u_pgsz==3'd4) ? va[20] : (w_u_pgsz==3'd5) ? va[22] : va[24];
-   wire [`PFN_WIDTH-1:0]  w_u_pfn = w_u_odd ? t_u_pfn1 : t_u_pfn0;
+   wire [`PFN_WIDTH-1:0]  w_u_pfn = {{(`PFN_WIDTH-`TLB_PFN_WIDTH){1'b0}}, (w_u_odd ? t_u_pfn1 : t_u_pfn0)};
    wire [`PFN_WIDTH+11:0] w_u_pa_full =
         (w_u_pgsz==3'd0) ? {w_u_pfn,                  va[11:0]} :
         (w_u_pgsz==3'd1) ? {w_u_pfn[`PFN_WIDTH-1:2],  va[13:0]} :
