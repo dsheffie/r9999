@@ -1254,7 +1254,7 @@ endfunction
 	  begin
 	     r_dbg_mm_cnt <= 8'd0;
 	  end
-	else if((($countones(r_dbg_out[0]) != r_color_cnt[0]) || ($countones(r_dbg_out[1]) != r_color_cnt[1])) && (r_dbg_mm_cnt < 8'd20))
+	else if(((32'($countones(r_dbg_out[0])) != 32'(r_color_cnt[0])) || (32'($countones(r_dbg_out[1])) != 32'(r_color_cnt[1]))) && (r_dbg_mm_cnt < 8'd20))
 	  begin
 	     r_dbg_mm_cnt <= r_dbg_mm_cnt + 8'd1;
 	     $display("[COLORSHADOW] cyc=%0d count mismatch shadow=%0d/%0d cnt=%0d/%0d", r_cycle,

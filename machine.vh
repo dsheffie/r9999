@@ -142,6 +142,12 @@
  `define LG_ROB_ENTRIES 4
 `endif
 
+/* ROB_ENTRIES may be any EVEN count in (2^(LG-1), 2^LG] (even: two-wide
+ * alloc/retire banks the ROB by ptr[0]); defaults to 2^LG_ROB_ENTRIES */
+`ifndef ROB_ENTRIES
+ `define ROB_ENTRIES (1<<`LG_ROB_ENTRIES)
+`endif
+
 `define LG_RET_STACK_ENTRIES 2
 
 /* non-uop queue */
