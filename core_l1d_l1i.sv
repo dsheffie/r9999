@@ -283,7 +283,18 @@ module core_l1d_l1i(clk,
    output logic [`LG_ROB_ENTRIES:0] 	  inflight;
    output logic [31:0]                    dbg_rob_inflight;
    wire [(1<<`LG_ROB_ENTRIES)-1:0] w_core_dbg_rob, w_l1d_dbg_rob;
-   assign dbg_rob_inflight = {w_l1d_dbg_rob, w_core_dbg_rob};
+   /* 32b AXI debug reg = {l1d, core} x 16 ROB entries; a larger ROB shows only entries 15..0 */
+   generate
+      if(`LG_ROB_ENTRIES > 4)
+	begin
+	   assign dbg_rob_inflight = {w_l1d_dbg_rob[15:0], w_core_dbg_rob[15:0]};
+	end
+      else
+	begin
+	   assign dbg_rob_inflight = {{(16-(1<<`LG_ROB_ENTRIES)){1'b0}}, w_l1d_dbg_rob,
+				      {(16-(1<<`LG_ROB_ENTRIES)){1'b0}}, w_core_dbg_rob};
+	end
+   endgenerate
    output logic [4:0]			  core_state; 
    output logic [3:0]			  l1i_state;
    output logic [3:0]			  l1d_state;

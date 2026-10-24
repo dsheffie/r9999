@@ -455,7 +455,11 @@ module core(clk,
    
    
    localparam N_PRF_ENTRIES = (1<<`LG_PRF_ENTRIES);
+   /* N_ROB_ENTRIES = pointer index space (masks/ports indexed by rob_ptr stay 2^LG);
+    * ROB_ENTRIES = real capacity (storage arrays, pointer wrap) */
    localparam N_ROB_ENTRIES = (1<<`LG_ROB_ENTRIES);
+   localparam ROB_ENTRIES = `ROB_ENTRIES;
+   localparam ROB_POW2 = (ROB_ENTRIES == N_ROB_ENTRIES);
    localparam N_UQ_ENTRIES = (1<<`LG_UQ_ENTRIES);
    localparam N_HILO_ENTRIES = (1<<`LG_HILO_PRF_ENTRIES);
    localparam N_FCR_ENTRIES = (1<<`LG_FCR_PRF_ENTRIES);
@@ -484,14 +488,48 @@ module core(clk,
     * bank sees a single alloc write (instead of 2 write ports on one wide array).
     * Retire reads head + head+1 -> one from each bank.  Bank index = rob_ptr[hi:1]. */
    /* completion-written fields (multi-ported flops) */
-   crob_entry_t r_rob_even[(N_ROB_ENTRIES/2)-1:0];
-   crob_entry_t r_rob_odd[(N_ROB_ENTRIES/2)-1:0];
+   crob_entry_t r_rob_even[(ROB_ENTRIES/2)-1:0];
+   crob_entry_t r_rob_odd[(ROB_ENTRIES/2)-1:0];
    /* alloc-only fields: one write port per bank, no reset (LUTRAM-able) */
-   mrob_entry_t r_mrob_even[(N_ROB_ENTRIES/2)-1:0];
-   mrob_entry_t r_mrob_odd[(N_ROB_ENTRIES/2)-1:0];
+   mrob_entry_t r_mrob_even[(ROB_ENTRIES/2)-1:0];
+   mrob_entry_t r_mrob_odd[(ROB_ENTRIES/2)-1:0];
    logic 	t_mrob_even_we, t_mrob_odd_we;
    logic [`LG_ROB_ENTRIES-2:0] t_mrob_even_addr, t_mrob_odd_addr;
    mrob_entry_t t_mrob_even_data, t_mrob_odd_data;
+
+   /* ROB pointers are {wrap, index}: empty = equal, full = index equal + wrap differs.
+    * Only advancing a pointer depends on the capacity. */
+   function automatic logic [`LG_ROB_ENTRIES:0] rob_ptr_inc_pow2(input logic [`LG_ROB_ENTRIES:0] p, input logic [1:0] k);
+      return p + {{(`LG_ROB_ENTRIES-1){1'b0}}, k};
+   endfunction // rob_ptr_inc_pow2
+
+   /* index wraps at ROB_ENTRIES and flips the wrap bit; k <= 2 and ROB_ENTRIES
+    * even, so one conditional subtract suffices */
+   function automatic logic [`LG_ROB_ENTRIES:0] rob_ptr_inc_npow2(input logic [`LG_ROB_ENTRIES:0] p, input logic [1:0] k);
+      logic [`LG_ROB_ENTRIES:0] t_idx;
+      logic 			t_wrap;
+      t_idx = {1'b0, p[`LG_ROB_ENTRIES-1:0]} + {{(`LG_ROB_ENTRIES-1){1'b0}}, k};
+      t_wrap = (t_idx >= ROB_ENTRIES);
+      if(t_wrap)
+	begin
+	   t_idx = t_idx - ROB_ENTRIES;
+	end
+      return {p[`LG_ROB_ENTRIES] ^ t_wrap, t_idx[`LG_ROB_ENTRIES-1:0]};
+   endfunction // rob_ptr_inc_npow2
+
+`ifdef VERILATOR
+   initial
+     begin
+	if((ROB_ENTRIES % 2) != 0 || ROB_ENTRIES > N_ROB_ENTRIES || ROB_ENTRIES <= (N_ROB_ENTRIES/2))
+	  begin
+	     $fatal(1, "ROB_ENTRIES %d must be even and in (2^(LG-1), 2^LG]", ROB_ENTRIES);
+	  end
+     end
+`endif
+
+   function automatic logic [`LG_ROB_ENTRIES:0] rob_ptr_inc(input logic [`LG_ROB_ENTRIES:0] p, input logic [1:0] k);
+      return ROB_POW2 ? rob_ptr_inc_pow2(p, k) : rob_ptr_inc_npow2(p, k);
+   endfunction // rob_ptr_inc
 
    function automatic mrob_entry_t rob_to_mrob(input rob_entry_t e);
       mrob_entry_t r;
@@ -631,11 +669,11 @@ module core(clk,
 `endif
       return r;
    endfunction // rob_merge
-   logic [`M_WIDTH-1:0 ] r_addrs[N_ROB_ENTRIES-1:0];
+   logic [`M_WIDTH-1:0 ] r_addrs[ROB_ENTRIES-1:0];
    /* FP IEEE flags side-band (1W at FP completion / 2R at retire), mirroring
     * r_addrs: {denorm(E), V,Z,O,U,I} of each completed FP op, indexed by ROB ptr.
     * Read at retire to update FCSR.Cause/Flags (gated by the fp_set_flags bit). */
-   logic [5:0] 		 r_fp_flags[N_ROB_ENTRIES-1:0];
+   logic [5:0] 		 r_fp_flags[ROB_ENTRIES-1:0];
 
    
    logic [N_ROB_ENTRIES-1:0] 		  r_rob_complete;
@@ -2268,7 +2306,7 @@ module core(clk,
 	t_faults = 'd0;
 	t_branches = 'd0;
 	t_dbg_rob = '0;
-	for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
+	for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=rob_ptr_inc(i, 2'd1))
 	  begin
 	     t_dbg_rob = i[0] ? rob_merge(r_mrob_odd[i[`LG_ROB_ENTRIES-1:1]], r_rob_odd[i[`LG_ROB_ENTRIES-1:1]]) :
 		  rob_merge(r_mrob_even[i[`LG_ROB_ENTRIES-1:1]], r_rob_even[i[`LG_ROB_ENTRIES-1:1]]);
@@ -2312,7 +2350,7 @@ module core(clk,
 		      t_rob_empty, 
 		      t_rob_full);
 
-	     for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=i+1)
+	     for(logic [`LG_ROB_ENTRIES:0] i = r_rob_head_ptr; i != (r_rob_tail_ptr); i=rob_ptr_inc(i, 2'd1))
 	       begin
 		  t_dbg_dump = i[0] ? rob_merge(r_mrob_odd[i[`LG_ROB_ENTRIES-1:1]], r_rob_odd[i[`LG_ROB_ENTRIES-1:1]]) :
 		  rob_merge(r_mrob_even[i[`LG_ROB_ENTRIES-1:1]], r_rob_even[i[`LG_ROB_ENTRIES-1:1]]);
@@ -3933,7 +3971,7 @@ module core(clk,
      begin
 	if(reset || t_clr_rob)
 	  begin
-	     for(integer i = 0; i < (N_ROB_ENTRIES/2); i=i+1)
+	     for(integer i = 0; i < (ROB_ENTRIES/2); i=i+1)
 	       begin
 		  r_rob_even[i].faulted <= 1'b0;
 		  r_rob_odd[i].faulted <= 1'b0;
@@ -4189,22 +4227,22 @@ module core(clk,
 	  begin
 	     if(t_alloc && !t_alloc_two)
 	       begin
-		  n_rob_tail_ptr = r_rob_tail_ptr + 'd1;
-		  n_rob_next_tail_ptr = r_rob_next_tail_ptr + 'd1;
+		  n_rob_tail_ptr = rob_ptr_inc(r_rob_tail_ptr, 2'd1);
+		  n_rob_next_tail_ptr = rob_ptr_inc(r_rob_next_tail_ptr, 2'd1);
 	       end
 	     else if(t_alloc && t_alloc_two)
 	       begin
-		  n_rob_tail_ptr = r_rob_tail_ptr + 'd2;
-		  n_rob_next_tail_ptr = r_rob_next_tail_ptr + 'd2;
+		  n_rob_tail_ptr = rob_ptr_inc(r_rob_tail_ptr, 2'd2);
+		  n_rob_next_tail_ptr = rob_ptr_inc(r_rob_next_tail_ptr, 2'd2);
 	       end
 
 	     
 	     if(t_retire || t_bump_rob_head)
 	       begin
-		  n_rob_head_ptr = t_retire_two ? r_rob_head_ptr + 'd2 : 
-				   r_rob_head_ptr + 'd1;
-		  n_rob_next_head_ptr = t_retire_two ? r_rob_next_head_ptr + 'd2 : 
-					r_rob_next_head_ptr + 'd1;
+		  n_rob_head_ptr = t_retire_two ? rob_ptr_inc(r_rob_head_ptr, 2'd2) : 
+				   rob_ptr_inc(r_rob_head_ptr, 2'd1);
+		  n_rob_next_head_ptr = t_retire_two ? rob_ptr_inc(r_rob_next_head_ptr, 2'd2) : 
+					rob_ptr_inc(r_rob_next_head_ptr, 2'd1);
 	       end
 	  end // else: !if(t_clr_rob)
 
