@@ -1,6 +1,7 @@
 `include "machine.vh"
 
 module mipsseg(v_addr, l_addr, cache, mapped, seg, bad_perms,
+	       erl,
 	       in_kernel_mode,
 	       in_supervisor_mode,
 	       in_user_mode,
@@ -15,6 +16,12 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg, bad_perms,
    /* access-level violation -> AdEL/AdES: the current mode may not touch this
     * segment.  kernel: all OK; user: useg only; supervisor: useg + sseg. */
    output logic	       bad_perms;
+   /* SR.ERL: the user segment becomes a 2^31-byte unmapped, uncached window, PA = VA
+    * (R4000 User's Manual, "User Mode Virtual Addressing" with ERL=1).  The IP24 PROM
+    * sizes memory through it: kuseg 0x20000000 with ERL still set from reset.
+    * Implemented for 32-bit addressing only (the 64-bit xkuseg case is not needed
+    * by anything and would put a 33-bit compare on the AGU critical path). */
+   input logic			erl;
    input logic			in_kernel_mode;
    input logic			in_supervisor_mode;
    input logic			in_user_mode;
@@ -90,9 +97,11 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg, bad_perms,
 	  begin
 	     /* 32-bit compat (or 32-bit mode, or sign-extended 64b address) */
 	     if(w_seg[3] == 1'b0)
-	       begin /* kuseg */
-		  cache = 1'b1;
-		  mapped = 1'b1;
+	       begin /* kuseg; with ERL unmapped + uncached, PA = VA.  w_va[63:31] is
+		      * already 0 here, so ERL only clears the flags -- no new address
+		      * mux on the AGU -> DTLB critical path. */
+		  cache = ~erl;
+		  mapped = ~erl;
 		  l_addr = w_va;
 		  seg = 'd3;
 	       end

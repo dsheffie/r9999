@@ -669,6 +669,7 @@ endfunction
 		 .mapped(w_mapped),
 		 .seg(w_seg),
 		 .bad_perms(w_bad_perms),    /* i-side AdEL: harvested below into r_bad_va */
+		 .erl(1'b0),                 /* TODO: ERL kuseg fetch (unmapped) is not wired to the I-side */
 		 .in_kernel_mode(in_kernel_mode),
 		 .in_supervisor_mode(in_supervisor_mode),
 		 .in_user_mode(in_user_mode),
