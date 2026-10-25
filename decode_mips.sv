@@ -1319,7 +1319,14 @@ module decode_mips(
 			 uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			 uop.srcA = rd;
 			 uop.is_int = 1'b1;
-			 /* not oldest_first: ordered by the CP0 sequence (uop.vh is_cp0_rd) */
+			 /* ordered by the CP0 sequence (uop.vh is_cp0_rd), except Cause: its
+			  * IP bits are asynchronous, and the CP0 sequence does not order a read
+			  * behind older loads/stores.  IRIX wbadaddr does a posted store, flushes
+			  * it with uncached loads, then reads Cause.IP6 for the MC bus error; an
+			  * early mfc0 misses IP6, which then fires when SR is restored ("IRIX
+			  * Killed due to Bus Error", IRIX 5.3 boot).  The R4000 is in order, so
+			  * read Cause at the head. */
+			 uop.oldest_first = (rd == 'd13);
 		      end
 		    else if((insn[25:21] == 5'd1) & (insn[10:0] == 'd0)) /* dmfc0 */
 		      begin
@@ -1336,7 +1343,7 @@ module decode_mips(
 			      uop.dst_valid = (rt != 'd0); /* never a valid int dest of $0 */
 			      uop.srcA = rd;
 			      uop.is_int = 1'b1;
-			      /* not oldest_first: see MFC0 */
+			      uop.oldest_first = (rd == 'd13);   /* Cause: see MFC0 */
 			   end
 			 /* else: 64-bit op in 32-bit mode -> op stays II (RI) */
 		      end
