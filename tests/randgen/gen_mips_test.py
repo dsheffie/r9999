@@ -26,7 +26,12 @@ Usage:
   make rt_0001.elf rt_0001.mips                          # build (.mips = ELF)
   ../../ooo_core -f rt_0001.elf -c 1 --maxicnt 5000000   # co-sim check
 """
-import argparse, random
+import argparse, os, random
+
+# RANDGEN_LIKELY=<0..1>: fraction of conditional branches emitted as branch-likely
+# (beql/bnel/blezl/...: delay slot annulled when not taken).  0 by default so existing
+# seeds generate the same programs.
+LIKELY = float(os.environ.get("RANDGEN_LIKELY", "0"))
 
 # ---- register allocation -------------------------------------------------
 POOL   = list(range(2, 25))   # $2..$24 : random read/write
@@ -178,11 +183,12 @@ class Gen:
         lbl = self.newlabel()
         self.pending.append((lbl, target))          # placed at next safe unit start
         r = random.random()
+        l = "l" if LIKELY > 0 and random.random() < LIKELY else ""
         if r < 0.45:
-            self._emit(f"{random.choice(['beq','bne'])} ${rs()}, ${rs()}, {lbl}", labs)
+            self._emit(f"{random.choice(['beq','bne'])}{l} ${rs()}, ${rs()}, {lbl}", labs)
         elif r < 0.85:
             op = random.choice(["blez", "bgtz", "bltz", "bgez"])
-            self._emit(f"{op} ${rs()}, {lbl}", labs)
+            self._emit(f"{op}{l} ${rs()}, {lbl}", labs)
         else:
             self._emit(f"j {lbl}", labs)
         self._emit(self.alu(allow64=False))         # delay slot (safe, no branch)
