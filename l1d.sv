@@ -342,6 +342,21 @@ module l1d(clk,
       return m;
    endfunction
          
+   /* byte mask an UNCACHED store sends to memory.  make_mask gives SDL/SDR the whole
+    * doubleword (fine for the cached merge, the store-buffer overlap checks and the MQ),
+    * but an uncached store's line is merged onto r_array_out -- the cached line that
+    * happens to sit at that index -- so every byte under the mask reaches memory.
+    * SDL/SDR must cover only their own bytes (big-endian: SDL k..7, SDR 0..k), or the
+    * unrelated line's bytes land in memory (IRIX 5.3's bcopy/blkclr on kseg1 directory
+    * buffers: /tmp got the in-core superblock's bytes). */
+   function logic [15:0] unc_st_mask(mem_req_t r);
+      if(r.op == MEM_SDL)
+	return {8'd0, 8'hff << r.addr[2:0]} << {r.addr[DWORD_START], 3'b0};
+      if(r.op == MEM_SDR)
+	return {8'd0, 8'hff >> (3'd7 - r.addr[2:0])} << {r.addr[DWORD_START], 3'b0};
+      return make_mask(r);
+   endfunction
+
 function logic [L1D_CL_LEN_BITS-1:0] merge_cl32(logic [L1D_CL_LEN_BITS-1:0] cl, logic [31:0] w32, logic[LG_WORDS_PER_CL-1:0] pos);
    logic [L1D_CL_LEN_BITS-1:0] 		 cl_out;
    case(pos)
@@ -2605,7 +2620,7 @@ endfunction
 `else
 	t_port2_hit_cache = r_valid_out2 && (r_tag_out2 == w_tlb_tag2);
 `endif
-	t_mem_req_mask = make_mask(r_req);
+	t_mem_req_mask = unc_st_mask(r_req);
 	n_state = r_state;
 	n_prb_seen = r_prb_seen & probe_req;
 	n_prb_ack = 1'b0;
