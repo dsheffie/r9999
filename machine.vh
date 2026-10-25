@@ -291,7 +291,7 @@
  * zero-filled up to PFN_WIDTH on read and PA_WIDTH stays 36 everywhere else.  A
  * PFN with bits set above TLB_PA_WIDTH aliases low (no PA-range check). */
 `ifndef TLB_PA_WIDTH
- `define TLB_PA_WIDTH 29
+ `define TLB_PA_WIDTH 30
 `endif
 `define TLB_PFN_WIDTH (`TLB_PA_WIDTH - 12)
 
