@@ -88,7 +88,13 @@ module fpu_add(/*AUTOARG*/
 
    wire [63:0] 	a_pass = fmt ? a : {32'd0, a[31:0]};
    wire [63:0] 	b_pass = fmt ? {sgn_b, b[62:0]} : {32'd0, sgn_b, b[30:0]};
-   wire [63:0] 	s1_early_y = special ? special_y : a_is_zero ? b_pass : a_pass;  // b_zero -> a
+   /* both operands zero: IEEE 754 sec 6.3 -- like-signed zeros keep their sign,
+    * unlike-signed zeros sum to +0 except when rounding toward -inf (rm 3).
+    * b_pass alone gave +0 - +0 = -0 (Quake D_PolysetCalcGradients -> ceilf) */
+   wire 	both_zero = a_is_zero & b_is_zero;
+   wire 	zz_sign = (sgn_a == sgn_b) ? sgn_a : (rm == 2'd3);
+   wire [63:0] 	zz_y = fmt ? {zz_sign, 63'd0} : {32'd0, zz_sign, 31'd0};
+   wire [63:0] 	s1_early_y = special ? special_y : both_zero ? zz_y : a_is_zero ? b_pass : a_pass;  // b_zero -> a
    wire 	s1_early_valid = special | a_is_zero | b_is_zero;
    wire 	s1_in_denorm = ((exp_a == 'd0) & (frac_a != 'd0)) | ((exp_b == 'd0) & (frac_b != 'd0));
 
@@ -262,7 +268,7 @@ module fpu_add(/*AUTOARG*/
 
    wire 	w_res_denorm = ~r3_early_valid & r3_exp_le0 & (t_round_mant != 'd0);
    wire [63:0] 	w_y = r3_early_valid ? r3_early_y :
-		w_is_zero  ? 64'd0 :
+		w_is_zero  ? ((r3_rm == 2'd3) ? (r3_fmt ? {1'b1, 63'd0} : {32'd0, 1'b1, 31'd0}) : 64'd0) :  // exact cancellation: -0 only toward -inf
 		w_overflow ? ovf_y : norm_y;
    wire 	w_denorm = ~r3_special & (r3_in_den | w_res_denorm);
    wire 	w_f_inexact  = ~r3_early_valid & ~w_is_zero & (w_inexact | w_overflow);
