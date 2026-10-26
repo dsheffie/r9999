@@ -1,15 +1,32 @@
 #include <iostream>
 #include <regex>
 #include <fstream>
+#include <unistd.h>
 #include <boost/program_options.hpp>
 #include "pipeline_record.hh"
 
 using namespace std;
 
+/* the template lives next to the gen_html binary, so it is found from any cwd
+ * (opening it relative to cwd silently emitted a bare `var tableData = ...') */
+static string template_path() {
+  char buf[4096];
+  ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if(n <= 0) {
+    return "traceTemplate.html";
+  }
+  string exe(buf, n);
+  return exe.substr(0, exe.rfind('/') + 1) + "traceTemplate.html";
+}
+
 static void read_template(list<string> &pre, list<string> &post) {
-  string line;
-  fstream in("traceTemplate.html");
+  string line, path = template_path();
+  fstream in(path);
   bool use_pre = true;
+  if(!in.is_open()) {
+    cerr << "can't open template " << path << "\n";
+    exit(-1);
+  }
   //var tableData = {}
   while(getline(in, line)) {
     if(regex_search(line, regex("var tableData"))) {
@@ -23,6 +40,10 @@ static void read_template(list<string> &pre, list<string> &post) {
       post.push_back(line);
     }
 
+  }
+  if(use_pre) {
+    cerr << path << " has no `var tableData' placeholder\n";
+    exit(-1);
   }
 }
 
