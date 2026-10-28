@@ -449,7 +449,7 @@ module exec(clk,
    logic [`LG_ROB_ENTRIES-1:0] t_div_rob_ptr_out;
    logic [(`M_WIDTH*2)-1:0] 	       t_div_result;
    logic [`LG_HILO_PRF_ENTRIES-1:0] t_div_hilo_prf_ptr_out;
-   /* unified divider, FP side (uni_divider.sv; all constant 0 without USE_UNI_DIVIDER).
+   /* unified divider, FP side (uni_divider.sv).
     * t_fdiv_pop = an FP div/sqrt pops from fp_uq THIS cycle (it starts NEXT cycle) */
    logic 			    t_fdiv_pop, t_fdiv_start, t_fdiv_wb_used;
    logic 			    w_fdiv_ready, w_fdiv_complete, w_fdiv_denorm;
@@ -4685,9 +4685,12 @@ module exec(clk,
 	    begin
 	       /* Config = 0x0002e483: an R4400 (machine.vh PRId) with 16 KB I$ +
 		* 16 KB D$ and 16-byte I and D lines (IB=DB=0), matching r9999's
-		* LG_L1D_CL_LEN=4 L1s.  SC (bit 17) = 1: no secondary cache visible,
-		* so the kernel skips the scache probe.  IRIX's mlreset derives
-		* cachecolormask from the cache-size fields (MAME_QUESTIONS.md Q5).
+		* LG_L1D_CL_LEN=4 L1s.  The L1I is really 32 KB 2-way; IC reports one
+		* 16 KB way, which is what an index CACHE op walk needs to cover (an
+		* I-side CACHE op invalidates both ways of its set).  SC (bit 17) = 1:
+		* no secondary cache visible, so the kernel skips the scache probe.
+		* IRIX's mlreset derives cachecolormask from the cache-size fields
+		* (MAME_QUESTIONS.md Q5).
 		* A CACHE op acts on the one 16-byte block containing its address;
 		* IRIX on an R4400 PRId walks every cache op at a 16-byte stride
 		* regardless of IB/DB (measured in interp_mips, 2026-10-10).  Was

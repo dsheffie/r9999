@@ -310,8 +310,8 @@ module l2(clk,
 
    /* L1D presence + colour per L2 line (inclusive-l2-v2 stage A).  pd = "the L1D may hold
     * this line", pidx = the L1D index colour it was filled at (the index bits above the
-    * page offset).  Today the L1D is PA-indexed, so pidx is just the PA colour of the
-    * request; stage C makes the L1D VA-indexed and supplies the colour explicitly.
+    * page offset).  The L1D is VA-indexed (stage C2b), so the colour comes with each
+    * L1D request (mem_req_colour) and is not derivable from the PA.
     * Set on an L1D fill, cleared on an L1D writeback and on every L2 valid-bit write
     * (refill, drop, flush, init).  Conservative: a silent clean L1D eviction leaves pd set. */
    localparam L1D_IDX_STOP = `LG_L1D_CL_LEN + `LG_L1D_NUM_SETS;
