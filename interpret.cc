@@ -278,8 +278,21 @@ static void take_exception_fpe(state_t *s) {
 /* This ISS is the co-sim checker for an R4400 (MIPS III) RTL, which has no MIPS IV:
  * movn/movz/movci and COP1X raise RI, and the COP1 .fmt movc/movz/movn, recip and
  * rsqrt raise the FP Unimplemented exception (the RTL FP_UNIMPL catch-all).  Their
- * MIPS IV implementations stay below for a MIPS IV model; true would re-enable them. */
+ * MIPS IV implementations stay below for a MIPS IV model: -DISS_FULL_MIPS4 enables
+ * all of MIPS IV (not for co-sim against the RTL, which implements only part of it). */
+#ifdef ISS_FULL_MIPS4
+static const bool ISS_MIPS4 = true;
+#else
 static const bool ISS_MIPS4 = false;
+#endif
+/* The subset of MIPS IV the RTL implements under machine.vh's ENABLE_MIPS4 (currently
+ * INCOMPLETE: only the conditional moves -- int movn/movz/movt/movf, .fmt
+ * movt/movf/movz/movn; COP1X and recip/rsqrt still trap).  -DENABLE_MIPS4 to match. */
+#if defined(ENABLE_MIPS4) || defined(ISS_FULL_MIPS4)   /* full MIPS IV includes the subset */
+static const bool ISS_MIPS4_CMOV = true;
+#else
+static const bool ISS_MIPS4_CMOV = false;
+#endif
 
 static void raise_ri(state_t *s, uint32_t inst) {
   fprintf(stderr, "unimplemented: opcode=0x%02x funct=0x%02x @ pc=0x%08x\n",
@@ -603,80 +616,105 @@ static void setConditionCode(state_t *s, uint32_t v, uint32_t cc) {
 
 
 
+/* COP1X (opcode 0x13, MIPS IV): indexed FP loads/stores, prefx, and
+ * madd/msub/nmadd/nmsub.fmt.  Only reached with ISS_MIPS4 (the RTL raises RI).
+ * Register-file conventions follow lwc1/swc1/ldc1/sdc1 and the COP1 FR=0 gate:
+ * FR=0 lwxc1/swxc1 to an odd fd/fs use the high half of the even register,
+ * FR=0 ldxc1/sdxc1 or an arithmetic op naming an odd register -> RI. */
 template <typename T>
-struct c1xExec {
-  void operator()(const coproc1x_t& insn, state_t *s) {
-    T _fr = *reinterpret_cast<T*>(s->cpr1+insn.fr);
-    T _fs = *reinterpret_cast<T*>(s->cpr1+insn.fs);
-    T _ft = *reinterpret_cast<T*>(s->cpr1+insn.ft);
-    T &_fd = *reinterpret_cast<T*>(s->cpr1+insn.fd);  
-    switch(insn.id)
-      {
-      case 4:
-	_fd = _fs*_ft + _fr;
-	break;
-      case 5:
-	_fd = _fs*_ft - _fr;
-	break;
-      default:
-	std::cerr << "unhandled coproc1x insn @ 0x"
-		  << std::hex << s->pc << std::dec
-		  << ", id = " << insn.id
-		  <<"\n";
-	exit(-1);
-      }
-    s->pc += 4;
-  }
-};
-
-
-template <bool EL, typename T>
-void lxc1(uint32_t inst, state_t *s) {
-  mips_t mi(inst);
-  uint32_t ea = va_translate(s, s->gpr[mi.lc1x.base] + s->gpr[mi.lc1x.index], tlb_op::load); if(s->tlb_fault) return;
-  *reinterpret_cast<T*>(s->cpr1 + mi.lc1x.fd) = bswap<EL>(s->mem.get<T>(ea));
-  s->pc += 4;
+static void c1x_madd(uint32_t inst, state_t *s) {
+  uint32_t fr = (inst >> 21) & 31, ft = (inst >> 16) & 31;
+  uint32_t fs = (inst >> 11) & 31, fd = (inst >> 6) & 31;
+  T _fr = *reinterpret_cast<T*>(s->cpr1+fr);
+  T _fs = *reinterpret_cast<T*>(s->cpr1+fs);
+  T _ft = *reinterpret_cast<T*>(s->cpr1+ft);
+  T &_fd = *reinterpret_cast<T*>(s->cpr1+fd);
+  /* MIPS IV madd is NOT fused: the product is rounded to fmt before the add
+   * (IV ISA, MADD.fmt).  Two statements (no -ffp-contract under -std=c++14)
+   * keep the host from contracting them into an FMA. */
+  T p = _fs * _ft;
+  switch((inst >> 3) & 7)
+    {
+    case 4:
+      _fd = p + _fr;
+      break;
+    case 5:
+      _fd = p - _fr;
+      break;
+    case 6:
+      _fd = -(p + _fr);
+      break;
+    default: /* 7 */
+      _fd = -(p - _fr);
+      break;
+    }
 }
 
 template <bool EL>
 static void execCoproc1x(uint32_t inst, state_t *s) {
-  mips_t mi(inst);
-
-  switch(mi.lc1x.id)
+  uint32_t base = (inst >> 21) & 31, index = (inst >> 16) & 31;
+  uint32_t fs = (inst >> 11) & 31, fd = (inst >> 6) & 31;
+  uint32_t funct = inst & 63;
+  bool fr0 = (s->cpr0[CPR0_SR] & SR_FR) == 0;
+  state_t::reg_t va = s->gpr[base] + s->gpr[index];
+  switch(funct)
     {
-    case 0:
-      //lwxc1
-      lxc1<EL,int32_t>(inst, s);
-      return;
-    case 1:
-      //ldxc1
-      lxc1<EL,int64_t>(inst, s);
-      return;
-    default:
+    case 0x00: { /* lwxc1 fd, index(base) */
+      uint32_t ea = va_translate(s, va, tlb_op::load); if(s->tlb_fault) return;
+      uint32_t v = bswap<EL>(s->mem.get<uint32_t>(ea));
+      if(fr0) {
+	uint64_t old = s->cpr1[fd & ~1u];
+	s->cpr1[fd & ~1u] = (fd & 1) ? ((old & 0xffffffffull) | ((uint64_t)v << 32))
+	                             : ((old & 0xffffffff00000000ull) | v);
+      }
+      else {
+	s->cpr1[fd] = (uint64_t)(int64_t)(int32_t)v;
+      }
       break;
     }
-  
-  switch(mi.c1x.fmt)
-   {
-   case 0: {
-     c1xExec<float> e;
-     e(mi.c1x, s);
-     return;
-   }
-   case 1: {
-     c1xExec<double> e;
-     e(mi.c1x, s);
-     return;
-   }
-   default:
-     std::cerr << "weird type in do_c1x_op @ 0x"
-	       << std::hex << s->pc << std::dec
-	       <<"\n";
-     exit(-1);
-   }
+    case 0x01: { /* ldxc1 fd, index(base) */
+      if(fr0 && (fd & 1)) { take_exception_ri(s); return; }
+      uint32_t ea = va_translate(s, va, tlb_op::load); if(s->tlb_fault) return;
+      s->cpr1[fd] = bswap<EL>(s->mem.get<uint64_t>(ea));
+      break;
+    }
+    case 0x08: { /* swxc1 fs, index(base) */
+      uint32_t ea = va_translate(s, va, tlb_op::store); if(s->tlb_fault) return;
+      uint64_t rv = s->cpr1[fr0 ? (fs & ~1u) : fs];
+      uint32_t v = (fr0 && (fs & 1)) ? (uint32_t)(rv >> 32) : (uint32_t)rv;
+      s->mem.set<uint32_t>(ea, bswap<EL>(v));
+      break;
+    }
+    case 0x09: { /* sdxc1 fs, index(base) */
+      if(fr0 && (fs & 1)) { take_exception_ri(s); return; }
+      uint32_t ea = va_translate(s, va, tlb_op::store); if(s->tlb_fault) return;
+      s->mem.set<uint64_t>(ea, bswap<EL>(s->cpr1[fs]));
+      break;
+    }
+    case 0x0f: /* prefx hint, index(base): a hint, never faults */
+      break;
+    default: {
+      /* madd/msub/nmadd/nmsub: op4 = funct[5:3] in 4..7, fmt3 = funct[2:0]
+       * (0 = S, 1 = D; PS and luxc1/suxc1 are MIPS V) */
+      uint32_t op4 = funct >> 3, fmt3 = funct & 7;
+      uint32_t fr = base, ft = index;
+      if((op4 < 4) || (fmt3 > 1) || (fr0 && ((fr | ft | fs | fd) & 1))) {
+	take_exception_ri(s);
+	return;
+      }
+      if(fmt3 == 0) {
+	c1x_madd<float>(inst, s);
+	s->cpr1_state[fd] = fp_reg_state::sp;
+      }
+      else {
+	c1x_madd<double>(inst, s);
+	s->cpr1_state[fd] = fp_reg_state::dp;
+      }
+      break;
+    }
+    }
+  s->pc += 4;
 }
-
-
 
 template <bool EL, branch_type bt>
 void branch(uint32_t inst, state_t *s) {
@@ -1937,8 +1975,11 @@ static void execCoproc1(uint32_t inst, state_t *s) {
        * no mandated exception; Sail doesn't model FR) -- we choose loud RI over the
        * R10000's silent force-to-even.  Covers arith/cvt/abs/neg/mov + compare;
        * moves/cfc1/ctc1 are handled above and are FR-half ops, not faulted. */
+      /* the .fmt conditional moves have no ft: bit 16 is tf (movt/movf) or the low
+       * bit of GPR rt (movz/movn) -- check only fs and fd (decode_mips.sv) */
+      const bool fcmov = ISS_MIPS4_CMOV && (lowop >= 0x11) && (lowop <= 0x13);
       if(((s->cpr0[CPR0_SR] & SR_FR) == 0) &&
-	 ((((inst >> 11) | (inst >> 16) | (inst >> 6)) & 1u) != 0u))
+	 ((((inst >> 11) | (fcmov ? 0u : (inst >> 16)) | (inst >> 6)) & 1u) != 0u))
 	{
 	  take_exception_ri(s);
 	  return;
@@ -2009,7 +2050,8 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	  case 0x13:
 	  case 0x15:
 	  case 0x16:
-	    if(!ISS_MIPS4) {
+	    /* ENABLE_MIPS4: the .fmt conditional moves (0x11-0x13), not recip/rsqrt */
+	    if(!ISS_MIPS4 && !(ISS_MIPS4_CMOV && ((inst & 63) <= 0x13))) {
 	      take_exception_fpe(s);   /* MIPS IV .fmt op on an R4400 */
 	      return;
 	    }
@@ -2123,7 +2165,8 @@ void execMips(state_t *s) {
    * LWC1 (0x31), LDC1 (0x35), SWC1 (0x39), SDC1 (0x3d).  IRIX lazy-FPU: o32
    * processes run with CU1=0 and take this trap on first FP use. */
   if((opcode == 0x11 || opcode == 0x31 || opcode == 0x35 ||
-      opcode == 0x39 || opcode == 0x3d) && !(s->cpr0[CPR0_SR] & SR_CU1)) {
+      opcode == 0x39 || opcode == 0x3d || (ISS_MIPS4 && opcode == 0x13)) &&
+     !(s->cpr0[CPR0_SR] & SR_CU1)) {
     take_exception_cpu(s, 1);
     return;
   }
@@ -2134,7 +2177,9 @@ void execMips(state_t *s) {
     bool is_mem_store =
       (opcode >= 0x28 && opcode <= 0x2e) ||   /* sb sh swl sw sdl sdr swr */
       opcode == 0x3f ||                        /* sd   */
-      opcode == 0x39 || opcode == 0x3d;        /* swc1, sdc1 */
+      opcode == 0x39 || opcode == 0x3d ||      /* swc1, sdc1 */
+      (ISS_MIPS4 && opcode == 0x13 &&
+       ((inst & 63) == 0x08 || (inst & 63) == 0x09)); /* swxc1, sdxc1 */
 #ifdef LLSC_BREAK_ON_LOAD
     /* R10000 (p.27): ANY normal load or store breaks the link. */
     bool is_mem_load =
@@ -2212,7 +2257,7 @@ void execMips(state_t *s) {
 	}
 	break;
       case 0x01: /* movci (MIPS IV) */
-	if(!ISS_MIPS4) {
+	if(!ISS_MIPS4 && !ISS_MIPS4_CMOV) {
 	  raise_ri(s, inst);
 	  return;
 	}
@@ -2468,7 +2513,7 @@ void execMips(state_t *s) {
 	break;
       }
       case 0x0B: /* movn (MIPS IV) */
-	if(!ISS_MIPS4) {
+	if(!ISS_MIPS4 && !ISS_MIPS4_CMOV) {
 	  raise_ri(s, inst);
 	  return;
 	}
@@ -2477,7 +2522,7 @@ void execMips(state_t *s) {
 	s->insn_histo[mipsInsn::MOVN]++;
 	break;
       case 0x0A: /* movz (MIPS IV) */
-	if(!ISS_MIPS4) {
+	if(!ISS_MIPS4 && !ISS_MIPS4_CMOV) {
 	  raise_ri(s, inst);
 	  return;
 	}

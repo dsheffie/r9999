@@ -928,6 +928,18 @@ module exec(clk,
 				   r_alu_srcB_rdy,
 				   r_alu_hilo_rdy,
 				   r_alu_fcr_rdy;
+   /* srcC (movn/movz rt) ready, or no srcC */
+   logic [N_INT_SCHED_ENTRIES-1:0] t_alu_srcC_ok;
+`ifdef ENABLE_MIPS4
+   /* movn/movz: rt is only a condition, "is its physical register zero" -- one
+    * flag bit per int physical register, written with every int PRF write (never
+    * physreg 0, which rf4r2w does not write either: its flag stays 1), and a
+    * third ready bit that wakes on the same producers as srcA/srcB.  A consumer
+    * selected on a writeback match executes the next cycle, after the flag write. */
+   logic [N_INT_PRF_ENTRIES-1:0]   r_prf_zero;
+   logic [N_INT_SCHED_ENTRIES-1:0] r_alu_srcC_rdy, t_alu_srcC_match;
+   logic 			   t_alu_alloc_srcC_match, t_alu_alloc2_srcC_match;
+`endif
 
    logic [N_INT_SCHED_ENTRIES-1:0] t_alu_srcA_match,
 				   t_alu_srcB_match,
@@ -1106,6 +1118,16 @@ module exec(clk,
 							 );
 	t_alu_alloc2_fcr_match = uq2.fcr_src_valid &&
 				 (w_fpu_fcr_valid & (w_fpu_fcr_ptr == uq2.hilo_src));
+`ifdef ENABLE_MIPS4
+	t_alu_alloc_srcC_match = uq.srcC_valid && (
+						   (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq.srcC)) ||
+						   (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == uq.srcC))
+						   );
+	t_alu_alloc2_srcC_match = uq2.srcC_valid && (
+						     (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == uq2.srcC)) ||
+						     (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == uq2.srcC))
+						     );
+`endif
 
      end // always_comb
   
@@ -1173,6 +1195,15 @@ module exec(clk,
 									     );
 		t_alu_fcr_match[i] = r_alu_sched_uops[i].fcr_src_valid &&
 				     (w_fpu_fcr_valid & (w_fpu_fcr_ptr == r_alu_sched_uops[i].hilo_src));
+`ifdef ENABLE_MIPS4
+		t_alu_srcC_match[i] = r_alu_sched_uops[i].srcC_valid && (
+									 (w_mem_rsp_int_valid & (mem_rsp_dst_ptr == r_alu_sched_uops[i].srcC)) ||
+									 (r_start_int && t_wr_int_prf & (int_uop.dst != 'd0) & (int_uop.dst == r_alu_sched_uops[i].srcC))
+									 );
+		t_alu_srcC_ok[i] = t_alu_srcC_match[i] | r_alu_srcC_rdy[i];
+`else
+		t_alu_srcC_ok[i] = 1'b1;
+`endif
 	
 
 		//is_mult(r_alu_sched_uops[i].op);
@@ -1184,6 +1215,7 @@ module exec(clk,
 					(t_alu_srcB_match[i] |r_alu_srcB_rdy[i]) &
 					(t_alu_hilo_match[i] |r_alu_hilo_rdy[i]) &
 					(t_alu_fcr_match[i] |r_alu_fcr_rdy[i]) &
+					t_alu_srcC_ok[i] &
 					(!is_cp0_rd(r_alu_sched_uops[i].op) ||
 					 (r_alu_sched_uops[i].cp0_seq == r_cp0_commit_seq)) &
 					(!r_alu_sched_uops[i].oldest_first ||
@@ -1242,6 +1274,31 @@ module exec(clk,
 		     
 		  end // else: !if(reset)
 	     end // always_ff@ (posedge clk)
+`ifdef ENABLE_MIPS4
+	   always_ff@(posedge clk)
+	     begin
+		if(reset)
+		  begin
+		     r_alu_srcC_rdy[i] <= 1'b0;
+		  end
+		else if(t_alu_alloc_entry[i])
+		  begin
+		     r_alu_srcC_rdy[i] <= uq.srcC_valid ? (!r_prf_inflight[uq.srcC] | t_alu_alloc_srcC_match) : 1'b1;
+		  end
+		else if(t_alu_alloc2_entry[i])
+		  begin
+		     r_alu_srcC_rdy[i] <= uq2.srcC_valid ? (!r_prf_inflight[uq2.srcC] | t_alu_alloc2_srcC_match) : 1'b1;
+		  end
+		else if(t_alu_select_entry[i])
+		  begin
+		     r_alu_srcC_rdy[i] <= 1'b0;
+		  end
+		else if(r_alu_sched_valid[i])
+		  begin
+		     r_alu_srcC_rdy[i] <= r_alu_srcC_rdy[i] | t_alu_srcC_match[i];
+		  end
+	     end // always_ff@ (posedge clk)
+`endif
 	end // for (genvar i = 0; i < LG_INT_SCHED_ENTRIES; i=i+1)
    endgenerate
    
@@ -1272,7 +1329,11 @@ module exec(clk,
 		      (uq.srcA_valid ? (!r_prf_inflight[uq.srcA] | t_alu_alloc_srcA_match) : 1'b1) &&
 		      (uq.srcB_valid ? (!r_prf_inflight[uq.srcB] | t_alu_alloc_srcB_match) : 1'b1) &&
 		      (uq.hilo_src_valid ? (!r_hilo_inflight[uq.hilo_src] | t_alu_alloc_hilo_match) : 1'b1) &&
-		      (uq.fcr_src_valid ? (!r_fcr_prf_inflight[uq.hilo_src] | t_alu_alloc_fcr_match) : 1'b1);
+		      (uq.fcr_src_valid ? (!r_fcr_prf_inflight[uq.hilo_src] | t_alu_alloc_fcr_match) : 1'b1)
+`ifdef ENABLE_MIPS4
+		      && (uq.srcC_valid ? (!r_prf_inflight[uq.srcC] | t_alu_alloc_srcC_match) : 1'b1)
+`endif
+		      ;
 `endif
 	t_pop_uq = !(t_flash_clear || t_uq_empty ||t_alu_sched_full) || t_uq_bypass;
 	t_pop_uq2 = 1'b0;
@@ -1675,13 +1736,21 @@ module exec(clk,
    wire w_iss_is_signop  = (r_fp_iss_uop.op == SP_ABS) || (r_fp_iss_uop.op == DP_ABS) ||
 			   (r_fp_iss_uop.op == SP_NEG) || (r_fp_iss_uop.op == DP_NEG) ||
 			   (r_fp_iss_uop.op == SP_MOV) || (r_fp_iss_uop.op == DP_MOV);
-   /* both convert and signop are single-cycle (bitvec dist 2, fpu bypassed) */
-   wire w_head_is_sc = w_head_is_cvt | w_head_is_signop;
+`ifdef ENABLE_MIPS4
+   wire w_head_is_fcmov = (fp_uq.op == FP_CMOV);
+   wire w_iss_is_fcmov  = (r_fp_iss_uop.op == FP_CMOV);
+`else
+   wire w_head_is_fcmov = 1'b0;
+   wire w_iss_is_fcmov  = 1'b0;
+`endif
+   /* convert, signop and the FP conditional moves are single-cycle (bitvec dist 2,
+    * fpu bypassed) */
+   wire w_head_is_sc = w_head_is_cvt | w_head_is_signop | w_head_is_fcmov;
    wire w_head_is_ds = (fp_uq.op == SP_DIV) || (fp_uq.op == DP_DIV) ||
 		       (fp_uq.op == SP_SQRT) || (fp_uq.op == DP_SQRT);
    wire w_iss_is_ds  = (r_fp_iss_uop.op == SP_DIV) || (r_fp_iss_uop.op == DP_DIV) ||
 		       (r_fp_iss_uop.op == SP_SQRT) || (r_fp_iss_uop.op == DP_SQRT);
-   wire w_iss_is_sc  = w_iss_is_cvt  | w_iss_is_signop;
+   wire w_iss_is_sc  = w_iss_is_cvt  | w_iss_is_signop | w_iss_is_fcmov;
    /* abs.* clears the sign, neg.* flips it, mov.* copies; single zero-extends low 32 */
    wire w_signop_dbl = (r_fp_iss_uop.op == DP_ABS) || (r_fp_iss_uop.op == DP_NEG) || (r_fp_iss_uop.op == DP_MOV);
    wire w_signop_abs = (r_fp_iss_uop.op == SP_ABS) || (r_fp_iss_uop.op == DP_ABS);
@@ -1764,6 +1833,13 @@ module exec(clk,
 	t_fpu_srcB_rdy = fp_uq.fp_srcB_valid ? !r_fp_prf_inflight[fp_uq.srcB] : 1'b1;
 	t_fpu_fcr_rdy  = fp_uq.fcr_src_valid ? !r_fcr_prf_inflight[fp_uq.hilo_src] : 1'b1;
 	t_fpu_srcs_rdy = t_fpu_srcA_rdy && t_fpu_srcB_rdy && t_fpu_fcr_rdy;
+`ifdef ENABLE_MIPS4
+	/* movz/movn.fmt: GPR rt (srcC) must be written, so its zero flag is valid */
+	if(fp_uq.srcC_valid && r_prf_inflight[fp_uq.srcC])
+	  begin
+	     t_fpu_srcs_rdy = 1'b0;
+	  end
+`endif
 	/* writeback slot for the head op (convert=2, fpu arith/compare=FPU_LAT+1 from pop)
 	 * must be free, else stall a cycle (mixed-latency shared FP writeback port). */
 	/* div.s/div.d/sqrt.s/sqrt.d run on the unified divider (d0), not fpu0.
@@ -1820,6 +1896,20 @@ module exec(clk,
 	r_fp_iss_uop <= fp_uq;
 	r_fp_iss_fcr <= r_fcr_prf[fp_uq.hilo_src];
      end
+`ifdef ENABLE_MIPS4
+   /* movz/movn.fmt condition: rt's zero flag, read with the FCC at issue */
+   logic r_fp_iss_zero;
+   always_ff@(posedge clk)
+     begin
+	r_fp_iss_zero <= r_prf_zero[fp_uq.srcC];
+     end
+   /* whole 64-bit register either way (the old fd is srcB): .s keeps fd's upper half */
+   wire w_fcmov_cond = (r_fp_iss_uop.imm[5:4] == 2'd0) ? (r_fp_iss_fcr[r_fp_iss_uop.imm[2:0]] == r_fp_iss_uop.imm[3]) :
+		       (r_fp_iss_uop.imm[5:4] == 2'd2) ? !r_fp_iss_zero : r_fp_iss_zero;
+   wire [63:0] w_fcmov_out = w_fcmov_cond ? w_fp_srcA : w_fp_srcB;
+`else
+   wire [63:0] w_fcmov_out = 64'd0;
+`endif
 
    fpu #(.LG_PRF_WIDTH(`LG_PRF_ENTRIES),
 	 .LG_ROB_WIDTH(`LG_ROB_ENTRIES),
@@ -1889,10 +1979,11 @@ module exec(clk,
      end
    always_ff@(posedge clk)
      begin
-	r_cvt_result <= w_iss_is_signop ? w_signop_out :
+	r_cvt_result <= w_iss_is_fcmov  ? w_fcmov_out :
+			w_iss_is_signop ? w_signop_out :
 			w_iss_is_f2f    ? w_f2f_out :
 			w_iss_is_f2i    ? w_f2i_out : w_i2f_out;
-	r_cvt_fflags <= w_iss_is_signop ? 5'd0 :
+	r_cvt_fflags <= (w_iss_is_signop | w_iss_is_fcmov) ? 5'd0 :
 			w_iss_is_f2f    ? w_f2f_fflags :
 			w_iss_is_f2i    ? w_f2i_fflags : w_i2f_fflags;
 	r_cvt_denorm <= w_iss_is_f2f ? w_f2f_denorm : 1'b0;
@@ -2484,6 +2575,28 @@ module exec(clk,
 	       t_wr_int_prf = 1'b1;
 	       t_alu_valid = 1'b1;
 	    end // case: SLTU
+`ifdef ENABLE_MIPS4
+	  MOVN:
+	    begin
+	       /* srcA = rs, srcB = the old rd, srcC = rt (its zero flag) */
+	       t_result = r_prf_zero[int_uop.srcC] ? t_srcB : t_srcA;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end // case: MOVN
+	  MOVZ:
+	    begin
+	       t_result = r_prf_zero[int_uop.srcC] ? t_srcA : t_srcB;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end // case: MOVZ
+	  MOVCI:
+	    begin
+	       /* movt (imm[0]=1) / movf (imm[0]=0): the FCC bit BC1x reads */
+	       t_result = (r_fcr_prf[int_uop.hilo_src][int_uop.srcC[2:0]] == int_uop.imm[0]) ? t_srcA : t_srcB;
+	       t_wr_int_prf = 1'b1;
+	       t_alu_valid = 1'b1;
+	    end // case: MOVCI
+`endif
 	  MOVIU:
 	    begin
 	       /* zero-extended immediate -- contrast MOVI, which sign-extends */
@@ -3851,6 +3964,27 @@ module exec(clk,
 	  end
      end
 
+
+`ifdef ENABLE_MIPS4
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_prf_zero <= '1;
+	  end
+	else
+	  begin
+	     if(r_start_int && t_wr_int_prf && (int_uop.dst != 'd0))
+	       begin
+		  r_prf_zero[int_uop.dst] <= (t_result == 'd0);
+	       end
+	     if(mem_rsp_dst_valid & ~mem_rsp_fp_dst & (mem_rsp_dst_ptr != 'd0))
+	       begin
+		  r_prf_zero[mem_rsp_dst_ptr] <= (mem_rsp_load_data == 'd0);
+	       end
+	  end
+     end // always_ff@ (posedge clk)
+`endif
 
    rf4r2w #(.WIDTH(`M_WIDTH), .LG_DEPTH(`LG_PRF_ENTRIES))
    intprf (.clk(clk),

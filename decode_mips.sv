@@ -775,6 +775,42 @@ module decode_mips(
 				uop.is_int = 1'b1;
 			     end
 			end
+`ifdef ENABLE_MIPS4
+		      6'd1: /* movf, movt (MIPS IV) */
+			begin
+			   /* rd = (FCC[cc] == tf) ? rs : rd.  The condition is the renamed
+			    * FCC that BC1x already reads in the int ALU; cc rides srcC
+			    * unrenamed as for BC1x */
+			   uop.srcA = rs;
+			   uop.srcA_valid = (rs != 'd0);
+			   uop.srcB = rd;
+			   uop.srcB_valid = (rd != 'd0);
+			   uop.srcC = {{(`LG_PRF_ENTRIES-3){1'b0}}, insn[20:18]};
+			   uop.fcr_src_valid = 1'b1;
+			   uop.imm = {15'd0, insn[16]};
+			   uop.dst = rd;
+			   uop.dst_valid = (rd != 'd0);
+			   uop.op = (rd == 'd0) ? NOP : MOVCI;
+			   uop.is_int = 1'b1;
+			end
+		      6'd10, 6'd11: /* movz, movn (MIPS IV) */
+			begin
+			   /* rd = cond ? rs : rd.  The old rd is a real source (srcB),
+			    * rt is a condition only (srcC -> its zero flag in exec);
+			    * rs/rt == $0 stay unrenamed and read physreg 0 (value 0,
+			    * zero flag 1) */
+			   uop.srcA = rs;
+			   uop.srcA_valid = (rs != 'd0);
+			   uop.srcB = rd;
+			   uop.srcB_valid = (rd != 'd0);
+			   uop.srcC = rt;
+			   uop.srcC_valid = (rt != 'd0);
+			   uop.dst = rd;
+			   uop.dst_valid = (rd != 'd0);
+			   uop.op = (rd == 'd0) ? NOP : (insn[0] ? MOVN : MOVZ);
+			   uop.is_int = 1'b1;
+			end
+`endif
 		      6'd42: /* slt */
 			begin
 			   /* exec computes (srcB < srcA) with srcA=rt, srcB=rs.
@@ -1533,6 +1569,33 @@ module decode_mips(
 			 uop.is_fp = 1'b1;
 			 uop.op = (insn[25:21]==5'd16) ? SP_SQRT : DP_SQRT;
 		      end
+`ifdef ENABLE_MIPS4
+		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
+			    (insn[5:0]==6'd17 || insn[5:0]==6'd18 || insn[5:0]==6'd19))
+		      begin /* MOVCF(17: movf/movt)/MOVZ(18)/MOVN(19).[sd]: fd = cond ? fs : fd.
+			     * Two FP sources (fs, the old fd) and a one-bit condition:
+			     * an FCC bit, or GPR rt's zero flag (int-renamed srcC) */
+			 uop.srcA = fs;
+			 uop.fp_srcA_valid = 1'b1;
+			 uop.srcB = fd;
+			 uop.fp_srcB_valid = 1'b1;
+			 uop.dst = fd;
+			 uop.fp_dst_valid = 1'b1;
+			 uop.is_fp = 1'b1;
+			 uop.op = FP_CMOV;
+			 if(insn[5:0]==6'd17)
+			   begin
+			      uop.fcr_src_valid = 1'b1;
+			      uop.imm = {10'd0, 2'd0, insn[16], insn[20:18]};
+			   end
+			 else
+			   begin
+			      uop.srcC = rt;
+			      uop.srcC_valid = (rt != 'd0);
+			      uop.imm = {10'd0, (insn[0] ? 2'd2 : 2'd1), 4'd0};
+			   end
+		      end
+`endif
 		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
 			    (insn[5:0]==6'd5 || insn[5:0]==6'd6 || insn[5:0]==6'd7))
 		      begin /* ABS(5)/MOV(6)/NEG(7).[sd]: single FP source, no flags */
@@ -2181,7 +2244,9 @@ module decode_mips(
 	      * save (_save_fp_context stores all 32, odd incl.) relies on it.  We force
 	      * ft even at the LDC1/SDC1 decode above; the even doubleword covers both
 	      * FR=0 single halves (lwc1/swc1 already merge them into the even reg). */
-	     if((fr == 1'b0) && uop.is_fp && (insn[11] | insn[16] | insn[6]))
+	     /* the .fmt conditional moves have no ft: insn[16] is tf (movt/movf) or the
+	      * low bit of GPR rt (movz/movn), so only fs and fd must be even */
+	     if((fr == 1'b0) && uop.is_fp && (insn[11] | (insn[16] & (uop.op != FP_CMOV)) | insn[6]))
 	       begin
 		  uop.op            = II;   /* -> is_ii -> ARCH_FAULT -> cause 10 (ResI) */
 		  uop.is_fp         = 1'b0;

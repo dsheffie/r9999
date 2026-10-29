@@ -284,7 +284,19 @@ typedef enum logic [7:0]
     * Not architectural instructions: they never count as retired. */
    XFLUSH,       /* whole L1D then L2: write back + invalidate */
    XPG_WBINV,    /* one page, before a transfer: write back + invalidate (L1D, then L2) */
-   XPG_INV       /* one page, after a deposit: drop, no write back (L2, then L1D) */
+   XPG_INV,      /* one page, after a deposit: drop, no write back (L2, then L1D) */
+   /* ENABLE_MIPS4 (MIPS IV): rd = (rt != 0 / == 0) ? rs : rd.  srcA = rs, srcB = rd
+    * (renamed: the old rd), srcC = rt, read only as its physical register's zero flag */
+   MOVN,
+   MOVZ,
+   /* ENABLE_MIPS4 (MIPS IV movt/movf): rd = (FCC[cc] == tf) ? rs : rd.  srcA = rs,
+    * srcB = rd (renamed: the old rd), the renamed FCC like BC1x (fcr_src_valid,
+    * hilo_src), cc in srcC (not renamed), tf in imm[0] */
+   MOVCI,
+   /* ENABLE_MIPS4 (MIPS IV movt/movf/movz/movn.fmt): fd = cond ? fs : fd.  srcA = fs,
+    * srcB = fd (renamed: the old fd); imm[5:4] = 0 FCC (imm[2:0] cc, imm[3] tf),
+    * 1 movz / 2 movn on GPR rt = srcC (int-renamed, read as its zero flag) */
+   FP_CMOV
    } opcode_t;
 
 function logic is_mult(opcode_t op);

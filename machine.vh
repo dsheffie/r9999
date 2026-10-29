@@ -60,6 +60,30 @@
  *   ENABLE_UQ_DUAL_POP: move up to two uops/cycle from the uop queue into the
  *     ALU scheduler (allocation pushes two, the queue used to pop one). */
 //`define ENABLE_SCHED_BYPASS 1
+
+/* ENABLE_MIPS4: the MIPS IV (R5000) instructions r9999 implements.  INCOMPLETE --
+ * code built with plain -march=mips4 WILL hit unimplemented ops; build with
+ * -march=mips4 -mno-madd4 -mno-lxc1-sxc1 (and -mno-branch-likely for speed).
+ *
+ * Implemented under this knob: the conditional moves -- int movn/movz (SPECIAL
+ * 0x0b/0x0a), movt/movf (SPECIAL 0x01), and movt/movf/movz/movn.fmt (COP1 0x11-0x13).
+ * Each is "two data sources + one condition bit": the old destination is a renamed
+ * source (no extra RAT/PRF port).  The GPR-rt conditions read a 1-bit zero flag per
+ * int physical register, written with every int PRF write (a third ALU-scheduler
+ * ready bit; the in-order FP queue checks rt's inflight bit); the FCC conditions
+ * reuse the renamed FCC that BC1x reads.
+ *
+ * Already present WITHOUT this knob: pref (a NOP) and the eight FCCs (c.cond.fmt
+ * cc / bc1t/f cc).
+ *
+ * MISSING (still RI / FP Unimplemented with the knob on): all of COP1X -- the
+ * indexed FP loads/stores lwxc1/ldxc1/swxc1/sdxc1, prefx, and the fused
+ * madd/msub/nmadd/nmsub.fmt (need a third FP source; plan: block in-order dispatch
+ * to read it from the FP RF) -- and recip/rsqrt.fmt (COP1 0x15/0x16).
+ *
+ * The C++ checker does not read this file: build interpret.cc with -DENABLE_MIPS4
+ * to match (ISS_MIPS4_CMOV). */
+//`define ENABLE_MIPS4 1
 //`define ENABLE_UQ_DUAL_POP 1
 
 /* Register the L1D -> core response instead of driving it combinationally.
