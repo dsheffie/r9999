@@ -36,6 +36,7 @@ module l2(clk,
 	  mem_req_store_data, 
 	  mem_req_opcode,
 	  mem_req_mask,
+	  mem_req_uncached,
 	  
 	  //mem -> l2
 	  mem_rsp_valid,
@@ -106,6 +107,7 @@ module l2(clk,
    output logic [127:0] mem_req_store_data;
    output logic [4:0] 	mem_req_opcode;
    output logic [15:0]	mem_req_mask;
+   output logic 	mem_req_uncached;   /* this request is an uncached load/store (non-speculative) */
    
    input logic 		mem_rsp_valid;
    input logic		mem_rsp_bad;
@@ -277,6 +279,12 @@ module l2(clk,
    assign mem_req_addr = r_addr;
    assign mem_req_valid = r_mem_req;
    assign mem_req_opcode = r_mem_opcode;
+   /* An uncached op issues only from UNCACHE_LOAD/UNCACHE_STORE (MEM_WB reuses
+    * UNCACHE_STORE for a cached writeback-through).  Everything else -- fills,
+    * evictions, CACHE-op writebacks -- is cached traffic, and a cached fill can be
+    * for a wrong-path load, so the SoC must not raise errors on it. */
+   assign mem_req_uncached = (r_state == UNCACHE_LOAD) |
+			     ((r_state == UNCACHE_STORE) & (r_opcode != MEM_WB));
    assign mem_req_store_data = r_mem_req_store_data;
    assign mem_req_mask = r_store_mask;
    

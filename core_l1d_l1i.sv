@@ -35,6 +35,7 @@ module core_l1d_l1i(clk,
 		    mem_req_store_data,
 		    mem_req_opcode,
 		    mem_req_mask,
+		    mem_req_uncached,
 		    mem_rsp_valid,
 		    mem_rsp_bad,		    
 		    mem_rsp_load_data,
@@ -198,6 +199,7 @@ module core_l1d_l1i(clk,
    output logic [127:0] 	 mem_req_store_data;
    output logic [4:0] 		 mem_req_opcode;
    output logic [15:0]		 mem_req_mask;
+   output logic 		 mem_req_uncached;
    
    
    input logic  			  mem_rsp_valid;
@@ -888,6 +890,7 @@ module core_l1d_l1i(clk,
 	       .mem_req_store_data(mem_req_store_data),
 	       .mem_req_opcode(mem_req_opcode),
 	       .mem_req_mask(mem_req_mask),
+	       .mem_req_uncached(mem_req_uncached),
 	       
 	       .mem_rsp_valid(mem_rsp_valid),
 	       .mem_rsp_bad(mem_rsp_bad),
