@@ -1468,10 +1468,15 @@ module exec(clk,
        .ready(t_div_ready),
        .fp_opcode(r_fp_iss_uop.op),
        .fp_start(t_fdiv_start),
+`ifdef ENABLE_MIPS4
        /* recip = 1.0 / fs: the constant dividend, fs as the divisor */
        .fp_src_a(((r_fp_iss_uop.op == SP_RECIP) || (r_fp_iss_uop.op == DP_RECIP)) ?
 		 ((r_fp_iss_uop.op == DP_RECIP) ? 64'h3ff0000000000000 : 64'h000000003f800000) : w_fp_srcA),
        .fp_src_b(((r_fp_iss_uop.op == SP_RECIP) || (r_fp_iss_uop.op == DP_RECIP)) ? w_fp_srcA : w_fp_srcB),
+`else
+       .fp_src_a(w_fp_srcA),
+       .fp_src_b(w_fp_srcB),
+`endif
        .fp_rm(r_fcsr[1:0]),
        .fp_rob_ptr_in(r_fp_iss_uop.rob_ptr),
        .fp_dst_ptr_in(r_fp_iss_uop.dst),

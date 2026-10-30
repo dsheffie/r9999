@@ -84,13 +84,21 @@ module fpu(clk,
     * 2*FPU_LAT+1 out.  r_pass2 marks the add pass; the mul flags ride with it. */
    function automatic logic is_madd(input opcode_t op);
       begin
+`ifdef ENABLE_MIPS4
 	 is_madd = (op == SP_MADD) || (op == DP_MADD) || (op == SP_MSUB) || (op == DP_MSUB) ||
 		   (op == SP_NMADD) || (op == DP_NMADD) || (op == SP_NMSUB) || (op == DP_NMSUB);
+`else
+	 is_madd = 1'b0;    /* no MIPS IV: w_restart is 0 and the madd muxes fold away */
+`endif
       end
    endfunction
    function automatic logic madd_dbl(input opcode_t op);
       begin
+`ifdef ENABLE_MIPS4
 	 madd_dbl = (op == DP_MADD) || (op == DP_MSUB) || (op == DP_NMADD) || (op == DP_NMSUB);
+`else
+	 madd_dbl = 1'b0;
+`endif
       end
    endfunction
    logic 			   r_pass2[FPU_LAT-1:0];
@@ -215,6 +223,7 @@ module fpu(clk,
 	       cmp_val = r_val[0];
 	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
+`ifdef ENABLE_MIPS4
 	  SP_MADD, DP_MADD, SP_MSUB, DP_MSUB, SP_NMADD, DP_NMADD, SP_NMSUB, DP_NMSUB:
 	    begin
 	       /* the add pass completes; the mul pass leaving the pipe is not a result */
@@ -226,6 +235,7 @@ module fpu(clk,
 				   : {32'd0, ~t_adder_result[31], t_adder_result[30:0]};
 		 end
 	    end
+`endif
 
 	  default:
 	    begin
@@ -244,11 +254,13 @@ module fpu(clk,
 	    begin fflags = w_add_fflags; denorm = w_add_denorm; end
 	  SP_MUL, DP_MUL:
 	    begin fflags = w_mul_fflags; denorm = w_mul_denorm; end
+`ifdef ENABLE_MIPS4
 	  SP_MADD, DP_MADD, SP_MSUB, DP_MSUB, SP_NMADD, DP_NMADD, SP_NMSUB, DP_NMSUB:
 	    begin
 	       fflags = w_add_fflags | r_mflags[0][4:0];
 	       denorm = w_add_denorm | r_mflags[0][5];
 	    end
+`endif
 	  SP_CMP, DP_CMP:
 	    fflags = w_cmp_fflags;
 	  /* DIV/SQRT + any unimplemented COP1: raise E (denorm) -> FPE at retirement,

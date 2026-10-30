@@ -201,6 +201,7 @@ module uni_divider(clk,
    /* The front end sees the incoming op, except in FP_RSQRT2, where it sees the
     * divide pass of an rsqrt: 1.0 / the root just rounded into r_fp_y.  recip needs
     * nothing here -- exec.sv hands it in as a divide of 1.0 by fs. */
+`ifdef ENABLE_MIPS4
    wire        w_rs2 = (r_state == FP_RSQRT2);
    wire        w_rs2_dbl = r_fmt;
    wire        w_op_rsqrt = (fp_opcode == SP_RSQRT) || (fp_opcode == DP_RSQRT);
@@ -210,6 +211,13 @@ module uni_divider(clk,
    wire        w_fmt_op     = w_rs2 ? w_rs2_dbl :
 			      ((fp_opcode == DP_DIV) || (fp_opcode == DP_SQRT) ||
 			       (fp_opcode == DP_RECIP) || (fp_opcode == DP_RSQRT));
+`else
+   wire        w_op_rsqrt = 1'b0;
+   wire [63:0] w_in_a = fp_src_a;
+   wire [63:0] w_in_b = fp_src_b;
+   wire        w_is_sqrt_op = (fp_opcode == SP_SQRT) || (fp_opcode == DP_SQRT);
+   wire        w_fmt_op     = (fp_opcode == DP_DIV)  || (fp_opcode == DP_SQRT);
+`endif
 
    wire        sgn_a = w_fmt_op ? w_in_a[63] : w_in_a[31];
    wire        sgn_b = w_fmt_op ? w_in_b[63] : w_in_b[31];
@@ -528,8 +536,13 @@ module uni_divider(clk,
 	    begin
 	       /* result registered by the round/pack flop below; advance to WB -- or, for
 		* the square-root pass of an rsqrt, to its divide pass */
+`ifdef ENABLE_MIPS4
 	       n_state = r_rsqrt ? FP_RSQRT2 : FP_WAITWB;
+`else
+	       n_state = FP_WAITWB;
+`endif
 	    end
+`ifdef ENABLE_MIPS4
 	  FP_RSQRT2:
 	    begin
 	       /* the front end now sees 1.0 / r_fp_y (w_rs2): set up a divide exactly as
@@ -552,6 +565,7 @@ module uni_divider(clk,
 	       n_last = r_fmt ? 'd55 : 'd26;
 	       n_state = flush ? FP_WAITWB : (w_op_early | w_in_denorm) ? FP_ROUND : ITER;
 	    end
+`endif
 	  FP_WAITWB:
 	    begin
 	       if(fp_wb_slot_used == 1'b0)
@@ -628,8 +642,13 @@ module uni_divider(clk,
      end // always_ff@ (posedge clk)
    assign fp_y = r_fp_y;
    /* rsqrt: the square-root pass's flags join the divide's (0 for every other op) */
+`ifdef ENABLE_MIPS4
    assign fp_fflags = r_fp_fflags | r_ph1_flags[4:0];
    assign fp_denorm = r_fp_denorm | r_ph1_flags[5];
+`else
+   assign fp_fflags = r_fp_fflags;
+   assign fp_denorm = r_fp_denorm;
+`endif
 
 `ifdef VERILATOR
    always_ff@(negedge clk)
