@@ -7,10 +7,10 @@ import "DPI-C" function longint loadgpr(input int regid);
 `endif
 
 module rf4r2w(clk, reset,
-	      rdptr0,rdptr1,rdptr2,rdptr3,
+	      rdptr0,rdptr1,rdptr2,rdptr3,rdptr4,
 	      wrptr0,wrptr1,wen0,wen1,
 	      wr0, wr1,
-	      rd0, rd1, rd2, rd3);
+	      rd0, rd1, rd2, rd3, rd4);
 
    parameter WIDTH = 1;
    parameter LG_DEPTH = 1;
@@ -20,6 +20,7 @@ module rf4r2w(clk, reset,
    input logic [LG_DEPTH-1:0] rdptr1;
    input logic [LG_DEPTH-1:0] rdptr2;
    input logic [LG_DEPTH-1:0] rdptr3;
+   input logic [LG_DEPTH-1:0] rdptr4;   /* ENABLE_MIPS4: the mem pipe's index (srcC) read */
 
    input logic [LG_DEPTH-1:0] wrptr0;
    input logic [LG_DEPTH-1:0] wrptr1;
@@ -33,6 +34,7 @@ module rf4r2w(clk, reset,
    output logic [WIDTH-1:0]   rd1;
    output logic [WIDTH-1:0]   rd2;
    output logic [WIDTH-1:0]   rd3;
+   output logic [WIDTH-1:0]   rd4;
 
    /* Clustered (banked) register file (Henry Wong clustered RF).
     * Pointer MSB selects the ALU bank (0) or MEM bank (1); the low LG_DEPTH-1
@@ -69,6 +71,7 @@ module rf4r2w(clk, reset,
 	rd1 <= rdptr1[LG_DEPTH-1] ? r_ram_mem[rdptr1[LG_DEPTH-2:0]] : r_ram_alu[rdptr1[LG_DEPTH-2:0]];
 	rd2 <= rdptr2[LG_DEPTH-1] ? r_ram_mem[rdptr2[LG_DEPTH-2:0]] : r_ram_alu[rdptr2[LG_DEPTH-2:0]];
 	rd3 <= rdptr3[LG_DEPTH-1] ? r_ram_mem[rdptr3[LG_DEPTH-2:0]] : r_ram_alu[rdptr3[LG_DEPTH-2:0]];
+	rd4 <= rdptr4[LG_DEPTH-1] ? r_ram_mem[rdptr4[LG_DEPTH-2:0]] : r_ram_alu[rdptr4[LG_DEPTH-2:0]];
 `else
 	/* No power-up-zero guarantee (e.g. ASIC SRAM): the rdptr==0 -> 0 mux IS the
 	 * mechanism that makes $0 read as 0.  Such a target must keep this (or add an
@@ -77,6 +80,7 @@ module rf4r2w(clk, reset,
 	rd1 <= rdptr1=='d0 ? 'd0 : (rdptr1[LG_DEPTH-1] ? r_ram_mem[rdptr1[LG_DEPTH-2:0]] : r_ram_alu[rdptr1[LG_DEPTH-2:0]]);
 	rd2 <= rdptr2=='d0 ? 'd0 : (rdptr2[LG_DEPTH-1] ? r_ram_mem[rdptr2[LG_DEPTH-2:0]] : r_ram_alu[rdptr2[LG_DEPTH-2:0]]);
 	rd3 <= rdptr3=='d0 ? 'd0 : (rdptr3[LG_DEPTH-1] ? r_ram_mem[rdptr3[LG_DEPTH-2:0]] : r_ram_alu[rdptr3[LG_DEPTH-2:0]]);
+	rd4 <= rdptr4=='d0 ? 'd0 : (rdptr4[LG_DEPTH-1] ? r_ram_mem[rdptr4[LG_DEPTH-2:0]] : r_ram_alu[rdptr4[LG_DEPTH-2:0]]);
 `endif
 	/* NEVER write phys reg 0 ($0): the FPGA read path dropped the rdptr==0->0 mux
 	 * on the invariant that $0 is never written, but an r0-dest op (e.g. ssnop =

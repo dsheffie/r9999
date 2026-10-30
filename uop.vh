@@ -296,7 +296,25 @@ typedef enum logic [7:0]
    /* ENABLE_MIPS4 (MIPS IV movt/movf/movz/movn.fmt): fd = cond ? fs : fd.  srcA = fs,
     * srcB = fd (renamed: the old fd); imm[5:4] = 0 FCC (imm[2:0] cc, imm[3] tf),
     * 1 movz / 2 movn on GPR rt = srcC (int-renamed, read as its zero flag) */
-   FP_CMOV
+   FP_CMOV,
+   /* ENABLE_MIPS4 (MIPS IV COP1X): fd = fs*ft + fr / fs*ft - fr / -(fs*ft + fr) /
+    * -(fs*ft - fr).  NOT fused (R5000/R10000, IV ISA): the product is rounded first.
+    * srcA = fs, srcB = ft, srcC = fr (FP).  fpu.sv: a mul pass, then the rounded
+    * product goes round again through the adder FPU_LAT later. */
+   SP_MADD,
+   DP_MADD,
+   SP_MSUB,
+   DP_MSUB,
+   SP_NMADD,
+   DP_NMADD,
+   SP_NMSUB,
+   DP_NMSUB,
+   /* ENABLE_MIPS4 (MIPS IV): fd = 1/fs and 1/sqrt(fs) on the divider (uni_divider):
+    * recip is a divide of 1.0; rsqrt a square root, then 1.0 / the rounded root */
+   SP_RECIP,
+   DP_RECIP,
+   SP_RSQRT,
+   DP_RSQRT
    } opcode_t;
 
 function logic is_mult(opcode_t op);

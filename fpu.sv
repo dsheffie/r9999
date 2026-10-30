@@ -77,6 +77,31 @@ module fpu(clk,
    logic [7:0] 			   fcr_reg;
    opcode_t r_opcode[FPU_LAT-1:0];
 
+   /* MIPS IV madd/msub/nmadd/nmsub (ENABLE_MIPS4 decodes them): NOT fused.  The mul
+    * pass runs the multiplier; when it reaches the end of the pipe its rounded product
+    * goes back into the head as the adder's A operand, with fr (src_c, delayed FPU_LAT
+    * alongside) as B -- exec.sv reserves that start slot and the writeback slot
+    * 2*FPU_LAT+1 out.  r_pass2 marks the add pass; the mul flags ride with it. */
+   function automatic logic is_madd(input opcode_t op);
+      begin
+	 is_madd = (op == SP_MADD) || (op == DP_MADD) || (op == SP_MSUB) || (op == DP_MSUB) ||
+		   (op == SP_NMADD) || (op == DP_NMADD) || (op == SP_NMSUB) || (op == DP_NMSUB);
+      end
+   endfunction
+   function automatic logic madd_dbl(input opcode_t op);
+      begin
+	 madd_dbl = (op == DP_MADD) || (op == DP_MSUB) || (op == DP_NMADD) || (op == DP_NMSUB);
+      end
+   endfunction
+   logic 			   r_pass2[FPU_LAT-1:0];
+   logic [63:0] 		   r_srcc[FPU_LAT-1:0];
+   logic [5:0] 			   r_mflags[FPU_LAT-1:0];   /* {denorm, fflags} of the product */
+   /* the mul pass of a madd is leaving the pipe: start its add pass this cycle */
+   wire 			   w_restart = r_val[0] & is_madd(r_opcode[0]) & ~r_pass2[0];
+   wire 			   w_madd_neg = (r_opcode[0] == SP_NMADD) || (r_opcode[0] == DP_NMADD) ||
+						(r_opcode[0] == SP_NMSUB) || (r_opcode[0] == DP_NMSUB);
+   wire 			   w_madd_dbl = madd_dbl(r_opcode[0]);
+
    
    assign dst_ptr_out = r_ptr[0];
    assign rob_ptr_out = r_rob[0];
@@ -190,6 +215,17 @@ module fpu(clk,
 	       cmp_val = r_val[0];
 	       y = handle_fcr(w_cmp, r_fcr_sel[0], fcr_reg);
 	    end
+	  SP_MADD, DP_MADD, SP_MSUB, DP_MSUB, SP_NMADD, DP_NMADD, SP_NMSUB, DP_NMSUB:
+	    begin
+	       /* the add pass completes; the mul pass leaving the pipe is not a result */
+	       val = r_val[0] & r_pass2[0];
+	       y = t_adder_result;
+	       if(w_madd_neg)
+		 begin
+		    y = w_madd_dbl ? {~t_adder_result[63], t_adder_result[62:0]}
+				   : {32'd0, ~t_adder_result[31], t_adder_result[30:0]};
+		 end
+	    end
 
 	  default:
 	    begin
@@ -208,6 +244,11 @@ module fpu(clk,
 	    begin fflags = w_add_fflags; denorm = w_add_denorm; end
 	  SP_MUL, DP_MUL:
 	    begin fflags = w_mul_fflags; denorm = w_mul_denorm; end
+	  SP_MADD, DP_MADD, SP_MSUB, DP_MSUB, SP_NMADD, DP_NMADD, SP_NMSUB, DP_NMSUB:
+	    begin
+	       fflags = w_add_fflags | r_mflags[0][4:0];
+	       denorm = w_add_denorm | r_mflags[0][5];
+	    end
 	  SP_CMP, DP_CMP:
 	    fflags = w_cmp_fflags;
 	  /* DIV/SQRT + any unimplemented COP1: raise E (denorm) -> FPE at retirement,
@@ -226,7 +267,7 @@ module fpu(clk,
 	  end
 	else
 	  begin
-	     r_val[FPU_LAT-1] <= start;
+	     r_val[FPU_LAT-1] <= start | w_restart;
 	     for(integer i = (FPU_LAT-1); i > 0; i=i-1)
 	       begin
 		  r_val[i-1] <= r_val[i];
@@ -236,12 +277,15 @@ module fpu(clk,
    
    always_ff@(posedge clk)
      begin
-	r_opcode[FPU_LAT-1] <= opcode;
-	r_ptr[FPU_LAT-1] <= dst_ptr_in;
+	r_opcode[FPU_LAT-1] <= w_restart ? r_opcode[0] : opcode;
+	r_ptr[FPU_LAT-1] <= w_restart ? r_ptr[0] : dst_ptr_in;
 	r_fcr[FPU_LAT-1] <= fcr_ptr_in;
-	r_rob[FPU_LAT-1] <= rob_ptr_in;
+	r_rob[FPU_LAT-1] <= w_restart ? r_rob[0] : rob_ptr_in;
 	r_fcr_sel[FPU_LAT-1] <= fcr_sel;
 	r_fcr_reg[FPU_LAT-1] <= src_fcr;
+	r_pass2[FPU_LAT-1] <= w_restart;
+	r_srcc[FPU_LAT-1] <= src_c;
+	r_mflags[FPU_LAT-1] <= {w_mul_denorm, w_mul_fflags};
 	for(integer i = (FPU_LAT-1); i > 0; i=i-1)
 	  begin
 	     r_opcode[i-1] <= r_opcode[i];
@@ -250,6 +294,9 @@ module fpu(clk,
 	     r_rob[i-1] <= r_rob[i];
 	     r_fcr_sel[i-1] <= r_fcr_sel[i];
 	     r_fcr_reg[i-1] <= r_fcr_reg[i];
+	     r_pass2[i-1] <= r_pass2[i];
+	     r_srcc[i-1] <= r_srcc[i];
+	     r_mflags[i-1] <= r_mflags[i];
 	  end
      end // always_ff@ (posedge clk)
 
@@ -257,15 +304,18 @@ module fpu(clk,
     * Single operands ride the low 32 bits of src_a/src_b (MIPS layout); the unit
     * extracts/packs per fmt and rounds once at the target precision.
     * Rounding mode comes from FCSR.RM (the rm port). */
-   wire w_add_is_double = (opcode == DP_ADD) || (opcode == DP_SUB);
-   wire w_add_is_sub    = (opcode == SP_SUB) || (opcode == DP_SUB);
-   wire w_add_en        = (opcode == SP_ADD) || (opcode == SP_SUB) ||
+   wire w_add_is_double = w_restart ? w_madd_dbl : ((opcode == DP_ADD) || (opcode == DP_SUB));
+   /* msub = p - fr, nmsub = -(p - fr) */
+   wire w_add_is_sub    = w_restart ? ((r_opcode[0] == SP_MSUB) || (r_opcode[0] == DP_MSUB) ||
+				       (r_opcode[0] == SP_NMSUB) || (r_opcode[0] == DP_NMSUB))
+				    : ((opcode == SP_SUB) || (opcode == DP_SUB));
+   wire w_add_en        = w_restart | (opcode == SP_ADD) || (opcode == SP_SUB) ||
 			  (opcode == DP_ADD) || (opcode == DP_SUB);
    fpu_add #(.ADD_LAT(FPU_LAT))
    sadd (.clk(clk),
 	 .sub(w_add_is_sub),
-	 .a(src_a),
-	 .b(src_b),
+	 .a(w_restart ? t_mult_result : src_a),   /* madd add pass: the rounded product */
+	 .b(w_restart ? r_srcc[0] : src_b),       /* ... and fr */
 	 .en(w_add_en),
 	 .rm(rm),
 	 .fmt(w_add_is_double),
@@ -276,8 +326,8 @@ module fpu(clk,
    
    /* one unified single/double multiplier: fmt selects format.
     * Rounding mode comes from FCSR.RM (the rm port). */
-   wire w_mul_is_double = (opcode == DP_MUL);
-   wire w_mul_en        = (opcode == SP_MUL) || (opcode == DP_MUL);
+   wire w_mul_is_double = (opcode == DP_MUL) || madd_dbl(opcode);
+   wire w_mul_en        = (opcode == SP_MUL) || (opcode == DP_MUL) || is_madd(opcode);
    fpu_mul #(.MUL_LAT(FPU_LAT))
    smul (.clk(clk),
 	 .a(src_a),
@@ -291,4 +341,14 @@ module fpu(clk,
 	 );
 
    
+`ifdef VERILATOR
+   always_ff@(negedge clk)
+     begin
+	if(!reset & start & w_restart)
+	  begin
+	     $display("fpu: an op started in the slot a madd's add pass needs (pc %x)", pc);
+	     $stop();
+	  end
+     end
+`endif
 endmodule // fpu

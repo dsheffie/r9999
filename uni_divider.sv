@@ -121,7 +121,8 @@ module uni_divider(clk,
 			     INT_WAITWB = 'd3,
 			     FP_NORM = 'd4,
 			     FP_ROUND = 'd5,
-			     FP_WAITWB = 'd6
+			     FP_WAITWB = 'd6,
+			     FP_RSQRT2 = 'd7	/* rsqrt: restart as 1.0 / the rounded root */
 			     } state_t;
    state_t r_state, n_state;
 
@@ -154,6 +155,10 @@ module uni_divider(clk,
    logic 			     r_inv, n_inv;
    logic 			     r_dz, n_dz;
    logic 			     r_inden, n_inden;
+   /* ENABLE_MIPS4 rsqrt: r_rsqrt = the square-root pass of an rsqrt is running; its
+    * flags (inexact, invalid) are kept for the result of the divide pass */
+   logic 			     r_rsqrt, n_rsqrt;
+   logic [5:0] 			     r_ph1_flags, n_ph1_flags;	/* {denorm, fflags} */
    /* normalized significand + guard/round/sticky handed to the round/pack stage */
    logic [FW:0] 		     r_sig, n_sig;
    logic 			     r_gd, n_gd, r_rd, n_rd, r_sd, n_sd;
@@ -193,15 +198,25 @@ module uni_divider(clk,
     * FP unpack + special-case detection (from fpu_iter / fpu_mul), evaluated
     * on the INCOMING operands at fp_start and latched.
     * ===================================================================== */
-   wire        w_is_sqrt_op = (fp_opcode == SP_SQRT) || (fp_opcode == DP_SQRT);
-   wire        w_fmt_op     = (fp_opcode == DP_DIV)  || (fp_opcode == DP_SQRT);
+   /* The front end sees the incoming op, except in FP_RSQRT2, where it sees the
+    * divide pass of an rsqrt: 1.0 / the root just rounded into r_fp_y.  recip needs
+    * nothing here -- exec.sv hands it in as a divide of 1.0 by fs. */
+   wire        w_rs2 = (r_state == FP_RSQRT2);
+   wire        w_rs2_dbl = r_fmt;
+   wire        w_op_rsqrt = (fp_opcode == SP_RSQRT) || (fp_opcode == DP_RSQRT);
+   wire [63:0] w_in_a = w_rs2 ? (w_rs2_dbl ? 64'h3ff0000000000000 : 64'h000000003f800000) : fp_src_a;
+   wire [63:0] w_in_b = w_rs2 ? r_fp_y : fp_src_b;
+   wire        w_is_sqrt_op = ~w_rs2 & ((fp_opcode == SP_SQRT) || (fp_opcode == DP_SQRT) || w_op_rsqrt);
+   wire        w_fmt_op     = w_rs2 ? w_rs2_dbl :
+			      ((fp_opcode == DP_DIV) || (fp_opcode == DP_SQRT) ||
+			       (fp_opcode == DP_RECIP) || (fp_opcode == DP_RSQRT));
 
-   wire        sgn_a = w_fmt_op ? fp_src_a[63] : fp_src_a[31];
-   wire        sgn_b = w_fmt_op ? fp_src_b[63] : fp_src_b[31];
-   wire [EW-1:0] exp_a = w_fmt_op ? fp_src_a[62:52] : {3'b0, fp_src_a[30:23]};
-   wire [EW-1:0] exp_b = w_fmt_op ? fp_src_b[62:52] : {3'b0, fp_src_b[30:23]};
-   wire [FW-1:0] frac_a = w_fmt_op ? fp_src_a[51:0] : {fp_src_a[22:0], 29'b0};
-   wire [FW-1:0] frac_b = w_fmt_op ? fp_src_b[51:0] : {fp_src_b[22:0], 29'b0};
+   wire        sgn_a = w_fmt_op ? w_in_a[63] : w_in_a[31];
+   wire        sgn_b = w_fmt_op ? w_in_b[63] : w_in_b[31];
+   wire [EW-1:0] exp_a = w_fmt_op ? w_in_a[62:52] : {3'b0, w_in_a[30:23]};
+   wire [EW-1:0] exp_b = w_fmt_op ? w_in_b[62:52] : {3'b0, w_in_b[30:23]};
+   wire [FW-1:0] frac_a = w_fmt_op ? w_in_a[51:0] : {w_in_a[22:0], 29'b0};
+   wire [FW-1:0] frac_b = w_fmt_op ? w_in_b[51:0] : {w_in_b[22:0], 29'b0};
    wire [EW-1:0] INF_EXP = w_fmt_op ? 11'd2047 : 11'd255;
    wire [EW-1:0] BIAS = w_fmt_op ? 11'd1023 : 11'd127;
 
@@ -218,8 +233,8 @@ module uni_divider(clk,
  *   - default NaN = 0x7FF7FFFFFFFFFFFF (double) / 0x7FBFFFFF (single): sign 0, exponent all
  *     ones, fraction = 0 followed by all ones.
  * Verified against a MIPS-legacy Berkeley SoftFloat specialization via TestFloat. */
-   wire        a_is_snan = a_is_nan & (w_fmt_op ? fp_src_a[51] : fp_src_a[22]);
-   wire        b_is_snan = b_is_nan & (w_fmt_op ? fp_src_b[51] : fp_src_b[22]);
+   wire        a_is_snan = a_is_nan & (w_fmt_op ? w_in_a[51] : w_in_a[22]);
+   wire        b_is_snan = b_is_nan & (w_fmt_op ? w_in_b[51] : w_in_b[22]);
    /* denormal operand -> raise E, trap to the emulator (HW path is normalized-only) */
    wire        w_in_denorm = ((exp_a == 'd0) & (frac_a != 'd0)) |
 			     (~w_is_sqrt_op & (exp_b == 'd0) & (frac_b != 'd0));
@@ -348,6 +363,8 @@ module uni_divider(clk,
 	r_inv <= n_inv;
 	r_dz <= n_dz;
 	r_inden <= n_inden;
+	r_rsqrt <= n_rsqrt;
+	r_ph1_flags <= n_ph1_flags;
 	r_sig <= n_sig;
 	r_gd <= n_gd;
 	r_rd <= n_rd;
@@ -381,6 +398,8 @@ module uni_divider(clk,
 	n_inv = r_inv;
 	n_dz = r_dz;
 	n_inden = r_inden;
+	n_rsqrt = r_rsqrt;
+	n_ph1_flags = r_ph1_flags;
 	n_sig = r_sig;
 	n_gd = r_gd;
 	n_rd = r_rd;
@@ -423,6 +442,8 @@ module uni_divider(clk,
 		 begin
 		    n_is_fp = 1'b1;
 		    n_is_sqrt = w_is_sqrt_op;
+		    n_rsqrt = w_op_rsqrt;
+		    n_ph1_flags = 'd0;
 		    n_rob_ptr = fp_rob_ptr_in;
 		    n_fp_dst = fp_dst_ptr_in;
 		    n_rm = fp_rm;
@@ -505,8 +526,31 @@ module uni_divider(clk,
 	    end
 	  FP_ROUND:
 	    begin
-	       /* result registered by the round/pack flop below; advance to WB */
-	       n_state = FP_WAITWB;
+	       /* result registered by the round/pack flop below; advance to WB -- or, for
+		* the square-root pass of an rsqrt, to its divide pass */
+	       n_state = r_rsqrt ? FP_RSQRT2 : FP_WAITWB;
+	    end
+	  FP_RSQRT2:
+	    begin
+	       /* the front end now sees 1.0 / r_fp_y (w_rs2): set up a divide exactly as
+		* fp_start does in IDLE, keeping rob/dst/rm */
+	       n_rsqrt = 1'b0;
+	       n_ph1_flags = {r_fp_denorm, r_fp_fflags};
+	       n_cnt = 'd0;
+	       n_q = 'd0;
+	       n_is_sqrt = 1'b0;
+	       n_fp_sign = w_sign;
+	       n_special = w_op_early | w_in_denorm;
+	       n_early_y = w_op_early_y;
+	       n_inv = w_op_inv;
+	       n_dz = w_op_dz;
+	       n_inden = w_in_denorm;
+	       n_ebase = w_div_ebase;
+	       n_opb = {{(W-FW-1){1'b0}}, sig_b};
+	       n_rem = {{(RW-FW-1){1'b0}}, sig_a};
+	       n_src = 'd0;
+	       n_last = r_fmt ? 'd55 : 'd26;
+	       n_state = flush ? FP_WAITWB : (w_op_early | w_in_denorm) ? FP_ROUND : ITER;
 	    end
 	  FP_WAITWB:
 	    begin
@@ -583,8 +627,9 @@ module uni_divider(clk,
 	  end
      end // always_ff@ (posedge clk)
    assign fp_y = r_fp_y;
-   assign fp_fflags = r_fp_fflags;
-   assign fp_denorm = r_fp_denorm;
+   /* rsqrt: the square-root pass's flags join the divide's (0 for every other op) */
+   assign fp_fflags = r_fp_fflags | r_ph1_flags[4:0];
+   assign fp_denorm = r_fp_denorm | r_ph1_flags[5];
 
 `ifdef VERILATOR
    always_ff@(negedge clk)

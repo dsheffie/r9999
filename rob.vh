@@ -320,7 +320,7 @@ typedef struct packed {
    logic [11:0] pagemask;
    logic [7:0]  asid;
    logic [1:0]  r;      /* region: va[63:62] */
-   logic [26:0] vpn;    /* va[39:13], 27 bits for 64-bit mode */
+   logic [`VPN2_WIDTH-1:0] vpn;    /* va[SEGBITS-1:13] */
 
    logic [`TLB_PFN_WIDTH-1:0] pfn0;   /* stored PFN, zero-padded to PFN_WIDTH on read */
    logic        d0;
@@ -343,7 +343,7 @@ typedef struct packed {
    logic [11:0] pagemask;
    logic [7:0]  asid;
    logic [1:0]  r;      /* region: va[63:62] */
-   logic [26:0] vpn;    /* va[39:13], 27 bits for 64-bit mode */
+   logic [`VPN2_WIDTH-1:0] vpn;    /* va[SEGBITS-1:13] */
 
    logic [`PFN_WIDTH-1:0] pfn0;   /* pa[PA_WIDTH-1:12] = PA_WIDTH-12 bits (24 for 36-bit PA) */
    logic        d0;
