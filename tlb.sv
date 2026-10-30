@@ -99,7 +99,7 @@ module tlb(clk,
 		       r_tlb[ri].pagemask <= pm[11:0];
 		       r_tlb[ri].asid     <= ehi[7:0];
 		       r_tlb[ri].r        <= ehi[63:62];
-		       r_tlb[ri].vpn      <= ehi[39:13];
+		       r_tlb[ri].vpn      <= ehi[`SEGBITS-1:13];
 		       r_tlb[ri].g0       <= elo0[0];  r_tlb[ri].v0 <= elo0[1];
 		       r_tlb[ri].d0       <= elo0[2];  r_tlb[ri].c0 <= elo0[5:3];
 		       r_tlb[ri].pfn0     <= elo0[(`TLB_PFN_WIDTH+5):6];
@@ -171,7 +171,7 @@ module tlb(clk,
 	    * compared.  vpn[26:12]=va[39:25] is always compared; vpn[11:0]=va[24:13]
 	    * is compared only where pagemask==0.  pagemask==0 (4K) -> full compare,
 	    * identical to the old behavior (no 4K-path regression). */
-	   assign w_hit8k[i] = (((r_tlb[i].vpn[26:0] ^ va[39:13]) & {15'h7fff, ~r_tlb[i].pagemask[11:0]}) == 27'd0) & (r_tlb[i].r == va[63:62]);
+	   assign w_hit8k[i] = (((r_tlb[i].vpn ^ va[`SEGBITS-1:13]) & {{(`VPN2_WIDTH-12){1'b1}}, ~r_tlb[i].pagemask[11:0]}) == 'd0) & (r_tlb[i].r == va[63:62]);
 	   /* Match a slot once it has been WRITTEN by software (TLBWR/TLBWI), not when
 	    * (v0|v1).  An entry whose pages are both invalid (a refill for a not-yet-
 	    * present page) must still match so the access takes TLB-Invalid ->

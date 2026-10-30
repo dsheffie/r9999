@@ -285,9 +285,10 @@ static const bool ISS_MIPS4 = true;
 #else
 static const bool ISS_MIPS4 = false;
 #endif
-/* The subset of MIPS IV the RTL implements under machine.vh's ENABLE_MIPS4 (currently
- * INCOMPLETE: only the conditional moves -- int movn/movz/movt/movf, .fmt
- * movt/movf/movz/movn; COP1X and recip/rsqrt still trap).  -DENABLE_MIPS4 to match. */
+/* The MIPS IV the RTL implements under machine.vh's ENABLE_MIPS4: the conditional
+ * moves (int movn/movz/movt/movf, .fmt movt/movf/movz/movn), all of COP1X (indexed
+ * loads/stores, prefx, the unfused madd/msub/nmadd/nmsub) and recip/rsqrt -- i.e. all
+ * of it, so ISS_MIPS4_CMOV now means the same as ISS_MIPS4.  -DENABLE_MIPS4 to match. */
 #if defined(ENABLE_MIPS4) || defined(ISS_FULL_MIPS4)   /* full MIPS IV includes the subset */
 static const bool ISS_MIPS4_CMOV = true;
 #else
@@ -423,13 +424,24 @@ static inline uint32_t exc_vector(state_t *s, bool is_refill, bool exl_was_set,
   return base + offset;
 }
 
+/* Virtual-address bits per region (machine.vh SEGBITS): 40 on the R4400, 44 under
+ * ENABLE_R10000.  Sets the VPN2 width (VA[SEGBITS-1:13]) of EntryHi and the TLB match,
+ * and the XContext layout: PTEBase[63:SEGBITS-7], R[SEGBITS-8:SEGBITS-9],
+ * BadVPN2[SEGBITS-10:4] (R4400 [63:33]/[32:31]/[30:4], R10000 [63:37]/[36:35]/[34:4]). */
+#ifdef ENABLE_R10000
+static const uint32_t SEGBITS = 44;
+#else
+static const uint32_t SEGBITS = 40;
+#endif
+static const uint64_t VPN2_MASK = (1ULL << (SEGBITS - 13)) - 1;
+
 /* Fold the faulting VA into BadVAddr / EntryHi.VPN2 / Context / XContext
  * (interp_mips tlb_set_fault_state), preserving the software PTEBase + ASID. */
 static void tlb_set_fault_state(state_t *s, uint64_t va) {
   s->cpr0[CPR0_BADVADDR]     = (uint32_t)va;
   s->cpr0_64[CPR0_BADVADDR]  = va;
   uint64_t r    = (va >> 62) & 0x3;
-  uint64_t vpn2 = (va >> 13) & 0x7ffffffULL;             /* VPN2[39:13] -> 27 bits */
+  uint64_t vpn2 = (va >> 13) & VPN2_MASK;                /* VPN2 = VA[SEGBITS-1:13] */
   uint64_t asid = s->cpr0_64[CPR0_ENTRYHI] & 0xffULL;
   uint64_t ehi  = (r << 62) | (vpn2 << 13) | asid;
   s->cpr0_64[CPR0_ENTRYHI] = ehi;
@@ -438,9 +450,9 @@ static void tlb_set_fault_state(state_t *s, uint64_t va) {
   ctx |= ((va >> 13) & 0x7ffffULL) << 4;                  /* VA[31:13] -> Context[22:4] */
   s->cpr0_64[CPR0_CONTEXT] = ctx;
   s->cpr0[CPR0_CONTEXT]    = (uint32_t)ctx;
-  uint64_t xctx = s->cpr0_64[CPR0_XCONTEXT] & ~0x1ffffffffULL;
-  xctx |= ((va >> 13) & 0x7ffffffULL) << 4;               /* BadVPN2 -> XContext[30:4] */
-  xctx |= r << 31;                                        /* R -> XContext[32:31] */
+  uint64_t xctx = s->cpr0_64[CPR0_XCONTEXT] & (~0ULL << (SEGBITS - 7)); /* keep PTEBase */
+  xctx |= vpn2 << 4;                                      /* BadVPN2 */
+  xctx |= r << (SEGBITS - 9);                             /* R */
   s->cpr0_64[CPR0_XCONTEXT] = xctx;
   s->cpr0[CPR0_XCONTEXT]    = (uint32_t)xctx;
 }
@@ -550,7 +562,7 @@ static uint32_t va_translate(state_t *s, uint64_t va, tlb_op op) {
   }
   for(int i = 0; i < state_t::NUM_TLB_ENTRIES; i++) {
     uint64_t pm      = s->tlb[i].page_mask & 0x1ffe000ULL;
-    uint64_t vpnMask = (~(uint64_t)(pm | 0x1fffULL)) & 0x000000ffffffe000ULL; /* VPN2[39:13] */
+    uint64_t vpnMask = (~(uint64_t)(pm | 0x1fffULL)) & (VPN2_MASK << 13); /* VPN2[SEGBITS-1:13] */
     uint64_t e_hi    = s->tlb[i].entry_hi;
     bool global      = (s->tlb[i].entry_lo0 & 1u) && (s->tlb[i].entry_lo1 & 1u);
     bool vpn_match   = ((va & vpnMask) == (e_hi & vpnMask))
@@ -2050,8 +2062,8 @@ static void execCoproc1(uint32_t inst, state_t *s) {
 	  case 0x13:
 	  case 0x15:
 	  case 0x16:
-	    /* ENABLE_MIPS4: the .fmt conditional moves (0x11-0x13), not recip/rsqrt */
-	    if(!ISS_MIPS4 && !(ISS_MIPS4_CMOV && ((inst & 63) <= 0x13))) {
+	    /* ENABLE_MIPS4: the .fmt conditional moves (0x11-0x13) and recip/rsqrt */
+	    if(!ISS_MIPS4 && !ISS_MIPS4_CMOV) {
 	      take_exception_fpe(s);   /* MIPS IV .fmt op on an R4400 */
 	      return;
 	    }
@@ -2874,8 +2886,9 @@ void execMips(state_t *s) {
   else if(isCoproc1) 
     execCoproc1<EL>(inst,s);
   else if(isCoproc1x) {
-    if(!ISS_MIPS4) {
-      raise_ri(s, inst);   /* COP1X is MIPS IV */
+    /* COP1X is MIPS IV (all of it under ENABLE_MIPS4) */
+    if(!ISS_MIPS4 && !ISS_MIPS4_CMOV) {
+      raise_ri(s, inst);
       return;
     }
     execCoproc1x<EL>(inst,s);

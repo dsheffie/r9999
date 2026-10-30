@@ -322,6 +322,7 @@ module exec(clk,
     * fpu operand reads (consumed one cycle later in the FP read stage); rd2 = mfc1
     * source (srcB); rd3 = FP store data (dq).  No flat r_fp_prf flop array anymore. */
    logic [`M_WIDTH-1:0] 	  w_fp_srcA, w_fp_srcB;     // fpu reads  (rd0/rd1)
+   logic [`M_WIDTH-1:0] 	  w_fp_srcC;                // ENABLE_MIPS4 madd fr (rd4)
    logic [`M_WIDTH-1:0] 	  r_fp_rd_srcB, r_fp_rd_dq; // mem reads (rd2/rd3)
    logic [N_INT_PRF_ENTRIES-1:0]  r_fp_prf_inflight, n_fp_prf_inflight;
 
@@ -390,12 +391,15 @@ module exec(clk,
    
    wire [`M_WIDTH-1:0] w_srcA, w_srcB;
    wire [`M_WIDTH-1:0] w_mem_srcA, w_mem_srcB;
+   wire [`M_WIDTH-1:0] w_mem_srcC;   /* ENABLE_MIPS4: indexed FP load/store index (rf port 4) */
    
    logic 	r_fwd_int_srcA, r_fwd_int_srcB;
    logic 	r_fwd_mem_srcA, r_fwd_mem_srcB;
 
    logic t_fwd_int_mem_srcA,t_fwd_mem_mem_srcA;
    logic r_fwd_int_mem_srcA,r_fwd_mem_mem_srcA;
+   logic t_fwd_int_mem_srcC,t_fwd_mem_mem_srcC;
+   logic r_fwd_int_mem_srcC,r_fwd_mem_mem_srcC;
    
    /* Dedicated forward-DATA registers, one per forward flag, captured in the
     * SAME if() that sets the flag.  ROOT-CAUSE FIX for the 2026-09-02/03 stale
@@ -412,12 +416,14 @@ module exec(clk,
     * desynchronise, whatever the pick-to-execute delay. */
    logic [`M_WIDTH-1:0]     r_fwd_srcA_data, r_fwd_srcB_data;
    logic [`M_WIDTH-1:0]     r_fwd_mem_srcA_data;
+   logic [`M_WIDTH-1:0]     r_fwd_mem_srcC_data;
    logic [(`M_WIDTH*2)-1:0] r_fwd_hilo_data;
    logic [(`M_WIDTH*2)-1:0] r_src_hilo;
    logic 	r_fwd_hilo_int, r_fwd_hilo_mul, r_fwd_hilo_div;
       
    logic [`M_WIDTH-1:0] t_srcA, t_srcB;
    logic [`M_WIDTH-1:0] t_mem_srcA;
+   logic [`M_WIDTH-1:0] t_mem_srcC;
    
    
    logic [(`M_WIDTH*2)-1:0] t_src_hilo;
@@ -889,6 +895,10 @@ module exec(clk,
 	t_mem_srcA = r_fwd_int_mem_srcA ? r_fwd_mem_srcA_data :
 		     r_fwd_mem_mem_srcA ? r_fwd_mem_srcA_data :
 		     w_mem_srcA;
+
+	t_mem_srcC = r_fwd_int_mem_srcC ? r_fwd_mem_srcC_data :
+		     r_fwd_mem_mem_srcC ? r_fwd_mem_srcC_data :
+		     w_mem_srcC;
 
 	
 	t_src_hilo = r_fwd_hilo_int ? r_fwd_hilo_data :
@@ -1458,8 +1468,10 @@ module exec(clk,
        .ready(t_div_ready),
        .fp_opcode(r_fp_iss_uop.op),
        .fp_start(t_fdiv_start),
-       .fp_src_a(w_fp_srcA),
-       .fp_src_b(w_fp_srcB),
+       /* recip = 1.0 / fs: the constant dividend, fs as the divisor */
+       .fp_src_a(((r_fp_iss_uop.op == SP_RECIP) || (r_fp_iss_uop.op == DP_RECIP)) ?
+		 ((r_fp_iss_uop.op == DP_RECIP) ? 64'h3ff0000000000000 : 64'h000000003f800000) : w_fp_srcA),
+       .fp_src_b(((r_fp_iss_uop.op == SP_RECIP) || (r_fp_iss_uop.op == DP_RECIP)) ? w_fp_srcA : w_fp_srcB),
        .fp_rm(r_fcsr[1:0]),
        .fp_rob_ptr_in(r_fp_iss_uop.rob_ptr),
        .fp_dst_ptr_in(r_fp_iss_uop.dst),
@@ -1598,6 +1610,11 @@ module exec(clk,
 	  .rdptr1(fp_uq.srcB),
 	  .rdptr2(t_picked_mem_uop.srcB),
 	  .rdptr3(t_sd_src),
+`ifdef ENABLE_MIPS4
+	  .rdptr4(fp_uq.srcC),
+`else
+	  .rdptr4('d0),
+`endif
 	  /* bank0 write port shared by fpu-arith result and single-cycle convert
 	   * (mutually exclusive by r_fp_wb_bitvec) */
 	  .wrptr0(w_fdiv_complete ? w_fdiv_dst_ptr : w_fpu_result_valid ? w_fpu_dst_ptr : r_cvt_dst),
@@ -1613,7 +1630,8 @@ module exec(clk,
 	  .rd0(w_fp_srcA),
 	  .rd1(w_fp_srcB),
 	  .rd2(r_fp_rd_srcB),
-	  .rd3(r_fp_rd_dq)
+	  .rd3(r_fp_rd_dq),
+	  .rd4(w_fp_srcC)
 	  );
 
    
@@ -1703,7 +1721,17 @@ module exec(clk,
     * complete_bundle_2 with the multi-cycle fpu, arbitrated by r_fp_wb_bitvec.
     * Latency from pop: convert = 2 (read stage + 1), fpu = FPU_LAT+1; reserve each
     * op's writeback slot at pop, gate the head on the matching slot. */
+`ifdef ENABLE_MIPS4
+   /* madd/msub/nmadd/nmsub: a mul pass then an add pass in fpu0 -> 2*FPU_LAT+1 from pop.
+    * Its add pass re-enters fpu0's head FPU_LAT cycles after its own start, so that
+    * start slot is reserved too (r_fp_st_bitvec, same dist conventions: an fpu op
+    * popped now starts at dist 1, a madd's add pass at dist FPU_LAT+1). */
+   localparam FP_WB_BITS = 2*`FPU_LAT + 2;
+   localparam FP_ST_BITS = `FPU_LAT + 2;
+   logic [FP_ST_BITS-1:0] r_fp_st_bitvec, n_fp_st_bitvec;
+`else
    localparam FP_WB_BITS = `FPU_LAT + 2;
+`endif
    logic [FP_WB_BITS-1:0] r_fp_wb_bitvec, n_fp_wb_bitvec;
    wire [63:0] w_f2i_out, w_i2f_out, w_f2f_out;
    wire [4:0]  w_f2i_fflags, w_i2f_fflags, w_f2f_fflags;
@@ -1746,10 +1774,31 @@ module exec(clk,
    /* convert, signop and the FP conditional moves are single-cycle (bitvec dist 2,
     * fpu bypassed) */
    wire w_head_is_sc = w_head_is_cvt | w_head_is_signop | w_head_is_fcmov;
+`ifdef ENABLE_MIPS4
+   /* recip/rsqrt run on the divider too (uni_divider: 1.0 / fs, and its two-pass rsqrt) */
+   wire w_head_is_ds = (fp_uq.op == SP_DIV) || (fp_uq.op == DP_DIV) ||
+		       (fp_uq.op == SP_SQRT) || (fp_uq.op == DP_SQRT) ||
+		       (fp_uq.op == SP_RECIP) || (fp_uq.op == DP_RECIP) ||
+		       (fp_uq.op == SP_RSQRT) || (fp_uq.op == DP_RSQRT);
+   wire w_iss_is_ds  = (r_fp_iss_uop.op == SP_DIV) || (r_fp_iss_uop.op == DP_DIV) ||
+		       (r_fp_iss_uop.op == SP_SQRT) || (r_fp_iss_uop.op == DP_SQRT) ||
+		       (r_fp_iss_uop.op == SP_RECIP) || (r_fp_iss_uop.op == DP_RECIP) ||
+		       (r_fp_iss_uop.op == SP_RSQRT) || (r_fp_iss_uop.op == DP_RSQRT);
+   wire w_head_is_madd = (fp_uq.op == SP_MADD) || (fp_uq.op == DP_MADD) ||
+			 (fp_uq.op == SP_MSUB) || (fp_uq.op == DP_MSUB) ||
+			 (fp_uq.op == SP_NMADD) || (fp_uq.op == DP_NMADD) ||
+			 (fp_uq.op == SP_NMSUB) || (fp_uq.op == DP_NMSUB);
+`else
    wire w_head_is_ds = (fp_uq.op == SP_DIV) || (fp_uq.op == DP_DIV) ||
 		       (fp_uq.op == SP_SQRT) || (fp_uq.op == DP_SQRT);
    wire w_iss_is_ds  = (r_fp_iss_uop.op == SP_DIV) || (r_fp_iss_uop.op == DP_DIV) ||
 		       (r_fp_iss_uop.op == SP_SQRT) || (r_fp_iss_uop.op == DP_SQRT);
+   wire w_head_is_madd = 1'b0;
+`endif
+   /* writeback distance from pop: convert 2, fpu FPU_LAT+1, madd 2*FPU_LAT+1 */
+   localparam LG_FP_WB = $clog2(FP_WB_BITS);
+   wire [LG_FP_WB-1:0] w_head_wb_dist = w_head_is_sc ? LG_FP_WB'(2) :
+				       w_head_is_madd ? LG_FP_WB'(2*`FPU_LAT+1) : LG_FP_WB'(`FPU_LAT+1);
    wire w_iss_is_sc  = w_iss_is_cvt  | w_iss_is_signop | w_iss_is_fcmov;
    /* abs.* clears the sign, neg.* flips it, mov.* copies; single zero-extends low 32 */
    wire w_signop_dbl = (r_fp_iss_uop.op == DP_ABS) || (r_fp_iss_uop.op == DP_NEG) || (r_fp_iss_uop.op == DP_MOV);
@@ -1834,6 +1883,11 @@ module exec(clk,
 	t_fpu_fcr_rdy  = fp_uq.fcr_src_valid ? !r_fcr_prf_inflight[fp_uq.hilo_src] : 1'b1;
 	t_fpu_srcs_rdy = t_fpu_srcA_rdy && t_fpu_srcB_rdy && t_fpu_fcr_rdy;
 `ifdef ENABLE_MIPS4
+	/* madd's fr */
+	if(fp_uq.fp_srcC_valid && r_fp_prf_inflight[fp_uq.srcC])
+	  begin
+	     t_fpu_srcs_rdy = 1'b0;
+	  end
 	/* movz/movn.fmt: GPR rt (srcC) must be written, so its zero flag is valid */
 	if(fp_uq.srcC_valid && r_prf_inflight[fp_uq.srcC])
 	  begin
@@ -1850,7 +1904,15 @@ module exec(clk,
 	 * takes no r_fp_wb_bitvec reservation. */
 	t_pop_fp_uq = !t_fp_uq_empty && !t_flash_clear && t_fpu_srcs_rdy &&
 		      (w_head_is_ds ? w_fdiv_ready
-				    : !r_fp_wb_bitvec[w_head_is_sc ? 2 : (`FPU_LAT+1)]);
+				    : !r_fp_wb_bitvec[w_head_wb_dist]);
+`ifdef ENABLE_MIPS4
+	/* an fpu op (not convert/signop/cmov, not divider) starts fpu0 next cycle: not in
+	 * the slot a madd's add pass has reserved */
+	if(!w_head_is_sc && !w_head_is_ds && r_fp_st_bitvec[1])
+	  begin
+	     t_pop_fp_uq = 1'b0;
+	  end
+`endif
 	t_fdiv_pop     = t_pop_fp_uq & w_head_is_ds;
 	t_fdiv_start   = r_fp_iss_valid & w_iss_is_ds;
 	t_fdiv_wb_used = w_fpu_result_valid | w_fpu_fcr_valid | r_cvt_valid;
@@ -1865,8 +1927,34 @@ module exec(clk,
 	  n_fp_wb_bitvec[i] = r_fp_wb_bitvec[i+1];
 	n_fp_wb_bitvec[FP_WB_BITS-1] = 1'b0;
 	if(t_pop_fp_uq)
-	  n_fp_wb_bitvec[(w_head_is_sc ? 2 : (`FPU_LAT+1)) - 1] = 1'b1;
+	  n_fp_wb_bitvec[w_head_wb_dist - LG_FP_WB'(1)] = 1'b1;
      end
+`ifdef ENABLE_MIPS4
+   always_comb
+     begin
+	integer i;
+	for(i = 0; i < FP_ST_BITS-1; i = i + 1)
+	  begin
+	     n_fp_st_bitvec[i] = r_fp_st_bitvec[i+1];
+	  end
+	n_fp_st_bitvec[FP_ST_BITS-1] = 1'b0;
+	if(t_pop_fp_uq && w_head_is_madd)
+	  begin
+	     n_fp_st_bitvec[`FPU_LAT] = 1'b1;
+	  end
+     end
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_fp_st_bitvec <= 'd0;
+	  end
+	else
+	  begin
+	     r_fp_st_bitvec <= n_fp_st_bitvec;
+	  end
+     end
+`endif
    always_ff@(posedge clk)
      begin
 	/* NOT flushed on t_flash_clear: an FP op already in the pipeline (popped from
@@ -1923,7 +2011,11 @@ module exec(clk,
 	.start(r_fp_iss_valid & ~w_iss_is_sc & ~w_iss_is_ds),   /* converts + sign-ops bypass the fpu (single-cycle path); div/sqrt -> d0 */
 	.src_a(w_fp_srcA),
 	.src_b(w_fp_srcB),
-	.src_c({`M_WIDTH{1'b0}}),   /* no MADD: src_c unused */
+`ifdef ENABLE_MIPS4
+	.src_c(w_fp_srcC),          /* madd fr */
+`else
+	.src_c({`M_WIDTH{1'b0}}),
+`endif
 	.src_fcr(r_fp_iss_fcr),
 	.rm(r_fcsr[1:0]),   /* FCSR.RM; CTC1 serializes so this is stable per FP op */
 	.rob_ptr_in(r_fp_iss_uop.rob_ptr),
@@ -3094,7 +3186,18 @@ module exec(clk,
      end // always_comb
 
 
-   wire [`M_WIDTH-1:0] w_agu = t_mem_srcA + {{E_BITS{mem_uq.imm[15]}},mem_uq.imm};
+   /* base + offset, where the offset is the index GPR for the ENABLE_MIPS4 indexed FP
+    * loads/stores (decode_mips.sv COP1X: index in srcC, imm 0) and the sign-extended
+    * immediate otherwise.  A 2:1 select on a registered bit in front of a two-input add:
+    * a three-input (carry-save) add here cost ~2.7 ns in front of the DTLB match
+    * (henry 5aa9462e, WNS +5.016 -> +2.309 at 50 MHz).  index = $0 -> srcC_valid = 0 ->
+    * imm, which is 0 for these ops. */
+`ifdef ENABLE_MIPS4
+   wire [`M_WIDTH-1:0] w_mem_off = mem_uq.srcC_valid ? t_mem_srcC : {{E_BITS{mem_uq.imm[15]}},mem_uq.imm};
+`else
+   wire [`M_WIDTH-1:0] w_mem_off = {{E_BITS{mem_uq.imm[15]}},mem_uq.imm};
+`endif
+   wire [`M_WIDTH-1:0] w_agu = t_mem_srcA + w_mem_off;
 
 
    /* mfc1's FP source is the registered FP read r_fp_rd_srcB (aligned with mem_uq).
@@ -3140,6 +3243,13 @@ module exec(clk,
 				      (!r_prf_inflight[r_mem_sched_uops[i].srcA] |
 				       (r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (r_mem_sched_uops[i].srcA == int_uop.dst)) |
 				       (w_mem_rsp_int_valid && (r_mem_sched_uops[i].srcA == mem_rsp_dst_ptr))) : 1'b1) &&
+`ifdef ENABLE_MIPS4
+				     /* indexed FP load/store: the index (srcC) too */
+				     (r_mem_sched_uops[i].srcC_valid ?
+				      (!r_prf_inflight[r_mem_sched_uops[i].srcC] |
+				       (r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (r_mem_sched_uops[i].srcC == int_uop.dst)) |
+				       (w_mem_rsp_int_valid && (r_mem_sched_uops[i].srcC == mem_rsp_dst_ptr))) : 1'b1) &&
+`endif
 				     ((r_mem_sched_uops[i].fp_srcB_valid && !r_mem_sched_uops[i].is_store) ?
 				      !r_fp_prf_inflight[r_mem_sched_uops[i].srcB] : 1'b1);
 		t_mem_elig[i] = t_mem_entry_rdy[i] &
@@ -3790,7 +3900,7 @@ module exec(clk,
 	  TLBP:
 	    begin
 	       t_mem_tail.op = MEM_TLBP;
-	       t_mem_tail.addr = {r_entryhi_r, 22'd0, r_entryhi_vpn2, 13'd0};
+	       t_mem_tail.addr = {r_entryhi_r, {(62-`SEGBITS){1'b0}}, r_entryhi_vpn2, 13'd0};
 	       t_mem_tail.mapped = 1'b1;
 	    end
 	  MTC1:
@@ -3907,6 +4017,8 @@ module exec(clk,
      begin
 	t_fwd_int_mem_srcA = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_mem_uop.srcA == int_uop.dst);
 	t_fwd_mem_mem_srcA = w_mem_rsp_int_valid && (t_picked_mem_uop.srcA == mem_rsp_dst_ptr);
+	t_fwd_int_mem_srcC = r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_mem_uop.srcC == int_uop.dst);
+	t_fwd_mem_mem_srcC = w_mem_rsp_int_valid && (t_picked_mem_uop.srcC == mem_rsp_dst_ptr);
      end
    
    always_ff@(posedge clk)
@@ -3920,6 +4032,16 @@ module exec(clk,
 	else if(t_fwd_mem_mem_srcA)
 	  begin
 	     r_fwd_mem_srcA_data <= mem_rsp_load_data[`M_WIDTH-1:0];
+	  end
+	r_fwd_int_mem_srcC <= t_fwd_int_mem_srcC;
+	r_fwd_mem_mem_srcC <= t_fwd_mem_mem_srcC;
+	if(t_fwd_int_mem_srcC)
+	  begin
+	     r_fwd_mem_srcC_data <= t_result;
+	  end
+	else if(t_fwd_mem_mem_srcC)
+	  begin
+	     r_fwd_mem_srcC_data <= mem_rsp_load_data[`M_WIDTH-1:0];
 	  end
 	
 	r_fwd_int_srcA <= r_start_int && t_wr_int_prf && (int_uop.dst != 'd0) && (t_picked_uop.srcA == int_uop.dst);
@@ -3993,6 +4115,11 @@ module exec(clk,
 	   .rdptr1(t_picked_uop.srcB),
 	   .rdptr2(t_picked_mem_uop.srcA),
 	   .rdptr3(t_sd_src),
+`ifdef ENABLE_MIPS4
+	   .rdptr4(t_picked_mem_uop.srcC),
+`else
+	   .rdptr4('d0),
+`endif
 	   .wrptr0(int_uop.dst),
 	   .wrptr1(mem_rsp_dst_ptr),
 	   .wen0(r_start_int && t_wr_int_prf),
@@ -4002,7 +4129,8 @@ module exec(clk,
 	   .rd0(w_srcA),
 	   .rd1(w_srcB),
 	   .rd2(w_mem_srcA),
-	   .rd3(w_mem_srcB)
+	   .rd3(w_mem_srcB),
+	   .rd4(w_mem_srcC)
 	   );
 
    
@@ -4084,7 +4212,7 @@ module exec(clk,
 
    logic [7:0]  r_entryhi_asid, n_entryhi_asid;
    logic [1:0]  r_entryhi_r, n_entryhi_r;
-   logic [26:0] n_entryhi_vpn2, r_entryhi_vpn2;
+   logic [`VPN2_WIDTH-1:0] n_entryhi_vpn2, r_entryhi_vpn2;
    logic [`PFN_WIDTH-1:0] n_entrylo0_pfn, r_entrylo0_pfn;
    logic [2:0]  n_entrylo0_c, r_entrylo0_c;
    logic n_entrylo0_d, r_entrylo0_d;
@@ -4098,8 +4226,10 @@ module exec(clk,
    logic n_entrylo1_g, r_entrylo1_g;
 
    logic [8:0]  r_ptebase, n_ptebase;
-   logic [30:0] r_xptebase, n_xptebase;
-   logic [26:0] r_badvpn2, n_badvpn2;
+   /* XContext = {PTEBase[63:SEGBITS-7], R[SEGBITS-8:SEGBITS-9], BadVPN2[SEGBITS-10:4], 0000}:
+    * R4400 [63:33]/[32:31]/[30:4], R10000 [63:37]/[36:35]/[34:4] */
+   logic [63:`SEGBITS-7] r_xptebase, n_xptebase;
+   logic [`VPN2_WIDTH-1:0] r_badvpn2, n_badvpn2;
       
    logic [11:0]	n_pagemask, r_pagemask;
    
@@ -4163,6 +4293,8 @@ module exec(clk,
    logic       r_sr_ts, n_sr_ts;
    /* wired and random */
    logic [5:0] r_wired, n_wired, r_random, n_random;
+   /* 6-bit Random reset/wrap value (unsized `N_TLB_ENTRIES-1 trips WIDTH at 64) */
+   localparam [5:0] RANDOM_MAX = 6'(`N_TLB_ENTRIES-1);
    
    logic       r_index_probe_failed, n_index_probe_failed;
    logic [5:0] r_index, n_index;
@@ -4249,13 +4381,13 @@ module exec(clk,
 	   r_badvaddr <= loadcp0_64(8);
 	   r_cause    <= c13[6:2];   r_ce <= c13[29:28];
 	   r_ip0      <= c13[8];     r_ip1 <= c13[9];   r_exc_in_ds <= c13[31];
-	   r_entryhi_asid <= c10[7:0]; r_entryhi_r <= c10[63:62]; r_entryhi_vpn2 <= c10[39:13];
+	   r_entryhi_asid <= c10[7:0]; r_entryhi_r <= c10[63:62]; r_entryhi_vpn2 <= c10[`SEGBITS-1:13];
 	   r_pagemask <= c5[24:13];
 	   r_entrylo0_g <= c2[0]; r_entrylo0_v <= c2[1]; r_entrylo0_d <= c2[2];
 	   r_entrylo0_c <= c2[5:3]; r_entrylo0_pfn <= c2[(`PFN_WIDTH+5):6];
 	   r_entrylo1_g <= c3[0]; r_entrylo1_v <= c3[1]; r_entrylo1_d <= c3[2];
 	   r_entrylo1_c <= c3[5:3]; r_entrylo1_pfn <= c3[(`PFN_WIDTH+5):6];
-	   r_ptebase  <= c4[31:23]; r_xptebase <= c20[63:33]; r_badvpn2 <= 'd0;
+	   r_ptebase  <= c4[31:23]; r_xptebase <= c20[63:`SEGBITS-7]; r_badvpn2 <= 'd0;
 	end
 	else begin
 `endif
@@ -4424,11 +4556,11 @@ module exec(clk,
 	  end
 	else if(w_cp0_wr & w_cp0_wr_64 & w_cp0_wr_reg == 'd20)
 	  begin
-	     n_xptebase = w_cp0_wr_data[63:33];
+	     n_xptebase = w_cp0_wr_data[63:`SEGBITS-7];
 	  end
 	if(save_to_tlb_regs)
 	  begin
-	     n_badvpn2 = core_badvaddr[39:13];
+	     n_badvpn2 = core_badvaddr[`SEGBITS-1:13];
 	  end
      end
    
@@ -4460,7 +4592,7 @@ module exec(clk,
 	else if(save_to_tlb_regs)
 	  begin
 	     n_entryhi_r    = core_badvaddr[63:62];
-	     n_entryhi_vpn2 = core_badvaddr[39:13];
+	     n_entryhi_vpn2 = core_badvaddr[`SEGBITS-1:13];
 	  end
 	else if(w_cp0_wr & w_cp0_wr_reg == 'd10)
 	  begin
@@ -4474,7 +4606,7 @@ module exec(clk,
 	      * workaround to the old low-19 loose match. In 32-bit addressing the
 	      * TLB match ignores R/upper-VPN, so the extra stored bits are benign. */
 	     n_entryhi_r    = w_cp0_wr_data[63:62];
-	     n_entryhi_vpn2 = w_cp0_wr_data[39:13];
+	     n_entryhi_vpn2 = w_cp0_wr_data[`SEGBITS-1:13];
 	  end
      end
 
@@ -4647,7 +4779,7 @@ module exec(clk,
 	r_sr_ts <= reset ? 1'b0 : n_sr_ts;
 	r_sr_im <= reset ? 8'd0 : n_sr_im;
 	r_wired <= reset ? 'd0 :  n_wired;
-	r_random <= reset ? (`N_TLB_ENTRIES-1) : n_random;
+	r_random <= reset ? RANDOM_MAX : n_random;
 	r_count  <= reset ? 32'd0 : n_count;
 	r_toggle <= reset ? 1'b0 : n_toggle;
 	
@@ -4858,7 +4990,7 @@ module exec(clk,
 	    end
 	  'd10:
 	    begin
-	       t_csr0_64_val = {r_entryhi_r, 22'd0, r_entryhi_vpn2, 5'd0, r_entryhi_asid};
+	       t_csr0_64_val = {r_entryhi_r, {(62-`SEGBITS){1'b0}}, r_entryhi_vpn2, 5'd0, r_entryhi_asid};
 	    end
 	  'd20:
 	    begin
@@ -4885,11 +5017,11 @@ module exec(clk,
 	if(w_cp0_wr & w_cp0_wr_reg == 'd6)
 	  begin
 	     n_wired = w_cp0_wr_data[5:0];
-	     n_random = (`N_TLB_ENTRIES-1);
+	     n_random = RANDOM_MAX;
 	  end
 	else if(retire)
 	  begin
-	     n_random = (r_random==r_wired) ? (`N_TLB_ENTRIES-1) : (r_random-'d1);
+	     n_random = (r_random==r_wired) ? RANDOM_MAX : (r_random-'d1);
 	  end
      end
 

@@ -180,6 +180,12 @@ xtlb/test_xtlb64.elf: xtlb/test_xtlb.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -DMODE64 -x assembler-with-cpp -c xtlb/test_xtlb.S -o xtlb/test_xtlb64.o
 	$(LD) $(LDFLAGS) xtlb/test_xtlb64.o -o $@
 
+# ENABLE_R10000 only (44-bit VAs): not in the default list -- on an R4400 build its
+# second page is an Address Error by design
+tlb/test_va44.elf: tlb/test_va44.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c tlb/test_va44.S -o tlb/test_va44.o
+	$(LD) $(LDFLAGS) tlb/test_va44.o -o $@
+
 xtlb/test_xtlb32.elf: xtlb/test_xtlb.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c xtlb/test_xtlb.S -o xtlb/test_xtlb32.o
 	$(LD) $(LDFLAGS) xtlb/test_xtlb32.o -o $@

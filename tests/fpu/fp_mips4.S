@@ -1,5 +1,6 @@
 /* MIPS IV ops under interp_mips --cpu r5000 vs the default R4400 (MIPS III).
- * Reads PRId: on an R5000 (imp 0x23) every op must execute with no exception and
+ * Reads PRId: on an R5000 (imp 0x23), or on any core where a probe movn does not trap
+ * (r9999 built with ENABLE_MIPS4 still reports an R4400), every op must execute with no exception and
  * the right result; otherwise movn/movz and the COP1X ops must raise RI (10) and
  * recip.d / movn.d must raise the FP Unimplemented exception (15).
  * madd/msub/nmadd/nmsub use a = 1+2^-30, c = -(1+2^-29): a*a = 1+2^-29+2^-60, so an
@@ -67,6 +68,16 @@ _start:
     andi    $t0, $t0, 0xff
     xori    $t0, $t0, 0x23
     sltiu   $16, $t0, 1         /* s0 = (imp == 0x23) */
+    /* ...or a core that implements MIPS IV with an R4400 PRId (r9999 ENABLE_MIPS4):
+     * probe with one movn -- no exception means MIPS IV is there */
+    li      $8, 0
+    li      $9, 1
+    movn    $8, $9, $9
+    lw      $2, 0($19)
+    bne     $2, $0, 2f
+    nop
+    li      $16, 1
+2:  sw      $0, 0($19)
 
     /* movn / movz */
     li      $8, 5

@@ -39,6 +39,14 @@ OPT = -O3 -g -std=c++14 #-fomit-frame-pointer
 CXXFLAGS = -std=c++11 -g  $(OPT) -I$(VERILATOR_INC) -I$(VERILATOR_DPI_INC) #-DLINUX_SYSCALL_EMULATION=1
 LIBS =  $(EXTRA_LD) -lpthread
 
+# keep the C++ ISS/checker in step with machine.vh's CPU-model and MIPS IV knobs
+# (ENABLE_R10000 implies ENABLE_MIPS4; interpret.hh derives N_TLB_ENTRIES from it)
+ifneq ($(shell grep -c '^`define ENABLE_R10000' machine.vh),0)
+CXXFLAGS += -DENABLE_R10000 -DENABLE_MIPS4
+else ifneq ($(shell grep -c '^`define ENABLE_MIPS4' machine.vh),0)
+CXXFLAGS += -DENABLE_MIPS4
+endif
+
 DEP = $(OBJ:.o=.d)
 
 EXE = ooo_core

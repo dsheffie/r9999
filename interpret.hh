@@ -141,8 +141,17 @@ public:
   fp_reg_state cpr1_state[32] = {fp_reg_state::unknown};
   std::unordered_map<mipsInsn,uint64_t> insn_histo;
 
-  /* Software TLB -- mirrors the 48-entry fully-associative RTL TLB */
-  static const int NUM_TLB_ENTRIES = 48;
+  /* Software TLB -- mirrors the fully-associative RTL TLB.  N_TLB_ENTRIES follows
+   * machine.vh's `N_TLB_ENTRIES: 64 under ENABLE_R10000, else the R4x00's 48
+   * (-DN_TLB_ENTRIES=N overrides, for a 16-entry Linux-only build). */
+#ifndef N_TLB_ENTRIES
+#ifdef ENABLE_R10000
+#define N_TLB_ENTRIES 64
+#else
+#define N_TLB_ENTRIES 48
+#endif
+#endif
+  static const int NUM_TLB_ENTRIES = N_TLB_ENTRIES;
   struct tlb_entry_t {
     uint64_t entry_hi  = 0;   /* R[63:62] + VPN2[39:13] + ASID[7:0] */
     uint64_t entry_lo0 = 0;   /* PFN[33:6] + C[5:3] + D[2] + V[1] + G[0] */

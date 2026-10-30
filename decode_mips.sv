@@ -1571,6 +1571,23 @@ module decode_mips(
 		      end
 `ifdef ENABLE_MIPS4
 		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
+			    (insn[5:0]==6'd21 || insn[5:0]==6'd22))
+		      begin /* RECIP(21)/RSQRT(22).[sd]: single source (fs), on the divider */
+			 uop.srcA = fs;
+			 uop.fp_srcA_valid = 1'b1;
+			 uop.dst = fd;
+			 uop.fp_dst_valid = 1'b1;
+			 uop.is_fp = 1'b1;
+			 if(insn[25:21]==5'd16)
+			   begin
+			      uop.op = (insn[5:0]==6'd21) ? SP_RECIP : SP_RSQRT;
+			   end
+			 else
+			   begin
+			      uop.op = (insn[5:0]==6'd21) ? DP_RECIP : DP_RSQRT;
+			   end
+		      end
+		    else if((insn[25:21]==5'd16 || insn[25:21]==5'd17) &&
 			    (insn[5:0]==6'd17 || insn[5:0]==6'd18 || insn[5:0]==6'd19))
 		      begin /* MOVCF(17: movf/movt)/MOVZ(18)/MOVN(19).[sd]: fd = cond ? fs : fd.
 			     * Two FP sources (fs, the old fd) and a one-bit condition:
@@ -2097,6 +2114,120 @@ module decode_mips(
 			 uop.oldest_first = 1'b1;
 		      end
 		 end
+`ifdef ENABLE_MIPS4
+	       6'd19: /* COP1X (MIPS IV): indexed FP loads/stores, address = base + index.
+		       * The ops are LWC1/LDC1/SWC1/SDC1 with imm 0 and the index GPR (rt
+		       * field) in srcC: on a mem uop srcC_valid means "add srcC", which the
+		       * AGU selects instead of the immediate (exec.sv w_agu).  srcB keeps its
+		       * meaning (store data / the FR=0 merge read), so the store-data path
+		       * is untouched.  index = $0 -> srcC_valid = 0 -> + 0.  madd/msub/
+		       * nmadd/nmsub (funct 32..57) are three-source FP ops, below. */
+		 begin
+		    if(!cu1)
+		      begin
+			 uop.op = CPU;
+			 uop.cpu_ce1 = 1'b1;
+		      end
+		    else
+		      begin
+			 case(insn[5:0])
+			   6'd0: /* LWXC1: FPR[fd] <- mem[base+index] (low 32b) */
+			     begin
+				uop.op = LWC1;
+				uop.srcA = rs;
+				uop.srcA_valid = 1'b1;
+				uop.srcC = rt;
+				uop.srcC_valid = (rt != 'd0);
+				uop.fp_dst_valid = 1'b1;
+				uop.is_mem = 1'b1;
+				if(!fr)
+				  begin
+				     uop.dst = {fd[`LG_PRF_ENTRIES-1:1], 1'b0};
+				     uop.srcB = {fd[`LG_PRF_ENTRIES-1:1], 1'b0};
+				     uop.fp_srcB_valid = 1'b1;
+				     uop.jmp_imm[0] = fd[0];
+				  end
+				else
+				  begin
+				     uop.dst = fd;
+				  end
+			     end
+			   6'd1: /* LDXC1: FPR[fd] <- mem[base+index] (64b) */
+			     begin
+				uop.op = LDC1;
+				uop.srcA = rs;
+				uop.srcA_valid = 1'b1;
+				uop.srcC = rt;
+				uop.srcC_valid = (rt != 'd0);
+				uop.dst = fr ? fd : {fd[`LG_PRF_ENTRIES-1:1], 1'b0};
+				uop.fp_dst_valid = 1'b1;
+				uop.is_mem = 1'b1;
+			     end
+			   6'd8: /* SWXC1: mem[base+index] <- FPR[fs] (low 32b) */
+			     begin
+				uop.op = SWC1;
+				uop.srcA = rs;
+				uop.srcA_valid = 1'b1;
+				uop.srcC = rt;
+				uop.srcC_valid = (rt != 'd0);
+				if(!fr)
+				  begin
+				     uop.srcB = {fs[`LG_PRF_ENTRIES-1:1], 1'b0};
+				     uop.jmp_imm[0] = fs[0];
+				  end
+				else
+				  begin
+				     uop.srcB = fs;
+				  end
+				uop.fp_srcB_valid = 1'b1;
+				uop.is_mem = 1'b1;
+				uop.is_store = 1'b1;
+			     end
+			   6'd9: /* SDXC1: mem[base+index] <- FPR[fs] (64b) */
+			     begin
+				uop.op = SDC1;
+				uop.srcA = rs;
+				uop.srcA_valid = 1'b1;
+				uop.srcC = rt;
+				uop.srcC_valid = (rt != 'd0);
+				uop.srcB = fr ? fs : {fs[`LG_PRF_ENTRIES-1:1], 1'b0};
+				uop.fp_srcB_valid = 1'b1;
+				uop.is_mem = 1'b1;
+				uop.is_store = 1'b1;
+			     end
+			   6'd15: /* PREFX: a hint */
+			     begin
+				uop.op = NOP;
+				uop.is_int = 1'b1;
+			     end
+			   /* MADD(4)/MSUB(5)/NMADD(6)/NMSUB(7) = funct[5:3], fmt3 = funct[2:0]
+			    * (0 = S, 1 = D): fd = fs*ft +- fr.  fr is the base field. */
+			   6'd32, 6'd33, 6'd40, 6'd41, 6'd48, 6'd49, 6'd56, 6'd57:
+			     begin
+				uop.srcA = fs;
+				uop.fp_srcA_valid = 1'b1;
+				uop.srcB = ft;
+				uop.fp_srcB_valid = 1'b1;
+				uop.srcC = rs;
+				uop.fp_srcC_valid = 1'b1;
+				uop.dst = fd;
+				uop.fp_dst_valid = 1'b1;
+				uop.is_fp = 1'b1;
+				uop.op = (insn[5:0] == 6'd32) ? SP_MADD :
+					 (insn[5:0] == 6'd33) ? DP_MADD :
+					 (insn[5:0] == 6'd40) ? SP_MSUB :
+					 (insn[5:0] == 6'd41) ? DP_MSUB :
+					 (insn[5:0] == 6'd48) ? SP_NMADD :
+					 (insn[5:0] == 6'd49) ? DP_NMADD :
+					 (insn[5:0] == 6'd56) ? SP_NMSUB : DP_NMSUB;
+			     end
+			   default:
+			     begin
+			     end
+			 endcase // case (insn[5:0])
+		      end
+		 end
+`endif
 	       6'd49: /* LWC1: FPR[ft] <- mem[rs+off] (low 32b) */
 		 begin
 		    if(!cu1)
@@ -2246,7 +2377,8 @@ module decode_mips(
 	      * FR=0 single halves (lwc1/swc1 already merge them into the even reg). */
 	     /* the .fmt conditional moves have no ft: insn[16] is tf (movt/movf) or the
 	      * low bit of GPR rt (movz/movn), so only fs and fd must be even */
-	     if((fr == 1'b0) && uop.is_fp && (insn[11] | (insn[16] & (uop.op != FP_CMOV)) | insn[6]))
+	     if((fr == 1'b0) && uop.is_fp && (insn[11] | (insn[16] & (uop.op != FP_CMOV)) | insn[6] |
+					     (insn[21] & uop.fp_srcC_valid)))   /* madd: fr = insn[25:21] */
 	       begin
 		  uop.op            = II;   /* -> is_ii -> ARCH_FAULT -> cause 10 (ResI) */
 		  uop.is_fp         = 1'b0;
@@ -2254,6 +2386,7 @@ module decode_mips(
 		  uop.is_store      = 1'b0;
 		  uop.fp_srcA_valid = 1'b0;
 		  uop.fp_srcB_valid = 1'b0;
+		  uop.fp_srcC_valid = 1'b0;
 		  uop.fp_dst_valid  = 1'b0;
 		  uop.fcr_src_valid = 1'b0;
 		  uop.fcr_dst_valid = 1'b0;

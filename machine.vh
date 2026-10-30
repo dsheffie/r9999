@@ -61,29 +61,39 @@
  *     ALU scheduler (allocation pushes two, the queue used to pop one). */
 //`define ENABLE_SCHED_BYPASS 1
 
-/* ENABLE_MIPS4: the MIPS IV (R5000) instructions r9999 implements.  INCOMPLETE --
- * code built with plain -march=mips4 WILL hit unimplemented ops; build with
- * -march=mips4 -mno-madd4 -mno-lxc1-sxc1 (and -mno-branch-likely for speed).
+/* ENABLE_R10000: model an R10000 (IP28 / Indigo2) instead of the R4400 (Indy / IP22).
+ * Implies the CPU's ISA and TLB: ENABLE_MIPS4 and a 64-entry JTLB (N_TLB_ENTRIES).
+ * Address space: 44-bit virtual addresses (SEGBITS), so the 44-bit XContext layout
+ * and a 31-bit TLB match; and TLB_PA_WIDTH 31, for IP28's 1 GB at
+ * 0x20000000..0x5fffffff.  The IP28 IRIX kernel's K2 heap sets VA[43:40]
+ * (0xc0000fc0...).  An R4400 must take an Address Error there, so this is a
+ * CPU-model switch, not a free widening.  The C++ checker follows it (Makefile ->
+ * -DENABLE_R10000). */
+//`define ENABLE_R10000 1
+
+/* ENABLE_MIPS4: the MIPS IV (R5000/R10000) instructions; on by itself for an R4400
+ * with MIPS IV bolted on (the cmov silicon builds), and implied by ENABLE_R10000.
  *
- * Implemented under this knob: the conditional moves -- int movn/movz (SPECIAL
- * 0x0b/0x0a), movt/movf (SPECIAL 0x01), and movt/movf/movz/movn.fmt (COP1 0x11-0x13).
- * Each is "two data sources + one condition bit": the old destination is a renamed
- * source (no extra RAT/PRF port).  The GPR-rt conditions read a 1-bit zero flag per
- * int physical register, written with every int PRF write (a third ALU-scheduler
- * ready bit; the in-order FP queue checks rt's inflight bit); the FCC conditions
- * reuse the renamed FCC that BC1x reads.
+ * - Conditional moves: int movn/movz (SPECIAL 0x0b/0x0a), movt/movf (SPECIAL 0x01),
+ *   and movt/movf/movz/movn.fmt (COP1 0x11-0x13).  Each is "two data sources + one
+ *   condition bit": the old destination is a renamed source (no extra RAT/PRF port).
+ *   The GPR-rt conditions read a 1-bit zero flag per int physical register, written
+ *   with every int PRF write (a third ALU-scheduler ready bit; the in-order FP queue
+ *   checks rt's inflight bit); the FCC conditions reuse the renamed FCC that BC1x reads.
+ * - COP1X indexed FP loads/stores lwxc1/ldxc1/swxc1/sdxc1 (index register in srcC,
+ *   a 2:1 mux in front of the AGU's offset) and prefx (a NOP).
+ * - madd/msub/nmadd/nmsub.fmt: NOT fused -- the R10000 rounds the product, so the
+ *   fpu runs multiply, then re-injects for the add (third FP read port for fr).
+ * - recip/rsqrt.fmt (COP1 0x15/0x16) on the iterative divider (uni_divider).
  *
  * Already present WITHOUT this knob: pref (a NOP) and the eight FCCs (c.cond.fmt
- * cc / bc1t/f cc).
- *
- * MISSING (still RI / FP Unimplemented with the knob on): all of COP1X -- the
- * indexed FP loads/stores lwxc1/ldxc1/swxc1/sdxc1, prefx, and the fused
- * madd/msub/nmadd/nmsub.fmt (need a third FP source; plan: block in-order dispatch
- * to read it from the FP RF) -- and recip/rsqrt.fmt (COP1 0x15/0x16).
- *
- * The C++ checker does not read this file: build interpret.cc with -DENABLE_MIPS4
- * to match (ISS_MIPS4_CMOV). */
+ * cc / bc1t/f cc).  The C++ checker follows it (Makefile -> -DENABLE_MIPS4). */
 //`define ENABLE_MIPS4 1
+`ifdef ENABLE_R10000
+ `ifndef ENABLE_MIPS4
+  `define ENABLE_MIPS4 1
+ `endif
+`endif
 //`define ENABLE_UQ_DUAL_POP 1
 
 /* Register the L1D -> core response instead of driving it combinationally.
@@ -307,9 +317,15 @@
 
 /* Supported virtual-address bits within a region (MIPS SEGBITS). A non-compat 64b
  * VA must fit in SEGBITS, i.e. VA[61:SEGBITS]==0, else Address Error (Sail
- * TLBTranslate MAX_VA). R4000 = 40; R10000 = 48. This also bounds the VPN width
+ * TLBTranslate MAX_VA). R4000 = 40; R10000 = 44. This also bounds the VPN width
  * carried through the TLB/CAM, so shrinking it saves bits on the critical path. */
+`ifdef ENABLE_R10000
+`define SEGBITS 44
+`else
 `define SEGBITS 40
+`endif
+/* VPN2 = VA[SEGBITS-1:13]: what a TLB entry, EntryHi and BadVPN2 hold (27 / 31 bits) */
+`define VPN2_WIDTH (`SEGBITS - 13)
 
 /* Page-frame-number width = PA_WIDTH - 12 (4KB page offset). The TLB stores
  * PFN this wide (so PA = {pfn, va[11:0]} is exactly PA_WIDTH and can never exceed
@@ -321,7 +337,11 @@
  * zero-filled up to PFN_WIDTH on read and PA_WIDTH stays 36 everywhere else.  A
  * PFN with bits set above TLB_PA_WIDTH aliases low (no PA-range check). */
 `ifndef TLB_PA_WIDTH
- `define TLB_PA_WIDTH 30
+ `ifdef ENABLE_R10000
+  `define TLB_PA_WIDTH 31
+ `else
+  `define TLB_PA_WIDTH 30
+ `endif
 `endif
 `define TLB_PFN_WIDTH (`TLB_PA_WIDTH - 12)
 
@@ -333,8 +353,13 @@
  * but it ALSO requires a matching Linux cpu-probe.c `c->tlbsize = 16` and BREAKS
  * IRIX. The keeper fix (both OSes + the timing win) is a micro-TLB in front of a
  * 48-entry JTLB. Single source of truth for tlb.sv (N) + exec.sv (Random reset/
- * wrap + shadow depth); flip here, nowhere else. */
-`define N_TLB_ENTRIES 48
+ * wrap + shadow depth); flip here, nowhere else.  ENABLE_R10000 = 64 entries (the
+ * R10000's JTLB); interpret.hh derives the same value for the C++ checker. */
+`ifdef ENABLE_R10000
+ `define N_TLB_ENTRIES 64
+`else
+ `define N_TLB_ENTRIES 48
+`endif
 
 /* Micro-ITLB: a small fully-associative cache of translations in front of the
  * 48-way JTLB CAM (itlb.sv).  Hit = 1-cycle translate (skips WAIT_FOR_TLB); miss =

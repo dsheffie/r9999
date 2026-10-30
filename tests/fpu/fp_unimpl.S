@@ -1,7 +1,8 @@
 /* Catch-all E-trap: a COP1 op not implemented in HW raises the Unimplemented-Op
  * FP exception (ExcCode 15, FCSR.Cause.E) so the OS soft-float emulator handles
- * it (instead of SIGILL).  Uses recip.s (MIPS IV, func 0x15) -- undecoded here.
- *   recip.s $f2,$f0 = 0x46000095
+ * it (instead of SIGILL).  Uses .s funct 0x18, reserved in MIPS IV (it was recip.s,
+ * which an ENABLE_MIPS4 core now executes).
+ *   .s funct 0x18, fd=$f2, fs=$f0 = 0x46000098
  * Self-contained (own vectors, no crt0); run under -c 0; prints 'P'.
  */
 #include "sim.h"
@@ -47,7 +48,7 @@ _start:
     la      $19, fpe_flag
 
     sw      $0, 0($19)
-    .word   0x46000095          /* recip.s $f2,$f0 -- unimplemented COP1 */
+    .word   0x46000098          /* COP1 .s funct 0x18 (reserved in MIPS IV) -- unimplemented */
     nop
     nop
     nop

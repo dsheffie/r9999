@@ -112,7 +112,7 @@ module itlb(clk,
 		       r_tlb[ri].pagemask <= pm[11:0];
 		       r_tlb[ri].asid     <= ehi[7:0];
 		       r_tlb[ri].r        <= ehi[63:62];
-		       r_tlb[ri].vpn      <= ehi[39:13];
+		       r_tlb[ri].vpn      <= ehi[`SEGBITS-1:13];
 		       r_tlb[ri].g0       <= elo0[0];  r_tlb[ri].v0 <= elo0[1];
 		       r_tlb[ri].d0       <= elo0[2];  r_tlb[ri].c0 <= elo0[5:3];
 		       r_tlb[ri].pfn0     <= elo0[(`TLB_PFN_WIDTH+5):6];
@@ -204,7 +204,7 @@ module itlb(clk,
 	   /* Variable page size (R4000 PageMask): mask off the VPN2 bits inside the
 	    * page (pagemask[11:0]=PageMask[24:13]).  pagemask==0 (4K) -> full compare,
 	    * identical to the old behavior.  Mirrors tlb.sv. */
-	   assign w_hit8k[i] = (((r_tlb[i].vpn[26:0] ^ va[39:13]) & {15'h7fff, ~r_tlb[i].pagemask[11:0]}) == 27'd0) & (r_tlb[i].r == va[63:62]);
+	   assign w_hit8k[i] = (((r_tlb[i].vpn ^ va[`SEGBITS-1:13]) & {{(`VPN2_WIDTH-12){1'b1}}, ~r_tlb[i].pagemask[11:0]}) == 'd0) & (r_tlb[i].r == va[63:62]);
 	   /* Match a slot once it has been WRITTEN by software (TLBWR/TLBWI), not when
 	    * (v0|v1).  An entry whose pages are both invalid (a refill for a not-yet-
 	    * present page) must still match so the access takes TLB-Invalid ->
@@ -281,7 +281,7 @@ module itlb(clk,
    localparam NU    = `N_UITLB_ENTRIES;
    localparam LG_NU = $clog2(NU);
 
-   logic [26:0]           r_u_vpn  [NU-1:0];
+   logic [`VPN2_WIDTH-1:0] r_u_vpn  [NU-1:0];
    logic [11:0]           r_u_pm   [NU-1:0];   /* PageMask[24:13] of the cached entry */
    logic [1:0]            r_u_r    [NU-1:0];
    logic [7:0]            r_u_asid [NU-1:0];
@@ -306,7 +306,7 @@ module itlb(clk,
       for(genvar u = 0; u < NU; u = u + 1)
 	begin : u_hits
 	   assign w_u_hits[u] = r_u_valid[u]
-	                        & (((r_u_vpn[u] ^ va[39:13]) & {15'h7fff, ~r_u_pm[u]}) == 27'd0)
+	                        & (((r_u_vpn[u] ^ va[`SEGBITS-1:13]) & {{(`VPN2_WIDTH-12){1'b1}}, ~r_u_pm[u]}) == 'd0)
 	                        & (r_u_r[u]   == va[63:62])
 	                        & ((r_u_asid[u] == asid) | r_u_g[u]);
 	end
@@ -371,7 +371,7 @@ module itlb(clk,
 	  end
 	else if(install_en & hit)   /* 48-way prime landed a hit: cache r_tlb[hit_index] */
 	  begin
-	     r_u_vpn[w_u_repl]   <= r_tlb[hit_index].vpn[26:0];
+	     r_u_vpn[w_u_repl]   <= r_tlb[hit_index].vpn;
 	     r_u_pm[w_u_repl]    <= r_tlb[hit_index].pagemask;
 	     r_u_r[w_u_repl]     <= r_tlb[hit_index].r;
 	     r_u_asid[w_u_repl]  <= r_tlb[hit_index].asid;

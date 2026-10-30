@@ -21,10 +21,10 @@ import "DPI-C" function longint loadfpr(input int regid);
 `endif
 
 module fp_regfile(clk, reset,
-		  rdptr0, rdptr1, rdptr2, rdptr3,
+		  rdptr0, rdptr1, rdptr2, rdptr3, rdptr4,
 		  wrptr0, wrptr1, wen0, wen1,
 		  wr0, wr1,
-		  rd0, rd1, rd2, rd3);
+		  rd0, rd1, rd2, rd3, rd4);
 
    parameter WIDTH = 64;
    parameter LG_DEPTH = 7;
@@ -34,6 +34,7 @@ module fp_regfile(clk, reset,
    input logic [LG_DEPTH-1:0] rdptr1;
    input logic [LG_DEPTH-1:0] rdptr2;
    input logic [LG_DEPTH-1:0] rdptr3;
+   input logic [LG_DEPTH-1:0] rdptr4;   /* ENABLE_MIPS4: madd's fr (fpu operand C) */
 
    input logic [LG_DEPTH-1:0] wrptr0;   // fpu-arith result ptr (bank 0)
    input logic [LG_DEPTH-1:0] wrptr1;   // mem/load result ptr (bank 1)
@@ -46,6 +47,7 @@ module fp_regfile(clk, reset,
    output logic [WIDTH-1:0]   rd1;
    output logic [WIDTH-1:0]   rd2;
    output logic [WIDTH-1:0]   rd3;
+   output logic [WIDTH-1:0]   rd4;
 
    localparam HALF = 1 << (LG_DEPTH-1);
    `RF_RAM_STYLE logic [WIDTH-1:0] r_ram_fpu[HALF-1:0];   // bank 0 (MSB=0)
@@ -70,6 +72,7 @@ module fp_regfile(clk, reset,
 	rd1 <= rdptr1[LG_DEPTH-1] ? r_ram_mem[rdptr1[LG_DEPTH-2:0]] : r_ram_fpu[rdptr1[LG_DEPTH-2:0]];
 	rd2 <= rdptr2[LG_DEPTH-1] ? r_ram_mem[rdptr2[LG_DEPTH-2:0]] : r_ram_fpu[rdptr2[LG_DEPTH-2:0]];
 	rd3 <= rdptr3[LG_DEPTH-1] ? r_ram_mem[rdptr3[LG_DEPTH-2:0]] : r_ram_fpu[rdptr3[LG_DEPTH-2:0]];
+	rd4 <= rdptr4[LG_DEPTH-1] ? r_ram_mem[rdptr4[LG_DEPTH-2:0]] : r_ram_fpu[rdptr4[LG_DEPTH-2:0]];
 	if(wen0)
 	  r_ram_fpu[wrptr0[LG_DEPTH-2:0]] <= wr0;
 	if(wen1)
