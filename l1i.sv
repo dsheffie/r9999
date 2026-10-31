@@ -38,6 +38,9 @@ module l1i(clk,
 	   flush_line_req,
 	   flush_line_idx,
 	   flush_line_complete,
+	   blk_inv_req,
+	   blk_inv_addr,
+	   blk_inv_done,
 	   restart_pc,
 	   dbg_arch_hist,
 	   dbg_spec_hist,
@@ -102,6 +105,13 @@ module l1i(clk,
    input logic 	      flush_line_req;
    input logic [`LG_L1I_NUM_SETS-1:0] flush_line_idx;
    output logic       flush_line_complete;
+   /* R10000 block op, from the L2: clear the 128-byte block's 8 sets at every colour
+    * (the kernel may name the block by an address of another colour) in the
+    * background -- through the valid arrays' write port, giving way to fills and to a
+    * flush -- while fetch carries on.  blk_inv_done pulses when all are clear. */
+   input logic 	      blk_inv_req;
+   input logic [`PA_WIDTH-1:0] blk_inv_addr;
+   output logic       blk_inv_done;
    //restart signals
    input logic [`M_WIDTH-1:0] restart_pc;
    /* Global history, read back over the existing trace-index debug port.
@@ -171,7 +181,7 @@ module l1i(clk,
    localparam BTB_ENTRIES = 1 << `LG_BTB_SZ;
 
    output logic [(`PA_WIDTH-1):0] mem_req_addr;
-   output logic [4:0] 			  mem_req_opcode;
+   output logic [5:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
    output logic [15:0]			  mem_req_mask;
    
@@ -461,6 +471,53 @@ endfunction
 
    assign flush_complete = r_flush_complete;
    assign flush_line_complete = r_fline_complete;
+
+   localparam BINV_CNT_BITS = LG_ALIAS_BITS + 3;   /* {colour, line in the block} */
+   logic 		  r_binv_busy, n_binv_busy;
+   logic [BINV_CNT_BITS-1:0] r_binv_cnt, n_binv_cnt;
+   logic [`LG_PG_SZ-8:0]  r_binv_off, n_binv_off;   /* the block's offset in the page */
+   logic 		  r_binv_done;
+   logic 		  t_binv_fire;
+   logic [31:0] 	  t_binv_va;
+   assign blk_inv_done = r_binv_done;
+   always_comb
+     begin
+	/* the set of {colour, block offset, line}: a VA with those bits, indexed as fetch does */
+	t_binv_va = {{(32-`LG_PG_SZ){1'b0}}, r_binv_off, r_binv_cnt[2:0], 4'd0} |
+		    (({{(32-BINV_CNT_BITS){1'b0}}, r_binv_cnt} >> 3) << `LG_PG_SZ);
+	t_binv_fire = r_binv_busy && !mem_rsp_valid && (r_state != FLUSH_CACHE);
+	n_binv_busy = r_binv_busy;
+	n_binv_cnt = r_binv_cnt;
+	n_binv_off = r_binv_off;
+	if(blk_inv_req)
+	  begin
+	     n_binv_busy = 1'b1;
+	     n_binv_cnt = 'd0;
+	     n_binv_off = blk_inv_addr[`LG_PG_SZ-1:7];
+	  end
+	else if(t_binv_fire)
+	  begin
+	     n_binv_cnt = r_binv_cnt + 'd1;
+	     n_binv_busy = (r_binv_cnt != {BINV_CNT_BITS{1'b1}});
+	  end
+     end // always_comb
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_binv_busy <= 1'b0;
+	     r_binv_cnt <= 'd0;
+	     r_binv_off <= 'd0;
+	     r_binv_done <= 1'b0;
+	  end
+	else
+	  begin
+	     r_binv_busy <= n_binv_busy;
+	     r_binv_cnt <= n_binv_cnt;
+	     r_binv_off <= n_binv_off;
+	     r_binv_done <= t_binv_fire && (r_binv_cnt == {BINV_CNT_BITS{1'b1}});
+	  end
+     end // always_ff
    
    assign insn_valid = !fq_empty;
    assign insn_valid_two = !(fq_next_empty || fq_empty);
@@ -1389,10 +1446,11 @@ endfunction
    
    always_comb
      begin
-	t_wr_valid_ram_en0 = (mem_rsp_valid && !r_fill_way) || r_state == FLUSH_CACHE;
-	t_wr_valid_ram_en1 = (mem_rsp_valid && r_fill_way) || r_state == FLUSH_CACHE;
-	t_valid_ram_value = (r_state != FLUSH_CACHE);
-	t_valid_ram_idx = mem_rsp_valid ? r_miss_pc[IDX_STOP-1:IDX_START] : r_cache_idx;
+	t_wr_valid_ram_en0 = (mem_rsp_valid && !r_fill_way) || r_state == FLUSH_CACHE || t_binv_fire;
+	t_wr_valid_ram_en1 = (mem_rsp_valid && r_fill_way) || r_state == FLUSH_CACHE || t_binv_fire;
+	t_valid_ram_value = (r_state != FLUSH_CACHE) && !t_binv_fire;
+	t_valid_ram_idx = mem_rsp_valid ? r_miss_pc[IDX_STOP-1:IDX_START] :
+			  t_binv_fire ? t_binv_va[IDX_STOP-1:IDX_START] : r_cache_idx;
      end
 
       

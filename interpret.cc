@@ -73,13 +73,29 @@ static bool tlb_probe_ro(state_t *s, uint64_t va, uint32_t *pa, bool for_store =
   return false;
 }
 
+/* Co-sim (ooo_core --ip28 checker): a load VA's PA, and whether it bypasses the caches --
+ * kseg1, uncached xkphys (CCA 2 or 7), or the device window.  Such loads read device
+ * registers or memory the ISS does not model, so the checker adopts the RTL's value for
+ * them.  False if the VA does not translate (the load faults). */
+bool iss_load_class(state_t *s, uint64_t va, uint32_t *pa, bool *uncached) {
+  if(!tlb_probe_ro(s, va, pa)) {
+    return false;
+  }
+  const bool kseg1 = (((uint32_t)va & 0xe0000000u) == 0xa0000000u) &&
+		     (((va >> 32) == 0) || ((va >> 32) == 0xffffffffu));
+  const uint64_t cca = (va >> 59) & 7;
+  const bool xkphys_uc = (((va >> 62) & 3) == 2) && ((cca == 2) || (cca == 7));
+  *uncached = kseg1 || xkphys_uc || ((*pa >= 0x1f000000u) && (*pa < 0x20000000u));
+  return true;
+}
+
 /* Co-sim retire_trace: fetch the big-endian instruction word at a virtual PC via the
  * ISS TLB.  Code is identical in RTL & ISS memory (only DATA diverges), so this yields
  * the RTL's retired instruction for the trace even when data state has diverged.  Sets
  * *ppa to the physical address; returns 0 (and *ppa=0) on an untranslatable PC. */
 uint32_t iss_fetch_inst(state_t *s, uint64_t vpc, uint32_t *ppa) {
   uint32_t pa = 0;
-  if(!tlb_probe_ro(s, vpc, &pa)) { if(ppa) { *ppa = 0; } return 0; }
+  if(!tlb_probe_ro(s, vpc, &pa)) { if(ppa) { *ppa = ~0u; } return 0; }   /* ~0u: no mapping (PA 0 is a real vector) */
   if(ppa) { *ppa = pa; }
   return bswap<IS_LITTLE_ENDIAN>(s->mem.get<uint32_t>(pa));
 }
@@ -375,10 +391,64 @@ void raise_int(state_t *s, uint64_t epc, uint32_t ip) {
   /* Cause.IP[7:0] = the REAL pending bits (from the RTL's w_ip in the checker),
    * ExcCode=0 (Int), BD=0.  Was hardcoded to IP[7] (timer) which mis-dispatched
    * every software (IP[1]) / device (IP[2]) interrupt in the IRIX ISR. */
-  s->cpr0[CPR0_CAUSE] = (ip & 0xffu) << 8;
+  /* CE [29:28] keeps the last coprocessor-unusable exception's unit, as the RTL's Cause
+   * does (it is defined only for CpU; IRIX's interrupt handler reads Cause right after a
+   * lazy-FPU CpU) */
+  s->cpr0[CPR0_CAUSE] = (s->cpr0[CPR0_CAUSE] & 0x30000000u) | ((ip & 0xffu) << 8);
   s->cpr0[CPR0_SR]    = (s->cpr0[CPR0_SR] & ~SR_ERL) | SR_EXL;
   s->pc = sext32(exc_vector_general(s));
 }
+
+#ifdef ENABLE_R10000
+static const uint64_t ENTRYLO_ARCH_MASK = (1ULL << 34) - 1;   /* EntryLo[33:0] */
+#endif
+/* EntryLo0/1 keep only the architectural bits (R10000: [33:0]; exec.sv's registers) */
+static inline void entrylo_arch_mask(state_t *s, uint32_t rd) {
+#ifdef ENABLE_R10000
+  if((rd == CPR0_ENTRYLO0) || (rd == CPR0_ENTRYLO1)) {
+    s->cpr0_64[rd] &= ENTRYLO_ARCH_MASK;
+    s->cpr0[rd] = (uint32_t)s->cpr0_64[rd];
+  }
+#else
+  (void)s;
+  (void)rd;
+#endif
+}
+
+/* a 32-bit CP0 read as the RTL returns it (exec.sv's CP0 read mux) */
+static uint32_t cp0_read32(state_t *s, uint32_t rd) {
+  if(rd == 7) {
+    return 0;
+  }
+  uint32_t v = s->cpr0[rd];
+#ifdef ENABLE_R10000
+  /* the R10000 CP0 registers r9999 has nothing behind read 0 */
+  if((rd == 21) || (rd == 22) || ((rd >= 25) && (rd <= 29))) {
+    v = 0;
+  }
+#endif
+  if(rd == CPR0_SR) {
+    /* Status.CU2 is HARDWIRED to 1 in the RTL (exec.sv cpr0_status_reg), which also
+     * implements only CU1/CU0 [29:28], FR [26], BEV/TS [22:21] and [15:0]; the rest read
+     * 0 (e.g. DE [16], which the IP28 PROM sets) */
+    v = (v & 0x3460ffffu) | 0x40000000u;
+  }
+  return v;
+}
+
+/* the EntryLo bits the architecture keeps: the R10000's PFN is EntryLo[33:6] (its CP0
+ * EntryLo registers, tlbr and dmfc0 return them all, IRIX's software bits above the board's
+ * 32 PA bits included: exec.sv ENTRYLO_PFN_WIDTH); the R4x00 model keeps PFN_WIDTH [29:6]
+ * in EntryLo but tlbr returns only the TLB_PA_WIDTH its TLB stores */
+#ifdef ENABLE_R10000
+static uint64_t tlbr_entrylo(uint64_t elo) {
+  return elo & ENTRYLO_ARCH_MASK;
+}
+#else
+static uint64_t tlbr_entrylo(uint64_t elo) {
+  return elo & ((((1ULL << (30 - 12)) - 1) << 6) | 0x3fULL);
+}
+#endif
 
 static inline uint32_t fcc_bit(uint32_t cc) { return (cc == 0) ? 23u : (24u + cc); }
 
@@ -434,6 +504,17 @@ static const uint32_t SEGBITS = 44;
 static const uint32_t SEGBITS = 40;
 #endif
 static const uint64_t VPN2_MASK = (1ULL << (SEGBITS - 13)) - 1;
+
+/* EntryHi holds only R [63:62], VPN2 [SEGBITS-1:13] and ASID [7:0]; the Fill bits
+ * [61:SEGBITS] and [12:8] read 0, as the RTL's register (exec.sv): the IP28 kernel writes
+ * an xkphys-looking value and reads it back with dmfc0 */
+static inline void entryhi_fill_mask(state_t *s, uint32_t rd) {
+  if(rd == CPR0_ENTRYHI) {
+    s->cpr0_64[rd] &= 0xc000000000000000ULL | (VPN2_MASK << 13) | 0xffULL;
+    s->cpr0[rd] = (uint32_t)s->cpr0_64[rd];
+  }
+}
+
 
 /* Fold the faulting VA into BadVAddr / EntryHi.VPN2 / Context / XContext
  * (interp_mips tlb_set_fault_state), preserving the software PTEBase + ASID. */
@@ -492,6 +573,17 @@ static inline void utlb_flush() { for(auto &e : g_utlb) e.valid = false; }
 void iss_apply_tlb_write(state_t *s, int idx, uint64_t ehi, uint64_t elo0, uint64_t elo1, uint32_t pm) {
   if(idx < 0 || idx >= state_t::NUM_TLB_ENTRIES) return;
   s->tlb[idx].entry_hi  = ehi;
+#ifdef ENABLE_R10000
+  /* the mirror carries the TLB write bus (EntryLo[29:6] of PFN); the bits above, which
+   * tlbr returns, are still in the ISS's own EntryLo registers -- the tlbwi/tlbwr this
+   * write mirrors just used them -- so keep them when the rest agrees */
+  {
+    const uint64_t bus = (1ULL << 30) - 1;
+    const uint64_t a0 = s->cpr0_64[CPR0_ENTRYLO0], a1 = s->cpr0_64[CPR0_ENTRYLO1];
+    elo0 = ((a0 & bus) == elo0) ? (a0 & ENTRYLO_ARCH_MASK) : elo0;
+    elo1 = ((a1 & bus) == elo1) ? (a1 & ENTRYLO_ARCH_MASK) : elo1;
+  }
+#endif
   s->tlb[idx].entry_lo0 = elo0;
   s->tlb[idx].entry_lo1 = elo1;
   s->tlb[idx].page_mask = pm;
@@ -505,6 +597,7 @@ void iss_apply_tlb_write(state_t *s, int idx, uint64_t ehi, uint64_t elo0, uint6
  * clobbers its own base reg (lwu v0,off(v0)) can't be re-decoded post-exec, so the
  * checker reads the VA the ISS actually translated here.  Harmless for ooo_core. */
 uint64_t g_iss_last_ld_va = 0;
+uint64_t g_iss_last_st_va = 0, g_iss_st_seq = 0;   /* the last store's VA, and a count of stores */
 
 /* co-sim checker: when true, the ISS's 48-entry TLB is written SOLELY by the RTL's mirror
  * (henry_tb tlb_wr_log -> iss_apply_tlb_write, applied as a lossless queue) -- the ISS's own
@@ -539,6 +632,10 @@ static uint32_t va_translate(state_t *s, uint64_t va, tlb_op op) {
     va = (uint64_t)(int64_t)(int32_t)va;
   }
   if(op == tlb_op::load) g_iss_last_ld_va = va;
+  if(op == tlb_op::store) {   /* co-sim last-writer tags (ooo_core): which step stored where */
+    g_iss_last_st_va = va;
+    g_iss_st_seq++;
+  }
   uint32_t hi32 = (uint32_t)(va >> 32);
   uint32_t lo32 = (uint32_t)va;
   if(hi32 == 0x00000000u || hi32 == 0xffffffffu) {
@@ -1179,7 +1276,7 @@ static void _cfc1(uint32_t inst, state_t *s) {
   uint32_t cr = (inst>>11) & 31;
   uint32_t rt = (inst>>16) & 31;
   /* GPR[rt] = sign_extend32(FCR[cr]); FCR0 is the read-only FIR */
-  uint32_t v = (cr == 0) ? 0x00000500u : (uint32_t)s->fcr1[fcr_index(cr)];
+  uint32_t v = (cr == 0) ? FIR_VALUE : (uint32_t)s->fcr1[fcr_index(cr)];
   s->gpr[rt] = (int64_t)(int32_t)v;
   s->pc += 4;
   s->insn_histo[mipsInsn::CFC1]++;
@@ -2225,9 +2322,21 @@ void execMips(state_t *s) {
                                                       * commit to the L1D array (RTL wr_log fires),
                                                       * so record them or the RTL FIFO drifts. */
     bool is_fp_store = (opcode == 0x39 || opcode == 0x3d);
+    /* MIPS IV indexed FP stores (COP1X swxc1/sdxc1/suxc1) commit to the L1D array too:
+     * EA = base + index, the data is fs; suxc1 ignores EA[2:0] */
+    const uint32_t x_funct = inst & 0x3fu;
+    const bool is_cop1x_store = (opcode == 0x13) && ((x_funct == 0x08) || (x_funct == 0x09) || (x_funct == 0x0d));
+    if(is_cop1x_store) {
+      store_sz = (x_funct == 0x08) ? 4 : 8;
+      is_fp_store = true;
+    }
     if(store_sz) {
       int32_t simm_sc = (int32_t)(int16_t)(inst & 0xffffu);
-      uint64_t sva = s->gpr[rs] + simm_sc;
+      uint64_t sva = is_cop1x_store ? (uint64_t)(s->gpr[rs] + s->gpr[(inst >> 16) & 31]) :
+		     (uint64_t)(s->gpr[rs] + simm_sc);
+      if(is_cop1x_store && (x_funct == 0x0d)) {
+        sva &= ~UINT64_C(7);
+      }
       uint32_t spa = 0;                                  /* REAL PA via the ported TLB probe */
       /* only record stores that translate cleanly -- a store that will TLB-fault
        * writes nothing (the RTL faults too), so pushing it would drift the FIFO. */
@@ -2242,7 +2351,8 @@ void execMips(state_t *s) {
         bool uncached = (((uint32_t)sva & 0xe0000000u) == 0xa0000000u) || xkphys_uc ||
                         (spa >= 0x1f000000u && spa <= 0x1fffffffu);
         if(!uncached) {
-          uint32_t srt = (inst >> 16) & 31;              /* ft for FP stores, rt for integer */
+          uint32_t srt = is_cop1x_store ? ((inst >> 11) & 31) :   /* fs for COP1X stores, */
+			 ((inst >> 16) & 31);                       /* ft for FP stores, rt for integer */
           /* r9999 is flat FR=1: SDC1 stores the full 64b cpr1[ft], SWC1 the low 32b. */
           uint64_t sdata = is_fp_store ? s->cpr1[srt] : s->gpr[srt];
           if(store_sz < 8) sdata &= (UINT64_C(1) << (store_sz * 8)) - 1;  /* mask to store size */
@@ -2691,11 +2801,11 @@ void execMips(state_t *s) {
 	  uint32_t idx = s->cpr0[CPR0_INDEX] & 63;
 	  if(idx < (uint32_t)state_t::NUM_TLB_ENTRIES) {
 	    s->cpr0_64[CPR0_ENTRYHI]  = s->tlb[idx].entry_hi;
-	    s->cpr0_64[CPR0_ENTRYLO0] = s->tlb[idx].entry_lo0;
-	    s->cpr0_64[CPR0_ENTRYLO1] = s->tlb[idx].entry_lo1;
+	    s->cpr0_64[CPR0_ENTRYLO0] = tlbr_entrylo(s->tlb[idx].entry_lo0);
+	    s->cpr0_64[CPR0_ENTRYLO1] = tlbr_entrylo(s->tlb[idx].entry_lo1);
 	    s->cpr0[CPR0_ENTRYHI]     = (uint32_t)s->tlb[idx].entry_hi;
-	    s->cpr0[CPR0_ENTRYLO0]    = (uint32_t)s->tlb[idx].entry_lo0;
-	    s->cpr0[CPR0_ENTRYLO1]    = (uint32_t)s->tlb[idx].entry_lo1;
+	    s->cpr0[CPR0_ENTRYLO0]    = (uint32_t)s->cpr0_64[CPR0_ENTRYLO0];
+	    s->cpr0[CPR0_ENTRYLO1]    = (uint32_t)s->cpr0_64[CPR0_ENTRYLO1];
 	    s->cpr0[CPR0_PAGEMASK]    = s->tlb[idx].page_mask;
 	  }
 	  s->insn_histo[mipsInsn::TLBR]++;
@@ -2814,25 +2924,22 @@ void execMips(state_t *s) {
       switch(rs)
 	{
 	case 0x0: /*mfc0*/
-	  if(rd == 7) {
-	    s->gpr[rt] = 0;
-	  } else {
-	    /* mfc0 sign-extends the 32-bit CP0 value to 64 bits, matching HW. */
-	    uint32_t v = s->cpr0[rd];
-	    /* Status.CU2 is HARDWIRED to 1 in the RTL -- exec.sv's cpr0_status_reg
-	     * concatenation puts a literal 1'b1 in the cu2 slot.  A checkpoint whose
-	     * stored Status has CU2=0 therefore makes the co-sim diverge by exactly
-	     * bit 30 the first time a kernel exception handler does mfc0 k0,$12.
-	     * Mirror the hardware. */
-	    if(rd == CPR0_SR) {
-	      v |= 0x40000000u;
-	    }
-	    s->gpr[rt] = sext32(v);
+	  if(rt != 0) {   /* mfc0 $zero, ... (the IP28 PROM does it) must not write $zero */
+	    s->gpr[rt] = sext32(cp0_read32(s, rd));
 	  }
 	  s->insn_histo[mipsInsn::MFC0]++;
 	  break;
 	case 0x1: /*dmfc0 -- read full 64-bit CP0 register */
-	  s->gpr[rt] = s->cpr0_64[rd];
+	  if(rt != 0) {
+	    /* only the registers the ISS keeps 64 bits of come from cpr0_64; the rest are
+	     * 32-bit registers read as mfc0 does -- their 64-bit shadow is not maintained
+	     * (raise_int sets only cpr0[SR]: an interrupt handler's `dmfc0 k1, $12` read
+	     * a stale Status without EXL) */
+	    const bool wide = (rd == 2) || (rd == 3) || (rd == 8) || (rd == 10) ||
+			      (rd == 14) || (rd == 20) || (rd == 30);   /* the RTL's 64-bit reads,
+									 * + ErrorEPC, which it lacks */
+	    s->gpr[rt] = wide ? (int64_t)s->cpr0_64[rd] : sext32(cp0_read32(s, rd));
+	  }
 	  s->insn_histo[mipsInsn::DMFC0]++;
 	  break;
 	case 0x4: /*mtc0*/
@@ -2855,6 +2962,8 @@ void execMips(state_t *s) {
 	                       ? s->gpr[rt]
 	                       : (uint64_t)(int64_t)(int32_t)s->gpr[rt];
 	    s->cpr0[rd] = (uint32_t)s->cpr0_64[rd];
+	    entryhi_fill_mask(s, rd);
+	    entrylo_arch_mask(s, rd);
 	  }
 	  /* CP0 reg 7 is the simulator putchar port */
 	  if(rd == 7 && !s->silent) {
@@ -2867,6 +2976,8 @@ void execMips(state_t *s) {
 	  if(rd != 15 && rd != CPR0_CONFIG) { /* PRId and Config are read-only (as the RTL) */
 	    s->cpr0_64[rd] = s->gpr[rt];
 	    s->cpr0[rd] = (uint32_t)s->gpr[rt];
+	    entryhi_fill_mask(s, rd);
+	    entrylo_arch_mask(s, rd);
 	  }
 	  if(rd == 7 && !s->silent) {
 	    fputc((int)(s->gpr[rt] & 0xff), stdout);
@@ -3085,7 +3196,14 @@ void execMips(state_t *s) {
 		    * checker was flooding TLB-DELTAs here because the ISS NOP'd the
 		    * translation).  Index-type ops + the cache effect itself stay NOPs. */
 	uint32_t cop = (inst >> 16) & 0x1f;
-	if(cop >= 0x10) {                                   /* Hit_* -> translates */
+#ifdef ENABLE_R10000
+	/* R10000 (decode_mips.sv r10k_cache_act): only Hit Inv I/D/S and Hit WB-Inv D/S
+	 * are hit ops; 0x14 is the cache barrier and 0x18-0x1f index the data array */
+	const bool hit_op = (cop == 0x10) || (cop == 0x11) || (cop == 0x13) || (cop == 0x15) || (cop == 0x17);
+#else
+	const bool hit_op = (cop >= 0x10);
+#endif
+	if(hit_op) {                                        /* Hit_* -> translates */
 	  uint32_t base = (inst >> 21) & 0x1f;
 	  int16_t  off  = (int16_t)(inst & 0xffff);
 	  (void)va_translate(s, s->gpr[base] + (int64_t)off, tlb_op::load);

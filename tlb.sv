@@ -43,7 +43,7 @@ module tlb(clk,
    output logic	       dirty;
    output logic	       valid;
    /* matched page's cacheability (EntryLo C[5:3], MIPS CCA): the consumer treats
-    * CCA==3 (cacheable noncoherent) as cached, everything else as uncached. */
+    * CCA_CACHED (machine.vh: CCA 3, and 4/5 under ENABLE_R10000) as cached, the rest uncached. */
    output logic [2:0]  cache_attr;
    /* PA out-of-range is now enforced BY CONSTRUCTION: pfn is PFN_WIDTH = PA_WIDTH-12
     * bits, so PA = {pfn, va[11:0]} is exactly PA_WIDTH and can never exceed MAX_PA.

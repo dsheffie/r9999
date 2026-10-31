@@ -46,8 +46,7 @@ typedef struct packed {
    logic 			 is_break;
    logic			 is_syscall;
    logic			 is_cache;   /* MIPS CACHE op (serializing flush) */
-   logic			 cache_is_d; /* CACHE targets D-cache (per-line WB at .data) vs I-cache */
-   logic			 cache_inval; /* CACHE Hit-Invalidate: drop line WITHOUT writeback (DMA-in) */
+   cache_act_t		 cache_act;  /* what the CACHE op does at retire (machine.vh) */
    logic [(`M_WIDTH-1):0]	 data;
    logic [7:0]			 opcode;
    logic [`LG_BPU_TBL_SZ-1:0] 	 bpu_idx;
@@ -120,8 +119,7 @@ typedef struct packed {
    logic is_break;
    logic is_syscall;
    logic is_cache;
-   logic cache_is_d;
-   logic cache_inval;
+   cache_act_t cache_act;
    logic [7:0] opcode;
    logic [`LG_BPU_TBL_SZ-1:0] bpu_idx;
    logic br_pred;

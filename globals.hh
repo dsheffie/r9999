@@ -8,6 +8,8 @@ namespace globals {
   extern bool trace_retirement;
   extern bool trace_fp;
   extern bool report_syscalls;
+  /* --ip28: the Indigo2 R10000 board (the indysim device models read it) */
+  extern bool ip28;
 };
 
 #endif

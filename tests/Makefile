@@ -227,6 +227,44 @@ cache/test_inval_nowb.elf: cache/test_inval_nowb.S $(STARTUP) $(COMMON)/sim.h $(
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_inval_nowb.S -o cache/test_inval_nowb.o
 	$(LD) $(LDFLAGS) $(STARTUP) cache/test_inval_nowb.o -o $@
 
+# CACHE decode tables (RTL-only, -c 0): the R4400 expectations, and -DR10K for an
+# ENABLE_R10000 build of ooo_core.
+cache/test_cache_act.elf: cache/test_cache_act.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_cache_act.S -o cache/test_cache_act.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_cache_act.o -o $@
+
+cache/test_cache_act_r10k.elf: cache/test_cache_act.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -DR10K -x assembler-with-cpp -c cache/test_cache_act.S -o cache/test_cache_act_r10k.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_cache_act_r10k.o -o $@
+
+# R10000 block CACHE ops (0x17/0x13/0x03): complete and retire once, in and out of
+# delay slots; co-sim (--checker true).
+cache/test_cache_blk.elf: cache/test_cache_blk.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_cache_blk.S -o cache/test_cache_blk.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_cache_blk.o -o $@
+
+# R10000 block-op effects (L2 sequencer); RTL-only (-c 0), ENABLE_R10000 ooo_core.
+cache/test_cache_blk_fx.elf: cache/test_cache_blk_fx.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_cache_blk_fx.S -o cache/test_cache_blk_fx.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_cache_blk_fx.o -o $@
+
+cache/test_coherent_l1i.elf: cache/test_coherent_l1i.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_coherent_l1i.S -o cache/test_coherent_l1i.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_coherent_l1i.o -o $@
+
+cache/test_cache_blk_ifx.elf: cache/test_cache_blk_ifx.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_cache_blk_ifx.S -o cache/test_cache_blk_ifx.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_cache_blk_ifx.o -o $@
+
+cache/test_uc_l1d_alias.elf: cache/test_uc_l1d_alias.S $(STARTUP) $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_uc_l1d_alias.S -o cache/test_uc_l1d_alias.o
+	$(LD) $(LDFLAGS) $(STARTUP) cache/test_uc_l1d_alias.o -o $@
+
+# R10000 TLBR keeps the architectural EntryLo; self-contained (own vectors), ENABLE_R10000.
+tlb/test_tlbr_pfn.elf: tlb/test_tlbr_pfn.S $(COMMON)/sim.h $(COMMON)/link.ld
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c tlb/test_tlbr_pfn.S -o tlb/test_tlbr_pfn.o
+	$(LD) $(LDFLAGS) tlb/test_tlbr_pfn.o -o $@
+
 # user-mode CACHE -> CpU. Self-contained (own vectors, no crt0), RTL-only.
 cache/test_cache_priv.elf: cache/test_cache_priv.S $(COMMON)/sim.h $(COMMON)/link.ld
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c cache/test_cache_priv.S -o cache/test_cache_priv.o

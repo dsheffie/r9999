@@ -3068,7 +3068,7 @@ module exec(clk,
 	    begin
 	       /* fs in srcA[4:0]: FCR0=FIR (read-only R4000 id), FCR31=FCSR */
 	       t_result = (int_uop.srcA[4:0] == 5'd0) ?
-			  sign_extend32(32'h00000500) : /* FIR: imp=0x05 (R4000 FPU), rev 0 */
+			  sign_extend32(`FIR_VALUE) : /* FIR (machine.vh) */
 			  sign_extend32(r_fcsr | fcc_expand(r_fcr_prf[int_uop.hilo_src]));
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
@@ -3379,7 +3379,8 @@ module exec(clk,
 				(t_mem_uq.op == LD) | (t_mem_uq.op == LWC1) |
 				(t_mem_uq.op == LDC1) | t_mem_uq_merge;
 	t_mem_uq_plain_store = is_lsu_store(t_mem_uq.op);
-	t_mem_uq_serial = (t_mem_uq.op == CHWB) | (t_mem_uq.op == CHWBINV) | (t_mem_uq.op == CHINV);
+	t_mem_uq_serial = (t_mem_uq.op == CHWB) | (t_mem_uq.op == CHWBINV) | (t_mem_uq.op == CHINV) |
+			  (t_mem_uq.op == CHBWBINV) | (t_mem_uq.op == CHBINV) | (t_mem_uq.op == CHBIDX);
 	/* SC/SCD check the link on their address pass: every older op must be gone */
 	t_mem_uq_old1 = (t_mem_uq.op == SC) | (t_mem_uq.op == SCD);
 	/* GPR<->FPR moves only borrow the mem pipe as a cross-register-file path (MEM_MOV,
@@ -3740,6 +3741,16 @@ module exec(clk,
 	  CHINV:
 	    begin
 	       t_mem_tail.op = MEM_CHINV;
+	       t_mem_tail.is_store = 1'b1;
+	       t_mem_tail.dst_valid = 1'b0;
+	       t_mem_tail.bad_addr = w_bad_seg_perms;
+	    end
+	  CHBWBINV, CHBINV, CHBIDX:
+	    begin
+	       /* R10000 secondary-cache ops: like the CH ops, one non-speculative mem op
+		* the l1d answers when its L2 request is acked; the L2 does the block */
+	       t_mem_tail.op = (mem_uq.op == CHBWBINV) ? MEM_BLK_WBINV :
+			       (mem_uq.op == CHBINV) ? MEM_BLK_INV : MEM_BLK_IDX;
 	       t_mem_tail.is_store = 1'b1;
 	       t_mem_tail.dst_valid = 1'b0;
 	       t_mem_tail.bad_addr = w_bad_seg_perms;
@@ -4218,17 +4229,22 @@ module exec(clk,
    logic [7:0]  r_entryhi_asid, n_entryhi_asid;
    logic [1:0]  r_entryhi_r, n_entryhi_r;
    logic [`VPN2_WIDTH-1:0] n_entryhi_vpn2, r_entryhi_vpn2;
-   logic [`PFN_WIDTH-1:0] n_entrylo0_pfn, r_entrylo0_pfn;
+   logic [`ENTRYLO_PFN_WIDTH-1:0] n_entrylo0_pfn, r_entrylo0_pfn;
    logic [2:0]  n_entrylo0_c, r_entrylo0_c;
    logic n_entrylo0_d, r_entrylo0_d;
    logic n_entrylo0_v, r_entrylo0_v;
    logic n_entrylo0_g, r_entrylo0_g;
    
-   logic [`PFN_WIDTH-1:0] n_entrylo1_pfn, r_entrylo1_pfn;
+   logic [`ENTRYLO_PFN_WIDTH-1:0] n_entrylo1_pfn, r_entrylo1_pfn;
    logic [2:0]  n_entrylo1_c, r_entrylo1_c;
    logic n_entrylo1_d, r_entrylo1_d;
    logic n_entrylo1_v, r_entrylo1_v;
    logic n_entrylo1_g, r_entrylo1_g;
+   /* EntryLo0/1 as CP0 reads them: dmfc0 the 64-bit register, mfc0 its low word */
+   wire [63:0] w_entrylo0_64 = {{(64-`ENTRYLO_PFN_WIDTH-6){1'b0}}, r_entrylo0_pfn, r_entrylo0_c,
+				r_entrylo0_d, r_entrylo0_v, r_entrylo0_g};
+   wire [63:0] w_entrylo1_64 = {{(64-`ENTRYLO_PFN_WIDTH-6){1'b0}}, r_entrylo1_pfn, r_entrylo1_c,
+				r_entrylo1_d, r_entrylo1_v, r_entrylo1_g};
 
    logic [8:0]  r_ptebase, n_ptebase;
    /* XContext = {PTEBase[63:SEGBITS-7], R[SEGBITS-8:SEGBITS-9], BadVPN2[SEGBITS-10:4], 0000}:
@@ -4304,6 +4320,13 @@ module exec(clk,
    logic       r_index_probe_failed, n_index_probe_failed;
    logic [5:0] r_index, n_index;
    tlb_stored_t r_tlb_entry;   /* TLBR read-back: stored type (no entry field) */
+`ifdef ENABLE_R10000
+   /* the EntryLo PFN bits the translating TLBs do not store (ENTRYLO_PFN_WIDTH above
+    * TLB_PFN_WIDTH), kept beside the shadow so tlbr returns what was written */
+   localparam SHADOW_PFN_HI = `ENTRYLO_PFN_WIDTH - `TLB_PFN_WIDTH;
+   logic [SHADOW_PFN_HI-1:0] r_shadow_pfn0_hi[`N_TLB_ENTRIES-1:0], r_shadow_pfn1_hi[`N_TLB_ENTRIES-1:0];
+   logic [SHADOW_PFN_HI-1:0] r_tlb_entry_pfn0_hi, r_tlb_entry_pfn1_hi;
+`endif
    
    
    logic [`M_WIDTH-1:0]	n_epc, r_epc, n_badvaddr, r_badvaddr;
@@ -4378,9 +4401,9 @@ module exec(clk,
      begin
 `ifdef VERILATOR
 	if(reset && (have_checkpoint() != 0)) begin : ckpt_cp0a
-	   logic [31:0] c13, c2, c3, c5;
-	   logic [63:0] c10, c4, c20;
-	   c13 = loadcp0(13); c2 = loadcp0(2); c3 = loadcp0(3); c5 = loadcp0(5);
+	   logic [31:0] c13, c5;
+	   logic [63:0] c10, c4, c20, c2, c3;   /* EntryLo: the full ENTRYLO_PFN_WIDTH */
+	   c13 = loadcp0(13); c2 = loadcp0_64(2); c3 = loadcp0_64(3); c5 = loadcp0(5);
 	   c10 = loadcp0_64(10); c4 = loadcp0_64(4); c20 = loadcp0_64(20);
 	   r_epc      <= loadcp0_64(14);
 	   r_badvaddr <= loadcp0_64(8);
@@ -4389,9 +4412,9 @@ module exec(clk,
 	   r_entryhi_asid <= c10[7:0]; r_entryhi_r <= c10[63:62]; r_entryhi_vpn2 <= c10[`SEGBITS-1:13];
 	   r_pagemask <= c5[24:13];
 	   r_entrylo0_g <= c2[0]; r_entrylo0_v <= c2[1]; r_entrylo0_d <= c2[2];
-	   r_entrylo0_c <= c2[5:3]; r_entrylo0_pfn <= c2[(`PFN_WIDTH+5):6];
+	   r_entrylo0_c <= c2[5:3]; r_entrylo0_pfn <= c2[(`ENTRYLO_PFN_WIDTH+5):6];
 	   r_entrylo1_g <= c3[0]; r_entrylo1_v <= c3[1]; r_entrylo1_d <= c3[2];
-	   r_entrylo1_c <= c3[5:3]; r_entrylo1_pfn <= c3[(`PFN_WIDTH+5):6];
+	   r_entrylo1_c <= c3[5:3]; r_entrylo1_pfn <= c3[(`ENTRYLO_PFN_WIDTH+5):6];
 	   r_ptebase  <= c4[31:23]; r_xptebase <= c20[63:`SEGBITS-7]; r_badvpn2 <= 'd0;
 	end
 	else begin
@@ -4431,8 +4454,8 @@ module exec(clk,
      begin
 	tlb_entry_out_valid = r_tlb_entry_out_valid;
 	tlb_entry_out.entry = r_tlb_index;
-	tlb_entry_out.pfn0 = r_entrylo0_pfn;
-	tlb_entry_out.pfn1 = r_entrylo1_pfn;
+	tlb_entry_out.pfn0 = r_entrylo0_pfn[`PFN_WIDTH-1:0];
+	tlb_entry_out.pfn1 = r_entrylo1_pfn[`PFN_WIDTH-1:0];
 	tlb_entry_out.pagemask = r_pagemask;
 	tlb_entry_out.asid = r_entryhi_asid;
 	tlb_entry_out.r = r_entryhi_r;
@@ -4451,8 +4474,16 @@ module exec(clk,
    always_ff@(posedge clk)
      begin
 	r_tlb_entry <= r_shadow_tlb[r_index];
+`ifdef ENABLE_R10000
+	r_tlb_entry_pfn0_hi <= r_shadow_pfn0_hi[r_index];
+	r_tlb_entry_pfn1_hi <= r_shadow_pfn1_hi[r_index];
+`endif
 	if(r_tlb_entry_out_valid)
 	  begin
+`ifdef ENABLE_R10000
+	     r_shadow_pfn0_hi[r_tlb_index] <= r_entrylo0_pfn[`ENTRYLO_PFN_WIDTH-1:`TLB_PFN_WIDTH];
+	     r_shadow_pfn1_hi[r_tlb_index] <= r_entrylo1_pfn[`ENTRYLO_PFN_WIDTH-1:`TLB_PFN_WIDTH];
+`endif
 	     /* copy the stored fields (everything except the entry write-index) */
 	     r_shadow_tlb[r_tlb_index].pagemask <= tlb_entry_out.pagemask;
 	     r_shadow_tlb[r_tlb_index].asid     <= tlb_entry_out.asid;
@@ -4511,7 +4542,11 @@ module exec(clk,
 	     n_entrylo0_v = r_tlb_entry.v0;
 	     n_entrylo0_d = r_tlb_entry.d0;
 	     n_entrylo0_c = r_tlb_entry.c0;	     
-	     n_entrylo0_pfn = {{(`PFN_WIDTH-`TLB_PFN_WIDTH){1'b0}}, r_tlb_entry.pfn0};	     
+`ifdef ENABLE_R10000
+	     n_entrylo0_pfn = {r_tlb_entry_pfn0_hi, r_tlb_entry.pfn0};
+`else
+	     n_entrylo0_pfn = {{(`PFN_WIDTH-`TLB_PFN_WIDTH){1'b0}}, r_tlb_entry.pfn0};
+`endif	     
 	  end
 	else if(w_cp0_wr & w_cp0_wr_reg == 'd2)
 	  begin
@@ -4521,7 +4556,7 @@ module exec(clk,
 	     n_entrylo0_c = w_cp0_wr_data[5:3];
 	     /* PFN = PA[PA_WIDTH-1:12] = EntryLo[PFN_WIDTH+5:6]; PA bits beyond
 	      * PA_WIDTH (a 64b write past the 36-bit PA) are dropped (real 36-bit HW). */
-	     n_entrylo0_pfn = w_cp0_wr_data[(`PFN_WIDTH+5):6];
+	     n_entrylo0_pfn = w_cp0_wr_data[(`ENTRYLO_PFN_WIDTH+5):6];
 	  end
      end
 
@@ -4538,7 +4573,11 @@ module exec(clk,
 	     n_entrylo1_v = r_tlb_entry.v1;
 	     n_entrylo1_d = r_tlb_entry.d1;
 	     n_entrylo1_c = r_tlb_entry.c1;	     
-	     n_entrylo1_pfn = {{(`PFN_WIDTH-`TLB_PFN_WIDTH){1'b0}}, r_tlb_entry.pfn1};	     
+`ifdef ENABLE_R10000
+	     n_entrylo1_pfn = {r_tlb_entry_pfn1_hi, r_tlb_entry.pfn1};
+`else
+	     n_entrylo1_pfn = {{(`PFN_WIDTH-`TLB_PFN_WIDTH){1'b0}}, r_tlb_entry.pfn1};
+`endif	     
 	  end	
 	else if(w_cp0_wr & w_cp0_wr_reg == 'd3)
 	  begin
@@ -4546,7 +4585,7 @@ module exec(clk,
 	     n_entrylo1_v = w_cp0_wr_data[1];
 	     n_entrylo1_d = w_cp0_wr_data[2];
 	     n_entrylo1_c = w_cp0_wr_data[5:3];
-	     n_entrylo1_pfn = w_cp0_wr_data[(`PFN_WIDTH+5):6];
+	     n_entrylo1_pfn = w_cp0_wr_data[(`ENTRYLO_PFN_WIDTH+5):6];
 	  end
      end
 
@@ -4872,21 +4911,11 @@ module exec(clk,
 	    end
 	  'd2:
 	    begin
-	       t_csr0_val = sign_extend32({2'd0,
-					   r_entrylo0_pfn[23:0],
-					   r_entrylo0_c,
-					   r_entrylo0_d,
-					   r_entrylo0_v,
-					   r_entrylo0_g});
+	       t_csr0_val = sign_extend32(w_entrylo0_64[31:0]);
 	    end
 	  'd3:
 	    begin
-	       t_csr0_val = sign_extend32({2'd0,
-					   r_entrylo1_pfn[23:0],
-					   r_entrylo1_c,
-					   r_entrylo1_d,
-					   r_entrylo1_v,
-					   r_entrylo1_g});
+	       t_csr0_val = sign_extend32(w_entrylo1_64[31:0]);
 	    end
 	  'd4:
 	    begin
@@ -4966,7 +4995,7 @@ module exec(clk,
 		* IRIX on an R4400 PRId walks every cache op at a 16-byte stride
 		* regardless of IB/DB (measured in interp_mips, 2026-10-10).  Was
 		* 0x0002e4a3 (IB=1, a 32-byte I line r9999 does not have). */
-	       t_csr0_val = 'h0002e483;
+	       t_csr0_val = sign_extend32(`CONFIG_VALUE);   /* the R10000 layout under ENABLE_R10000 */
 	    end
 	  'd23:
 	    begin
@@ -4976,6 +5005,16 @@ module exec(clk,
 	    begin
 	       t_csr0_val = sign_extend32(r_retired_insns[31:0]);
 	    end
+`ifdef ENABLE_R10000
+	  'd21, 'd22, 'd25, 'd26, 'd27, 'd28, 'd29:
+	    begin
+	       /* R10000 FrameMask, Diagnostic, PerfCount, ECC, CacheErr, TagLo, TagHi:
+		* nothing behind them (the index tag/data CACHE ops are NOPs), so they read
+		* 0 -- not Status, the default above (IRIX reads TagLo/TagHi after its
+		* cache ops) */
+	       t_csr0_val = 'd0;
+	    end
+`endif
 	endcase
      end
 
@@ -4985,13 +5024,11 @@ module exec(clk,
 	case(int_uop.srcA[4:0])
 	  'd2:
 	    begin
-	       t_csr0_64_val = {{(64-`PFN_WIDTH-6){1'b0}}, r_entrylo0_pfn, r_entrylo0_c,
-				 r_entrylo0_d, r_entrylo0_v, r_entrylo0_g};
+	       t_csr0_64_val = w_entrylo0_64;
 	    end
 	  'd3:
 	    begin
-	       t_csr0_64_val = {{(64-`PFN_WIDTH-6){1'b0}}, r_entrylo1_pfn, r_entrylo1_c,
-				 r_entrylo1_d, r_entrylo1_v, r_entrylo1_g};
+	       t_csr0_64_val = w_entrylo1_64;
 	    end
 	  'd10:
 	    begin

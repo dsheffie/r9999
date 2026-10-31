@@ -1,6 +1,6 @@
 UNAME_S = $(shell uname -s)
 
-OBJ = top.o verilated.o verilated_vcd_c.o loadelf.o interpret.o disassemble.o helper.o saveState.o sparse_mem.o sgi_hpc.o sgi_mc.o sgi_scc.o
+OBJ = top.o verilated.o verilated_vcd_c.o loadelf.o interpret.o disassemble.o helper.o saveState.o sparse_mem.o sgi_hpc.o sgi_mc.o sgi_scc.o sgi_scsi.o sgi_seeq.o sgi_ps2.o qcow2_reader.o sgi_shim.o
 
 SV_SRC = core_l1d_l1i.sv core.sv exec.sv decode_mips.sv shiftregbit.sv shift_right.sv mul.sv fpu.sv fpu_add.sv fpu_mul.sv fpu_compare.sv fpu_f2i.sv fpu_i2f.sv fpu_f2f.sv fp_regfile.sv find_first_set.sv divider.sv nu_divider.sv uni_divider.sv l1d.sv l1i.sv machine.vh rob.vh uop.vh fp_compare.vh ram1r1w.sv ram2r1w.sv popcount.sv count_leading_zeros.sv unsigned_divider.sv fair_sched.sv ppa32.sv csa.sv rf4r2w.sv reg_ram1rw.sv l2.sv mipsseg.sv tlb.sv predecode.sv
 
@@ -45,6 +45,15 @@ ifneq ($(shell grep -c '^`define ENABLE_R10000' machine.vh),0)
 CXXFLAGS += -DENABLE_R10000 -DENABLE_MIPS4
 else ifneq ($(shell grep -c '^`define ENABLE_MIPS4' machine.vh),0)
 CXXFLAGS += -DENABLE_MIPS4
+endif
+# those flags come from a grep, not an #include, and they change state_t's layout: every
+# C++ object that uses state_t must rebuild when machine.vh does
+$(filter-out verilated.o verilated_vcd_c.o,$(OBJ)): machine.vh
+
+# STORE_CHECK=1: the co-sim store check (l1d.sv wr_log vs the ISS's store stream, top.cc)
+ifeq ($(STORE_CHECK),1)
+CXXFLAGS += -DSTORE_CHECK
+VFLAGS_EXTRA += +define+ENABLE_STORE_CHECK
 endif
 
 DEP = $(OBJ:.o=.d)

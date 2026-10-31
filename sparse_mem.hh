@@ -27,8 +27,11 @@ public:
    * OFF by default (ooo_core randgen is flat, self-consistent); the henry_tb golden
    * ISS enables it so it reads the real handler, matching the RTL MC + interp_mips. */
   bool route_devices = false;
-  static inline uint64_t mc_alias(uint64_t pa) {
-    return (pa < 0x00080000UL) ? (pa + 0x08000000UL) : pa;
+  /* the base of main memory the alias mirrors: 0x08000000 on IP22, 0x20000000 on IP28
+   * (ooo_core --ip28 sets it on the checker ISS, as top.cc's ip28_mem_pa does for the RTL) */
+  uint64_t alias_base = 0x08000000UL;
+  inline uint64_t mc_alias(uint64_t pa) const {
+    return (pa < 0x00080000UL) ? (pa + alias_base) : pa;
   }
 public:
   sparse_mem();
@@ -63,6 +66,11 @@ public:
     byte_addr &= ((1UL<<32) - 1);
     if(route_devices) byte_addr = mc_alias(byte_addr);
     return mem+byte_addr;
+  }
+  /* indysim's read-only DMA accessor (the device models use it); r9999 has no decode
+   * cache to keep coherent, so it is get_raw_ptr */
+  uint8_t *peek_raw_ptr(uint64_t byte_addr) {
+    return get_raw_ptr(byte_addr);
   }
   template <typename T>
   T get(uint64_t byte_addr) {

@@ -127,10 +127,10 @@ boot phase.
 ## r9999 sim integration notes
 
 - The sim already has device models `sgi_mc.cc` / `sgi_hpc.cc` (used only by the
-  `--indy` ROM path, not `--file`). `sgi_mc` **already implements `memcfg[]`**
+  `--ip22` ROM path, not `--file`). `sgi_mc` **already implements `memcfg[]`**
   (reads at `0xc0`/`0xc8`); `sgi_hpc` has **no UART** yet.
 - Plan to get past early boot + gain console ("jam magic values like firmware"):
-  1. instantiate `sgi_mc` + `sgi_hpc` on the kernel-boot path (as `--indy` does),
+  1. instantiate `sgi_mc` + `sgi_hpc` on the kernel-boot path (as `--ip22` does),
   2. program MEMCFG0/1 (+ SYSID) to advertise RAM at base `0x08000000`,
   3. add a Tx path in `sgi_hpc` at the SCC data register (`0x1fbd9837`/`0x1fbd983f`)
      that writes the byte to stdout.

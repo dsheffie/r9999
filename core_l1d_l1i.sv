@@ -68,6 +68,10 @@ module core_l1d_l1i(clk,
 		    retire_two_valid,
 		    retire_pc,
 		    retire_two_pc,
+`ifdef VERILATOR
+		    retire_insn,
+		    retire_two_insn,
+`endif
 		    retire_op,
 		    retire_two_op,
 		    branch_pc,
@@ -265,6 +269,10 @@ module core_l1d_l1i(clk,
    output logic 			  retire_two_valid;
    output logic [(`M_WIDTH-1):0] 	  retire_pc;
    output logic [(`M_WIDTH-1):0] 	  retire_two_pc;
+`ifdef VERILATOR
+   output logic [31:0] 			  retire_insn;
+   output logic [31:0] 			  retire_two_insn;
+`endif
 
    output logic [7:0]			  retire_op;
    output logic [7:0]			  retire_two_op;   
@@ -689,7 +697,7 @@ module core_l1d_l1i(clk,
    logic [(`PA_WIDTH-1):0] 		  l1d_mem_req_addr;
    logic [`L1D_N_COLOUR-1:0] 		  l1d_mem_req_colour;
    logic [L1D_CL_LEN_BITS-1:0] 		  l1d_mem_req_store_data;
-   logic [4:0] 				  l1d_mem_req_opcode;
+   logic [5:0] 				  l1d_mem_req_opcode;
    logic				  l1d_mem_req_cacheable;
    logic [15:0]				  l1d_mem_req_mask;
    
@@ -700,7 +708,7 @@ module core_l1d_l1i(clk,
    logic [15:0]				  l1i_mem_req_mask;
    
    logic [L1D_CL_LEN_BITS-1:0] 		  l1i_mem_req_store_data;
-   logic [4:0] 				  l1i_mem_req_opcode;
+   logic [5:0] 				  l1i_mem_req_opcode;
    logic 				  l1d_mem_rsp_valid, l1i_mem_rsp_valid;
    
    state_t r_state, n_state;
@@ -715,7 +723,7 @@ module core_l1d_l1i(clk,
 
 
    logic [`PA_WIDTH-1:0]			  t_l2_req_addr;
-   logic [4:0] 				  t_l2_req_opcode;
+   logic [5:0] 				  t_l2_req_opcode;
    logic				  t_l2_req_cacheable;
    logic [15:0]				  t_l2_req_mask;
    logic				  t_l2_passthru;
@@ -853,6 +861,9 @@ module core_l1d_l1i(clk,
    wire 		 w_probe_dirty;
    wire [127:0] 	 w_probe_data;
 
+   /* R10000 block op: the L2 has the L1I invalidate the block (l2.sv, l1i.sv) */
+   wire w_l1i_blk_inv_req, w_l1i_blk_inv_done;
+   wire [`PA_WIDTH-1:0] w_l1i_blk_inv_addr;
    l2 l2cache (
 	       .clk(clk),
 	       .reset(reset),
@@ -907,7 +918,10 @@ module core_l1d_l1i(clk,
 	       .probe_colour(w_probe_colour),
 	       .probe_ack(w_probe_ack),
 	       .probe_dirty(w_probe_dirty),
-	       .probe_data(w_probe_data)
+	       .probe_data(w_probe_data),
+	       .l1i_blk_inv_req(w_l1i_blk_inv_req),
+	       .l1i_blk_inv_addr(w_l1i_blk_inv_addr),
+	       .l1i_blk_inv_done(w_l1i_blk_inv_done)
 	       );
    
    
@@ -1030,6 +1044,9 @@ module core_l1d_l1i(clk,
 	      .flush_line_req(w_flush_line_req_l1i),
 	      .flush_line_idx(w_flush_line_idx_l1i),
 	      .flush_line_complete(w_l1i_flush_line_complete),
+	      .blk_inv_req(w_l1i_blk_inv_req),
+	      .blk_inv_addr(w_l1i_blk_inv_addr),
+	      .blk_inv_done(w_l1i_blk_inv_done),
 	      .flush_complete(l1i_flush_complete),
 	      .restart_pc(restart_pc),
 	      .dbg_arch_hist(w_dbg_arch_hist),
@@ -1184,6 +1201,10 @@ module core_l1d_l1i(clk,
 	     .retire_delay_slot(t_retire_delay_slot),
 	     .retire_pc(retire_pc),
 	     .retire_two_pc(retire_two_pc),
+`ifdef VERILATOR
+	     .retire_insn(retire_insn),
+	     .retire_two_insn(retire_two_insn),
+`endif
 	     .retire_op(retire_op),
 	     .retire_two_op(retire_two_op),
 	     .retired_call(retired_call),
@@ -1405,12 +1426,12 @@ module core_l1d_l1i(clk,
      end
    /* back-invalidate (L2 -> L1D probe) statistics by reason, counted where the L1D
     * answers (PROBE_CHK: n_prb_ack).  Reasons are l2cache.r_probe_reason. */
-   logic [63:0] r_bi_cnt[7][3];   /* [reason][0 probes, 1 L1D hit, 2 dirty] */
+   logic [63:0] r_bi_cnt[10][3];   /* [reason][0 probes, 1 L1D hit, 2 dirty] */
    always_ff@(posedge clk)
      begin
 	if(reset)
 	  begin
-	     for(integer r = 0; r < 7; r = r + 1)
+	     for(integer r = 0; r < 10; r = r + 1)
 	       begin
 		  r_bi_cnt[r][0] <= 'd0;
 		  r_bi_cnt[r][1] <= 'd0;
@@ -1436,6 +1457,9 @@ module core_l1d_l1i(clk,
 	$display("[BISTAT] alias_pgdrop    %8d  %8d  %8d", r_bi_cnt[4][0], r_bi_cnt[4][1], r_bi_cnt[4][2]);
 	$display("[BISTAT] snoop_wbinv     %8d  %8d  %8d", r_bi_cnt[5][0], r_bi_cnt[5][1], r_bi_cnt[5][2]);
 	$display("[BISTAT] snoop_drop      %8d  %8d  %8d", r_bi_cnt[6][0], r_bi_cnt[6][1], r_bi_cnt[6][2]);
+	$display("[BISTAT] block_op        %8d  %8d  %8d", r_bi_cnt[7][0], r_bi_cnt[7][1], r_bi_cnt[7][2]);
+	$display("[BISTAT] uncached_hit    %8d  %8d  %8d", r_bi_cnt[8][0], r_bi_cnt[8][1], r_bi_cnt[8][2]);
+	$display("[BISTAT] coherent_l1i    %8d  %8d  %8d", r_bi_cnt[9][0], r_bi_cnt[9][1], r_bi_cnt[9][2]);
      end
 `endif
 

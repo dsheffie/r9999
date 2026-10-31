@@ -163,6 +163,10 @@ module core(clk,
 	    retire_delay_slot,
 	    retire_pc,
 	    retire_two_pc,
+`ifdef VERILATOR
+	    retire_insn,
+	    retire_two_insn,
+`endif
 	    retire_op,
 	    retire_two_op,
 	    retired_call,
@@ -357,6 +361,14 @@ module core(clk,
    
    output logic [(`M_WIDTH-1):0] 	  retire_pc;
    output logic [(`M_WIDTH-1):0] 	  retire_two_pc;
+`ifdef VERILATOR
+   /* the instruction word each retiring op was fetched as: the L1I is not coherent with
+    * stores, so it can differ from memory (IRIX utlbmiss_reset patches the refill vector
+    * with no I-cache flush); the co-sim checker runs this word, not memory's */
+   output logic [31:0] 			  retire_insn;
+   output logic [31:0] 			  retire_two_insn;
+   logic [31:0] 			  r_rob_raw_insn[(1<<`LG_ROB_ENTRIES)-1:0];
+`endif
 
    output logic [7:0]			  retire_op;
    output logic [7:0]			  retire_two_op;
@@ -558,8 +570,7 @@ module core(clk,
       r.is_break = e.is_break;
       r.is_syscall = e.is_syscall;
       r.is_cache = e.is_cache;
-      r.cache_is_d = e.cache_is_d;
-      r.cache_inval = e.cache_inval;
+      r.cache_act = e.cache_act;
       r.opcode = e.opcode;
       r.bpu_idx = e.bpu_idx;
       r.br_pred = e.br_pred;
@@ -641,8 +652,7 @@ module core(clk,
       r.is_break = m.is_break;
       r.is_syscall = m.is_syscall;
       r.is_cache = m.is_cache;
-      r.cache_is_d = m.cache_is_d;
-      r.cache_inval = m.cache_inval;
+      r.cache_act = m.cache_act;
       r.data = c.data;
       r.opcode = m.opcode;
       r.bpu_idx = m.bpu_idx;
@@ -2199,6 +2209,10 @@ module core(clk,
 	     retire_two_valid <= t_retire_two;
    	     retire_pc <= t_rob_head.pc;
 	     retire_two_pc <= t_rob_next_head.pc;
+`ifdef VERILATOR
+	     retire_insn <= r_rob_raw_insn[r_rob_head_ptr[`LG_ROB_ENTRIES-1:0]];
+	     retire_two_insn <= r_rob_raw_insn[r_rob_next_head_ptr[`LG_ROB_ENTRIES-1:0]];
+`endif
 	     retire_delay_slot <= t_rob_head.in_delay_slot && t_retire;
 	     retired_ret <= t_rob_head.is_ret && t_retire;
 	     retired_call <= t_rob_head.is_call && t_retire;
@@ -2851,9 +2865,9 @@ module core(clk,
 		    if(t_rob_head.is_cache | is_xflush(t_rob_head.opcode))
 		      begin
 `ifdef IRIX_CACHE_TRACE
-			 $display("[cache] pc=%x is_d=%b inval=%b EA=%x",
-				  t_rob_head.pc[31:0], t_rob_head.cache_is_d,
-				  t_rob_head.cache_inval, t_rob_head.data[31:0] & 32'h1fffffff);
+			 $display("[cache] pc=%x act=%0d EA=%x",
+				  t_rob_head.pc[31:0], t_rob_head.cache_act,
+				  t_rob_head.data[31:0] & 32'h1fffffff);
 `endif
 			 /* CACHE op: D-side does a surgical per-line writeback of the
 			  * addressed line to L2 (flush_cl at EA = rob.data); I-side
@@ -2879,14 +2893,14 @@ module core(clk,
 			      n_l1i_flush_complete = 1'b1;          /* not flushing L1I */
 			      n_l2_flush_complete  = 1'b1;          /* the page walk covers the L2 */
 			   end
-			 else if(t_rob_head.cache_is_d)
+			 else if((t_rob_head.cache_act == CA_D_LINE_WB) || (t_rob_head.cache_act == CA_D_LINE_INV))
 			   begin
 			      n_flush_cl_req  = 1'b1;
 			      /* EA = base+offset, masked to a physical address (kseg0/kseg1
 			       * unmapped: PA = VA & 0x1fffffff) so L1D can tag-match it and
 			       * the L2 drop targets the right line. */
 			      n_flush_cl_addr = t_rob_head.data & 64'h1fffffff;
-			      n_flush_cl_inval = t_rob_head.cache_inval; /* Hit-Invalidate: drop, no WB */
+			      n_flush_cl_inval = (t_rob_head.cache_act == CA_D_LINE_INV); /* drop, no WB */
 			      n_l1i_flush_complete = 1'b1;          /* not flushing L1I */
 			      n_l2_flush_complete  = 1'b1;          /* flush_cl bypasses the L2 flush */
 			   end
@@ -3584,8 +3598,7 @@ module core(clk,
 	t_rob_tail.is_break  = (t_alloc_uop.op == BREAK);
 	t_rob_tail.is_syscall  = (t_alloc_uop.op == SYSCALL);
 	t_rob_tail.is_cache  = t_alloc_uop.is_cache;
-	t_rob_tail.cache_is_d = t_alloc_uop.cache_is_d;
-	t_rob_tail.cache_inval = t_alloc_uop.cache_inval;
+	t_rob_tail.cache_act = t_alloc_uop.cache_act;
 	t_rob_tail.is_indirect = t_alloc_uop.op == JALR || t_alloc_uop.op == JR;
 	t_rob_tail.is_tlbp = (t_alloc_uop.op == TLBP);
 	
@@ -3638,8 +3651,7 @@ module core(clk,
 	t_rob_next_tail.is_break = (t_alloc_uop2.op == BREAK);
 	t_rob_next_tail.is_syscall = (t_alloc_uop2.op == SYSCALL);
 	t_rob_next_tail.is_cache = t_alloc_uop2.is_cache;
-	t_rob_next_tail.cache_is_d = t_alloc_uop2.cache_is_d;
-	t_rob_next_tail.cache_inval = t_alloc_uop2.cache_inval;
+	t_rob_next_tail.cache_act = t_alloc_uop2.cache_act;
 	t_rob_next_tail.is_tlbp = (t_alloc_uop2.op == TLBP);
 	t_rob_next_tail.is_indirect = t_alloc_uop2.op == JALR || t_alloc_uop2.op == JR;
 	t_rob_next_tail.is_fpe = 1'b0;
@@ -3988,6 +4000,9 @@ module core(clk,
 `ifdef ENABLE_EXC_RING
 		  r_fetch_insn[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.insn;
 `endif
+`ifdef VERILATOR
+		  r_rob_raw_insn[r_rob_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop.raw_insn;
+`endif
 	       end
 	     if(t_alloc_two)
 	       begin
@@ -3997,6 +4012,9 @@ module core(clk,
 		    r_rob_even[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:1]] <= rob_to_crob(t_rob_next_tail);
 `ifdef ENABLE_EXC_RING
 		  r_fetch_insn[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.insn;
+`endif
+`ifdef VERILATOR
+		  r_rob_raw_insn[r_rob_next_tail_ptr[`LG_ROB_ENTRIES-1:0]] <= t_alloc_uop2.raw_insn;
 `endif
 	       end
 	     if(t_complete_valid_1)

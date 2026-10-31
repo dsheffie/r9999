@@ -2,30 +2,80 @@
 #define __sgi_scc__
 
 #include <cstdint>
+#include <cstdio>
 #include <cstddef>
 
 struct state_t;
 
-/* Minimal Zilog Z8530 / SCC85230 (SGI IP22 IOC2 serial) -- TX-only, just enough
- * to capture the IRIX serial console to stdout.  The IRIX kernel drives this
- * chip directly (it does NOT use the ARCS romvec Write), so this is what makes
- * boot text appear.
+/* Zilog Z85230 / SCC85230 (SGI IP22 IOC2 serial): TX path + the Tx interrupt.
  *
- * 4 byte-wide registers at 4-byte spacing, in z80scc "ab_dc" order
- * (offset bit1 = channel A/B, bit0 = data/control):
- *   +0x0  ctrl B   +0x4  data B   +0x8  ctrl A   +0xc  data A
- * A write to either DATA register transmits the byte (-> stdout); a read of a
- * CONTROL register returns RR0 with Tx-Buffer-Empty set so the du driver always
- * believes it can transmit.  Control/pointer writes are ignored.
+ * Tx-interrupt model cross-validated against four sources that all agree (MAME
+ * z80scc.cpp, the IRIS Rust Indy emulator z85c30.rs, and the Linux ip22zilog +
+ * NetBSD zstty drivers):
  *
- * Base address (0x1fbd9830, IOC2 reg 0x0c) is the canonical IP22 value; confirm
- * against the MAME scc_dc_w guest-physical capture when wiring a real IRIX boot. */
+ *   - Tx-IP is a stored one-shot set ONLY on transmit COMPLETION (a char finishes
+ *     shifting out), never on the data write.
+ *   - Writing the next data byte CLEARS Tx-IP (re-arm) -- this is the ISR's normal
+ *     "send next char" deassert, and it is what makes IP2 go LOW so the kernel can
+ *     eret back to userspace instead of instantly re-taking the interrupt (the
+ *     storm).  WR0=RES_Tx_P (0x28) also clears it.
+ *   - The pending Tx int is gated LIVE on WR1.TxINT_ENAB (so clearing TxIE
+ *     deasserts immediately).
+ *
+ * Real transmit timing is required so IP2 is genuinely low between completions:
+ * a written char is "shifting out" (tx_busy, RR0 Tx-Buffer-Empty clear) for
+ * TX_DRAIN_TICKS instruction ticks, then completes (Tx-IP set).  The byte is
+ * echoed to stdout immediately on write (order preserved).  int_pending() (the
+ * SCC INT line) -> IOC2 vmeistat[5] -> local0 LIO2 -> CPU IP2.
+ *
+ * RX (console input): host stdin -> 8-deep chanA/B Rx FIFO; the DATA read
+ * returns+pops the front byte, RR0 bit0 = Rx-Char-Avail, and RR3 carries the
+ * per-channel Rx-IP (chanA 0x20 / chanB 0x04) gated on WR1's Rx-int mode -- so
+ * the login getty's serial ISR sees a real Rx interrupt and reads the char.
+ * (Contract mirrors henry-the-wannabe-ip22-soc rtl/ioc.sv + the iris z85c30.)
+ *
+ * Window: +0x0 ctrl B  +0x4 data B  +0x8 ctrl A  +0xc data A (z80scc ab_dc). */
 class sgi_scc {
   state_t *s;
+  uint8_t  ptr[2]      = {0, 0};        /* RR/WR pointer per channel (0=B, 1=A) */
+  uint8_t  wr1[2]      = {0, 0};        /* WR1 per channel (TxINT_ENAB = bit1) */
+  uint8_t  wr9         = 0;             /* WR9 (chip-wide; MIE = bit3) */
+  bool     tx_busy[2]  = {false, false};/* a char is shifting out (buffer full) */
+  uint64_t drain_at[2] = {0, 0};        /* tick at which the shifting char completes */
+  bool     tx_ip[2]    = {false, false};/* Tx-buffer-empty int pending (set on completion) */
+  uint64_t clk         = 0;             /* instruction-tick clock */
+  uint64_t next_due    = 0;             /* clk at which tick1 must run tick_due: the
+                                         * earlier of rx_poll_at and a busy drain_at */
+  void     tick_due();                  /* the work tick() does when something is due */
+
+  /* RX (console input), ported from henry-the-wannabe-ip22-soc rtl/ioc.sv:
+   * host stdin -> 8-deep chanA Rx FIFO; the chanA DATA read returns+pops the
+   * front byte, RR0 bit0 = Rx-Char-Avail while non-empty, and rx_avail (FIFO
+   * non-empty) joins the Tx-int on the Serial-DUART source -> IOC2 cmeimask0 ->
+   * LIO2 -> CPU IP2 (level-triggered). */
+  uint8_t  rx_fifo[8]  = {0};
+  uint8_t  rx_wptr = 0, rx_rptr = 0, rx_count = 0;
+  bool     rx_init = false;             /* stdin put into non-blocking mode once */
+  uint64_t rx_poll_at = 0;              /* next clk at which to drain host stdin */
+  void     rx_poll();                   /* pull available host stdin bytes into the FIFO */
 public:
   sgi_scc(state_t *s) : s(s) {}
   uint8_t read(uint32_t offs);          /* offs within the 16-byte SCC window */
   void    write(uint32_t offs, uint8_t b);
+  void    tick(uint64_t dticks);        /* advance TX timing by dticks instruction ticks */
+  /* tick(1) for the per-instruction path: one compare unless the stdin poll or a
+   * shifting character is due */
+  inline void tick1() {
+    if(__builtin_expect(++clk >= next_due, 0)) {
+      tick_due();
+    }
+  }
+  bool    int_pending();                /* SCC INT line: TxIE & Tx-IP, or Rx char available */
+  /* SIGUSR1 interrupt-state dump (main.cc service_lean_signals) */
+  void    dump(FILE *fp) const {
+    fprintf(fp, "[irq] scc: wr9=%02x wr1 B=%02x A=%02x tx_busy B=%d A=%d tx_ip B=%d A=%d rx_count=%u\n",
+            wr9, wr1[0], wr1[1], tx_busy[0], tx_busy[1], tx_ip[0], tx_ip[1], rx_count);
+  }
 };
 
 #endif

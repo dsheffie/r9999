@@ -314,7 +314,12 @@ typedef enum logic [7:0]
    SP_RECIP,
    DP_RECIP,
    SP_RSQRT,
-   DP_RSQRT
+   DP_RSQRT,
+   /* R10000 secondary-cache CACHE ops (decode_mips.sv r10k_cache_act CA_BLK_*): one
+    * mem uop each, carried to the L2 as MEM_BLK_* for the 128-byte block */
+   CHBWBINV,   /* 0x17 Hit WB-Inv S */
+   CHBINV,     /* 0x13 Hit Inv S */
+   CHBIDX      /* 0x03 Index WB-Inv S */
    } opcode_t;
 
 function logic is_mult(opcode_t op);
@@ -535,14 +540,14 @@ typedef struct packed {
    logic 		       is_mem;
    logic 		       is_store;
    logic 		       is_cache;   /* MIPS CACHE op (serializing flush) */
-   logic 		       cache_is_d; /* CACHE targets D-cache (per-line WB) vs I-cache (whole nuke) */
-   logic 		       cache_inval; /* CACHE Hit-Invalidate: drop the line WITHOUT writeback (DMA-in) */
+   cache_act_t 	       cache_act;  /* the CACHE op's retire-time action (machine.vh) */
    logic 		       is_fp;   /* compute FP op (routes to the FP issue queue) */
    logic 		       cpu_ce1; /* CpU is for CP1 (Status.CU1=0) -> Cause.CE=1 (vs CP0 CpU = CE=0) */
    logic [`LG_BPU_TBL_SZ-1:0]      bpu_idx;
    logic		       mode_when_fetched;
 `ifdef VERILATOR
    logic [31:0] 	       clear_id;
+   logic [31:0] 	       raw_insn;   /* the fetched word, for the co-sim checker (stale-L1I fetches) */
 `endif
 `ifdef ENABLE_CYCLE_ACCOUNTING
    logic [63:0] 	    fetch_cycle;

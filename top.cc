@@ -1,6 +1,9 @@
 #include "top.hh"
 #include <deque>
 #include "sgi_indy.hh"
+#include "sgi_scsi.hh"
+#include "sgi_seeq.hh"
+#include "sgi_ps2.hh"
 
 /* l2.sv's `ifdef VERILATOR` L2DBG descriptor-line tracer DPI probes are only
  * implemented in the henry full-system tb (henry_tb.cpp).  ooo_core does no L2
@@ -34,10 +37,13 @@ uint64_t globals::icountMIPS = 0;
 uint64_t globals::cycle = 0;
 bool globals::trace_retirement = false;
 bool globals::trace_fp = false;
+bool globals::ip28 = false;
 
 
 static state_t *s = nullptr;
 static state_t *ss = nullptr;
+static void watch_note(const char *what, uint64_t pc, uint64_t pa, uint64_t data);   /* --watch-va */
+static void tag_iss_store(state_t *iss, uint64_t pc, uint64_t st_seq0);               /* last-writer tags */
 
 /* Co-sim TLB mirror (as henry_tb): itlb.sv's tlb_wr_log DPI hook (ENABLE_TLB_MIRROR)
  * hands every RTL TLBWI/TLBWR to the checker, and the ISS TLB is written ONLY from
@@ -67,6 +73,26 @@ static inline void adopt_timing_cp0(uint32_t insn, state_t *rtl, state_t *iss) {
   }
 }
 
+/* cfc1 $31 (FCSR): the sticky cause/flag bits differ between the RTL and the ISS for some
+ * FP op (the IP28 PROM's FPU POST leaves Inexact set on the RTL only) -- a separate FP
+ * question.  Report each difference (the first few), then adopt the RTL's FCSR so the
+ * checker keeps running. */
+static inline void adopt_fcsr_read(uint32_t insn, uint64_t pc, state_t *rtl, state_t *iss) {
+  const uint32_t op = insn >> 26, fmt = (insn >> 21) & 31, rd = (insn >> 11) & 31;
+  if((op == 0x11) && (fmt == 2) && (rd == 31)) {
+    const uint32_t rt = (insn >> 16) & 31;
+    if(iss->gpr[rt] != rtl->gpr[rt]) {
+      static int n = 0;
+      if(n++ < 16) {
+	fprintf(stderr, "[fcsr-adopt] pc=%08x FCSR rtl=%08x iss=%08x\n", (uint32_t)pc,
+		(uint32_t)rtl->gpr[rt], (uint32_t)iss->gpr[rt]);
+      }
+      iss->gpr[rt] = rtl->gpr[rt];
+      iss->fcr1[CP1_CR31] = (uint32_t)rtl->gpr[rt];
+    }
+  }
+}
+
 /* The hook fires at the negedge, after the cycle's checker steps, so apply the queue
  * BEFORE every ISS step: an instruction retiring after a TLB write must see it. */
 static inline void iss_step(state_t *iss) {
@@ -75,7 +101,48 @@ static inline void iss_step(state_t *iss) {
     iss_apply_tlb_write(iss, p.idx, p.ehi, p.elo0, p.elo1, p.pm);
     g_pend_tlb.pop_front();
   }
+  const size_t n_st = g_iss_stores.size();
+  const uint64_t pc0 = iss->pc, st_seq0 = g_iss_st_seq;
   execMips(iss);
+  tag_iss_store(iss, pc0, st_seq0);
+  iss->gpr[0] = 0;   /* some ISS paths write $zero (a device read `lw $zero, ...`) */
+  if(g_iss_stores.size() > n_st) {
+    const store_rec &r = g_iss_stores.back();
+    watch_note("iss-store", r.pc, r.addr, r.data);
+  }
+}
+/* The L1I is not coherent with stores, so the RTL may legally run a stale word: IRIX
+ * utlbmiss_reset rewrites the first word of the refill vectors (0x80000000/0x80000080)
+ * with no I-cache flush -- the old `ld k1,PDA` and the new `b` reach the same handler.
+ * The ISS has no I-cache, so for one step it runs the word the RTL fetched (patched
+ * into ISS memory, then put back unless that step stored over it). */
+struct stale_fetch_t {
+  uint32_t pa = 0, mem_word = 0, rtl_word = 0;
+  bool active = false;
+};
+static uint64_t g_stale_fetches = 0;
+static stale_fetch_t stale_fetch_begin(state_t *iss, uint64_t pc, uint32_t rtl_insn) {
+  stale_fetch_t f;
+  uint32_t pa = 0;
+  const uint32_t w = iss_fetch_inst(iss, pc, &pa);
+  if((pa == ~0u) || (w == rtl_insn)) {
+    return f;
+  }
+  if(g_stale_fetches++ < 32) {
+    fprintf(stderr, "[stale-ifetch] cyc %llu pc=%016llx pa=%08x: RTL ran %08x, memory holds %08x\n",
+	    (unsigned long long)globals::cycle, (unsigned long long)pc, pa, rtl_insn, w);
+  }
+  f.pa = pa;
+  f.mem_word = iss->mem.get<uint32_t>(pa);
+  f.rtl_word = bswap<IS_LITTLE_ENDIAN>(rtl_insn);
+  f.active = true;
+  iss->mem.set<uint32_t>(pa, f.rtl_word);
+  return f;
+}
+static void stale_fetch_end(state_t *iss, const stale_fetch_t &f) {
+  if(f.active && (iss->mem.get<uint32_t>(f.pa) == f.rtl_word)) {
+    iss->mem.set<uint32_t>(f.pa, f.mem_word);
+  }
 }
 static uint64_t insns_retired = 0;
 static uint64_t pipestart = 0, pipeend = ~(0UL);
@@ -113,10 +180,387 @@ static std::map<int,uint64_t> fault_distribution;
 static std::map<int,uint64_t> branch_distribution;
 static std::map<int,uint64_t> fault_to_restart_distribution;
 
-static bool sgi_indy = false;
+/* boot a real SGI PROM from the current directory: --ip22 (Indy, R4400) or --ip28
+ * (Indigo2, R10000; build with ENABLE_R10000).  sgi_prom = either. */
+static bool sgi_ip22 = false, sgi_ip28 = false, sgi_prom = false;
+/* --disk: the SCSI disk (target 1, dksc(0,1,*)); guest writes stay in memory */
+static std::string disk_image;
 static sgi_mc *mc = nullptr;
 static sgi_hpc *hpc = nullptr;
 static sgi_scc *scc = nullptr;
+
+/* the SGI board: indysim's device models (sgi_hpc/mc/scc/scsi/seeq/ps2), which hang off
+ * state_t; mc/hpc/scc above are the same objects, for the MMIO paths below */
+static void attach_sgi_devices(state_t *st) {
+  st->mc = mc = new sgi_mc(st);
+  st->hpc = hpc = new sgi_hpc(st);
+  st->scc = scc = new sgi_scc(st);
+  st->scsi = new sgi_scsi(st, disk_image);   /* no --disk: every selection times out */
+  st->seeq = new sgi_seeq(st);
+  if(globals::ip28) {
+    st->ps2 = new sgi_ps2(st);       /* the IP28 PROM's POST tests the 8042 */
+  }
+}
+
+/* --ip28: the memory decode the MC applies to a CPU physical address (indysim
+ * interpret.cc ip28_mem_window).  The PROM sizes memory by programming MEMCFG -- in 16 MB
+ * units, base 0x20 -- and probing; a flat 4 GB array would answer everywhere (it sized
+ * 2 GB and overflowed).  A bank decodes [base, base + (size field + 1) * 16 MB); bank 0
+ * holds the 256 MB, stored in place at 0x20000000 (the DMA models use the real PA) and
+ * wrapping as real SIMMs alias; the low 512 KB alias is the base of memory.  Returns
+ * false where nothing decodes: loads read 0, stores vanish. */
+/* --ip28: the Indigo2's EISA bus with no cards -- I/O (0x00080000-0x0009ffff, alias
+ * included) and memory (0x000a0000-0x07ffffff).  An empty bus floats high: reads are all
+ * ones, writes go nowhere.  Backed by memory, the slot ID registers read 0 and Linux
+ * found four "@@@0000" cards. */
+static inline bool ip28_eisa(uint32_t pa) {
+  return globals::ip28 && (pa >= 0x00080000u) && (pa < 0x08000000u);
+}
+
+static bool ip28_mem_pa(uint32_t &pa) {
+  if(pa < 0x00080000u) {
+    pa += 0x20000000u;
+    return true;
+  }
+  if((pa < 0x20000000u) || (pa >= 0x60000000u)) {
+    return true;
+  }
+  for(int b = 0; b < 4; b++) {
+    const uint32_t reg = (b < 2) ? mc->memcfg0_cpu() : mc->memcfg1_cpu();
+    const uint32_t cfg = ((b & 1) ? reg : (reg >> 16)) & 0xffffu;
+    if(((cfg >> 13) & 1) == 0) {
+      continue;
+    }
+    const uint32_t base = (cfg & 0xffu) << 24;
+    const uint32_t size = (((cfg >> 8) & 0x1fu) + 1u) << 24;
+    if((pa >= base) && ((pa - base) < size)) {
+      if(b == 0) {
+        pa = 0x20000000u + ((pa - base) & 0x0fffffffu);
+        return true;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
+/* --- co-sim checker for SGI PROM / IRIX runs (--ip22/--ip28 with --checker true).  The ISS
+ * has no devices; it follows the RTL where it cannot know the answer and checks the rest. */
+
+/* a load the ISS cannot model -- a device register, an uncached access, or (IP28) memory
+ * the MC decode does not back as the ISS's flat memory does -- takes the RTL's value.
+ * Classified BEFORE the ISS executes it (the load may overwrite its own base register):
+ * returns the destination GPR to adopt after the step, or 0 */
+static uint32_t unmodeled_load_dst_at(state_t *iss, uint64_t pc) {
+  const uint32_t insn = iss_fetch_inst(iss, pc, nullptr);
+  const uint32_t op = insn >> 26;
+  const bool gpr_load = ((op >= 0x20) && (op <= 0x27)) || (op == 0x37) || (op == 0x1a) ||
+			(op == 0x1b) || (op == 0x30) || (op == 0x34);
+  if(!gpr_load) {
+    return 0;
+  }
+  const uint64_t va = (uint64_t)iss->gpr[(insn >> 21) & 31] + (uint64_t)(int64_t)(int16_t)(insn & 0xffffu);
+  uint32_t pa = 0;
+  bool uncached = false;
+  if(!iss_load_class(iss, va, &pa, &uncached)) {
+    return 0;
+  }
+  uint32_t mpa = pa;
+  const bool unbacked = ip28_eisa(pa) ||
+			(globals::ip28 && (pa >= 0x20000000u) && (!ip28_mem_pa(mpa) || (mpa != pa)));
+  return (uncached || unbacked) ? ((insn >> 16) & 31) : 0;
+}
+
+/* sc/scd may fail whenever the link is lost (an interrupt, an exception, the line leaving
+ * the L1D), so its outcome is timing: before the ISS executes one, give it the RTL's
+ * (s->gpr[rt], already the retired 1/0) -- linked to the SC's line if the RTL succeeded,
+ * unlinked if not -- so it also stores, or does not, as the RTL did */
+static void follow_rtl_sc(state_t *rtl, state_t *iss, uint64_t pc) {
+  const uint32_t insn = iss_fetch_inst(iss, pc, nullptr);
+  const uint32_t op = insn >> 26;
+  if((op != 0x38) && (op != 0x3c)) {
+    return;
+  }
+  const uint32_t rt = (insn >> 16) & 31;
+  const uint64_t va = (uint64_t)iss->gpr[(insn >> 21) & 31] + (uint64_t)(int64_t)(int16_t)(insn & 0xffffu);
+  uint32_t pa = 0;
+  bool uncached = false;
+  if(!iss_load_class(iss, va, &pa, &uncached)) {
+    return;   /* faults: no link question */
+  }
+  iss->ll_link_valid = (rtl->gpr[rt] != 0);
+  iss->ll_link_addr = (uint64_t)pa & ~UINT64_C(0xf);
+}
+
+/* the ISS executes a branch and its delay slot in one step, but the RTL may retire the
+ * slot a cycle later: an unmodeled load in a delay slot is adopted when the RTL retires
+ * it (g_ds_adopt_pc) */
+static uint64_t g_ds_adopt_pc = 0;
+static uint32_t g_ds_adopt_rt = 0;
+static inline bool has_delay_slot(uint32_t insn) {
+  const uint32_t op = insn >> 26, funct = insn & 63;
+  return ((op == 0) && ((funct == 8) || (funct == 9))) ||      /* jr, jalr */
+	 (op == 1) || (op == 2) || (op == 3) ||                  /* regimm, j, jal */
+	 ((op >= 4) && (op <= 7)) || ((op >= 0x14) && (op <= 0x17)) ||   /* b* , b*l */
+	 ((op == 0x11) && (((insn >> 21) & 31) == 8));            /* bc1* */
+}
+static uint32_t unmodeled_load_dst(state_t *iss, uint64_t pc) {
+  if(has_delay_slot(iss_fetch_inst(iss, pc, nullptr))) {
+    g_ds_adopt_rt = unmodeled_load_dst_at(iss, pc + 4);
+    g_ds_adopt_pc = pc + 4;
+    return 0;
+  }
+  return unmodeled_load_dst_at(iss, pc);
+}
+static inline void adopt_ds_load(uint64_t rpc) {
+  if((g_ds_adopt_rt != 0) && ((uint32_t)rpc == (uint32_t)g_ds_adopt_pc)) {
+    ss->gpr[g_ds_adopt_rt] = s->gpr[g_ds_adopt_rt];
+    g_ds_adopt_rt = 0;
+  }
+}
+
+/* last-writer tags (co-sim, --ip28): for every 16-byte line of IP28 RAM, who wrote it last
+ * -- in the RTL's architectural view (its store commits), in the RTL's memory (L2
+ * writebacks and uncached stores at the memory port, DMA) and in the ISS's memory (its
+ * stores, DMA mirrored).  A register mismatch on a load prints all three for that line,
+ * which says whether the word came from the core or from traffic outside it. */
+enum wtag_who_t : uint8_t { WT_NONE = 0, WT_RTL_STORE, WT_MEM_PORT, WT_DMA, WT_ISS_STORE };
+struct wtag_t {
+  uint64_t cyc;
+  uint32_t pc;
+  uint8_t who;
+};
+static wtag_t *g_tag_rtl_arch = nullptr, *g_tag_rtl_mem = nullptr, *g_tag_iss = nullptr;
+static const uint32_t TAG_BASE = 0x20000000u, TAG_SIZE = 0x10000000u;
+static void tags_alloc() {
+  const size_t n = TAG_SIZE >> 4;
+  g_tag_rtl_arch = static_cast<wtag_t*>(calloc(n, sizeof(wtag_t)));
+  g_tag_rtl_mem = static_cast<wtag_t*>(calloc(n, sizeof(wtag_t)));
+  g_tag_iss = static_cast<wtag_t*>(calloc(n, sizeof(wtag_t)));
+}
+static inline wtag_t *tag_at(wtag_t *t, uint32_t pa) {
+  if(t == nullptr) {
+    return nullptr;
+  }
+  if(pa < 0x00080000u) {
+    pa += TAG_BASE;   /* the low alias is the base of RAM */
+  }
+  return ((pa >= TAG_BASE) && (pa < (TAG_BASE + TAG_SIZE))) ? &t[(pa - TAG_BASE) >> 4] : nullptr;
+}
+static inline void tag_set(wtag_t *t, uint32_t pa, uint8_t who, uint64_t pc) {
+  wtag_t *e = tag_at(t, pa);
+  if(e != nullptr) {
+    e->cyc = globals::cycle;
+    e->pc = (uint32_t)pc;
+    e->who = who;
+  }
+}
+static void tag_print(const char *side, wtag_t *t, uint32_t pa) {
+  static const char *names[] = {"never written", "RTL store", "memory port (L2 wb / uncached)", "DMA", "ISS store"};
+  const wtag_t *e = tag_at(t, pa);
+  if(e == nullptr) {
+    fprintf(stderr, "    %-9s: (not tracked)\n", side);
+    return;
+  }
+  fprintf(stderr, "    %-9s: %s, pc=%08x, cyc=%llu\n", side, names[e->who], e->pc, (unsigned long long)e->cyc);
+}
+static void tag_iss_store(state_t *iss, uint64_t pc, uint64_t st_seq0) {
+  uint32_t pa = 0;
+  bool uncached = false;
+  if((g_tag_iss != nullptr) && (g_iss_st_seq != st_seq0) && iss_load_class(iss, g_iss_last_st_va, &pa, &uncached)) {
+    tag_set(g_tag_iss, pa, WT_ISS_STORE, pc);
+  }
+}
+
+/* on a checker mismatch: the ISS's last load, its line's three last writers and the
+ * doubleword in each memory */
+static void tags_report_last_load() {
+  if((g_tag_iss == nullptr) || (ss == nullptr)) {
+    return;
+  }
+  uint32_t pa = 0;
+  bool uncached = false;
+  if(!iss_load_class(ss, g_iss_last_ld_va, &pa, &uncached)) {
+    return;
+  }
+  uint32_t rpa = pa & ~7u;
+  if(globals::ip28) {
+    ip28_mem_pa(rpa);
+  }
+  fprintf(stderr, "[last-writer] ISS last load va=%016llx pa=%08x%s: ISS mem=%016llx RTL DRAM=%016llx\n",
+	  (unsigned long long)g_iss_last_ld_va, pa, uncached ? " (uncached)" : "",
+	  (unsigned long long)__builtin_bswap64(ss->mem.get<uint64_t>(pa & ~7u)),
+	  (unsigned long long)__builtin_bswap64(s->mem.get<uint64_t>(rpa)));
+  tag_print("RTL arch", g_tag_rtl_arch, pa);
+  tag_print("RTL mem", g_tag_rtl_mem, pa);
+  tag_print("ISS mem", g_tag_iss, pa);
+}
+
+/* the device models' DMA writes land in the RTL's memory; the checker ISS keeps its own */
+static bool g_dma_mirror = false;
+void sgi_dma_wrote(state_t *st, uint64_t pa, size_t n) {
+  if(g_dma_mirror && (ss != nullptr)) {
+    memcpy(ss->mem.get_raw_ptr(pa), st->mem.get_raw_ptr(pa), n);
+  }
+  watch_note("dma", 0, pa, n);
+  for(size_t i = 0; i < n; i += 16) {
+    tag_set(g_tag_rtl_mem, (uint32_t)(pa + i), WT_DMA, 0);
+    tag_set(g_tag_iss, (uint32_t)(pa + i), WT_DMA, 0);
+  }
+}
+
+/* store check (rv64core's, via henry_tb): l1d.sv reports each store written into the L1D
+ * array (wr_log, ENABLE_STORE_CHECK), the ISS each store it executes (interpret.cc
+ * STORE_CHECK); both are program order, so the first front-to-front mismatch is the
+ * root store -- a lost, extra or wrong store, caught where it happens */
+/* --watch-va: follow one virtual address's line through both sides -- RTL store commits,
+ * ISS stores, DMA, and the L2's fills / writebacks -- resolved to a PA through the ISS's
+ * TLB (the RTL's, mirrored) at each event */
+static uint64_t g_watch_va = 0;
+static uint32_t watch_line() {
+  uint32_t pa = 0;
+  bool uncached = false;
+  if((g_watch_va == 0) || (ss == nullptr) || !iss_load_class(ss, g_watch_va, &pa, &uncached)) {
+    return ~0u;
+  }
+  return pa & ~0xfu;
+}
+static void watch_note(const char *what, uint64_t pc, uint64_t pa, uint64_t data) {
+  if((g_watch_va != 0) && (((uint32_t)pa & ~0xfu) == watch_line())) {
+    fprintf(stderr, "[watch] cyc=%llu %s pc=%08x pa=%09llx data=%016llx\n", (unsigned long long)globals::cycle,
+	    what, (uint32_t)pc, (unsigned long long)pa, (unsigned long long)data);
+  }
+}
+
+/* at the end of a run: the watched doubleword as each side's memory holds it (the RTL's
+ * DRAM copy; the newest may still sit in its caches) */
+static void watch_dump() {
+  const uint32_t line = watch_line();
+  if((g_watch_va == 0) || (line == ~0u)) {
+    return;
+  }
+  uint32_t pa = 0;
+  bool uncached = false;
+  iss_load_class(ss, g_watch_va, &pa, &uncached);
+  pa &= ~7u;
+  uint32_t rpa = pa;
+  if(globals::ip28) {
+    ip28_mem_pa(rpa);
+  }
+  fprintf(stderr, "[watch] va=%016llx pa=%08x: ISS mem=%016llx  RTL DRAM=%016llx\n",
+	  (unsigned long long)g_watch_va, pa,
+	  (unsigned long long)__builtin_bswap64(ss->mem.get<uint64_t>(pa)),
+	  (unsigned long long)__builtin_bswap64(s->mem.get<uint64_t>(rpa)));
+  tag_print("RTL arch", g_tag_rtl_arch, pa);
+  tag_print("RTL mem", g_tag_rtl_mem, pa);
+  tag_print("ISS mem", g_tag_iss, pa);
+}
+
+std::deque<store_rec> g_iss_stores;
+static std::deque<store_rec> g_rtl_stores;
+static bool g_store_check = false, g_store_diverged = false;
+static uint64_t g_stores_checked = 0;
+extern "C" void wr_log(long long pc, int rob_ptr, unsigned long long addr,
+		       unsigned long long data, int is_atomic) {
+  (void)rob_ptr;
+  (void)is_atomic;
+  if(g_store_check) {
+    g_rtl_stores.emplace_back((uint64_t)pc, addr, data);
+  }
+  watch_note("rtl-store", (uint64_t)pc, addr, data);
+  tag_set(g_tag_rtl_arch, (uint32_t)addr, WT_RTL_STORE, (uint64_t)pc);
+}
+/* the rest of l1d.sv's ENABLE_STORE_CHECK hooks: henry_tb's line-lifecycle traces (no-ops
+ * here), and the dirty-set-drop watch, which flags a store whose dirty bit lost the L1D's
+ * dirty-bit write port to a refill or invalidate -- the line then looks clean and can be
+ * evicted without its writeback, i.e. a lost store */
+extern "C" void l1d_wb_log(unsigned long long, unsigned long long, unsigned long long) {
+}
+extern "C" void rd_log(long long, unsigned long long, unsigned long long, int) {
+}
+extern "C" void l1d_fill(unsigned long long, long long, unsigned long long, unsigned long long,
+			 unsigned long long) {
+}
+extern "C" void l1d_cacheop(unsigned long long, long long, unsigned long long, int) {
+}
+extern "C" void dirtydrop(unsigned long long cycle, long long pc, unsigned long long pa, int by_refill) {
+  static uint64_t n = 0;
+  if(n++ < 64) {
+    fprintf(stderr, "[dirtydrop] cyc=%llu pc=%08x pa=%09llx store's dirty bit lost to %s\n",
+	    cycle, (uint32_t)pc, pa, by_refill ? "a refill" : "an invalidate");
+  }
+}
+static void drain_store_check() {
+  while(!g_iss_stores.empty() && !g_rtl_stores.empty()) {
+    const store_rec &i = g_iss_stores.front(), &r = g_rtl_stores.front();
+    if((((uint32_t)i.pc) != ((uint32_t)r.pc)) || (i.addr != r.addr) || (i.data != r.data)) {
+      fprintf(stderr, "[STORE-CHECK] ROOT STORE DIVERGENCE at cycle %llu\n"
+	      "  ISS pc=%08x addr=%09llx data=%016llx\n"
+	      "  RTL pc=%08x addr=%09llx data=%016llx\n",
+	      (unsigned long long)globals::cycle,
+	      (uint32_t)i.pc, (unsigned long long)i.addr, (unsigned long long)i.data,
+	      (uint32_t)r.pc, (unsigned long long)r.addr, (unsigned long long)r.data);
+      fprintf(stderr, "  [queues] ISS depth=%zu RTL depth=%zu\n", g_iss_stores.size(), g_rtl_stores.size());
+      for(size_t k = 0; (k < 8) && (k < g_iss_stores.size()); k++) {
+	fprintf(stderr, "    ISS[%zu] pc=%08x addr=%09llx data=%016llx\n", k, (uint32_t)g_iss_stores[k].pc,
+		(unsigned long long)g_iss_stores[k].addr, (unsigned long long)g_iss_stores[k].data);
+      }
+      for(size_t k = 0; (k < 8) && (k < g_rtl_stores.size()); k++) {
+	fprintf(stderr, "    RTL[%zu] pc=%08x addr=%09llx data=%016llx\n", k, (uint32_t)g_rtl_stores[k].pc,
+		(unsigned long long)g_rtl_stores[k].addr, (unsigned long long)g_rtl_stores[k].data);
+      }
+      g_store_diverged = true;
+      return;
+    }
+    g_iss_stores.pop_front();
+    g_rtl_stores.pop_front();
+    g_stores_checked++;
+  }
+}
+
+/* a device read/write at the access's own size: the models take it (the IP28 8254,
+ * EEPROM and SYS_ID are byte registers), the RTL presents a word and its byte mask
+ * wm.  A contiguous 1/2/4-byte access goes as one; anything else byte by byte. */
+template <typename R>
+static uint32_t device_word_read(uint32_t addr, uint32_t wm, R rd) {
+  if(wm == 15) {
+    return rd(addr, 4);
+  }
+  if(wm == 0) {
+    return 0;
+  }
+  const uint32_t first = __builtin_ctz(wm), n = __builtin_popcount(wm);
+  if(((wm >> first) == ((1u << n) - 1)) && (n <= 2)) {
+    return rd(addr + first, n) << (8 * first);
+  }
+  uint32_t d = 0;
+  for(uint32_t j = 0; j < 4; j++) {
+    if((wm >> j) & 1) {
+      d |= (rd(addr + j, 1) & 0xffu) << (8 * j);
+    }
+  }
+  return d;
+}
+template <typename W>
+static void device_word_write(uint32_t addr, uint32_t wm, uint32_t d, W wr) {
+  if(wm == 15) {
+    wr(addr, d, 4);
+    return;
+  }
+  if(wm == 0) {
+    return;
+  }
+  const uint32_t first = __builtin_ctz(wm), n = __builtin_popcount(wm);
+  if(((wm >> first) == ((1u << n) - 1)) && (n <= 2)) {
+    wr(addr + first, (d >> (8 * first)) & ((n == 1) ? 0xffu : 0xffffu), n);
+    return;
+  }
+  for(uint32_t j = 0; j < 4; j++) {
+    if((wm >> j) & 1) {
+      wr(addr + j, (d >> (8 * j)) & 0xffu, 1);
+    }
+  }
+}
 static const uint32_t SCC_BASE = 0x1fbd9830u;  /* IOC2 serial SCC window base */
 
 
@@ -555,7 +999,7 @@ static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
   uint32_t k = addr & 15;
   uint32_t w = (addr>>2) & 3;
   mem_range_t mr = mem_range_t::low_local;
-  if(sgi_indy or (mc != nullptr)) {
+  if(sgi_prom or (mc != nullptr)) {
     mr = compute_mem_range_type(addr);
   }
   uint16_t wm = (m >> (4*w)) & 15;
@@ -564,17 +1008,11 @@ static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
     {
     case mem_range_t::hpc_regs:
       //printf("hpc load addr %x, offs %u, mask %x\n", addr, w, wm);
-      if(wm == 15) {
-	//std::cout << "hpc : " << std::hex << addr << std::dec  << "\n";
-	d = hpc->read(addr & 0x7ffff, 4);
-      }
+      d = device_word_read(addr, wm, [](uint32_t a, size_t sz) { return hpc->read(a & 0x7ffff, sz); });
       break;
     case mem_range_t::mc_regs:
       //printf("mc  load addr %x, offs %u, mask %x\n", addr, w, wm);
-      if(wm == 15) {
-	//std::cout << "mc  : " << std::hex << addr << std::dec  << "\n";
-	d = mc->read(addr & 0x1ffff, 4);
-      }
+      d = device_word_read(addr, wm, [](uint32_t a, size_t sz) { return mc->read(a & 0x1ffff, sz); });
       break;
     case mem_range_t::scc_regs:
       /* IOC2 serial SCC -- byte-granular (control reads = RR0 status) */
@@ -591,7 +1029,9 @@ static uint32_t perform_word_load(state_t *s, uint32_t addr, uint16_t m) {
        * is plain physical memory */
       for(int j = 0; j < 4; j++) {
 	if( ((m >> k) & 1) ) {
-	  uint32_t by = s->mem.get<uint8_t>(addr+j);
+	  uint32_t pa = addr + j;
+	  uint32_t by = ip28_eisa(pa) ? 0xffu :
+			((!globals::ip28 || ip28_mem_pa(pa)) ? s->mem.get<uint8_t>(pa) : 0);
 	  d |= (by << (j*8));
 	}
 	k++;
@@ -606,7 +1046,7 @@ static void perform_word_store(state_t *s, uint32_t addr, uint16_t m, uint32_t d
   uint32_t k = addr & 15;
   uint32_t w = (addr >> 2) & 0x3;
   mem_range_t mr = mem_range_t::low_local;
-  if(sgi_indy or (mc != nullptr)) {
+  if(sgi_prom or (mc != nullptr)) {
     mr = compute_mem_range_type(addr);
   }
   uint16_t wm = (m >> (4*w)) & 15;
@@ -623,9 +1063,7 @@ static void perform_word_store(state_t *s, uint32_t addr, uint16_t m, uint32_t d
       // break;
       case mem_range_t::mc_regs:
 	///printf("mc  store addr %x, offs %u, mask %x\n", addr, w, wm);	
-	if(wm == 15) {
-	  mc->write(addr & 0x1ffff, d, 4);
-	}
+	device_word_write(addr, wm, d, [](uint32_t a, uint32_t v, size_t sz) { mc->write(a & 0x1ffff, v, sz); });
 	break;
     case mem_range_t::low_local:
       for(int j = 0; j < 4; j++) {
@@ -638,9 +1076,7 @@ static void perform_word_store(state_t *s, uint32_t addr, uint16_t m, uint32_t d
       }
       break;
     case mem_range_t::hpc_regs:
-      if(wm == 15) {
-	hpc->write(addr & 0x7ffff, d, 4);
-      }
+      device_word_write(addr, wm, d, [](uint32_t a, uint32_t v, size_t sz) { hpc->write(a & 0x7ffff, v, sz); });
       break;
     case mem_range_t::scc_regs:
       /* IOC2 serial SCC -- byte-granular (data writes transmit to stdout) */
@@ -657,7 +1093,10 @@ static void perform_word_store(state_t *s, uint32_t addr, uint16_t m, uint32_t d
       for(int j = 0; j < 4; j++) {
 	if(((m >> k) & 1)) {
 	  uint32_t by = (d>>(8*j)) & 0xff;
-	  s->mem.set<uint8_t>(addr+j, by);
+	  uint32_t pa = addr + j;
+	  if(!ip28_eisa(pa) && (!globals::ip28 || ip28_mem_pa(pa))) {
+	    s->mem.set<uint8_t>(pa, by);
+	  }
 	}
 	k++;
       }
@@ -672,6 +1111,8 @@ int main(int argc, char **argv) {
   namespace po = boost::program_options; 
   // Initialize Verilators variables
   bool enable_checker = true;
+  bool checker_given = false;
+  std::string watch_va_str;   /* --checker on the command line (PROM runs default it off) */
   bool os_mode = false;
   bool magic_halt = true;
   /* Physical address of the simulator halt register (kseg1 0xBFD00000). */
@@ -727,7 +1168,10 @@ int main(int argc, char **argv) {
       ("tracefp", po::value<bool>(&globals::trace_fp)->default_value(false), "trace fp instructions")
       ("trace,t", po::value<bool>(&globals::trace_retirement)->default_value(false), "trace retired instruction stream")
       ("starttrace,s", po::value<uint64_t>(&start_trace_at)->default_value(~0UL), "start tracing retired instructions")
-      ("indy", po::value<bool>(&sgi_indy)->default_value(false), "sgi indy")
+      ("ip22", po::value<bool>(&sgi_ip22)->default_value(false), "boot the SGI IP22 (Indy) PROM, ip24prom.070-9101-005.bin")
+      ("ip28", po::value<bool>(&sgi_ip28)->default_value(false), "boot the SGI IP28 (Indigo2 R10000) PROM, ip28prom.070-1477-002.bin")
+      ("watch-va", po::value<std::string>(&watch_va_str), "co-sim: log every store / DMA / fill / writeback of this VA's line (hex)")
+      ("disk", po::value<std::string>(&disk_image), "SCSI disk image (raw or qcow2) for the SGI board, target 1; writes stay in memory")
       ("arcs", po::value<std::string>(&arcs_image),
        "synthetic ARCS firmware image; loaded at physical 0x1000 (kseg1 0xA0001000)")
       ("memdump", po::value<std::string>(&memdump_spec),
@@ -738,6 +1182,27 @@ int main(int argc, char **argv) {
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm); 
+    checker_given = !vm["checker"].defaulted();
+    if(!watch_va_str.empty()) {
+      g_watch_va = strtoull(watch_va_str.c_str(), nullptr, 16);
+    }
+    sgi_prom = sgi_ip22 or sgi_ip28;
+    /* ooo_core carries no libchdr (sgi_shim.cc): a MAME CHD would be read as a raw disk */
+    if(not(disk_image.empty())) {
+      char magic[8] = {0};
+      FILE *df = fopen(disk_image.c_str(), "rb");
+      if(df == nullptr) {
+        std::cerr << "cannot open disk image " << disk_image << "\n";
+        return -1;
+      }
+      const size_t got = fread(magic, 1, sizeof(magic), df);
+      fclose(df);
+      if((got == sizeof(magic)) && (memcmp(magic, "MComprHD", 8) == 0)) {
+        std::cerr << disk_image << " is a MAME CHD, which ooo_core cannot read: convert it to raw or qcow2\n";
+        return -1;
+      }
+    }
+    globals::ip28 = sgi_ip28;
   }
   catch(po::error &e) {
     std::cerr <<"command-line error : " << e.what() << "\n";
@@ -773,7 +1238,7 @@ int main(int argc, char **argv) {
   ss->silent = true;  /* checker: suppress putchar side-effects */
   initCapstone();
 
-  if(not(sgi_indy)) {
+  if(not(sgi_prom)) {
     if(mips_binary.empty()) {
       std::cout << "no elf binary\n";
       exit(-1);
@@ -806,17 +1271,28 @@ int main(int argc, char **argv) {
                 << " bytes) at physical 0x1000\n";
 
       /* Model the SGI MC/HPC devices for the kernel boot (decoupled from the
-       * --indy ROM path): the IP22 kernel probes the MC for the memory map. */
-      mc  = new sgi_mc(s);
-      hpc = new sgi_hpc(s);
-      scc = new sgi_scc(s);
+       * --ip22/--ip28 ROM path): the IP22 kernel probes the MC for the memory map. */
+      attach_sgi_devices(s);
     }
   }
   else {
-    enable_checker = false;    
+    /* the ISS has no devices: off unless asked for, and then it follows the RTL on device
+     * loads (adopt_unmodeled_load), interrupts (raise_int) and DMA (sgi_dma_wrote) */
+    enable_checker = checker_given && enable_checker;
+    if(enable_checker) {
+      g_dma_mirror = true;
+      if(sgi_ip28) {
+	tags_alloc();
+      }
+      if(sgi_ip28) {
+	ss->mem.route_devices = true;        /* the low 512 KB alias, as ip28_mem_pa */
+	ss->mem.alias_base = 0x20000000UL;
+      }
+    }
     struct stat st;
     int rc;
-    int fd = open("ip24prom.070-9101-005.bin", O_RDONLY);
+    const char *prom = sgi_ip28 ? "ip28prom.070-1477-002.bin" : "ip24prom.070-9101-005.bin";
+    int fd = open(prom, O_RDONLY);
     if(fd<0) {
       printf("INTERP: open() returned %d\n", fd);
       exit(-1);
@@ -833,10 +1309,9 @@ int main(int argc, char **argv) {
     memcpy(ss->mem.mem +(0xbfc00000 & 0x1fffffff), buf, st.st_size);    
 
     s->pc = 0xbfc00000;
+    ss->pc = (int64_t)(int32_t)0xbfc00000;   /* the checker ISS starts at the reset vector too */
     close(fd);
-    mc = new sgi_mc(s);
-    hpc = new sgi_hpc(s);
-    scc = new sgi_scc(s);
+    attach_sgi_devices(s);
   }
   
   
@@ -924,8 +1399,38 @@ int main(int argc, char **argv) {
   tb->step = 0;
   double t0 = timestamp();
   g_iss_tlb_ext = enable_checker;   /* checker ISS TLB = the RTL's (tlb_wr_log mirror) */
-  g_iss_os_mode = os_mode;          /* checker ISS: SYSCALL/BREAK trap to the kernel */
+  g_iss_os_mode = os_mode || sgi_prom;   /* checker ISS: SYSCALL/BREAK trap to the kernel (IRIX too) */
+#ifdef STORE_CHECK
+  g_store_check = enable_checker;
+#endif
   while(!Verilated::gotFinish() && (globals::cycle < max_cycle) && (insns_retired < max_icnt)) {
+    /* the device models (MC RPSS, ...) clock off s->icnt, but a PROM boot runs with no
+     * checker to step s: their clock is the RTL's retire count instead */
+    if(sgi_prom) {
+      /* the 8254 model (sgi_hpc pit_irq, t2_value) clocks off the ISS's CP0 Count, which
+       * indysim ticks once per instruction: without this it stays 0, the timers never
+       * fire again once armed, and IRIX sleeps forever (the miniroot after its mounts) */
+      s->icnt = insns_retired;
+      s->cpr0[CPR0_COUNT] = (uint32_t)insns_retired;
+      /* indysim steps the devices per instruction: the SCC's TX timing every one, the
+       * interrupt sources every 64 (or when one pokes); here the retire count is the
+       * instruction clock, and the interrupt sources drive the core's IP lines */
+      static uint64_t scc_icnt = 0, next_poll = 0;
+      while(scc_icnt < insns_retired) {
+        scc->tick1();
+        ++scc_icnt;
+      }
+      if(s->irq_poke || (insns_retired >= next_poll)) {
+        s->irq_poke = false;
+        next_poll = insns_retired + 64;
+        hpc->enet_poll();
+        tb->ip2 = hpc->ioc2_ip2_pending();
+        if(globals::ip28) {
+          tb->ip4 = hpc->pit_irq(0);   /* 8254 counter 0, rtclock */
+          tb->ip5 = hpc->pit_irq(1);   /* 8254 counter 1, kgclock */
+        }
+      }
+    }
     /* EARLY-RETIRE PROBE: how many instructions have actually retired by cycle N?
      * Needed to interpret BMC depth: a formal run that is "clean to frame 30" is
      * only meaningful if the machine has executed something by cycle 30. */
@@ -1070,6 +1575,30 @@ int main(int argc, char **argv) {
     if(tb->took_irq && enable_checker) {
       raise_int(ss, (uint64_t)tb->epc);
     }
+    /* A synchronous exception: the faulting instruction never retires, so the ISS would
+     * never step it.  On entry to WRITE_EPC (core.sv state 10) without took_irq, if the ISS
+     * sits at the RTL's EPC, step it there: with the RTL's TLB mirrored, it takes the same
+     * exception (e.g. a TLB miss inside the XTLB refill handler, which nests to the general
+     * vector and the kernel's handler, where the PC-range resync below cannot follow). */
+    { static uint32_t prev_core_state = 0;
+      if(enable_checker && (tb->core_state == 10) && (prev_core_state != 10) && !tb->took_irq) {
+	if((uint32_t)ss->pc == (uint32_t)tb->epc) {
+	  iss_step(ss);
+	  /* the stepped ISS must land in an exception vector, or it did not fault */
+	  if(((uint32_t)ss->pc & 0xfffff000u) != 0x80000000u &&
+	     ((uint32_t)ss->pc & 0xfffff000u) != 0xbfc00000u) {
+	    fprintf(stderr, "[sync-exc-nofault] cyc %llu rtl epc=%016llx: ISS stepped it without faulting, now pc=%016llx\n",
+		    (unsigned long long)globals::cycle, (unsigned long long)tb->epc,
+		    (unsigned long long)ss->pc);
+	  }
+	}
+	else {
+	  fprintf(stderr, "[sync-exc-skip] cyc %llu rtl epc=%016llx but ISS pc=%016llx: not stepped\n",
+		  (unsigned long long)globals::cycle, (unsigned long long)tb->epc,
+		  (unsigned long long)ss->pc);
+	}
+      }
+      prev_core_state = tb->core_state; }
 
     /* TIP: full per-cycle attribution (rv64core top.cc parity). ROB-empty ->
      * blame last-retired (stall is upstream/fetch); nothing retires -> blame the
@@ -1155,10 +1684,25 @@ int main(int argc, char **argv) {
       }
 
       if( enable_checker) {
+	adopt_ds_load(tb->retire_pc);
 	if((uint32_t)tb->retire_pc == (uint32_t)ss->pc) {
 	  //std::cout << std::hex << tb->retire_pc << "," << ss->pc << std::dec << "\n";
+	  const stale_fetch_t sf = stale_fetch_begin(ss, tb->retire_pc, tb->retire_insn);
+	  const uint32_t r_insn = iss_fetch_inst(ss, tb->retire_pc, nullptr);
+	  const uint32_t ld_dst = unmodeled_load_dst(ss, tb->retire_pc);
+	  follow_rtl_sc(s, ss, tb->retire_pc);
 	  iss_step(ss);
-	  adopt_timing_cp0(iss_fetch_inst(ss, tb->retire_pc, nullptr), s, ss);
+	  stale_fetch_end(ss, sf);
+	  adopt_timing_cp0(r_insn, s, ss);
+	  adopt_fcsr_read(r_insn, tb->retire_pc, s, ss);
+	  if(ld_dst != 0) {
+	    ss->gpr[ld_dst] = s->gpr[ld_dst];
+	  }
+	  drain_store_check();
+	  if(g_store_diverged) {
+	    incorrect = true;
+	    break;
+	  }
 	  /* If checker just executed BREAK or SYSCALL, stop gracefully */
 	  if(ss->brk) {
 	    break;
@@ -1204,6 +1748,9 @@ int main(int argc, char **argv) {
 
 	  if(diverged) {
 	    incorrect = true;
+	    fprintf(stderr, "[diverge] rtl retire_pc=%016llx  ISS pc=%016llx\n",
+		    (unsigned long long)tb->retire_pc, (unsigned long long)ss->pc);
+	    tags_report_last_load();
 	    /* Mask retire_pc to 32 bits before accessing memory */
 	    uint32_t r_inst = s->mem.get<uint32_t>((uint32_t)tb->retire_pc & 0x1fffffffu);
 	    r_inst = bswap<IS_LITTLE_ENDIAN>(r_inst);
@@ -1371,9 +1918,24 @@ int main(int argc, char **argv) {
     
 
     if(enable_checker && tb->retire_two_valid) {
+      adopt_ds_load(tb->retire_two_pc);
       if((uint32_t)tb->retire_two_pc == (uint32_t)ss->pc) {
+	const stale_fetch_t sf = stale_fetch_begin(ss, tb->retire_two_pc, tb->retire_two_insn);
+	const uint32_t r_insn = iss_fetch_inst(ss, tb->retire_two_pc, nullptr);
+	const uint32_t ld_dst = unmodeled_load_dst(ss, tb->retire_two_pc);
+	follow_rtl_sc(s, ss, tb->retire_two_pc);
 	iss_step(ss);
-	adopt_timing_cp0(iss_fetch_inst(ss, tb->retire_two_pc, nullptr), s, ss);
+	stale_fetch_end(ss, sf);
+	adopt_timing_cp0(r_insn, s, ss);
+	adopt_fcsr_read(r_insn, tb->retire_two_pc, s, ss);
+	if(ld_dst != 0) {
+	  ss->gpr[ld_dst] = s->gpr[ld_dst];
+	}
+	drain_store_check();
+	if(g_store_diverged) {
+	  incorrect = true;
+	  break;
+	}
 	if(ss->brk) {
 	  break;
 	}
@@ -1474,6 +2036,7 @@ int main(int argc, char **argv) {
 	  uint32_t ea = (tb->mem_req_addr + 4*i) & (~0U);
 	  uint32_t d = perform_word_load(s, ea, m);
 	  tb->mem_rsp_load_data[i] = d;
+	  watch_note("mem-fill", 0, ea, __builtin_bswap32(d));
 	}
 	last_load_addr = tb->mem_req_addr;
 	assert((tb->mem_req_addr & 0xf) == 0);
@@ -1485,6 +2048,10 @@ int main(int argc, char **argv) {
 	  uint32_t d = tb->mem_req_store_data[i];
 	  uint32_t ea = (tb->mem_req_addr + 4*i) & (~0U);
 	  perform_word_store(s, ea, m, d);
+	  watch_note("mem-wb", 0, ea, __builtin_bswap32(d));
+	  if(((m >> (4 * i)) & 15) != 0) {
+	    tag_set(g_tag_rtl_mem, ea, WT_MEM_PORT, 0);
+	  }
 	  if(magic_halt && (ea & 0x1fffffffu) == MAGIC_HALT_PHYS && d != 0u) {
 	    sim_halted = true;
 	  }
@@ -1832,6 +2399,7 @@ int main(int argc, char **argv) {
     else { std::cerr << "memdump: bad spec (want hexPA:hexLEN:file)\n"; }
   }
 
+  watch_dump();
   delete s;
   delete ss;
   delete [] insns_delivered;
@@ -1845,6 +2413,14 @@ int main(int argc, char **argv) {
     delete hpc;
   }
 
+  if(g_stale_fetches) {
+    fprintf(stderr, "[stale-ifetch] %llu retired ops ran a stale L1I word\n",
+	    (unsigned long long)g_stale_fetches);
+  }
+  if(g_store_check) {
+    fprintf(stderr, "[STORE-CHECK] %llu stores matched (ISS %zu, RTL %zu still queued)\n",
+	    (unsigned long long)g_stores_checked, g_iss_stores.size(), g_rtl_stores.size());
+  }
   stopCapstone();
   exit(EXIT_SUCCESS);
 }

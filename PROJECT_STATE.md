@@ -245,7 +245,7 @@ The csmith N32 test suite is essentially clean. To increase pass count further, 
 2. TLB: **RTL now does real VA→PA translation** (tlb.sv, 64-bit format, refill/XTLB/general vectoring). The C++ **interpreter** still uses 1:1 `va2pa` — fine because Linux runs RTL-only; would need real translation only to re-enable the checker on a non-1:1 page table.
 3. Exception vectors: **now dispatched** (EXL model; TLB-refill 0x000, XTLB 0x080, general 0x180, BEV-aware). ErrorEPC / true ERL-NMI-cache-error path intentionally deferred (not needed now).
 4. SGI IP22 machine model: MC + HPC3 stubs only — only relevant to the eventual IRIX path, not Linux64.
-5. PROM: SGI Indy PROM binary needed for `--indy` mode (IRIX path).
+5. PROM: SGI Indy PROM binary needed for `--ip22` mode (IRIX path).
 
 > Authoritative live status for the Linux64 effort: the "Session 2026-06-07" section above, and the auto-memory note `project_linux64_todo.md`.
 

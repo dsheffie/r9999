@@ -99,6 +99,14 @@ module decode_mips(
 			 (insn[15:11] == 5'd5) | (insn[15:11] == 5'd7) |
 			 (insn[15:11] == 5'd14) | (insn[15:11] == 5'd20) |
 			 (insn[15:11] == 5'd30);
+   /* (D)MFC0/(D)MTC0 must have insn[10:0] zero -- except the R10000's PerfCount ($25),
+    * whose low bits pick counter/control and which counter (mtps/mtpc, mfps/mfpc).
+    * r9999 has no counters: all four selects share the one $25. */
+`ifdef ENABLE_R10000
+   wire 	w_cop0_sel_ok = (insn[10:0] == 11'd0) | (insn[15:11] == 5'd25);
+`else
+   wire 	w_cop0_sel_ok = (insn[10:0] == 11'd0);
+`endif
 
    wire [`LG_PRF_ENTRIES-1:0]	fs = {{ZP{1'b0}},insn[15:11]};
    wire [`LG_PRF_ENTRIES-1:0]	ft = {{ZP{1'b0}},insn[20:16]};
@@ -108,10 +116,69 @@ module decode_mips(
    /* shamt only feeds the 16-bit imm as {10'b0, shamt}; keep it 6 bits so it
     * does not depend on LG_PRF_ENTRIES (the shift amount is insn[10:6]). */
    wire [5:0]			shamt = {1'b0, insn[10:6]};
-   
+
+   /* CACHE: insn[20:16] = op[4:2] (operation) | op[1:0] (0 I, 1 D, 2 SI, 3 S/SD).
+    * Each CPU model numbers its operations differently; these tables turn the
+    * encoding into the action this core takes (cache_act_t, machine.vh), and
+    * nothing downstream of decode depends on the CPU model. */
+   function automatic cache_act_t r4400_cache_act(input logic [4:0] op);
+      begin
+	 if((op[1:0] == 2'b01) && (op[4:2] == 3'b100))
+	   begin
+	      r4400_cache_act = CA_D_HIT_INV;      /* 0x11 */
+	   end
+	 else if((op[1:0] == 2'b01) && (op[4:2] == 3'b101))
+	   begin
+	      r4400_cache_act = CA_D_HIT_WBINV;    /* 0x15 */
+	   end
+	 else if((op[1:0] == 2'b01) && (op[4:2] == 3'b110))
+	   begin
+	      r4400_cache_act = CA_D_HIT_WB;       /* 0x19 */
+	   end
+	 else if(op[0])
+	   begin
+	      /* every other D/SD op, index or hit: the one L1D line at the EA */
+	      r4400_cache_act = (op[4:2] == 3'b100) ? CA_D_LINE_INV : CA_D_LINE_WB;
+	   end
+	 else
+	   begin
+	      r4400_cache_act = CA_I_LINE_INV;     /* I/SI ops, including Fill (0x14) */
+	   end
+      end
+   endfunction
+
+   /* R10000 (MIPS R10000 manual; NetBSD cache_r10k.h; IRIS): ops 5-7 are the cache
+    * barrier and the index-addressed data-array load/store, and there is no
+    * Create Dirty Exclusive, Hit Writeback or SI target.  The IP28 kernel keeps its
+    * caches with the S ops at a 128-byte stride (0x17 ranges, 0x3 sweeps). */
+   function automatic cache_act_t r10k_cache_act(input logic [4:0] op);
+      begin
+	 case(op)
+	   5'h00, 5'h10: r10k_cache_act = CA_I_LINE_INV;      /* Index Inv I / Hit Inv I */
+	   5'h01:        r10k_cache_act = CA_D_LINE_WB;       /* Index WB-Inv D */
+	   5'h11:        r10k_cache_act = CA_D_HIT_INV;       /* Hit Inv D */
+	   5'h15:        r10k_cache_act = CA_D_HIT_WBINV;     /* Hit WB-Inv D */
+	   5'h03:        r10k_cache_act = CA_BLK_INDEX_WBINV; /* Index WB-Inv S */
+	   5'h13:        r10k_cache_act = CA_BLK_HIT_INV;     /* Hit Inv S */
+	   5'h17:        r10k_cache_act = CA_BLK_HIT_WBINV;   /* Hit WB-Inv S */
+	   default:      r10k_cache_act = CA_NOP;  /* 0x14 barrier, tag/data diagnostics, reserved */
+	 endcase
+      end
+   endfunction
+
+   cache_act_t w_cache_act;
+`ifdef ENABLE_R10000
+   assign w_cache_act = r10k_cache_act(insn[20:16]);
+`else
+   assign w_cache_act = r4400_cache_act(insn[20:16]);
+`endif
+
    always_comb
      begin
 	uop.op = II;
+`ifdef VERILATOR
+	uop.raw_insn = insn;
+`endif
 `ifdef ENABLE_EXC_RING
 	uop.insn = insn;   /* debug: ferry the raw fetched word to the ROB alloc (exception ring) */
 `endif
@@ -155,8 +222,7 @@ module decode_mips(
 	uop.is_int = 1'b0;
 	uop.is_store = 1'b0;
 	uop.is_cache = 1'b0;
-	uop.cache_is_d = 1'b0;
-	uop.cache_inval = 1'b0;
+	uop.cache_act = CA_NONE;
 `ifdef ENABLE_CYCLE_ACCOUNTING
 	uop.fetch_cycle = fetch_cycle;
 `endif
@@ -1348,7 +1414,7 @@ module decode_mips(
 			 uop.op = TLBP;
 			 uop.is_mem = 1'b1;
 		      end	       
-		    else if((insn[25:21] == 5'd0) & (insn[10:0] == 'd0)) /* switch on RS */
+		    else if((insn[25:21] == 5'd0) & w_cop0_sel_ok) /* switch on RS */
 		      begin /* mfc0 */
 			 uop.op = (rt == 'd0) ? NOP : MFC0;
 			 uop.dst = rt;
@@ -1364,7 +1430,7 @@ module decode_mips(
 			  * read Cause at the head. */
 			 uop.oldest_first = (rd == 'd13);
 		      end
-		    else if((insn[25:21] == 5'd1) & (insn[10:0] == 'd0)) /* dmfc0 */
+		    else if((insn[25:21] == 5'd1) & w_cop0_sel_ok) /* dmfc0 */
 		      begin
 			 /* NO counter exemption here: in 32-bit mode (o32 user) a 64-bit
 			  * GPR read has no meaning -- the ABI's registers are 32-bit -- so
@@ -1383,7 +1449,7 @@ module decode_mips(
 			   end
 			 /* else: 64-bit op in 32-bit mode -> op stays II (RI) */
 		      end
-		    else if((insn[25:21] == 5'd4) & (insn[10:0] == 'd0)) /* switch on RS */
+		    else if((insn[25:21] == 5'd4) & w_cop0_sel_ok) /* switch on RS */
 		      begin
 			 uop.op = MTC0;
 			 uop.dst = rd;
@@ -1393,7 +1459,7 @@ module decode_mips(
 			 uop.is_int = 1'b1;
 			 uop.serializing_op = !w_mtc0_plain;
 		      end // case: 5'd4
-		    else if((insn[25:21] == 5'd5) & (insn[10:0] == 'd0)) /* dmtc0 */
+		    else if((insn[25:21] == 5'd5) & w_cop0_sel_ok) /* dmtc0 */
 		      begin
 			 if(w_in_64b_mode)
 			   begin
@@ -2017,45 +2083,49 @@ module decode_mips(
 		    uop.is_mem = 1'b1;
 		    uop.is_store = 1'b1;
 		 end
-	       6'd47: /* CACHE -- serializing flush. Op subfield insn[20:16]:
-		       * bit[16] selects cache (0=I, 1=D). D-ops do a per-line
-		       * writeback (flush_cl at EA=base+offset, pushing the line to L2);
-		       * I-ops nuke the whole L1I. Compute base+offset so the EA lands
-		       * in rob.data for the per-line D flush. */
+	       6'd47: /* CACHE: w_cache_act (the CPU model's table, above) picks the action.
+		       * D hit ops are MEM uops (AGU -> mem queue -> l1d, where the dtlb
+		       * translates the EA: IRIX invalidates MAPPED K2SEG buffer-cache lines
+		       * for DMA; the old funnel path masked VA&0x1fffffff, wrong for mapped
+		       * EAs -> stale superblock -> EWRONGFS), whose side effect defers to
+		       * post-retirement via store graduation.  The line actions serialize
+		       * and act at retire (core.sv), on the EA = base+offset in rob.data. */
 		 begin
-		    if(in_kernel_mode && (insn[17:16] == 2'b01) &&
-		       ((insn[20:18] == 3'b100) || (insn[20:18] == 3'b101) || (insn[20:18] == 3'b110)))
+		    if(!in_kernel_mode)
 		      begin
-			 /* primary-D HIT-type ops (Hit-Inval 0x11 / Hit-WB-Inval 0x15 /
-			  * Hit-WB 0x19) are MEM uops: AGU -> mem queue -> l1d, where the
-			  * dtlb translates the EA (IRIX invalidates MAPPED K2SEG buffer-
-			  * cache lines for DMA; the old funnel path masked VA&0x1fffffff,
-			  * wrong for mapped EAs -> stale superblock -> EWRONGFS).  The
-			  * side effect defers to post-retirement via store graduation. */
-			 uop.op = (insn[20:18] == 3'b100) ? CHINV :
-				  (insn[20:18] == 3'b101) ? CHWBINV : CHWB;
-			 uop.is_mem = 1'b1;
-			 uop.srcA = rs;
-			 uop.srcA_valid = 1'b1;
-			 uop.imm = insn[15:0];
+			 uop.op = CPU; /* CACHE outside kernel mode -> Coprocessor Unusable */
 		      end
-		    else if(in_kernel_mode)
+		    else if(w_cache_act == CA_NOP)
 		      begin
-			 uop.op = CACHE_OP;
+			 uop.op = NOP;
 			 uop.is_int = 1'b1;
-			 uop.serializing_op = 1'b1;
-			 uop.is_cache = 1'b1;
-			 uop.cache_is_d = insn[16];
-			 /* operation field insn[20:18]==3'b100 = Hit-Invalidate: drop the
-			  * D line WITHOUT writeback (DMA-in). Other D ops write back. */
-			 uop.cache_inval = (insn[20:18] == 3'b100);
+		      end
+		    else if((w_cache_act == CA_D_HIT_INV) || (w_cache_act == CA_D_HIT_WBINV) ||
+			    (w_cache_act == CA_D_HIT_WB) || (w_cache_act == CA_BLK_HIT_INV) ||
+			    (w_cache_act == CA_BLK_HIT_WBINV) || (w_cache_act == CA_BLK_INDEX_WBINV))
+		      begin
+			 /* the R10000 block ops (CA_BLK_*) go to the L2 as MEM_BLK_*, which
+			  * sequences the 128-byte block */
+			 uop.op = (w_cache_act == CA_D_HIT_INV) ? CHINV :
+				  (w_cache_act == CA_D_HIT_WBINV) ? CHWBINV :
+				  (w_cache_act == CA_D_HIT_WB) ? CHWB :
+				  (w_cache_act == CA_BLK_HIT_INV) ? CHBINV :
+				  (w_cache_act == CA_BLK_HIT_WBINV) ? CHBWBINV : CHBIDX;
+			 uop.is_mem = 1'b1;
 			 uop.srcA = rs;
 			 uop.srcA_valid = 1'b1;
 			 uop.imm = insn[15:0];
 		      end
 		    else
 		      begin
-			 uop.op = CPU; /* CACHE outside kernel mode -> Coprocessor Unusable */
+			 uop.op = CACHE_OP;
+			 uop.is_int = 1'b1;
+			 uop.serializing_op = 1'b1;
+			 uop.is_cache = 1'b1;
+			 uop.cache_act = w_cache_act;
+			 uop.srcA = rs;
+			 uop.srcA_valid = 1'b1;
+			 uop.imm = insn[15:0];
 		      end
 		 end
 	       6'd48: /* LL */

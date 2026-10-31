@@ -87,9 +87,9 @@ module mipsseg(v_addr, l_addr, cache, mapped, seg, bad_perms,
 	l_addr = w_va;
 
 	if(`M_WIDTH == 64 && w_in_64b_mode && w_va[63:62] == 2'b10)
-	  begin /* xkphys: unmapped, PA = w_va[58:0], cached iff CCA==3 */
+	  begin /* xkphys: unmapped, PA = w_va[58:0], cached by CCA (machine.vh CCA_CACHED) */
 	     mapped = 1'b0;
-	     cache  = (w_va[61:59] == 3'b011);
+	     cache  = `CCA_CACHED(w_va[61:59]);
 	     l_addr = {5'b0, w_va[58:0]};
 	     seg    = 2'd0;
 	  end

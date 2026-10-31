@@ -2,20 +2,132 @@
 #define __sgi_hpc__
 
 #include <cstdint>
+#include <cstdio>
+#include <ctime>
 #include <cstddef>
 
 struct state_t;
 
+/* SGI Indy HPC3 peripheral controller (first chip, base PA 0x1fb80000).
+ * Backing store for the registers; full map and bit defs in sgi_hpc.cc. */
 class sgi_hpc {
   state_t *s;
-  uint32_t intstat;
-  uint32_t misc;
-  uint32_t pbus_pio_config[10] = {0};
-  uint32_t pbus_dma_config[8] = {0};
+  uint32_t intstat;                  /* reg 0x30000 (istat0): interrupt status [4:0] */
+  uint32_t misc;                     /* reg 0x30004 (gio_misc) */
+  /* IOC2/INT2 local interrupt controller (guinness/Indy): local0 status/mask at
+   * IOC2 off 0x20/0x21 (abs 0x59883/0x59887), local1 at 0x22/0x23 (0x5988b/0x5988f).
+   * local0 -> CPU IP2, local1 -> IP3. SCSI0 INTRQ = local0 bit 0x02 (computed live
+   * from the WD33C93 intrq). */
+  uint8_t ioc2_local_status[2] = {0, 0};
+  uint8_t ioc2_local_mask[2]   = {0, 0};
+  /* Mappable ("local2/local3", kernel's vmeistat/cmeimask) cascade: the SCC
+   * serial INT is mappable bit5.  Map status = vmeistat (live); Map masks =
+   * cmeimask0/1; a set bit in (vmeistat & cmeimask0) drives local0 LIO2 (bit7)
+   * -> IP2 (cmeimask1 -> local1 LIO3 -> IP3).  cmepol stored, unused. */
+  uint8_t ioc2_cmeimask[2] = {0, 0};
+  uint8_t ioc2_cmepol      = 0;
+  uint8_t ioc2_vmeistat_live();      /* live mappable status (bit5 = SCC serial INT) */
+  uint8_t ioc2_local0_live();        /* local0 status incl. live SCSI0 intrq + LIO2 */
+  uint32_t pbus_pio_config[10] = {0};/* reg 0x5d000 block: per-channel PIO config (10 ch) */
+  /* DS1386 RTC: register N (byte) at 0x60000 + 4N.  Regs 0-0xa = the clock (host
+   * time + rtc_offset once the guest has set it), 0xb.. = battery-backed RAM. */
+  uint8_t rtc_ram[0x2000] = {0};
+  int64_t rtc_offset = 0;
+  time_t rtc_lt_time = (time_t)-1;   /* rtc_read's cached calendar: valid for this second */
+  struct tm rtc_lt = {};
+  uint8_t rtc_read(uint32_t reg);
+  void rtc_write(uint32_t reg, uint8_t v);
+  uint32_t pbus_dma_config[8] = {0}; /* reg 0x5c000 block: per-channel DMA config (8 ch) */
+
+  /* HPC3 SCSI DMA channel (HD0/HD1).  Pure-physical scatter-gather: walk the
+   * {BP,BC,DP} descriptor chain via nbdp until EOX, moving bytes between DRAM
+   * and the WD33C93 on each DRQ.  Control is an explicit descriptor-walk FSM. */
+  enum dma_state_t { CH_IDLE, CH_FETCH, CH_XFER, CH_DESC_DONE };
+  struct scsi_dma_t {
+    uint32_t cbp = 0;       /* current buffer pointer (descriptor BP) */
+    uint32_t nbdp = 0;      /* next-descriptor pointer (descriptor DP) */
+    uint32_t bc = 0;        /* byte-count word: flags (EOX/XIE) + count */
+    uint32_t ctrl = 0;      /* DMA control register */
+    uint32_t count = 0;     /* live per-descriptor byte count */
+    uint32_t dmacfg = 0;
+    uint32_t piocfg = 0;
+    bool active = false;    /* ch_active */
+    bool to_device = false; /* DIR: 1 = mem->device (write) */
+    dma_state_t state = CH_IDLE;
+  };
+  scsi_dma_t scsi_dma[2];
+  void scsi_fetch_chain(int ch);   /* load {cbp,bc,nbdp,count} from nbdp */
+  void scsi_run_dma(int ch);       /* pump the descriptor-walk FSM */
+
+  /* HPC3 ENET DMA channels: ch0 = RX (regs @ 0x14000), ch1 = TX (@ 0x16000).
+   * Same {BP,BC,DP} scatter-gather as SCSI, driving the Seeq 8003 (s->seeq)
+   * instead of the WD33C93. */
+  scsi_dma_t enet_dma[2];
+  /* HPC3-maintained "current RX buffer descriptor pointer" (reg 0x18000). IRIX's
+   * if_ec reads it to find which descriptor the HPC just filled; without it the
+   * driver looks in the wrong place and drops every received frame. */
+  uint32_t enet_crbdp = 0;
+  uint32_t enet_tx_crbdp = 0;      /* TX channel CRBDP (regs 0x1a000/0x1a004) */
+  uint32_t enet_tx_hold = 0;       /* deferred TX: poll ticks left before ch_active clears */
+  uint32_t enet_poll_ctr = 0;      /* throttle the per-instruction tap read (a syscall) */
+  void enet_run_dma(int ch);       /* pump the ENET descriptor walk vs the Seeq */
+  /* i8254 PIT counter 2 (IP22 timer calibration; tcnt2=offs 0x598bb,
+   * tcword=offs 0x598bf).  ip22-time.c:dosample() programs cnt2, then polls the
+   * latched value until its high byte reads 0, measuring CP0 Count across that
+   * interval to calibrate mips_hpt_frequency.  We tie the down-count to CP0
+   * Count (which ticks once per retired insn) so the poll converges and yields a
+   * sane, deterministic delta. */
+  uint32_t t2_load = 0;          /* programmed 16-bit reload value */
+  uint64_t t2_count_at_load = 0; /* CP0 Count snapshot at the (re)load */
+  uint16_t t2_latch = 0;         /* value snapshotted by a latch command */
+  uint8_t  t2_wr_phase = 0;      /* load: 0=expect low byte, 1=expect high byte */
+  uint8_t  t2_rd_phase = 0;      /* read: 0=return low byte, 1=return high byte */
+  bool     t2_loading = false;   /* an RW=both program is in progress */
+  uint16_t t2_value();           /* live down-counted value, derived from CP0 Count */
+  /* --ip28: i8254 counters 0 and 1 as periodic interrupt sources.  The IP28 kernel
+   * runs its scheduler clock (rtclock) on counter 0 and its profiling clock (kgclock)
+   * on counter 1, on CPU Cause IP4 / IP5 -- where the Indy's R4400 kernel ticks on CP0
+   * Count/Compare.  Counters 0/1 are clocked by counter 2's output (the prescaler).
+   * The interrupt latches when a period elapses; the timer-clear register (INT3/INT2
+   * offset 0x20, bit 0 / bit 1) drops it. */
+  struct pit_counter_t {
+    uint16_t load = 0;
+    uint8_t  wr_phase = 0;
+    bool     loading = false;
+    bool     armed = false;
+    bool     irq = false;
+    uint32_t period = 0;         /* in CP0 Count ticks */
+    uint32_t next_fire = 0;      /* CP0 Count value of the next terminal count */
+  };
+  pit_counter_t pit[2];
+  uint32_t pit_period(uint16_t load) const;
 public:
-  sgi_hpc(state_t *s) : s(s), intstat(0), misc(0) {}
+  /* --ip28: counter n (0/1) has a latched interrupt -> CP0 Cause IP4 / IP5 */
+  bool pit_irq(int n);
+  /* true when an unmasked local0 interrupt is pending -> drive CP0 Cause IP2 */
+  bool ioc2_ip2_pending() { return (ioc2_local0_live() & ioc2_local_mask[0]) != 0; }
+  /* local1 status incl. live Newport vertical retrace (0x80); unmasked -> CP0 Cause IP3 */
+  uint8_t ioc2_local1_live();
+  bool ioc2_ip3_pending() {
+    /* called every interrupt poll: nothing to compute while local1 is fully masked */
+    return ioc2_local_mask[1] != 0 && (ioc2_local1_live() & ioc2_local_mask[1]) != 0;
+  }
+  void enet_poll();   /* drain the tap into the Seeq + deliver pending RX via DMA */
+  /* SIGUSR1 interrupt-state dump: local0/1 live + masks, mappable status + masks */
+  void dump_irq(FILE *fp) {
+    fprintf(fp, "[irq] local0 live=%02x mask=%02x  local1 live=%02x mask=%02x  map live=%02x mask0=%02x mask1=%02x  ip2=%d ip3=%d\n",
+            ioc2_local0_live(), ioc2_local_mask[0], ioc2_local1_live(), ioc2_local_mask[1],
+            ioc2_vmeistat_live(), ioc2_cmeimask[0], ioc2_cmeimask[1], ioc2_ip2_pending(), ioc2_ip3_pending());
+  }
+  sgi_hpc(state_t *s) : s(s), intstat(0), misc(0) { rtc_ram_load(); }
+  /* NVRAM_FILE=<path>: the ds1386 battery-backed RAM -- on an Indy (IP24) this holds
+   * the PROM environment (eaddr, monitor, console, ...) -- persists across runs:
+   * loaded at startup if the file exists, rewritten on every RAM write */
+  void rtc_ram_load();
+  void rtc_ram_save();
+  uint32_t read_impl(uint32_t offs, size_t sz);
   uint32_t read(uint32_t offs, size_t sz);
-  void write(uint32_t offs, uint32_t x, size_t sz);  
+  void write(uint32_t offs, uint32_t x, size_t sz);
 };
 
 

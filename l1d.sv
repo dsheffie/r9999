@@ -240,7 +240,7 @@ module l1d(clk,
    output logic [(`PA_WIDTH-1):0] mem_req_addr;
    output logic [`L1D_N_COLOUR-1:0] mem_req_colour;   /* stage C2: the colour of the set this line lives at */
    output logic [L1D_CL_LEN_BITS-1:0] mem_req_store_data;
-   output logic [4:0] 			  mem_req_opcode;
+   output logic [5:0] 			  mem_req_opcode;
    output logic				  mem_req_cacheable;
    output logic [15:0]			  mem_req_mask;
    
@@ -670,7 +670,7 @@ endfunction
    logic [`LG_L1D_NUM_SETS-1:0] t_mq_push_idx;
    logic [L1D_CL_LEN_BITS-1:0] r_mem_req_store_data, n_mem_req_store_data;
    
-   logic [4:0] 		       r_mem_req_opcode, n_mem_req_opcode;
+   logic [5:0] 		       r_mem_req_opcode, n_mem_req_opcode;
    logic [63:0] 	       n_cache_accesses, r_cache_accesses;
    logic [63:0] 	       n_cache_hits, r_cache_hits;
 
@@ -804,10 +804,26 @@ endfunction
      end // always_ff
 `endif
    /* CACHE hit-type mem ops (MEM_CHWB/CHWBINV/CHINV): line ops with dtlb-translated
-    * PAs, deferred to post-retirement via store graduation. */
-   wire w_is_chop2 = (r_req2.op == MEM_CHWB) | (r_req2.op == MEM_CHWBINV) | (r_req2.op == MEM_CHINV);
-   wire w_is_chop_head = (t_mem_head.op == MEM_CHWB) | (t_mem_head.op == MEM_CHWBINV) | (t_mem_head.op == MEM_CHINV);
-   wire w_is_chop_r = (r_req.op == MEM_CHWB) | (r_req.op == MEM_CHWBINV) | (r_req.op == MEM_CHINV);
+    * PAs, admitted only non-speculatively (w_chop_req), performed from the MQ head,
+    * answered when the L2 acks.  The R10000 block ops (MEM_BLK_*) take the same
+    * path, but the l1d hands the whole 128-byte block to the L2. */
+   function automatic logic is_blkop(mem_op_t op);
+      begin
+`ifdef ENABLE_R10000
+	 is_blkop = (op == MEM_BLK_WBINV) | (op == MEM_BLK_INV) | (op == MEM_BLK_IDX);
+`else
+	 is_blkop = 1'b0;
+`endif
+      end
+   endfunction
+   function automatic logic is_chop(mem_op_t op);
+      begin
+	 is_chop = (op == MEM_CHWB) | (op == MEM_CHWBINV) | (op == MEM_CHINV) | is_blkop(op);
+      end
+   endfunction
+   wire w_is_chop2 = is_chop(r_req2.op);
+   wire w_is_chop_head = is_chop(t_mem_head.op);
+   wire w_is_chop_r = is_chop(r_req.op);
    logic r_chop_wait, n_chop_wait;
 `ifdef CHOP_DEBUG
    always_ff@(negedge clk)
@@ -1012,7 +1028,7 @@ endfunction
 	t_req2_idx = r_req2.addr[IDX_STOP-1:IDX_START];
 `endif
 	/* For a TLB-MAPPED access, cacheability comes from the matched page's C
-	 * field (CCA==3 -> cached) rather than mipsseg's segment default; for an
+	 * field (machine.vh CCA_CACHED) rather than mipsseg's segment default; for an
 	 * unmapped (direct) access keep the segment decision in r_req2.cached.
 	 * w_tlb_c is registered in lockstep with w_mapped_addr, so it lines up
 	 * with r_req2 here. (This is the proper fix the L2 UNCACHE_WB_TURNAROUND
@@ -1020,7 +1036,7 @@ endfunction
 `ifdef FORCE_UNCACHED
 	t_remapped_req2.cached = 1'b0;   /* SCIENCE: force ALL data traffic uncached */
 `else
-	t_remapped_req2.cached = r_req2.mapped ? (w_tlb_c == 3'd3) : r_req2.cached;
+	t_remapped_req2.cached = r_req2.mapped ? `CCA_CACHED(w_tlb_c) : r_req2.cached;
 `endif
 	/* the queued/replayed req now carries the TLB-translated PHYSICAL address;
 	 * mark it unmapped so the replay refills from / re-tags with the PA and
@@ -1395,7 +1411,7 @@ endfunction
      if(r_got_req2 & (w_mapped_addr[35:12] == 24'h00841d))
        $display("[desc-acc] va=%x pa=%x mapped=%b cca=%0d cached=%b store=%b op=%0d",
 		r_req2.addr, w_mapped_addr, r_req2.mapped, w_tlb_c,
-		(r_req2.mapped ? (w_tlb_c==3'd3) : r_req2.cached), r_req2.is_store, r_req2.op);
+		(r_req2.mapped ? `CCA_CACHED(w_tlb_c) : r_req2.cached), r_req2.is_store, r_req2.op);
    // TEMP: CPU reads of the INQUIRY buffer (BP=0x083dcb00).  hit=1 -> served from
    // L1D (STALE if it predates the DMA write); hit=0 -> miss/refill (FRESH from DRAM).
    always_ff @(posedge clk)
@@ -1408,7 +1424,7 @@ endfunction
      if(r_got_req2 & r_req2.is_store & (w_mapped_addr[31:8] == 24'h083dcb))
        $display("[bufwr] cyc=%0d pa=%09x va=%x pc=%x op=%0d data=%016x cached=%b",
 		r_cycle, w_mapped_addr, r_req2.addr, r_req2.pc, r_req2.op,
-		r_req2.data, (r_req2.mapped ? (w_tlb_c==3'd3) : r_req2.cached));
+		r_req2.data, (r_req2.mapped ? `CCA_CACHED(w_tlb_c) : r_req2.cached));
    // L1D FILL of the buffer line: what data lands (fresh INQUIRY or stale DRAM)?
    always_ff @(posedge clk)
      if(w_cacheable_mem_rsp_valid & (r_mem_req_addr[35:8] == 28'h0083dcb))
@@ -1435,7 +1451,7 @@ endfunction
 	  begin
 	     /* a line fill: t_mem_head is the miss being serviced -> its pc is the
 	      * instruction that brought the line in (speculative if wrong-path). */
-	     l1d_fill({32'd0, r_cycle}, t_mem_head.pc, r_mem_req_addr,
+	     l1d_fill({32'd0, r_cycle}, t_mem_head.pc, 64'(r_mem_req_addr),
 		      mem_rsp_load_data[63:0], mem_rsp_load_data[127:64]);
 	  end
 	if(r_state == FLUSH_CL)
@@ -1446,20 +1462,20 @@ endfunction
 	/* mem-pipe CACHE ops (Hit-Invalidate 0x11 -> CHINV etc.) — these carry the op's pc. */
 	if(r_got_req & w_is_chop_r)
 	  begin
-	     l1d_cacheop({32'd0, r_cycle}, r_req.pc, {r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}},
+	     l1d_cacheop({32'd0, r_cycle}, r_req.pc, 64'({r_req.addr[`PA_WIDTH-1:`LG_L1D_CL_LEN], {`LG_L1D_CL_LEN{1'b0}}}),
 			 (r_req.op == MEM_CHINV) ? 32'd1 : 32'd0);
 	  end
 	if(r_got_req2 & ~r_req2.is_store & (r_req2.pc[31:0] >= 32'h88018f2c)
 	   & (r_req2.pc[31:0] <= 32'h88018f48))
 	  begin
-	     rd_log(r_req2.pc, w_mapped_addr, t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
+	     rd_log(r_req2.pc, 64'(w_mapped_addr), t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
 	  end
 	/* config_cache epilogue stack reloads (small-L1D derail): ld ra/s2/s1/s0,(sp)
 	 * at 0x8800f89c-a8 -- probe hit/miss + returned data to pin the stale reload. */
 	if(r_got_req2 & ~r_req2.is_store & (r_req2.pc[31:0] >= 32'h8800f89c)
 	   & (r_req2.pc[31:0] <= 32'h8800f8a8))
 	  begin
-	     rd_log(r_req2.pc, w_mapped_addr, t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
+	     rd_log(r_req2.pc, 64'(w_mapped_addr), t_rsp_data2, t_hit_cache2 ? 32'd1 : 32'd0);
 	  end
      end // always_ff
 `endif
@@ -2535,7 +2551,7 @@ endfunction
    /* CACHE hit ops are serializing (the LSU issues one only when it is the oldest
     * memory op and holds everything younger): admit it only when non-speculative,
     * then perform it with no graduation wait and answer when it is done */
-   wire	w_chop_req = (core_mem_req.op == MEM_CHWB) | (core_mem_req.op == MEM_CHWBINV) | (core_mem_req.op == MEM_CHINV);
+   wire	w_chop_req = is_chop(core_mem_req.op);
    /* NB: never hold an LSU-held op (lsu_hold) here waiting for the ROB head: the
     * exec request FIFO is in order, and an OLDER op re-issued after a block may be
     * queued behind it -> deadlock.  An uncached simple load answers BLK_UNCACHEABLE
@@ -3058,7 +3074,22 @@ endfunction
 
 	       if(r_got_req)
 		 begin
-		    if(w_is_chop_r)
+		    if(w_is_chop_r && is_blkop(r_req.op))
+		      begin
+			 /* R10000 block op: the L2 sequences the 128-byte block (back-
+			  * invalidating any L1D copies itself); answer when it acks.
+			  * Address bit 0 is the index form's way select. */
+			 t_got_miss = 1'b1;
+			 n_mem_req_addr = {r_req.addr[`PA_WIDTH-1:7], 6'd0, r_req.addr[0]};
+			 n_mem_req_idx = r_req_idx;
+			 n_mem_req_opcode = r_req.op;
+			 n_mem_req_cacheable = 1'b1;
+			 n_mem_req_mask = 16'hffff;
+			 n_mem_req_valid = 1'b1;
+			 n_chop_wait = 1'b1;
+			 n_state = FLUSH_CL_WAIT;
+		      end
+		    else if(w_is_chop_r)
 		      begin
 			 /* retried CACHE hit-op: perform the line op on the translated
 			  * PA (mirrors the FLUSH_CL funnel semantics).  Already early-
@@ -3844,7 +3875,7 @@ endfunction
    always_ff @(negedge clk)
      if(t_wr_array & ((r_req.op == MEM_SB) | (r_req.op == MEM_SH) |
 		      (r_req.op == MEM_SW) | (r_req.op == MEM_SD)))
-       wr_log(r_req.pc, {27'd0, r_req.rob_ptr}, r_req.addr,
+       wr_log(r_req.pc, 32'(r_req.rob_ptr), r_req.addr,
 	      (r_req.op == MEM_SB) ? {56'd0, r_req.data[7:0]}  :
 	      (r_req.op == MEM_SH) ? {48'd0, r_req.data[15:0]} :
 	      (r_req.op == MEM_SW) ? {32'd0, r_req.data[31:0]} : r_req.data,

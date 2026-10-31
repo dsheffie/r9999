@@ -122,6 +122,14 @@ enum class branch_type {
 
 enum class fp_reg_state { unknown, sp, dp };
 
+class sgi_mc;
+class sgi_hpc;
+class sgi_scc;
+class sgi_scsi;
+class sgi_seeq;
+class sgi_newport;
+class sgi_ps2;
+
 class state_t{
 public:
   typedef int64_t reg_t;
@@ -185,6 +193,18 @@ public:
    * the PC has already been vectored to the handler.  Cleared at the top of
    * execMips each instruction.  Mirrors interp_mips. */
   bool tlb_fault = false;
+
+  /* SGI devices (ooo_core --ip22/--ip28; the models come from indysim, which hangs
+   * them off state_t): null when there is no board.  irq_poke = a device raised an
+   * interrupt, poll now. */
+  sgi_mc *mc = nullptr;
+  sgi_hpc *hpc = nullptr;
+  sgi_scc *scc = nullptr;
+  sgi_scsi *scsi = nullptr;
+  sgi_seeq *seeq = nullptr;
+  sgi_newport *np = nullptr;
+  sgi_ps2 *ps2 = nullptr;
+  bool irq_poke = false;
 
   state_t(sparse_mem &mem) : mem(mem) {}
   ~state_t();
@@ -322,6 +342,12 @@ void execMips(state_t *s);
 /* co-sim retire_trace: fetch the BE instruction word at a virtual PC via the ISS TLB
  * (code is identical in RTL & ISS memory); *ppa gets the PA.  0 on untranslatable PC. */
 uint32_t iss_fetch_inst(state_t *s, uint64_t vpc, uint32_t *ppa);
+/* ooo_core: a device model wrote n bytes of memory at pa by DMA (sgi_hpc/sgi_mc).  The
+ * checker ISS keeps its own memory, so the same bytes are copied there (top.cc). */
+void sgi_dma_wrote(state_t *s, uint64_t pa, size_t n);
+/* co-sim: a load VA's PA and whether it bypasses the caches (interpret.cc) */
+bool iss_load_class(state_t *s, uint64_t va, uint32_t *pa, bool *uncached);
+extern uint64_t g_iss_last_ld_va, g_iss_last_st_va, g_iss_st_seq;
 void raise_int(state_t *s, uint64_t epc, uint32_t ip = (1u << 7));
 
 
@@ -375,9 +401,17 @@ bool is_store_insn(state_t *s);
  * presented R4600 for booting IRIX in the ISS -- IRIX /unix branches on
  * PRId.IMP in start(), MAME_QUESTIONS.md Q5; IRIX now boots on the RTL as an
  * R4400, and standalone ISS work uses interp_mips.) */
+/* CP0 Config: the RTL's read-only constant (exec.sv 'd16); keep in sync.  Under
+ * ENABLE_R10000 all three are the R10000's (machine.vh PRID/FIR/CONFIG_VALUE). */
+#ifdef ENABLE_R10000
+#define PRID_VALUE  0x00000925u
+#define CONFIG_VALUE 0x6c00a002u
+#define FIR_VALUE   0x00000900u
+#else
 #define PRID_VALUE  PRID_R4400
-/* CP0 Config: the RTL's read-only constant (exec.sv 'd16); keep in sync. */
 #define CONFIG_VALUE 0x0002e483u
+#define FIR_VALUE   0x00000500u   /* R4000 FPU, as exec.sv CFC1 */
+#endif
 
 #define VA2PA(x) ((x & 0x1fffffff))
 

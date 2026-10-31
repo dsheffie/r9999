@@ -59,7 +59,12 @@ module l2(clk,
 	  probe_colour,
 	  probe_ack,
 	  probe_dirty,
-	  probe_data
+	  probe_data,
+
+	  // R10000 block op: invalidate the block in the L1I
+	  l1i_blk_inv_req,
+	  l1i_blk_inv_addr,
+	  l1i_blk_inv_done
 	  );
 
    input logic clk;
@@ -84,12 +89,18 @@ module l2(clk,
     * reservoir AND no inclusivity vs the L1D.  CACHE-management ops (>=24) stay cacheable so their
     * handlers still run (find an empty L2, ack/write through).  l2_nocache=0 => normal L2.  Set
     * before-go only, so no mid-run flush needed (no lines exist to go stale). Was `ENABLE_L2_NOCACHE. */
-   wire w_l2_cacheable = l1_mem_req_cacheable & (~l2_nocache | (l1_mem_req_opcode >= 5'd24));
+   wire w_l2_cacheable = l1_mem_req_cacheable & (~l2_nocache | (l1_mem_req_opcode >= 6'd24));
+`ifdef ENABLE_COHERENT_L1I
+   wire w_ci_need = l1_mem_req_from_d && !is_blkop(l1_mem_req_opcode) &&
+		    (((l1_mem_req_opcode == 6'd4) && w_l2_cacheable) ||
+		     ((l1_mem_req_opcode == 6'd7) && !w_l2_cacheable));
+   wire w_ci_ok = r_ci_ok && (l1_mem_req_addr[`PA_WIDTH-1:7] == r_blk_addr);
+`endif
    input logic l2_nocache;
    input logic [15:0] l1_mem_req_mask;
    
    input logic [127:0] l1_mem_req_store_data;
-   input logic [4:0] l1_mem_req_opcode;
+   input logic [5:0] l1_mem_req_opcode;   /* mem_op_t; the memory side (mem_req_opcode) stays 5 bits */
    /* the granted request is the L1D's (the arbiter's address mux selects the L1D unless
     * it is in GNT_L1I) -- presence tracking only records L1D fills */
    input logic       l1_mem_req_from_d;
@@ -134,13 +145,20 @@ module l2(clk,
    input logic 		      probe_ack;
    input logic 		      probe_dirty;
    input logic [127:0] 	      probe_data;
+   /* the L1I is not covered by inclusion, so a block op also invalidates the block
+    * there: a pulse with the block's address on accepting it, and the L1D's answer
+    * waits for the L1I's done */
+   output logic 	      l1i_blk_inv_req;
+   output logic [`PA_WIDTH-1:0] l1i_blk_inv_addr;
+   input logic 		      l1i_blk_inv_done;
    logic 		      r_probe_req, n_probe_req;
    logic [`PA_WIDTH-1:0]      r_probe_addr, n_probe_addr;
    logic [`L1D_N_COLOUR-1:0]  r_probe_colour, n_probe_colour;
    /* why the probe was sent (stats only): 0 L1I-miss eviction, 1 L1D-miss eviction of an
     * line (any colour), 2 alias on a fill, 3 alias on an INVL, 4 alias on a PGDROP,
-    * 5 external WBINV snoop, 6 external DROP snoop */
-   logic [2:0] 		      r_probe_reason, n_probe_reason;
+    * 5 external WBINV snoop, 6 external DROP snoop, 7 R10000 block op, 8 uncached hit,
+    * 9 coherent-L1I fill */
+   logic [3:0] 		      r_probe_reason, n_probe_reason;
    logic 		      r_probed, n_probed;
    logic 		      r_probe_dirty, n_probe_dirty;
    logic [127:0] 	      r_probe_data, n_probe_data;
@@ -175,6 +193,34 @@ module l2(clk,
    logic 	       r_snp_wbinv, n_snp_wbinv;
    logic 	       r_snoop_done, n_snoop_done;
    assign snoop_done = r_snoop_done;
+   /* R10000 block op (MEM_BLK_*): acked on arrival, then IDLE launches its eight 16-byte
+    * lines one at a time and, once all eight are done and the L1I has invalidated the
+    * block (r_blk_l1i_done), answers the L1D.  r_blk_cnt = the next line (8 = all
+    * launched), r_blk_way = address bit 0, the index form's way select. */
+   logic 	       r_blk_pend, n_blk_pend;
+   logic [3:0] 	       r_blk_cnt, n_blk_cnt;
+   logic 	       r_blk_l1i_req, n_blk_l1i_req;
+`ifdef ENABLE_COHERENT_L1I
+   /* coherent L1I: r_ci_wait = the L1I is dropping the block of the held L1D request;
+    * r_ci_ok = it has (for the block in r_blk_addr), so the request may now be taken */
+   logic 	       r_ci_wait, n_ci_wait;
+   logic 	       r_ci_ok, n_ci_ok;
+`endif
+   logic 	       r_blk_l1i_done, n_blk_l1i_done;
+   assign l1i_blk_inv_req = r_blk_l1i_req;
+   assign l1i_blk_inv_addr = {r_blk_addr, 7'd0};
+   logic [`PA_WIDTH-1:7] r_blk_addr, n_blk_addr;
+   logic [5:0] 	       r_blk_op, n_blk_op;
+   logic 	       r_blk_way, n_blk_way;
+   function automatic logic is_blkop(logic [5:0] op);
+      begin
+`ifdef ENABLE_R10000
+	 is_blkop = (op == MEM_BLK_WBINV) | (op == MEM_BLK_INV) | (op == MEM_BLK_IDX);
+`else
+	 is_blkop = 1'b0;   /* never decoded: the sequencer synthesizes away */
+`endif
+      end
+   endfunction
 `ifdef VERILATOR
    logic [63:0]        r_snoop_hit, n_snoop_hit, r_snoop_dirty, n_snoop_dirty;
    logic [63:0]        r_pd_drop_n;   /* sim: [l2-pd-drop] print limiter */
@@ -195,7 +241,7 @@ module l2(clk,
    logic [`PA_WIDTH-1:0]	   n_addr, r_addr;
    logic [`PA_WIDTH-1:0]	   n_saveaddr, r_saveaddr;
    
-   logic [4:0] 		   n_opcode, r_opcode;
+   logic [5:0] 		   n_opcode, r_opcode;
 
    logic 		   r_mem_req, n_mem_req;
    logic [4:0] 		   r_mem_opcode, n_mem_opcode;
@@ -363,9 +409,12 @@ module l2(clk,
 `else
    wire w_alias = r_from_d && !r_is_uncache && w_hit && w_pres[N_PIDX] &&
 		  (w_pres[N_PIDX-1:0] != w_req_pidx) &&
-		  ((r_opcode == 5'd4) || (r_opcode == MEM_INVL) || (r_opcode == MEM_PGDROP));
+		  ((r_opcode == 6'd4) || (r_opcode == MEM_INVL) || (r_opcode == MEM_PGDROP));
 `endif
    wire 		w_need_wb = w_valid ? w_dirty : 1'b0;
+   /* the block op's current line; the index form takes whatever line sits at the set */
+   wire [`PA_WIDTH-1:0] w_blk_line = {r_blk_addr, r_blk_cnt[2:0], 4'd0};
+   wire 		w_blk_hit = (r_opcode == MEM_BLK_IDX) ? w_valid : w_hit;
       
    always_ff@(posedge clk)
      begin
@@ -376,7 +425,7 @@ module l2(clk,
 	     r_flush_complete <= 1'b0;
 	     r_idx <= 'd0;
 	     r_tag <= 'd0;
-	     r_opcode <= 5'd0;
+	     r_opcode <= 6'd0;
 	     r_from_d <= 1'b0;
 	     r_req_colour <= 'd0;
 	     r_addr <= 'd0;
@@ -391,6 +440,17 @@ module l2(clk,
 	     r_snoop_ack <= 1'b0;
 	     r_snp_wbinv <= 1'b0;
 	     r_snoop_done <= 1'b0;
+	     r_blk_pend <= 1'b0;
+	     r_blk_cnt <= 'd0;
+	     r_blk_addr <= 'd0;
+	     r_blk_op <= 6'd0;
+	     r_blk_way <= 1'b0;
+	     r_blk_l1i_req <= 1'b0;
+	     r_blk_l1i_done <= 1'b0;
+`ifdef ENABLE_COHERENT_L1I
+	     r_ci_wait <= 1'b0;
+	     r_ci_ok <= 1'b0;
+`endif
 `ifdef VERILATOR
 	     r_snoop_hit <= 64'd0;
 	     r_snoop_dirty <= 64'd0;
@@ -431,6 +491,17 @@ module l2(clk,
 	     r_snoop_ack <= n_snoop_ack;
 	     r_snp_wbinv <= n_snp_wbinv;
 	     r_snoop_done <= n_snoop_done;
+	     r_blk_pend <= n_blk_pend;
+	     r_blk_cnt <= n_blk_cnt;
+	     r_blk_addr <= n_blk_addr;
+	     r_blk_op <= n_blk_op;
+	     r_blk_way <= n_blk_way;
+	     r_blk_l1i_req <= n_blk_l1i_req;
+	     r_blk_l1i_done <= n_blk_l1i_done;
+`ifdef ENABLE_COHERENT_L1I
+	     r_ci_wait <= n_ci_wait;
+	     r_ci_ok <= n_ci_ok;
+`endif
 `ifdef VERILATOR
 	     r_snoop_hit <= n_snoop_hit;
 	     r_snoop_dirty <= n_snoop_dirty;
@@ -458,7 +529,7 @@ module l2(clk,
 	     /* MEM_WB/MEM_SW carry the L1D's own copy, which the L1D invalidated (pd is
 	      * conservative), so they are exempt; so is a same-colour L1D INVL/PGDROP */
 	     if(t_wr_valid && w_valid && w_pres[N_PIDX] && !r_probed &&
-		(r_opcode != MEM_WB) && (r_opcode != 5'd7) &&
+		(r_opcode != MEM_WB) && (r_opcode != 6'd7) &&
 		/* an L1D INVL/PGDROP at the line's own colour: the L1D just looked
 		 * there, so pd is merely stale (conservative) */
 		!(((r_opcode == MEM_INVL) || (r_opcode == MEM_PGDROP)) && r_from_d &&
@@ -578,7 +649,7 @@ module l2(clk,
 	  begin
 	     l2_line_log(0, {{(64-`PA_WIDTH){1'b0}}, l1_mem_req_addr},
 			 l1_mem_req_store_data[63:0], l1_mem_req_store_data[127:64],
-			 {27'd0, l1_mem_req_opcode}, {16'd0, l1_mem_req_mask});
+			 {26'd0, l1_mem_req_opcode}, {16'd0, l1_mem_req_mask});
 	  end
 	if(r_mem_req & ~r_l2wb_prev & (r_addr[31:4] == 28'h083e400))
 	  begin
@@ -595,9 +666,61 @@ module l2(clk,
 	  begin
 	     l2_chk_log({{(64-`PA_WIDTH){1'b0}}, r_saveaddr},
 			{31'd0, w_hit}, {31'd0, w_valid}, {31'd0, w_dirty},
-			{27'd0, r_opcode}, w_d0[63:0], w_d0[127:64]);
+			{26'd0, r_opcode}, w_d0[63:0], w_d0[127:64]);
 	  end
      end // always_ff
+`endif
+
+`ifdef VERILATOR
+   /* R10000 block-op statistics (sim): ops by kind, and what their lines found in the
+    * L2 -- a line hit, written back (its own dirty copy, or the L1D's via the probe),
+    * or dirty data discarded by Hit Invalidate S.  Probes are [BISTAT] block_op. */
+   logic [63:0] r_bs_wbinv, r_bs_inv, r_bs_idx, r_bs_hit, r_bs_wb_l2, r_bs_wb_l1d, r_bs_drop_dirty;
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_bs_wbinv <= 'd0;
+	     r_bs_inv <= 'd0;
+	     r_bs_idx <= 'd0;
+	     r_bs_hit <= 'd0;
+	     r_bs_wb_l2 <= 'd0;
+	     r_bs_wb_l1d <= 'd0;
+	     r_bs_drop_dirty <= 'd0;
+	  end
+	else
+	  begin
+	     if(r_blk_l1i_req)
+	       begin
+		  r_bs_wbinv <= r_bs_wbinv + ((r_blk_op == MEM_BLK_WBINV) ? 64'd1 : 64'd0);
+		  r_bs_inv <= r_bs_inv + ((r_blk_op == MEM_BLK_INV) ? 64'd1 : 64'd0);
+		  r_bs_idx <= r_bs_idx + ((r_blk_op == MEM_BLK_IDX) ? 64'd1 : 64'd0);
+	       end
+	     if((r_state == CHECK_VALID_AND_TAG) && is_blkop(r_opcode) && t_wr_valid)
+	       begin
+		  r_bs_hit <= r_bs_hit + 64'd1;
+		  if(n_state == UNCACHE_WB_DRAIN)
+		    begin
+		       r_bs_wb_l1d <= r_bs_wb_l1d + (r_probe_dirty ? 64'd1 : 64'd0);
+		       r_bs_wb_l2 <= r_bs_wb_l2 + (r_probe_dirty ? 64'd0 : 64'd1);
+		    end
+		  else if(w_dirty || r_probe_dirty)
+		    begin
+		       r_bs_drop_dirty <= r_bs_drop_dirty + 64'd1;
+		    end
+	       end
+	  end
+     end // always_ff
+   final
+     begin
+	if((r_bs_wbinv | r_bs_inv | r_bs_idx) != 64'd0)
+	  begin
+	     $display("[BLKSTAT] ops: 0x17 hit-wbinv %0d, 0x13 hit-inv %0d, 0x03 index-wbinv %0d",
+		      r_bs_wbinv, r_bs_inv, r_bs_idx);
+	     $display("[BLKSTAT] lines: L2 hit %0d, written back %0d from the L2 + %0d from the L1D, dirty discarded (0x13) %0d",
+		      r_bs_hit, r_bs_wb_l2, r_bs_wb_l1d, r_bs_drop_dirty);
+	  end
+     end
 `endif
 
 `ifdef PRESEVICT_LOG
@@ -608,7 +731,7 @@ module l2(clk,
    always_ff@(posedge clk)
      begin
 	if(!reset && (r_state == CHECK_VALID_AND_TAG) && !r_is_uncache &&
-	   ((r_opcode == 5'd4) || (r_opcode == 5'd7)) && !w_hit && w_valid && w_pres[N_PIDX] &&
+	   ((r_opcode == 6'd4) || (r_opcode == 6'd7)) && !w_hit && w_valid && w_pres[N_PIDX] &&
 	   (r_from_d || r_probed))   /* once per eviction: after the probe (L1I) or at once (L1D) */
 	  begin
 	     $display("[PRESEVICT] cyc=%0d evict pa %x (pidx %0d) for %s req pa %x",
@@ -655,6 +778,17 @@ module l2(clk,
 	n_snoop_ack = 1'b0;
 	n_snp_wbinv = r_snp_wbinv;
 	n_snoop_done = 1'b0;
+	n_blk_pend = r_blk_pend;
+	n_blk_cnt = r_blk_cnt;
+	n_blk_addr = r_blk_addr;
+	n_blk_op = r_blk_op;
+	n_blk_way = r_blk_way;
+	n_blk_l1i_req = 1'b0;
+	n_blk_l1i_done = r_blk_l1i_done | l1i_blk_inv_done;
+`ifdef ENABLE_COHERENT_L1I
+	n_ci_wait = r_ci_wait & !l1i_blk_inv_done;
+	n_ci_ok = r_ci_ok | (r_ci_wait & l1i_blk_inv_done);
+`endif
 	n_probe_req = r_probe_req;
 	n_probe_addr = r_probe_addr;
 	n_probe_colour = r_probe_colour;
@@ -769,16 +903,71 @@ module l2(clk,
 		     * line (the boot wedge). */
 		    n_state = WAIT_FOR_RAM;
 		 end
+	       else if(r_blk_pend && r_blk_cnt[3])
+		 begin
+		    /* all eight lines done: answer once the L1I has the block invalidated */
+		    if(r_blk_l1i_done)
+		      begin
+			 n_blk_pend = 1'b0;
+			 n_rsp_valid = 1'b1;
+		      end
+		 end
+	       else if(r_blk_pend)
+		 begin
+		    /* the next line of a block op.  The index form (0x03) names a set, not
+		     * a line: the way bit stands in for the top index bit, so the kernel's
+		     * sweep of both ways over half the reported size covers every set as
+		     * long as Config reports at least this L2's size. */
+		    t_idx = (r_blk_op == MEM_BLK_IDX) ? {r_blk_way, w_blk_line[LG_L2_LINES+2:4]} :
+			    w_blk_line[LG_L2_LINES+3:4];
+		    n_tag = w_blk_line[`PA_WIDTH-1:LG_L2_LINES+4];
+		    n_addr = w_blk_line;
+		    n_saveaddr = w_blk_line;
+		    n_opcode = r_blk_op;
+		    n_from_d = 1'b0;
+		    n_blk_cnt = r_blk_cnt + 4'd1;
+		    n_state = WAIT_FOR_RAM;
+		 end
+`ifdef ENABLE_COHERENT_L1I
+	       else if(l1_mem_req_valid && (r_ci_wait || (w_ci_need && !w_ci_ok)))
+		 begin
+		    /* the L1D is about to own the line (fill) or write around it (uncached
+		     * store): first drop its block from the L1I, holding the request (the L1
+		     * keeps it until the ack); nothing else is taken while the L1I works */
+		    if(!r_ci_wait)
+		      begin
+			 n_blk_l1i_req = 1'b1;
+			 n_blk_addr = l1_mem_req_addr[`PA_WIDTH-1:7];
+			 n_ci_wait = 1'b1;
+			 n_ci_ok = 1'b0;
+		      end
+		 end
+`endif
 	       else if(l1_mem_req_valid)
 		 begin
-		    if(w_l2_cacheable == 1'b0)
+`ifdef ENABLE_COHERENT_L1I
+		    n_ci_ok = 1'b0;
+`endif
+		    if(is_blkop(l1_mem_req_opcode))
+		      begin
+			 /* R10000 block op: take it; the r_blk_pend arm above runs its lines */
+			 n_req_ack = 1'b1;
+			 n_blk_pend = 1'b1;
+			 n_blk_cnt = 4'd0;
+			 n_blk_l1i_req = 1'b1;
+			 n_blk_l1i_done = 1'b0;
+			 n_blk_addr = l1_mem_req_addr[`PA_WIDTH-1:7];
+			 n_blk_way = l1_mem_req_addr[0];
+			 n_blk_op = l1_mem_req_opcode;
+		      end
+		    else if(w_l2_cacheable == 1'b0)
 		      begin
 			 /* L2 inclusive of L1: always look the line up first; on an
 			  * uncached hit, evict (write back if dirty) + invalidate before
 			  * the uncached op so s->mem is authoritative. */
 			 n_uncache_mask = l1_mem_req_mask;
 			 n_store_mask = l1_mem_req_mask;
-			 n_mem_opcode = l1_mem_req_opcode;
+			 n_mem_opcode = l1_mem_req_opcode[4:0];   /* uncached data ops are < 24 */
 			 n_mem_req_store_data = l1_mem_req_store_data;
 			 n_req_ack = 1'b1;
 			 n_is_uncache = 1'b1;
@@ -788,7 +977,7 @@ module l2(clk,
 		      begin
 			 n_req_ack = 1'b1;
 			 n_state = WAIT_FOR_RAM;
-			 n_rsp_valid = (l1_mem_req_opcode == 5'd7);
+			 n_rsp_valid = (l1_mem_req_opcode == 6'd7);
 			 n_is_uncache = 1'b0;
 			 n_cache_accesses = r_cache_accesses + 64'd1;
 			 n_cache_hits = r_cache_hits + 64'd1;
@@ -803,16 +992,36 @@ module l2(clk,
 	  CHECK_VALID_AND_TAG:
 	    begin
 	       //load hit
-	       if(r_is_uncache)
+	       if(r_is_uncache && w_hit && w_pres[N_PIDX] && !r_probed)
+		 begin
+		    /* an uncached access to a line the L1D may hold (pd): probe it out first,
+		     * as before any other drop -- else the L2 drops a line the L1D keeps
+		     * (inclusion broken: a later block op or snoop never finds it) and a
+		     * dirty L1D copy is not what the uncached op sees.  The arm below then
+		     * writes back whichever copy is dirty.  Stay put until the ack. */
+		    n_probe_req = 1'b1;
+		    n_probe_addr = {w_tag, t_idx, 4'd0};
+		    n_probe_colour = w_pres[N_PIDX-1:0];
+		    n_probe_reason = 4'd8;
+		    if(r_probe_req && probe_ack)
+		      begin
+			 n_probe_req = 1'b0;
+			 n_probed = 1'b1;
+			 n_probe_dirty = probe_dirty;
+			 n_probe_data = probe_data;
+		      end
+		 end
+	       else if(r_is_uncache)
 		 begin
 		    n_is_uncache = 1'b0;
 		    if(w_hit)
 		      begin
 			 t_wr_valid = 1'b1; t_valid = 1'b0;
 			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
-			 if(w_dirty)
+			 if(w_dirty || r_probe_dirty)
 			   begin
-			      n_mem_req_store_data = w_d0;
+			      /* a dirty L1D copy (the probe above) is the newest data */
+			      n_mem_req_store_data = r_probe_dirty ? r_probe_data : w_d0;
 			      n_addr = {w_tag, t_idx, 4'd0};
 			      n_mem_opcode = 5'd7;
 			      n_store_mask = 16'hffff;
@@ -823,23 +1032,23 @@ module l2(clk,
 			 else
 			   begin
 			      n_addr = r_saveaddr;
-			      n_mem_opcode = r_opcode;
+			      n_mem_opcode = r_opcode[4:0];   /* an uncached data op (< 24) */
 			      n_store_mask = r_uncache_mask;
 			      n_mem_req_store_data = r_store_data;
 			      n_mem_req = 1'b1;
 			      n_got_mem_rsp_valid = 1'b0;
-			      n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+			      n_state = (r_opcode == 6'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 			   end
 		      end
 		    else
 		      begin
 			 n_addr = r_saveaddr;
-			 n_mem_opcode = r_opcode;
+			 n_mem_opcode = r_opcode[4:0];   /* an uncached data op (< 24) */
 			 n_store_mask = r_uncache_mask;
 			 n_mem_req_store_data = r_store_data;
 			 n_mem_req = 1'b1;
 			 n_got_mem_rsp_valid = 1'b0;
-			 n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+			 n_state = (r_opcode == 6'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 		      end
 		 end
 	       else if(w_alias && !r_probed)
@@ -850,13 +1059,55 @@ module l2(clk,
 		    n_probe_req = 1'b1;
 		    n_probe_addr = {w_tag, t_idx, 4'd0};
 		    n_probe_colour = w_pres[N_PIDX-1:0];
-		    n_probe_reason = (r_opcode == 5'd4) ? 3'd2 : (r_opcode == MEM_INVL) ? 3'd3 : 3'd4;
+		    n_probe_reason = (r_opcode == 6'd4) ? 4'd2 : (r_opcode == MEM_INVL) ? 4'd3 : 4'd4;
 		    if(r_probe_req && probe_ack)
 		      begin
 			 n_probe_req = 1'b0;
 			 n_probed = 1'b1;
 			 n_probe_dirty = probe_dirty;
 			 n_probe_data = probe_data;
+		      end
+		 end
+	       else if(is_blkop(r_opcode))
+		 begin
+		    /* one line of a block op: the WBINV snoop (0x17, 0x03) or the DROP
+		     * snoop (0x13) below -- probe out any L1D copy, write back a dirty
+		     * line unless dropping, invalidate -- then back to IDLE for the next
+		     * line (IDLE answers the L1D after the last). */
+		    if(w_blk_hit && w_pres[N_PIDX] && !r_probed)
+		      begin
+			 n_probe_req = 1'b1;
+			 n_probe_addr = {w_tag, t_idx, 4'd0};
+			 n_probe_colour = w_pres[N_PIDX-1:0];
+			 n_probe_reason = 4'd7;
+			 if(r_probe_req && probe_ack)
+			   begin
+			      n_probe_req = 1'b0;
+			      n_probed = 1'b1;
+			      n_probe_dirty = probe_dirty;
+			      n_probe_data = probe_data;
+			   end
+		      end
+		    else if(w_blk_hit && (r_opcode != MEM_BLK_INV) && (w_dirty || r_probe_dirty))
+		      begin
+			 t_wr_valid = 1'b1; t_valid = 1'b0;
+			 t_wr_dirty = 1'b1; t_dirty = 1'b0;
+			 n_mem_req_store_data = r_probe_dirty ? r_probe_data : w_d0;
+			 n_addr = {w_tag, t_idx, 4'd0};
+			 n_mem_opcode = 5'd7;
+			 n_store_mask = 16'hffff;
+			 n_mem_req = 1'b1;
+			 n_got_mem_rsp_valid = 1'b0;
+			 n_state = UNCACHE_WB_DRAIN;   /* drain + turnaround, then the next line */
+		      end
+		    else
+		      begin
+			 if(w_blk_hit)
+			   begin
+			      t_wr_valid = 1'b1; t_valid = 1'b0;
+			      t_wr_dirty = 1'b1; t_dirty = 1'b0;
+			   end
+			 n_state = IDLE;
 		      end
 		 end
 	       else if(r_opcode == MEM_INVL)
@@ -925,7 +1176,7 @@ module l2(clk,
 			 n_probe_req = 1'b1;
 			 n_probe_addr = {w_tag, t_idx, 4'd0};
 			 n_probe_colour = w_pres[N_PIDX-1:0];
-			 n_probe_reason = 3'd5;
+			 n_probe_reason = 4'd5;
 			 if(r_probe_req && probe_ack)
 			   begin
 			      n_probe_req = 1'b0;
@@ -968,7 +1219,7 @@ module l2(clk,
 		    n_probe_req = 1'b1;
 		    n_probe_addr = {w_tag, t_idx, 4'd0};
 		    n_probe_colour = w_pres[N_PIDX-1:0];
-		    n_probe_reason = 3'd6;
+		    n_probe_reason = 4'd6;
 		    if(r_probe_req && probe_ack)
 		      begin
 			 n_probe_req = 1'b0;
@@ -1021,10 +1272,29 @@ module l2(clk,
 		      end
 		    n_state = UNCACHE_STORE;
 		 end
+`ifdef ENABLE_COHERENT_L1I
+	       else if(w_hit && (r_opcode == 6'd4) && !r_from_d && w_pres[N_PIDX] && !r_probed)
+		 begin
+		    /* coherent L1I: an L1I fill of a line the L1D may hold -- probe it out of
+		     * the L1D first; a dirty copy comes back and is what the L1I gets (the
+		     * arm below serves r_probe_data and keeps it here, dirty) */
+		    n_probe_req = 1'b1;
+		    n_probe_addr = {w_tag, t_idx, 4'd0};
+		    n_probe_colour = w_pres[N_PIDX-1:0];
+		    n_probe_reason = 4'd9;
+		    if(r_probe_req && probe_ack)
+		      begin
+			 n_probe_req = 1'b0;
+			 n_probed = 1'b1;
+			 n_probe_dirty = probe_dirty;
+			 n_probe_data = probe_data;
+		      end
+		 end
+`endif
 	       else if(w_hit)
 		 begin
 		    n_reload = 1'b0;
-		    if(r_opcode == 5'd4)
+		    if(r_opcode == 6'd4)
 		      begin
 			 /* an L1D fill: record that the L1D holds the line, and where */
 			 if(r_from_d)
@@ -1032,6 +1302,14 @@ module l2(clk,
 			      t_wr_pres = 1'b1;
 			      t_pres = {1'b1, w_req_pidx};
 			   end
+`ifdef ENABLE_COHERENT_L1I
+			 else if(r_probed)
+			   begin
+			      /* the probe took it out of the L1D */
+			      t_wr_pres = 1'b1;
+			      t_pres = 'd0;
+			   end
+`endif
 			 n_rsp_data =  w_d0;
 			 if(r_probe_dirty)
 			   begin
@@ -1047,7 +1325,7 @@ module l2(clk,
 			 n_rsp_valid = 1'b1;
 			 //n_cache_hits = r_cache_hits + 64'd1;			 
 		      end
-		    else if(r_opcode == 5'd7)
+		    else if(r_opcode == 6'd7)
 		      begin
 			 /* an L1D writeback (victim / alias / flush): it gave the line up */
 			 if(r_from_d)
@@ -1073,7 +1351,7 @@ module l2(clk,
 		    n_probe_req = 1'b1;
 		    n_probe_addr = {w_tag, t_idx, 4'd0};
 		    n_probe_colour = w_pres[N_PIDX-1:0];
-		    n_probe_reason = r_from_d ? 3'd1 : 3'd0;
+		    n_probe_reason = r_from_d ? 4'd1 : 4'd0;
 		    if(r_probe_req && probe_ack)
 		      begin
 			 n_probe_req = 1'b0;
@@ -1294,15 +1572,20 @@ module l2(clk,
 		    n_state = IDLE;
 		    n_snoop_done = 1'b1;
 		 end
+	       else if(is_blkop(r_opcode))
+		 begin
+		    /* a block op line's writeback drained: IDLE runs the next line, or answers */
+		    n_state = IDLE;
+		 end
 	       else
 		 begin
 		    /* re-issue the uncached op that the dirty-evict writeback preceded */
 		    n_addr = r_saveaddr;
-		    n_mem_opcode = r_opcode;
+		    n_mem_opcode = r_opcode[4:0];   /* an uncached data op (< 24) */
 		    n_store_mask = r_uncache_mask;
 		    n_mem_req_store_data = r_store_data;
 		    n_mem_req = 1'b1;
-		    n_state = (r_opcode == 5'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
+		    n_state = (r_opcode == 6'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 		 end
 	    end
 	  default:

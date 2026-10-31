@@ -70,6 +70,12 @@
  * CPU-model switch, not a free widening.  The C++ checker follows it (Makefile ->
  * -DENABLE_R10000). */
 //`define ENABLE_R10000 1
+/* validation knob: keep the L1I coherent with core stores by making a line live in the
+ * L1I XOR the L1D (the L2 drops it from the L1I before an L1D fill or uncached store, and
+ * probes it out of the L1D before an L1I fill).  The architecture allows a stale L1I;
+ * this makes the RTL match an ISS with no I-cache.  Instructions already fetched are not
+ * covered, nor is DMA.  Off for FPGA builds. */
+//`define ENABLE_COHERENT_L1I 1
 
 /* ENABLE_MIPS4: the MIPS IV (R5000/R10000) instructions; on by itself for an R4400
  * with MIPS IV bolted on (the cmov silicon builds), and implied by ENABLE_R10000.
@@ -345,6 +351,17 @@
 `endif
 `define TLB_PFN_WIDTH (`TLB_PA_WIDTH - 12)
 
+/* EntryLo's PFN as the architecture defines it -- what dmtc0 / tlbwi / tlbr / dmfc0 keep
+ * (exec.sv's EntryLo registers and the TLBR shadow RAM): the R10000's is 28 bits,
+ * EntryLo[33:6].  The translating TLBs still store only TLB_PFN_WIDTH: IRIX keeps
+ * software bits (the PFN lock among them) just above the PFN, they reach EntryLo as PA
+ * bits 32 and up, and the board decodes 32 -- so translation drops them, tlbr must not. */
+`ifdef ENABLE_R10000
+`define ENTRYLO_PFN_WIDTH 28
+`else
+`define ENTRYLO_PFN_WIDTH `PFN_WIDTH
+`endif
+
 /* JTLB entry count -- the knob for the TLB-CAM timing tradeoff. R4000/R4400 is
  * architecturally 48 (IRIX + Linux both hardcode it by PRId -- there's no Config1
  * MMU-size reg on R4x00), so 48 is the default and the ONLY value IRIX accepts.
@@ -416,7 +433,32 @@
  * since-fixed TLB bug: R4400 now reaches the SCSI scan, and unlike R4600 (fixed
  * 32-byte L1 line) its Config DB bit lets IRIX manage 16-byte lines matching
  * r9999's LG_L1D_CL_LEN=4. Present R4400. */
+/* Which MIPS cache-coherency attributes (xkphys VA[61:59], EntryLo C) cache.  The R4400
+ * model caches only CCA 3 (cacheable noncoherent: what IRIX/Linux on an Indy use).  The
+ * R10000's coherent CCAs 4 (exclusive) and 5 (exclusive-on-write) are cacheable too and,
+ * with one CPU, behave as 3 -- and the IP28 kernel runs at xkphys CCA 5 (0xa8...): as
+ * uncached it ran wholly uncached, half-aliased with its CCA 3 K2 mappings. */
+`ifdef ENABLE_R10000
+`define CCA_CACHED(c) (((c) == 3'd3) || ((c) == 3'd4) || ((c) == 3'd5))
+`else
+`define CCA_CACHED(c) ((c) == 3'd3)
+`endif
+
+`ifdef ENABLE_R10000
+/* IP28: an R10000 rev 2.5 (0x0925, as IRIS and indysim report; the IP28 kernel
+ * panics in r1nk_perf_architecture on an R4400 PRId), its FPU (FIR imp 0x09), and
+ * the R10000 Config layout: IC = DC = 32 KB [31:29]/[28:26], BE [15], SB = 128-byte
+ * secondary lines [13], SS = 0 (512 KB) [18:16], K0 = 2.  SS must be at least the
+ * L2's real size: the kernel's index-op sweep (l2.sv MEM_BLK_IDX) covers what
+ * Config claims. */
+`define PRID_VALUE  32'h00000925
+`define FIR_VALUE   32'h00000900
+`define CONFIG_VALUE 32'h6c00a002
+`else
 `define PRID_VALUE  `PRID_R4400
+`define FIR_VALUE   32'h00000500   /* imp 0x05 (R4000 FPU), rev 0 */
+`define CONFIG_VALUE 32'h0002e483  /* see exec.sv CP0 'd16 */
+`endif
 
 `define LG_BTB_SZ 7
 /* mini-ITTAGE: one tagged indirect-target table over the PC-indexed BTB (see l1i.sv) */
@@ -440,47 +482,75 @@
  * Sail conformance gap on address-errors for out-of-range fetch). */
 `define BTB_POISON_PC 64'h00000000deadcafc
 
-typedef enum logic [4:0] {
-   MEM_LB   = 5'd0,
-   MEM_LBU  = 5'd1,
-   MEM_LH   = 5'd2,
-   MEM_LHU  = 5'd3,
-   MEM_LW   = 5'd4,
-   MEM_SB   = 5'd5,
-   MEM_SH   = 5'd6,
-   MEM_SW   = 5'd7,
-   MEM_SWR  = 5'd8,
-   MEM_SWL  = 5'd9,
-   MEM_LWR  = 5'd10,
-   MEM_LWL  = 5'd11,
-   MEM_SC   = 5'd12,
-   MEM_TLBP = 5'd13,
-   MEM_LD   = 5'd14,
-   MEM_SD   = 5'd15,
-   MEM_LWU  = 5'd16,
-   MEM_LDL  = 5'd17,
-   MEM_LDR  = 5'd18,
-   MEM_SDL  = 5'd19,
-   MEM_SDR  = 5'd20,
-   MEM_LL   = 5'd21,   /* load-linked word  */
-   MEM_LLD  = 5'd22,   /* load-linked dword */
-   MEM_SCD  = 5'd23,   /* store-conditional dword */
-   MEM_INVL = 5'd24,   /* L2 line invalidate -- CACHE DMA-in drop; a dirty L2 line (or a dirty
+typedef enum logic [5:0] {
+   MEM_LB   = 6'd0,
+   MEM_LBU  = 6'd1,
+   MEM_LH   = 6'd2,
+   MEM_LHU  = 6'd3,
+   MEM_LW   = 6'd4,
+   MEM_SB   = 6'd5,
+   MEM_SH   = 6'd6,
+   MEM_SW   = 6'd7,
+   MEM_SWR  = 6'd8,
+   MEM_SWL  = 6'd9,
+   MEM_LWR  = 6'd10,
+   MEM_LWL  = 6'd11,
+   MEM_SC   = 6'd12,
+   MEM_TLBP = 6'd13,
+   MEM_LD   = 6'd14,
+   MEM_SD   = 6'd15,
+   MEM_LWU  = 6'd16,
+   MEM_LDL  = 6'd17,
+   MEM_LDR  = 6'd18,
+   MEM_SDL  = 6'd19,
+   MEM_SDR  = 6'd20,
+   MEM_LL   = 6'd21,   /* load-linked word  */
+   MEM_LLD  = 6'd22,   /* load-linked dword */
+   MEM_SCD  = 6'd23,   /* store-conditional dword */
+   MEM_INVL = 6'd24,   /* L2 line invalidate -- CACHE DMA-in drop; a dirty L2 line (or a dirty
                         * other-colour L1D copy found by the alias probe) is written back first */
-   MEM_MOV  = 5'd25,   /* GPR<->FPR move: data carried in req.addr, echoed by L1D (no memory access) */
-   MEM_WB   = 5'd26,   /* CACHE writeback-through: L2 hit -> flush line to DRAM + invalidate;
+   MEM_MOV  = 6'd25,   /* GPR<->FPR move: data carried in req.addr, echoed by L1D (no memory access) */
+   MEM_WB   = 6'd26,   /* CACHE writeback-through: L2 hit -> flush line to DRAM + invalidate;
                         * L2 miss -> write the carried data straight to DRAM (so a CACHE
                         * D-writeback reaches memory instead of sitting dirty in L2) */
-   MEM_CHWB    = 5'd27, /* CACHE D Hit-Writeback: mem-pipe (dtlb-translated) per-line op */
-   MEM_CHWBINV = 5'd28, /* CACHE D Hit-Writeback-Invalidate (mem-pipe) */
-   MEM_CHINV   = 5'd29, /* CACHE D Hit-Invalidate, no WB (DMA-in drop; mem-pipe) */
-   MEM_SNOOP_INVL = 5'd30, /* DMA-coherence snoop: drop the L2 line, DISCARD even if dirty
+   MEM_CHWB    = 6'd27, /* CACHE D Hit-Writeback: mem-pipe (dtlb-translated) per-line op */
+   MEM_CHWBINV = 6'd28, /* CACHE D Hit-Writeback-Invalidate (mem-pipe) */
+   MEM_CHINV   = 6'd29, /* CACHE D Hit-Invalidate, no WB (DMA-in drop; mem-pipe) */
+   MEM_SNOOP_INVL = 6'd30, /* DMA-coherence snoop: drop the L2 line, DISCARD even if dirty
                            * (a stale prior-owner dirty line must not clobber DMA data), and
                            * emit NO L1 response (the request came from the snoop FIFO, not an L1) */
-   MEM_PGDROP = 5'd31  /* injected page drop (XPG_INV, after a DMA deposit): drop the L2 line
+   MEM_PGDROP = 6'd31, /* injected page drop (XPG_INV, after a DMA deposit): drop the L2 line
                         * WITHOUT writeback and ack the L1D; rsp_data[0] = the line was dirty
                         * (never expected: the pre-transfer XPG_WBINV cleaned the page) */
+   /* R10000 secondary-cache ops (CA_BLK_*): one request for the 128-byte block at
+    * PA & ~0x7f, sequenced by the L2.  L1 -> L2 only: the L2's memory-side opcode
+    * stays 5 bits and never carries these. */
+   MEM_BLK_WBINV = 6'd32,  /* Hit WB-Inv S (0x17) */
+   MEM_BLK_INV   = 6'd33,  /* Hit Inv S (0x13): drop, no writeback */
+   MEM_BLK_IDX   = 6'd34   /* Index WB-Inv S (0x03): the sets the address indexes */
 } mem_op_t;
+
+/* What a MIPS CACHE instruction does to this core's caches.  The encodings
+ * (insn[20:16]) differ by CPU -- decode_mips.sv maps them with one table per CPU
+ * model (r4400_cache_act / r10k_cache_act, chosen by ENABLE_R10000) -- and
+ * everything past decode sees only these actions.  CA_I_LINE_INV..CA_D_LINE_INV
+ * are the serializing retire-time actions the ROB carries (kept in the low two
+ * bits); CA_NOP and the CA_D_HIT_* become a NOP uop and the CHINV/CHWBINV/CHWB
+ * mem uops in decode.  CA_BLK_* are the R10000 secondary-cache ops: a 128-byte L2
+ * block, inclusive of the L1s. */
+typedef enum logic [3:0] {
+   CA_NONE            = 4'd0,  /* not a CACHE op */
+   CA_I_LINE_INV      = 4'd1,  /* invalidate the L1I set the EA indexes (both ways) */
+   CA_D_LINE_WB       = 4'd2,  /* flush_cl: write back the L1D line at the EA */
+   CA_D_LINE_INV      = 4'd3,  /* flush_cl: drop the L1D line at the EA, no writeback */
+   CA_NOP             = 4'd4,  /* no cache effect (barrier, tag/data diagnostics, CDX) */
+   CA_D_HIT_INV       = 4'd5,  /* CHINV mem uop: translated, drop the line */
+   CA_D_HIT_WBINV     = 4'd6,  /* CHWBINV mem uop */
+   CA_D_HIT_WB        = 4'd7,  /* CHWB mem uop */
+   CA_BLK_INDEX_WBINV = 4'd8,  /* R10000 Index WB-Inv S: the 128 B block at the index */
+   CA_BLK_HIT_INV     = 4'd9,  /* R10000 Hit Inv S: the 128 B block, translated */
+   CA_BLK_HIT_WBINV   = 4'd10  /* R10000 Hit WB-Inv S */
+} cache_act_t;
 
 /* MIPS R10000 exception ordering 
 * Cold Reset (highest priority)
