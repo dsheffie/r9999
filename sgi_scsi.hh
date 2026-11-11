@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 struct state_t;
+class ckpt_io;
 class qcow2_reader;
 class chd_reader;
 
@@ -87,6 +88,8 @@ private:
   void finish();                    /* data phase drained -> status + INTRQ */
   void complete(uint8_t scsi_status);
 public:
+  /* full-system checkpoint: save or restore every stateful field (dev_ckpt.hh) */
+  void ckpt(ckpt_io &c);
   sgi_scsi(state_t *s, const std::string &disk_path, const std::string &delta_path = "",
            bool direct_write = false);
   ~sgi_scsi();

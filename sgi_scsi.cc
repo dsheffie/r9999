@@ -1,4 +1,5 @@
 #include "sgi_scsi.hh"
+#include "dev_ckpt.hh"
 #include "qcow2_reader.hh"
 #include "chd_reader.hh"
 #include "interpret.hh"
@@ -711,4 +712,24 @@ void sgi_scsi::dma_w(uint8_t v) {
   default:
     break;
   }
+}
+
+/* full-system checkpoint (dev_ckpt.hh): the WD33C93 + target state and the COW
+ * overlay -- every block the guest has written, so a checkpoint plus the read-only
+ * base image IS the disk at that instant */
+void sgi_scsi::ckpt(ckpt_io &c) {
+  c.tag(0x57443933);   /* "WD93" */
+  c.io(regs);
+  c.io(sasr);
+  c.io(phase);
+  c.io(buf);
+  uint64_t p = pos;
+  c.io(p);
+  pos = p;
+  c.io(drq);
+  c.io(intrq);
+  c.io(wr_lba);
+  c.io(sense);
+  c.io(tgt_status);
+  c.io(overlay);
 }

@@ -1,4 +1,5 @@
 #include "sgi_scc.hh"
+#include "dev_ckpt.hh"
 #include "interpret.hh"
 #include <cstdio>
 #include <cstdlib>
@@ -173,4 +174,24 @@ bool sgi_scc::int_pending() {
    * cmeimask0 -> local0 LIO2 -> CPU IP2 (henry ioc.sv). */
   bool rx = (rx_count > 0) && (rx_int_en(wr1[0]) || rx_int_en(wr1[1]));
   return rx || tx_int(wr1[0], tx_ip[0]) || tx_int(wr1[1], tx_ip[1]);
+}
+
+/* full-system checkpoint (dev_ckpt.hh).  rx_init (stdin set non-blocking) is host
+ * state, not device state; injected console input still queued is not saved (the
+ * checkpoint writer refuses to dump while any is pending). */
+void sgi_scc::ckpt(ckpt_io &c) {
+  c.tag(0x53434338);   /* "SCC8" */
+  c.io(ptr);
+  c.io(wr1);
+  c.io(wr9);
+  c.io(tx_busy);
+  c.io(drain_at);
+  c.io(tx_ip);
+  c.io(clk);
+  c.io(next_due);
+  c.io(rx_fifo);
+  c.io(rx_wptr);
+  c.io(rx_rptr);
+  c.io(rx_count);
+  c.io(rx_poll_at);
 }

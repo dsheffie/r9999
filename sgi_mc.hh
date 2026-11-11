@@ -13,6 +13,7 @@
 static const uint32_t sys_id = 0x13000000; /* mame says rev c (3) */
 
 struct state_t;
+class ckpt_io;
 
 /* SGI Indy Memory Controller. Backing store for the MC register window; see
  * the register map and bit definitions in sgi_mc.cc. */
@@ -56,6 +57,8 @@ class sgi_mc {
   uint32_t dma_translate(uint32_t va);
   void dma_perform();
 public:
+  /* full-system checkpoint: save or restore every stateful field (dev_ckpt.hh) */
+  void ckpt(ckpt_io &c);
   bool dma_irq_pending() const { return dma_irq; }
   sgi_mc(state_t *s) : s(s),
 		       eeprom_ctrl(0),

@@ -1,4 +1,5 @@
 #include "sgi_hpc.hh"
+#include "dev_ckpt.hh"
 #include "interpret.hh"
 #include "sgi_scsi.hh"
 #include "sgi_seeq.hh"
@@ -1185,5 +1186,36 @@ void sgi_hpc::write(uint32_t offs, uint32_t x, size_t sz) {
   }
   else {
     DPRINTF("%s at pc %x : %x unimplemented (lenient -> ignore)\n", __PRETTY_FUNCTION__, s->pc, offs);
+  }
+}
+
+/* full-system checkpoint (dev_ckpt.hh).  The RTC calendar cache is not state: it is
+ * dropped on restore and recomputed from icnt (DETTIME) + rtc_offset. */
+void sgi_hpc::ckpt(ckpt_io &c) {
+  c.tag(0x48504333);   /* "HPC3" */
+  c.io(intstat);
+  c.io(misc);
+  c.io(ioc2_local_status);
+  c.io(ioc2_local_mask);
+  c.io(ioc2_cmeimask);
+  c.io(ioc2_cmepol);
+  c.io(pbus_pio_config);
+  c.io(rtc_ram);
+  c.io(rtc_offset);
+  c.io(pbus_dma_config);
+  c.io(scsi_dma);
+  c.io(enet_dma);
+  c.io(enet_crbdp);
+  c.io(enet_tx_crbdp);
+  c.io(enet_tx_hold);
+  c.io(enet_poll_ctr);
+  c.io(t2_load);
+  c.io(t2_count_at_load);
+  c.io(t2_latch);
+  c.io(t2_wr_phase);
+  c.io(t2_rd_phase);
+  c.io(t2_loading);
+  if(!c.saving) {
+    rtc_lt_time = (time_t)-1;
   }
 }

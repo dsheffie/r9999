@@ -2126,6 +2126,15 @@ module exec(clk,
 	  begin
 	     for(integer i = 0; i < N_FCR_PRF_ENTRIES; i = i + 1)
 	       r_fcr_prf[i] <= 8'd0;
+`ifdef VERILATOR
+	     /* checkpoint resume: the FCCs (FCR RAT resets to entry 0), as CTC1 packs them */
+	     if(have_checkpoint() != 0)
+	       begin : ckpt_fcc
+		  logic [31:0] f;
+		  f = loadfcsr();
+		  r_fcr_prf[0] <= {f[31:25], f[23]};
+	       end
+`endif
 	  end
 	else if(w_fpu_fcr_valid)
 	  r_fcr_prf[w_fpu_fcr_ptr] <= w_fpu_result[7:0];
@@ -4156,6 +4165,14 @@ module exec(clk,
      begin
 	r_src_hilo <= r_hilo_prf[t_picked_uop.hilo_src];
 	
+`ifdef VERILATOR
+	/* checkpoint resume: HI/LO live in phys entry 0 (the HI/LO RATs reset to 0) */
+	if(reset && (have_checkpoint() != 0))
+	  begin
+	     r_hilo_prf[0] <= {loadhilo(1), loadhilo(0)};
+	  end
+	else
+`endif
 	if(r_start_int && t_wr_hilo)
 	  begin
 	     r_hilo_prf[int_uop.hilo_dst] <= t_hilo_result;

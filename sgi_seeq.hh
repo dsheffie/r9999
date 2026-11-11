@@ -8,6 +8,7 @@
 #include <string>
 
 struct state_t;
+class ckpt_io;
 
 /*
  * Seeq 8003 / 80C03 Ethernet Data Link Controller (behavioral model), the
@@ -69,6 +70,8 @@ private:
   void     raise_interrupt();
 
 public:
+  /* full-system checkpoint: save or restore every stateful field (dev_ckpt.hh) */
+  void ckpt(ckpt_io &c);
   sgi_seeq(state_t *s, const std::string &tap_ifname = "");
   ~sgi_seeq();
   bool ok() const { return tap_fd >= 0; }

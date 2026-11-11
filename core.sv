@@ -36,6 +36,9 @@ import "DPI-C" function void pt_retire(input int rob_ptr);
 `endif
 import "DPI-C" function void record_ds_restart(input int delay_cycles);
 import "DPI-C" function int check_insn_bytes(input longint pc, input int data);
+/* checkpoint resume (exec.sv imports the same C functions; tlb.sv's aliasing idiom) */
+import "DPI-C" have_checkpoint = function int have_ckpt_c();
+import "DPI-C" loadcp0 = function int loadcp0_c(input int regid);
 
 
 `endif
@@ -2092,6 +2095,16 @@ module core(clk,
 	     r_got_restart_ack <= 1'b0;
 	     r_cause <= 5'd0;
 	     r_ce <= 2'd0;
+`ifdef VERILATOR
+	     /* checkpoint resume: CE is the last CpU's unit, which every later exception
+	      * writes back into Cause -- it lives here, not in exec.sv's Cause */
+	     if(have_ckpt_c() != 0)
+	       begin : ckpt_ce
+		  logic [31:0] c13;
+		  c13 = loadcp0_c(13);
+		  r_ce <= c13[29:28];
+	       end
+`endif
 	     r_tlb_refill <= 1'b0;
 	     r_xtlb_refill <= 1'b0;
 	     r_save_to_tlb_regs <= 1'b0;

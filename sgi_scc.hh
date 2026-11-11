@@ -6,6 +6,7 @@
 #include <cstddef>
 
 struct state_t;
+class ckpt_io;
 
 /* Zilog Z85230 / SCC85230 (SGI IP22 IOC2 serial): TX path + the Tx interrupt.
  *
@@ -59,6 +60,8 @@ class sgi_scc {
   uint64_t rx_poll_at = 0;              /* next clk at which to drain host stdin */
   void     rx_poll();                   /* pull available host stdin bytes into the FIFO */
 public:
+  /* full-system checkpoint: save or restore every stateful field (dev_ckpt.hh) */
+  void ckpt(ckpt_io &c);
   sgi_scc(state_t *s) : s(s) {}
   uint8_t read(uint32_t offs);          /* offs within the 16-byte SCC window */
   void    write(uint32_t offs, uint8_t b);

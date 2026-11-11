@@ -1,4 +1,5 @@
 #include "sgi_seeq.hh"
+#include "dev_ckpt.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -230,4 +231,25 @@ uint8_t sgi_seeq::rx_dma_r(bool &last) {
     raise_interrupt();
   }
   return v;
+}
+
+/* full-system checkpoint (dev_ckpt.hh).  The tap is host state and is not saved. */
+void sgi_seeq::ckpt(ckpt_io &c) {
+  c.tag(0x53454551);   /* "SEEQ" */
+  c.io(rx_cmd);
+  c.io(rx_stat);
+  c.io(tx_cmd);
+  c.io(tx_stat);
+  c.io(station_addr);
+  c.io(mcast_lsb);
+  c.io(mcast_msb);
+  c.io(pktgap);
+  c.io(ctl);
+  c.io(intpend);
+  c.io(tx_frame);
+  c.io(rx_queue);
+  c.io(rx_cur);
+  uint64_t p = rx_pos;
+  c.io(p);
+  rx_pos = p;
 }

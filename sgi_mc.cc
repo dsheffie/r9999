@@ -1,4 +1,5 @@
 #include "sgi_mc.hh"
+#include "dev_ckpt.hh"
 #include "helper.hh"
 #include "interpret.hh"
 #include "sgi_newport.hh"
@@ -539,4 +540,43 @@ void sgi_mc::dma_perform() {
     dma_irq = true;
     s->irq_poke = true;
   }
+}
+
+/* full-system checkpoint (dev_ckpt.hh) */
+void sgi_mc::ckpt(ckpt_io &c) {
+  c.tag(0x4d43494e);   /* "MCIN" */
+  c.io(eeprom_ctrl);
+  c.io(ee_mem);
+  c.io(ee_sr);
+  c.io(ee_nbits);
+  c.io(ee_out);
+  c.io(ee_nout);
+  c.io(ee_op);
+  c.io(ee_addr);
+  c.io(ee_wen);
+  c.io(ee_reading);
+  c.io(ee_di);
+  c.io(cpu_error_status);
+  c.io(gio_error_status);
+  c.io(cpu_mem_access_config);
+  c.io(gio_mem_access_config);
+  c.io(gio64_arb_param);
+  c.io(rpss_divider);
+  c.io(rpss_counter);
+  c.io(cpu_control);
+  c.io(memcfg);
+  c.io(dma_gio_mask);
+  c.io(dma_gio_sub);
+  c.io(dma_cause);
+  c.io(dma_ctl);
+  c.io(dma_tlb_hi);
+  c.io(dma_tlb_lo);
+  c.io(dma_memadr);
+  c.io(dma_size);
+  c.io(dma_stride);
+  c.io(dma_gio_adr);
+  c.io(dma_mode);
+  c.io(dma_count);
+  c.io(dma_run);
+  c.io(dma_irq);
 }

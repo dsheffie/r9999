@@ -7,6 +7,7 @@
 #include <cstddef>
 
 struct state_t;
+class ckpt_io;
 
 /* SGI Indy HPC3 peripheral controller (first chip, base PA 0x1fb80000).
  * Backing store for the registers; full map and bit defs in sgi_hpc.cc. */
@@ -102,6 +103,8 @@ class sgi_hpc {
   pit_counter_t pit[2];
   uint32_t pit_period(uint16_t load) const;
 public:
+  /* full-system checkpoint: save or restore every stateful field (dev_ckpt.hh) */
+  void ckpt(ckpt_io &c);
   /* --ip28: counter n (0/1) has a latched interrupt -> CP0 Cause IP4 / IP5 */
   bool pit_irq(int n);
   /* true when an unmasked local0 interrupt is pending -> drive CP0 Cause IP2 */

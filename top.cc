@@ -4,6 +4,7 @@
 #include "sgi_scsi.hh"
 #include "sgi_seeq.hh"
 #include "sgi_ps2.hh"
+#include "dev_ckpt.hh"
 
 /* l2.sv's `ifdef VERILATOR` L2DBG descriptor-line tracer DPI probes are only
  * implemented in the henry full-system tb (henry_tb.cpp).  ooo_core does no L2
@@ -13,19 +14,58 @@ extern "C" void l2_line_log(int, unsigned long long, unsigned long long,
 extern "C" void l2_chk_log(unsigned long long, int, int, int, int,
                            unsigned long long, unsigned long long) {}
 
-/* Checkpoint-resume DPI seed hooks (used by the henry full-system tb to inject a
- * fast-forwarded ISS state at reset).  ooo_core never resumes from a checkpoint, so
- * have_checkpoint() returns 0 -> the RTL seed branches are dead; these stubs only
- * satisfy the linker for the `ifdef VERILATOR` DPI imports in the core RTL. */
+/* --checkpoint: resume an indysim full-system checkpoint (indysim saveState.cc, v2):
+ * the v1 header (CPU + CP0 + FPU + TLB), every non-zero 4 KB page of PA [0, 512 MB),
+ * then the device section (dev_ckpt.hh: MC, HPC3, SCC, WD33C93 + its COW overlay =
+ * the disk's written blocks, Seeq).  Memory and CPU state go to the RTL's memory and
+ * the checker ISS; the devices to the models attach_sgi_devices() hangs off the RTL
+ * side.  The RTL seeds its register files, CP0 and TLB at reset through the DPI hooks
+ * below (rf4r2w, fp_regfile, exec.sv ckpt_*, tlb.sv); have_checkpoint() is 0 without
+ * --checkpoint, so those seed branches stay dead. */
+struct ck_tlb_t {
+  uint64_t entry_hi, entry_lo0, entry_lo1;
+  uint32_t page_mask, pad;
+} __attribute__((packed));
+struct ck_header_t {
+  uint64_t magic;
+  int64_t  pc;
+  int64_t  gpr[32];
+  int64_t  hi, lo;
+  uint32_t cpr0[32];
+  uint64_t cpr0_64[32];
+  uint64_t cpr1[32];
+  uint32_t fcr1[5];
+  ck_tlb_t tlb[48];
+  uint64_t icnt;
+  uint32_t num_pages;
+} __attribute__((packed));
+struct ck_page_t {
+  uint32_t pa;
+  uint8_t  data[4096];
+} __attribute__((packed));
+static const uint64_t CK_MAGIC_V2 = 0x6d697073f5f5d006UL;
+static const uint64_t CK_DEV_MAGIC = 0x3254415453564544UL;   /* "DEVSTAT2" */
+static ck_header_t g_ck;
+static bool g_have_ck = false;
+static uint64_t g_ck_uicnt = 0;
+
 extern "C" {
-  int       have_checkpoint(void)               { return 0; }
-  long long loadgpr(int regid)                  { (void)regid; return 0; }
-  long long loadfpr(int regid)                  { (void)regid; return 0; }
-  int       loadcp0(int regid)                  { (void)regid; return 0; }
-  long long loadcp0_64(int regid)               { (void)regid; return 0; }
-  long long loadhilo(int half)                  { (void)half;  return 0; }
-  int       loadfcsr(void)                      { return 0; }
-  long long loadtlb(int entry, int field)       { (void)entry; (void)field; return 0; }
+  int       have_checkpoint(void)               { return g_have_ck ? 1 : 0; }
+  long long loadgpr(int regid)                  { return g_have_ck ? g_ck.gpr[regid & 31] : 0; }
+  long long loadfpr(int regid)                  { return g_have_ck ? (long long)g_ck.cpr1[regid & 31] : 0; }
+  int       loadcp0(int regid)                  { return g_have_ck ? (int)g_ck.cpr0[regid & 31] : 0; }
+  long long loadcp0_64(int regid)               { return g_have_ck ? (long long)g_ck.cpr0_64[regid & 31] : 0; }
+  long long loadhilo(int half)                  { return g_have_ck ? (half ? g_ck.hi : g_ck.lo) : 0; }
+  int       loadfcsr(void)                      { return g_have_ck ? (int)g_ck.fcr1[4] : 0; }   /* FCR31 */
+  /* 0 = EntryHi, 1/2 = EntryLo0/1, 3 = PageMask as tlb.sv takes it (the [24:13] field) */
+  long long loadtlb(int entry, int field) {
+    if(!g_have_ck) {
+      return 0;
+    }
+    const ck_tlb_t &e = g_ck.tlb[entry % 48];
+    return (field == 0) ? (long long)e.entry_hi : (field == 1) ? (long long)e.entry_lo0 :
+           (field == 2) ? (long long)e.entry_lo1 : (long long)(e.page_mask >> 13);
+  }
 }
 
 #define BRANCH_DEBUG 1
@@ -183,6 +223,9 @@ static std::map<int,uint64_t> fault_to_restart_distribution;
 /* boot a real SGI PROM from the current directory: --ip22 (Indy, R4400) or --ip28
  * (Indigo2, R10000; build with ENABLE_R10000).  sgi_prom = either. */
 static bool sgi_ip22 = false, sgi_ip28 = false, sgi_prom = false;
+/* the device models' instruction clock = these + the RTL's retire count (--checkpoint:
+ * the checkpoint's icnt and Count, so the RTC, RPSS and 8254 continue, not restart) */
+static uint64_t g_dev_icnt0 = 0, g_dev_count0 = 0;
 /* --disk: the SCSI disk (target 1, dksc(0,1,*)); guest writes stay in memory */
 static std::string disk_image;
 static sgi_mc *mc = nullptr;
@@ -200,6 +243,69 @@ static void attach_sgi_devices(state_t *st) {
   if(globals::ip28) {
     st->ps2 = new sgi_ps2(st);       /* the IP28 PROM's POST tests the 8042 */
   }
+}
+
+/* --checkpoint: read the file into the RTL side (rtl: memory + the attached devices)
+ * and the checker (iss: memory + architectural state).  The ISS TLB is written here
+ * once; after that only the RTL's TLB writes (tlb_wr_log) change it. */
+static void load_checkpoint(const std::string &path, state_t *rtl, state_t *iss) {
+  FILE *fp = fopen(path.c_str(), "rb");
+  if(fp == nullptr) {
+    fprintf(stderr, "cannot open checkpoint %s\n", path.c_str());
+    exit(-1);
+  }
+  ckpt_io c(fp, false);
+  c.io(g_ck);
+  if(g_ck.magic != CK_MAGIC_V2) {
+    fprintf(stderr, "%s: not a full-system (v2) indysim checkpoint (magic %016llx)\n", path.c_str(),
+	    (unsigned long long)g_ck.magic);
+    exit(-1);
+  }
+  for(uint32_t i = 0; i < g_ck.num_pages; i++) {
+    ck_page_t pg;
+    c.io(pg);
+    memcpy(rtl->mem.mem + pg.pa, pg.data, 4096);
+    memcpy(iss->mem.mem + pg.pa, pg.data, 4096);
+  }
+  uint64_t dm = 0;
+  uint32_t mask = 0;
+  c.io(dm);
+  c.io(g_ck_uicnt);
+  c.io(mask);
+  if((dm != CK_DEV_MAGIC) || (mask != 31)) {
+    fprintf(stderr, "%s: device section magic %016llx mask %x (want MC|HPC|SCC|SCSI|SEEQ = 1f)\n",
+	    path.c_str(), (unsigned long long)dm, mask);
+    exit(-1);
+  }
+  rtl->mc->ckpt(c);
+  rtl->hpc->ckpt(c);
+  rtl->scc->ckpt(c);
+  rtl->scsi->ckpt(c);
+  rtl->seeq->ckpt(c);
+  fclose(fp);
+  g_have_ck = true;
+  /* the ISS pc is reg_t: a compat-32 (kseg / 32-bit user) pc is held sign-extended */
+  const int64_t pc = ((uint64_t)g_ck.pc >> 32) == 0 ? (int64_t)(int32_t)g_ck.pc : g_ck.pc;
+  for(state_t *st : {rtl, iss}) {
+    st->pc = pc;
+    st->hi = g_ck.hi;
+    st->lo = g_ck.lo;
+    for(int i = 0; i < 32; i++) {
+      st->gpr[i] = g_ck.gpr[i];
+      st->cpr0[i] = g_ck.cpr0[i];
+      st->cpr0_64[i] = g_ck.cpr0_64[i];
+      st->cpr1[i] = g_ck.cpr1[i];
+    }
+    for(int i = 0; i < 5; i++) {
+      st->fcr1[i] = g_ck.fcr1[i];
+    }
+  }
+  for(int i = 0; i < state_t::NUM_TLB_ENTRIES; i++) {
+    const ck_tlb_t &e = g_ck.tlb[i % 48];
+    iss_apply_tlb_write(iss, i, e.entry_hi, e.entry_lo0, e.entry_lo1, e.page_mask);
+  }
+  fprintf(stderr, "[ckpt] %s: pc=%016llx icnt=%llu uicnt=%llu, %u pages, devices restored\n", path.c_str(),
+	  (unsigned long long)pc, (unsigned long long)g_ck.icnt, (unsigned long long)g_ck_uicnt, g_ck.num_pages);
 }
 
 /* --ip28: the memory decode the MC applies to a CPU physical address (indysim
@@ -1121,6 +1227,7 @@ int main(int argc, char **argv) {
   std::string mips_binary = "dhrystone3";
   std::string arcs_image;
   std::string memdump_spec;
+  std::string ckpt_name;
   std::string log_name = "log.txt";
   std::string pushout_name = "pushout.txt";
   std::string branch_name = "branch_info.txt";
@@ -1172,6 +1279,7 @@ int main(int argc, char **argv) {
       ("ip28", po::value<bool>(&sgi_ip28)->default_value(false), "boot the SGI IP28 (Indigo2 R10000) PROM, ip28prom.070-1477-002.bin")
       ("watch-va", po::value<std::string>(&watch_va_str), "co-sim: log every store / DMA / fill / writeback of this VA's line (hex)")
       ("disk", po::value<std::string>(&disk_image), "SCSI disk image (raw or qcow2) for the SGI board, target 1; writes stay in memory")
+      ("checkpoint", po::value<std::string>(&ckpt_name), "resume an indysim full-system (v2) IP22 checkpoint: CPU, memory, devices and the disk's written blocks (--disk = the base image); checker on by default")
       ("arcs", po::value<std::string>(&arcs_image),
        "synthetic ARCS firmware image; loaded at physical 0x1000 (kseg1 0xA0001000)")
       ("memdump", po::value<std::string>(&memdump_spec),
@@ -1185,6 +1293,9 @@ int main(int argc, char **argv) {
     checker_given = !vm["checker"].defaulted();
     if(!watch_va_str.empty()) {
       g_watch_va = strtoull(watch_va_str.c_str(), nullptr, 16);
+    }
+    if(not(ckpt_name.empty())) {
+      sgi_ip22 = true;   /* the IP22 board, resumed instead of booted */
     }
     sgi_prom = sgi_ip22 or sgi_ip28;
     /* ooo_core carries no libchdr (sgi_shim.cc): a MAME CHD would be read as a raw disk */
@@ -1278,7 +1389,7 @@ int main(int argc, char **argv) {
   else {
     /* the ISS has no devices: off unless asked for, and then it follows the RTL on device
      * loads (adopt_unmodeled_load), interrupts (raise_int) and DMA (sgi_dma_wrote) */
-    enable_checker = checker_given && enable_checker;
+    enable_checker = (checker_given || not(ckpt_name.empty())) && enable_checker;
     if(enable_checker) {
       g_dma_mirror = true;
       if(sgi_ip28) {
@@ -1289,29 +1400,41 @@ int main(int argc, char **argv) {
 	ss->mem.alias_base = 0x20000000UL;
       }
     }
-    struct stat st;
-    int rc;
-    const char *prom = sgi_ip28 ? "ip28prom.070-1477-002.bin" : "ip24prom.070-9101-005.bin";
-    int fd = open(prom, O_RDONLY);
-    if(fd<0) {
-      printf("INTERP: open() returned %d\n", fd);
-      exit(-1);
+    if(not(ckpt_name.empty())) {
+      /* IP22 MC System Memory Alias: PA [0, 512 KB) is DRAM 0x08000000 (indysim's
+       * decode, where the checkpoint was taken), on both sides */
+      s->mem.route_devices = true;
+      ss->mem.route_devices = true;
+      attach_sgi_devices(s);
+      load_checkpoint(ckpt_name, s, ss);
+      g_dev_icnt0 = g_ck.icnt;
+      g_dev_count0 = g_ck.cpr0[CPR0_COUNT];
     }
-    rc = fstat(fd,&st);
-    if(rc<0) {
-      printf("INTERP: fstat() returned %d\n", rc);
-      exit(-1);
+    else {
+      struct stat st;
+      int rc;
+      const char *prom = sgi_ip28 ? "ip28prom.070-1477-002.bin" : "ip24prom.070-9101-005.bin";
+      int fd = open(prom, O_RDONLY);
+      if(fd<0) {
+        printf("INTERP: open() returned %d\n", fd);
+        exit(-1);
+      }
+      rc = fstat(fd,&st);
+      if(rc<0) {
+        printf("INTERP: fstat() returned %d\n", rc);
+        exit(-1);
+      }
+      char *buf = (char*)mmap(nullptr, st.st_size,
+                              PROT_READ, MAP_PRIVATE, fd, 0);
+
+      memcpy(s->mem.mem +(0xbfc00000 & 0x1fffffff), buf, st.st_size);
+      memcpy(ss->mem.mem +(0xbfc00000 & 0x1fffffff), buf, st.st_size);    
+
+      s->pc = 0xbfc00000;
+      ss->pc = (int64_t)(int32_t)0xbfc00000;   /* the checker ISS starts at the reset vector too */
+      close(fd);
+      attach_sgi_devices(s);
     }
-    char *buf = (char*)mmap(nullptr, st.st_size,
-                            PROT_READ, MAP_PRIVATE, fd, 0);
-
-    memcpy(s->mem.mem +(0xbfc00000 & 0x1fffffff), buf, st.st_size);
-    memcpy(ss->mem.mem +(0xbfc00000 & 0x1fffffff), buf, st.st_size);    
-
-    s->pc = 0xbfc00000;
-    ss->pc = (int64_t)(int32_t)0xbfc00000;   /* the checker ISS starts at the reset vector too */
-    close(fd);
-    attach_sgi_devices(s);
   }
   
   
@@ -1410,8 +1533,8 @@ int main(int argc, char **argv) {
       /* the 8254 model (sgi_hpc pit_irq, t2_value) clocks off the ISS's CP0 Count, which
        * indysim ticks once per instruction: without this it stays 0, the timers never
        * fire again once armed, and IRIX sleeps forever (the miniroot after its mounts) */
-      s->icnt = insns_retired;
-      s->cpr0[CPR0_COUNT] = (uint32_t)insns_retired;
+      s->icnt = g_dev_icnt0 + insns_retired;
+      s->cpr0[CPR0_COUNT] = (uint32_t)(g_dev_count0 + insns_retired);
       /* indysim steps the devices per instruction: the SCC's TX timing every one, the
        * interrupt sources every 64 (or when one pokes); here the retire count is the
        * instruction clock, and the interrupt sources drive the core's IP lines */
@@ -1804,16 +1927,18 @@ int main(int argc, char **argv) {
 	   * BEV=0 range the sim is never advanced past the faulting instruction,
 	   * so it sits on the store while the RTL runs the handler and the desync
 	   * watchdog kills the run a few retires later. */
+	  /* the kseg0 bound matches the BEV=1 one: IRIX's general-exception stub at
+	   * 0x80000180 runs past 0x80000200 (its `j intrfast' sits at 0x80000218) */
 	  bool rtl_in_exc_handler = (rtl_pc32 >= 0xbfc00180u &&
 				     rtl_pc32 <  0xbfc00400u) ||
 				    (rtl_pc32 >= 0x80000000u &&
-				     rtl_pc32 <  0x80000200u);
+				     rtl_pc32 <  0x80000400u);
 	  /* "sim in user code" = the sim has NOT yet taken the exception, i.e. it
 	   * is in neither vector area */
 	  bool sim_in_user_code   = !((sim_pc32 >= 0xbfc00000u &&
 				       sim_pc32 <  0xbfc00400u) ||
 				      (sim_pc32 >= 0x80000000u &&
-				       sim_pc32 <  0x80000200u));
+				       sim_pc32 <  0x80000400u));
 	  bool caught_up = false;
 
 	  if(rtl_in_exc_handler && sim_in_user_code) {
@@ -1841,10 +1966,13 @@ int main(int argc, char **argv) {
 	    ++last_check;
 	    /* Peek at the pending checker instruction.  If it is BREAK or
 	     * SYSCALL the RTL has entered exception/halt mode and the
-	     * simulation is effectively over -- terminate cleanly. */
-	    {
-	      uint32_t pending = bswap<IS_LITTLE_ENDIAN>(
-		ss->mem.get<uint32_t>(va2pa((uint32_t)ss->pc)));
+	     * simulation is effectively over -- terminate cleanly.  Not under an
+	     * OS (SYSCALL/BREAK trap to the kernel there), and the word comes
+	     * through the ISS TLB: va2pa() of a user pc read an unrelated
+	     * physical page, whose random syscall-looking word silently ended
+	     * IRIX checkpoint runs a few dozen instructions in. */
+	    if(!g_iss_os_mode) {
+	      uint32_t pending = iss_fetch_inst(ss, ss->pc, nullptr);
 	      uint32_t pend_op   = pending >> 26;
 	      uint32_t pend_func = pending & 63;
 	      if(pend_op == 0 && (pend_func == 0x0C || pend_func == 0x0D)) {
