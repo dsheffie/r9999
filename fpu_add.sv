@@ -188,6 +188,11 @@ module fpu_add(/*AUTOARG*/
    wire [LG_FW-1:0] w_clz;
    fpu_zero_detector #(.LG_W(LG_FW), .W(FW)) zd (.distance(w_clz), .a(r2_mant));
    wire [EW:0] 	    w_shift = {{ZP{1'b0}}, w_clz};
+   /* only the guard bit is left: (2^e - 1 ulp) - 2^e, the exponents one apart, cancels
+    * down to the bit the alignment shifted out.  The detector sees r2_mant only and
+    * stops at FW, one short: the guard becomes the leading 1, a shift of FW+1 (was a
+    * result 3x too large; found by superdupersparc's CFP95 tomcatv/hydro2d co-sim) */
+   wire 	    w_guard_only = (r2_mant == 'd0) & r2_g;
    logic [FW:0] t_norm_mant;
    logic [EW:0] t_norm_exp;
    logic 	t_norm_g, t_norm_r, t_norm_s;
@@ -195,7 +200,13 @@ module fpu_add(/*AUTOARG*/
      begin
 	t_norm_mant = r2_mant; t_norm_exp = r2_exp;
 	t_norm_g = r2_g; t_norm_r = r2_r; t_norm_s = r2_s;
-	if(r2_mant[FW] == 1'b0 && (r2_exp != 'd0))
+	if(w_guard_only && (r2_exp != 'd0))
+	  begin
+	     t_norm_exp = r2_exp - (FW + 1);
+	     t_norm_g = 1'b0; t_norm_r = 1'b0;
+	     t_norm_mant = {r2_g, r2_r, {(FW-1){1'b0}}};
+	  end
+	else if(r2_mant[FW] == 1'b0 && (r2_exp != 'd0))
 	  begin
 	     t_norm_exp = r2_exp - w_shift;
 	     if(w_shift == 'd1)
@@ -211,7 +222,7 @@ module fpu_add(/*AUTOARG*/
 	  end
      end
    // result-underflow exponent test (<= 0), for the denorm punt
-   wire [EW:0] 	w_lead = (r2_mant[FW] == 1'b0) ? w_shift : {(EW+1){1'b0}};
+   wire [EW:0] 	w_lead = w_guard_only ? (FW + 1) : (r2_mant[FW] == 1'b0) ? w_shift : {(EW+1){1'b0}};
    wire signed [EW+1:0] w_real_exp = $signed({1'b0, r2_exp}) - $signed({1'b0, w_lead});
    wire 	s3_exp_le0 = w_real_exp[EW+1] | ~(|w_real_exp);
 
