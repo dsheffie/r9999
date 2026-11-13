@@ -312,6 +312,18 @@
 `endif
 `endif
 
+/* L2_WAYS: L2 associativity, any integer >= 1 (the way select is one-hot).
+ * LG_L2_NUM_SETS is then the sets PER WAY, so the L2 holds
+ * L2_WAYS * 2^LG_L2_NUM_SETS * 16 B (512KB 2-way = L2_WAYS=2 LG_L2_NUM_SETS=14).
+ * 1 is the direct-mapped L2.  Replacement is NRU (LRU at 2 ways).  With
+ * ENABLE_R10000 at most 2: the index-form block op names the way with address bit 0. */
+`ifndef L2_WAYS
+ `define L2_WAYS 1
+`endif
+/* L2_SEL_STAGE (off unless defined; only with L2_WAYS > 1): spend one more L2 cycle
+ * per lookup so the N-way tag compare and the way mux in front of the 128-bit data
+ * are in different cycles (FPGA timing; l2.sv r_way / r_hit). */
+
 
 
 `define M_WIDTH (1 << `LG_M_WIDTH)

@@ -231,6 +231,15 @@ module l2(clk,
    localparam L2_LINES = 1<<LG_L2_LINES;
    
    localparam TAG_BITS = `PA_WIDTH - (LG_L2_LINES + 4);
+   /* L2_WAYS (machine.vh): LG_L2_LINES is the sets per way.  LG_WAYS is the width of
+    * a way number, kept >= 1 so a one-way L2 still declares its counters. */
+   localparam L2_WAYS = `L2_WAYS;
+   localparam LG_WAYS = (L2_WAYS > 1) ? $clog2(L2_WAYS) : 1;
+`ifdef L2_SEL_STAGE
+   localparam SEL = (L2_WAYS > 1);
+`else
+   localparam SEL = 1'b0;
+`endif
 
    logic 		t_wr_dirty, t_wr_valid;
    logic 		t_wr_d0, t_wr_tag;
@@ -345,22 +354,10 @@ module l2(clk,
      
    logic [127:0] 	t_d0;
       
+   /* the line the state machine works on: the selected way's (see t_sel) */
    wire [127:0] 	w_d0;
    wire [TAG_BITS-1:0] 	w_tag;
    wire 		w_valid, w_dirty;
-
-   
-   reg_ram1rw #(.WIDTH(128), .LG_DEPTH(LG_L2_LINES)) data_ram0
-     (.clk(clk), .addr(t_idx), .wr_data(t_d0), .wr_en(t_wr_d0), .rd_data(w_d0));
-      
-   reg_ram1rw #(.WIDTH(TAG_BITS), .LG_DEPTH(LG_L2_LINES)) tag_ram
-     (.clk(clk), .addr(t_idx), .wr_data(r_tag), .wr_en(t_wr_tag), .rd_data(w_tag));   
-   
-   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) valid_ram
-     (.clk(clk), .addr(t_idx), .wr_data(t_valid), .wr_en(t_wr_valid), .rd_data(w_valid));   
-
-   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) dirty_ram
-     (.clk(clk), .addr(t_idx), .wr_data(t_dirty), .wr_en(t_wr_dirty), .rd_data(w_dirty));   
 
    /* L1D presence + colour per L2 line (inclusive-l2-v2 stage A).  pd = "the L1D may hold
     * this line", pidx = the L1D index colour it was filled at (the index bits above the
@@ -378,8 +375,266 @@ module l2(clk,
     * longer a function of the PA) */
    wire [N_PIDX-1:0] 	w_req_pidx = r_req_colour;
 
-   reg_ram1rw #(.WIDTH(N_PIDX+1), .LG_DEPTH(LG_L2_LINES)) pres_ram
-     (.clk(clk), .addr(t_idx), .wr_data(t_pres), .wr_en(t_wr_pres), .rd_data(w_pres));
+   /* ---- L2_WAYS: one set of the line RAMs per way ----
+    * Every way reads and writes t_idx; the write enables are gated by t_wr_way, so a
+    * write goes to the selected way only (INITIALIZE: to all).  The state machine is
+    * unchanged: it sees one line (w_d0, w_tag, w_valid, w_dirty, w_pres), the selected
+    * way's, picked by t_sel (one-hot):
+    *  - INITIALIZE writes every way at once;
+    *  - the flush walk (FLUSH_*) visits every way of a set in turn (r_fway);
+    *  - otherwise (anything through CHECK_VALID_AND_TAG, which looks up r_tag) the way
+    *    that hits, else the victim (t_vict); an R10000 index-form block op
+    *    (MEM_BLK_IDX) names its way with address bit 0 (r_blk_way) instead.  The first
+    *    CHECK_VALID_AND_TAG cycle latches the choice (r_way) and holds it while the
+    *    state machine stays there (probes) and through a miss's DIRTY_STORE ..
+    *    CLEAN_RELOAD: the fill must land in the way whose line was written back, and
+    *    the replacement state (updated as the miss leaves CHECK) would by then name
+    *    another victim.  A miss that is not a fill (an INVL, a snoop, ..) changes
+    *    nothing, so its "victim" is never written.
+    * With one way t_sel is a constant and the design is the direct-mapped L2. */
+   logic [127:0] 	w_d0_w[L2_WAYS-1:0];
+   logic [TAG_BITS-1:0] w_tag_w[L2_WAYS-1:0];
+   logic [N_PIDX:0] 	w_pres_w[L2_WAYS-1:0];
+   logic [L2_WAYS-1:0] 	w_valid_w, w_dirty_w;
+   logic [L2_WAYS-1:0] 	t_sel, t_wr_way, t_hitv, t_vict, t_fsel, t_blkv, t_pick;
+   logic [L2_WAYS-1:0] 	r_way;
+   /* L2_SEL_STAGE (machine.vh): the lookup's pick and its hit go into r_way / r_hit on
+    * the first CHECK_VALID_AND_TAG cycle, which does nothing else; from the next cycle
+    * only those flops drive the way muxes, the write enables and w_hit, so the N-way
+    * tag compare and the 128-bit way mux sit in different cycles.  Every lookup
+    * reaches CHECK through WAIT_FOR_RAM and holds t_idx (= r_idx) there, so the RAM
+    * outputs stay put over the extra cycle. */
+   logic 		r_hit;
+   logic 		r_way_lock, n_way_lock;
+   logic [LG_WAYS-1:0] 	r_fway, n_fway;
+   logic [127:0] 	t_way_d0;
+   logic [TAG_BITS-1:0] t_way_tag;
+   logic [N_PIDX:0] 	t_way_pres;
+   logic 		t_way_valid, t_way_dirty;
+   genvar 		g;
+   generate
+      for(g = 0; g < L2_WAYS; g = g + 1)
+	begin : g_way
+	   reg_ram1rw #(.WIDTH(128), .LG_DEPTH(LG_L2_LINES)) data_ram0
+	     (.clk(clk),
+	      .addr(t_idx),
+	      .wr_data(t_d0),
+	      .wr_en(t_wr_d0 & t_wr_way[g]),
+	      .rd_data(w_d0_w[g]));
+	   reg_ram1rw #(.WIDTH(TAG_BITS), .LG_DEPTH(LG_L2_LINES)) tag_ram
+	     (.clk(clk),
+	      .addr(t_idx),
+	      .wr_data(r_tag),
+	      .wr_en(t_wr_tag & t_wr_way[g]),
+	      .rd_data(w_tag_w[g]));
+	   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) valid_ram
+	     (.clk(clk),
+	      .addr(t_idx),
+	      .wr_data(t_valid),
+	      .wr_en(t_wr_valid & t_wr_way[g]),
+	      .rd_data(w_valid_w[g]));
+	   reg_ram1rw #(.WIDTH(1), .LG_DEPTH(LG_L2_LINES)) dirty_ram
+	     (.clk(clk),
+	      .addr(t_idx),
+	      .wr_data(t_dirty),
+	      .wr_en(t_wr_dirty & t_wr_way[g]),
+	      .rd_data(w_dirty_w[g]));
+	   reg_ram1rw #(.WIDTH(N_PIDX+1), .LG_DEPTH(LG_L2_LINES)) pres_ram
+	     (.clk(clk),
+	      .addr(t_idx),
+	      .wr_data(t_pres),
+	      .wr_en(t_wr_pres & t_wr_way[g]),
+	      .rd_data(w_pres_w[g]));
+	end // block: g_way
+`ifdef ENABLE_R10000
+      /* the index-form block op names one of two ways with address bit 0 */
+      if(L2_WAYS > 2)
+	begin : g_blk_idx_two_ways
+	   $error("ENABLE_R10000 (MEM_BLK_IDX) requires L2_WAYS <= 2");
+	end
+`endif
+   endgenerate
+
+   /* NRU replacement: one bit per way per set, beside the tags (read at t_idx with
+    * them).  A hit or a fill sets its way's bit, clearing the others once all are set
+    * (at 2 ways this is LRU); the victim is the first invalid way, else the first
+    * with its bit clear. */
+   logic [L2_WAYS-1:0] 	w_repl, t_repl_wdata;
+   logic 		t_repl_upd, t_wr_repl;
+   generate
+      if(L2_WAYS > 1)
+	begin : g_repl
+	   reg_ram1rw #(.WIDTH(L2_WAYS), .LG_DEPTH(LG_L2_LINES)) repl_ram
+	     (.clk(clk),
+	      .addr(t_idx),
+	      .wr_data(t_repl_wdata),
+	      .wr_en(t_wr_repl),
+	      .rd_data(w_repl));
+	end
+      else
+	begin : g_no_repl
+	   assign w_repl = '0;
+	end
+   endgenerate
+
+   logic 		t_vfound;
+   always_comb
+     begin
+	t_hitv = '0;
+	t_fsel = '0;
+	t_blkv = '0;
+	for(integer i = 0; i < L2_WAYS; i = i + 1)
+	  begin
+	     t_hitv[i] = w_valid_w[i] && (w_tag_w[i] == r_tag);
+	     t_fsel[i] = (int'(r_fway) == i);
+	     t_blkv[i] = (i == int'(r_blk_way));
+	  end
+
+	/* the victim: the first invalid way, else the first not recently used */
+	t_vict = '0;
+	t_vfound = 1'b0;
+	for(integer i = 0; i < L2_WAYS; i = i + 1)
+	  begin
+	     if(!t_vfound && !w_valid_w[i])
+	       begin
+		  t_vict[i] = 1'b1;
+		  t_vfound = 1'b1;
+	       end
+	  end
+	for(integer i = 0; i < L2_WAYS; i = i + 1)
+	  begin
+	     if(!t_vfound && !w_repl[i])
+	       begin
+		  t_vict[i] = 1'b1;
+		  t_vfound = 1'b1;
+	       end
+	  end
+	if(!t_vfound)
+	  begin
+	     t_vict[0] = 1'b1;   /* unreachable: NRU always leaves a bit clear */
+	  end
+
+	t_pick = (r_opcode == MEM_BLK_IDX) ? t_blkv :
+		 (t_hitv != '0) ? t_hitv :
+		 t_vict;
+	if(L2_WAYS == 1)
+	  begin
+	     t_sel = '1;
+	  end
+	else if((r_state == FLUSH_WAIT) || (r_state == FLUSH_TRIAGE) || (r_state == FLUSH_STORE))
+	  begin
+	     t_sel = t_fsel;
+	  end
+	else if(r_way_lock || SEL)
+	  begin
+	     /* L2_SEL_STAGE: only the registered pick reaches the muxes */
+	     t_sel = r_way;
+	  end
+	else
+	  begin
+	     t_sel = t_pick;
+	  end
+	t_wr_way = (r_state == INITIALIZE) ? '1 : t_sel;
+
+	t_way_d0 = '0;
+	t_way_tag = '0;
+	t_way_pres = '0;
+	t_way_valid = 1'b0;
+	t_way_dirty = 1'b0;
+	for(integer i = 0; i < L2_WAYS; i = i + 1)
+	  begin
+	     if(t_sel[i])
+	       begin
+		  t_way_d0 = t_way_d0 | w_d0_w[i];
+		  t_way_tag = t_way_tag | w_tag_w[i];
+		  t_way_pres = t_way_pres | w_pres_w[i];
+		  t_way_valid = t_way_valid | w_valid_w[i];
+		  t_way_dirty = t_way_dirty | w_dirty_w[i];
+	       end
+	  end
+
+	/* NRU after a hit in, or a fill of, way t_sel */
+	t_repl_wdata = w_repl | t_sel;
+	if(t_repl_wdata == '1)
+	  begin
+	     t_repl_wdata = t_sel;
+	  end
+	/* INITIALIZE: every bit clear (all ways invalid anyway) */
+	if(r_state == INITIALIZE)
+	  begin
+	     t_repl_wdata = '0;
+	  end
+	t_wr_repl = t_repl_upd | (r_state == INITIALIZE);
+     end // always_comb
+   assign w_d0 = t_way_d0;
+   assign w_tag = t_way_tag;
+   assign w_valid = t_way_valid;
+   assign w_dirty = t_way_dirty;
+   assign w_pres = t_way_pres;
+
+   always_ff@(posedge clk)
+     begin
+	if(reset)
+	  begin
+	     r_way <= 'd0;
+	     r_hit <= 1'b0;
+	     r_way_lock <= 1'b0;
+	     r_fway <= 'd0;
+	  end
+	else
+	  begin
+	     r_way <= r_way_lock ? r_way : t_pick;
+	     r_hit <= r_way_lock ? r_hit : (t_hitv != '0);
+	     r_way_lock <= n_way_lock;
+	     r_fway <= n_fway;
+	  end
+     end // always_ff@ (posedge clk)
+`ifdef VERILATOR
+   always_ff@(negedge clk)
+     begin
+	if(!reset && (r_state == CHECK_VALID_AND_TAG) && !$onehot0(t_hitv))
+	  begin
+	     $display("L2: a line in two ways of set %x (hits %b)", r_idx, t_hitv);
+	     $stop();
+	  end
+     end
+   /* sim-only mirror of every way's valid, tag and presence RAMs for the PRESCHK
+    * inclusion checker (core_l1d_l1i.sv), which cannot index g_way[] by a variable.
+    * It takes the write a cycle late, as reg_ram1rw does, so it equals r_ram. */
+   logic [L2_WAYS-1:0] 	r_dbg_wv, r_dbg_wt, r_dbg_wp;
+   logic [LG_L2_LINES-1:0] r_dbg_widx;
+   logic 		r_dbg_v;
+   logic [TAG_BITS-1:0] r_dbg_t;
+   logic [N_PIDX:0] 	r_dbg_p;
+   bit 			dbg_valid [L2_WAYS][1 << LG_L2_LINES];
+   logic [TAG_BITS-1:0] dbg_tag [L2_WAYS][1 << LG_L2_LINES];
+   logic [N_PIDX:0] 	dbg_pres [L2_WAYS][1 << LG_L2_LINES];
+   always_ff@(posedge clk)
+     begin
+	r_dbg_wv <= {L2_WAYS{t_wr_valid}} & t_wr_way;
+	r_dbg_wt <= {L2_WAYS{t_wr_tag}} & t_wr_way;
+	r_dbg_wp <= {L2_WAYS{t_wr_pres}} & t_wr_way;
+	r_dbg_widx <= t_idx;
+	r_dbg_v <= t_valid;
+	r_dbg_t <= r_tag;
+	r_dbg_p <= t_pres;
+	for(integer i = 0; i < L2_WAYS; i = i + 1)
+	  begin
+	     if(r_dbg_wv[i])
+	       begin
+		  dbg_valid[i][r_dbg_widx] <= r_dbg_v;
+	       end
+	     if(r_dbg_wt[i])
+	       begin
+		  dbg_tag[i][r_dbg_widx] <= r_dbg_t;
+	       end
+	     if(r_dbg_wp[i])
+	       begin
+		  dbg_pres[i][r_dbg_widx] <= r_dbg_p;
+	       end
+	  end
+     end // always_ff@ (posedge clk)
+`endif
 
 `ifdef VERILATOR
    /* sim-only per-index history, read by the PRESCHK inclusion checker: the last
@@ -398,7 +653,7 @@ module l2(clk,
    int 	        dbg_p_op [1 << LG_L2_LINES];
    int 	        dbg_p_val [1 << LG_L2_LINES];
 `endif
-   wire 		w_hit = w_valid ? (r_tag == w_tag) : 1'b0;
+   wire 		w_hit = SEL ? r_hit : (w_valid ? (r_tag == w_tag) : 1'b0);
    /* stage C2 alias (push, the R10000 PIdx scheme): an L1D request for a line the L1D
     * holds at a DIFFERENT colour -- probe that copy out first (it comes back if dirty).
     * Only for ops whose line the L1D did not supply itself: a fill (LW), an invalidate
@@ -825,6 +1080,8 @@ module l2(clk,
 	n_cache_accesses = r_cache_accesses;
 
 	n_got_mem_rsp_valid = r_got_mem_rsp_valid | mem_rsp_valid;
+	t_repl_upd = 1'b0;
+	n_fway = r_fway;
 	
 	
 	case(r_state)
@@ -874,6 +1131,7 @@ module l2(clk,
 	       else if(n_flush_req)
 		 begin
 		    t_idx = 'd0;
+		    n_fway = 'd0;
 		    n_state = FLUSH_WAIT;
 		    n_store_mask = 16'hffff;
 		    //$display("GOT FLUSH REQUEST at cycle %d", r_cycle);
@@ -918,7 +1176,7 @@ module l2(clk,
 		     * a line: the way bit stands in for the top index bit, so the kernel's
 		     * sweep of both ways over half the reported size covers every set as
 		     * long as Config reports at least this L2's size. */
-		    t_idx = (r_blk_op == MEM_BLK_IDX) ? {r_blk_way, w_blk_line[LG_L2_LINES+2:4]} :
+		    t_idx = ((r_blk_op == MEM_BLK_IDX) && (L2_WAYS == 1)) ? {r_blk_way, w_blk_line[LG_L2_LINES+2:4]} :
 			    w_blk_line[LG_L2_LINES+3:4];
 		    n_tag = w_blk_line[`PA_WIDTH-1:LG_L2_LINES+4];
 		    n_addr = w_blk_line;
@@ -992,7 +1250,12 @@ module l2(clk,
 	  CHECK_VALID_AND_TAG:
 	    begin
 	       //load hit
-	       if(r_is_uncache && w_hit && w_pres[N_PIDX] && !r_probed)
+	       if(SEL && !r_way_lock)
+		 begin
+		    /* L2_SEL_STAGE: this cycle registers the way pick (r_way, r_hit);
+		     * stay here (t_idx holds), which also sets r_way_lock */
+		 end
+	       else if(r_is_uncache && w_hit && w_pres[N_PIDX] && !r_probed)
 		 begin
 		    /* an uncached access to a line the L1D may hold (pd): probe it out first,
 		     * as before any other drop -- else the L2 drops a line the L1D keeps
@@ -1294,6 +1557,9 @@ module l2(clk,
 	       else if(w_hit)
 		 begin
 		    n_reload = 1'b0;
+		    /* a hit promotes the line; not the hit that follows its own fill (the miss
+		     * already marked it, below) */
+		    t_repl_upd = !r_reload;
 		    if(r_opcode == 6'd4)
 		      begin
 			 /* an L1D fill: record that the L1D holds the line, and where */
@@ -1363,6 +1629,10 @@ module l2(clk,
 	       else
 		 begin
 		    n_cache_hits = r_cache_hits - 64'd1;
+		    /* the fill will install into this way (t_sel, the victim): mark it now,
+		     * while the set's state is in hand; nothing else touches the set before
+		     * the fill lands */
+		    t_repl_upd = 1'b1;
 		    /* Evict the resident line only if it is BOTH valid and dirty
 		     * (w_need_wb). A bare w_dirty test wrote back lines that a prior
 		     * MEM_WB left valid=0/dirty=1 (MEM_WB clears valid but not dirty,
@@ -1475,17 +1745,27 @@ module l2(clk,
 		 end
 	       else
 		 begin
-		    t_idx = r_idx + 'd1;
-		    if(r_idx == (L2_LINES-1))
+		    if(int'(r_fway) != (L2_WAYS-1))
 		      begin
-			 n_state = IDLE;
-			 //$display("L2 flush complete at cycle %d", r_cycle);
-			 n_flush_complete = 1'b1;
-			 n_flush_req = 1'b0;
+			 /* the next way of this set */
+			 n_fway = r_fway + 'd1;
+			 n_state = FLUSH_WAIT;
 		      end
 		    else
 		      begin
-			 n_state = FLUSH_WAIT;
+			 n_fway = 'd0;
+			 t_idx = r_idx + 'd1;
+			 if(r_idx == (L2_LINES-1))
+			   begin
+			      n_state = IDLE;
+			      //$display("L2 flush complete at cycle %d", r_cycle);
+			      n_flush_complete = 1'b1;
+			      n_flush_req = 1'b0;
+			   end
+			 else
+			   begin
+			      n_state = FLUSH_WAIT;
+			   end
 		      end
 		 end
 	    end // case: FLUSH_TRIAGE
@@ -1499,18 +1779,28 @@ module l2(clk,
 	       if(mem_rsp_valid)
 		 begin
 		    n_mem_req = 1'b0;
-		    t_idx = r_idx + 'd1;
-		    if(r_idx == (L2_LINES-1))
+		    if(int'(r_fway) != (L2_WAYS-1))
 		      begin
-			 n_state = IDLE;
-			 //$display("L2 flush complete at cycle %d", r_cycle);
-			 n_flush_complete = 1'b1;
-			 n_flush_req = 1'b0;
+			 /* the next way of this set */
+			 n_fway = r_fway + 'd1;
+			 n_state = FLUSH_WAIT;
 		      end
 		    else
 		      begin
-			 n_state = FLUSH_WAIT;
-		      end		    
+			 n_fway = 'd0;
+			 t_idx = r_idx + 'd1;
+			 if(r_idx == (L2_LINES-1))
+			   begin
+			      n_state = IDLE;
+			      //$display("L2 flush complete at cycle %d", r_cycle);
+			      n_flush_complete = 1'b1;
+			      n_flush_req = 1'b0;
+			   end
+			 else
+			   begin
+			      n_state = FLUSH_WAIT;
+			   end
+		      end
 		 end
 	    end // case: FLUSH_STORE
 	  UNCACHE_STORE:
@@ -1597,7 +1887,12 @@ module l2(clk,
 	     t_wr_pres = 1'b1;
 	     t_pres = 'd0;
 	  end
-     end
+	/* L2_WAYS: hold the way CHECK_VALID_AND_TAG picked while it stays there and
+	 * through a miss's writeback and fill (see t_sel) */
+	n_way_lock = ((r_state == CHECK_VALID_AND_TAG) || r_way_lock) &&
+		     ((n_state == CHECK_VALID_AND_TAG) || (n_state == DIRTY_STORE) ||
+		      (n_state == STORE_TURNAROUND) || (n_state == CLEAN_RELOAD));
+     end // always_comb
 
 `ifdef DESC_TRACE
    // TEMP sim-only trace: the IRIX t1/L0 INQUIRY descriptor page (PA 0x0841d000).

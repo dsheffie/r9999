@@ -1351,6 +1351,7 @@ module core_l1d_l1i(clk,
 			 begin
 			    logic [63:0] pa, l2i;
 			    logic [63:0] l2t;
+			    int l2w;   /* the L2 way holding pa, -1 if none (l2.sv's sim mirror) */
 			    pa = ({{(64-$bits(dcache.dc_tag.b0.r_ram[i])){1'b0}}, dcache.dc_tag.b0.r_ram[i]} << CHK_L1D_TAG_LSB)
 			       | ((64'(i) << `LG_L1D_CL_LEN) & ((64'd1 << CHK_L1D_TAG_LSB) - 64'd1));
 			    l2i = (pa >> 4) & ((64'd1 << `LG_L2_NUM_SETS) - 64'd1);
@@ -1365,8 +1366,16 @@ module core_l1d_l1i(clk,
 				 t_dup = t_dup + 'd1;
 			      end
 			    seen[pa] = i;
-			    if(!(l2cache.valid_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]] &&
-				 (64'(l2cache.tag_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]]) == l2t)))
+			    l2w = -1;
+			    for(integer k = 0; k < `L2_WAYS; k = k + 1)
+			      begin
+				 if(l2cache.dbg_valid[k][l2i[`LG_L2_NUM_SETS-1:0]] &&
+				    (64'(l2cache.dbg_tag[k][l2i[`LG_L2_NUM_SETS-1:0]]) == l2t))
+				   begin
+				      l2w = k;
+				   end
+			      end
+			    if(l2w < 0)
 			      begin
 				 /* benign transient: the L1D has a fill outstanding to this very
 				  * index -- its old clean line stays valid until the fill lands,
@@ -1382,9 +1391,9 @@ module core_l1d_l1i(clk,
 					begin
 					   $display("[PRESCHK] NOT-IN-L2: L1D set %0d pa %x dirty %b | L2 idx %x valid %b tag %x pres %b | l1d state %0d mem_req_idx %0d | l2 state %0d",
 						    i, pa, dcache.dc_dirty.b0.r_ram[i], l2i[`LG_L2_NUM_SETS-1:0],
-						    l2cache.valid_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]],
-						    l2cache.tag_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]],
-						    l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_valid[0][l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_tag[0][l2i[`LG_L2_NUM_SETS-1:0]],
+						    l2cache.dbg_pres[0][l2i[`LG_L2_NUM_SETS-1:0]],
 						    dcache.r_state, dcache.r_mem_req_idx, l2cache.r_state);
 					   $display("[PRESCHK]   L1D set %0d history: last valid write cyc %0d state %0d val %0d | last fill cyc %0d pa %x state %0d",
 						    i, dcache.dbg_v_cyc[i], dcache.dbg_v_state[i], dcache.dbg_v_val[i],
@@ -1402,14 +1411,14 @@ module core_l1d_l1i(clk,
 				      t_incl = t_incl + 'd1;
 				   end
 			      end
-			    else if(!l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]][l2cache.N_PIDX] ||
-				    (64'(l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]][l2cache.N_PIDX-1:0]) !=
+			    else if(!l2cache.dbg_pres[l2w][l2i[`LG_L2_NUM_SETS-1:0]][l2cache.N_PIDX] ||
+				    (64'(l2cache.dbg_pres[l2w][l2i[`LG_L2_NUM_SETS-1:0]][l2cache.N_PIDX-1:0]) !=
 				     ((64'(i) >> CHK_IDX_IN_PG) & ((64'd1 << l2cache.N_PIDX) - 64'd1))))
 			      begin
 				 if((r_preschk_bad + t_bad) < 'd20)
 				   begin
 				      $display("[PRESCHK] L1D set %0d pa %x: L2 pres %b (want pd=1 pidx=%0d)",
-					       i, pa, l2cache.pres_ram.r_ram[l2i[`LG_L2_NUM_SETS-1:0]],
+					       i, pa, l2cache.dbg_pres[l2w][l2i[`LG_L2_NUM_SETS-1:0]],
 					       (64'(i) >> CHK_IDX_IN_PG) & ((64'd1 << l2cache.N_PIDX) - 64'd1));
 				   end
 				 t_bad = t_bad + 'd1;
