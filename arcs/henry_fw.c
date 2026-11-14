@@ -15,8 +15,9 @@
  */
 
 #include "sim.h"
+#include "henry_arcs.h"
 
-#define ARCS_BB     0x88fff000u                /* runtime base for the argv/envp blob */
+#define ARCS_BB     ((unsigned int)ARCS_BB_ADDR)  /* runtime base for the argv/envp blob */
 #define ARCS_ARGC   8u
 #define SPB_VMA     0xA0001000u                /* ARCS SPB block, copied PROM -> RAM   */
 #define KENTRY_SLOT 0xBFC00008u                /* driver-patched kernel entry (BE)     */
@@ -76,7 +77,7 @@ void fsbl_main(void) {
   newport_init();                              /* probe + program Newport if present */
 #endif
 
-  /* stage the argv/envp blob at its runtime base 0x88fff000 */
+  /* stage the argv/envp blob at its runtime base (the last page of RAM) */
   {
     unsigned char *s = arcs_argv_blob;
     volatile unsigned char *d = (volatile unsigned char *)ARCS_BB;

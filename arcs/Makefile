@@ -42,10 +42,10 @@ verify: analyze
 	$(CBMC) henry_fw.c cbmc_harness.c --function harness_getenv $(CBMCFLAGS) --unwind 12 --unwinding-assertions
 	$(CBMC) henry_fw.c cbmc_harness.c --function harness_write  $(CBMCFLAGS) --unwind 12
 
-henry_arcs.o: henry_arcs.S henry_arcs.ld ../tests/common/sim.h
+henry_arcs.o: henry_arcs.S henry_arcs.h henry_arcs.ld ../tests/common/sim.h
 	$(CC) $(ASFLAGS) $(ARCS_DEFS) -x assembler-with-cpp -c henry_arcs.S -o $@
 
-henry_fw.o: henry_fw.c ../tests/common/sim.h
+henry_fw.o: henry_fw.c henry_arcs.h ../tests/common/sim.h
 	$(CC) $(CFLAGS) $(ARCS_DEFS) -c henry_fw.c -o $@
 
 henry_newport.o: henry_newport.c ../tests/common/sim.h

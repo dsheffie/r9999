@@ -17,19 +17,11 @@
 
 #include "sim.h"
 
-/* Free-RAM descriptor base: reserve the low 16 KiB of main memory (phys
- * 0x08000000..0x08003fff) -- the CPU exception vectors (aliased) and the SPB the FSBL
- * copies to phys 0x1000 live there, below the kernel _text @ 0x08004000. */
-#ifndef ARCS_RAM_BASE
-#define ARCS_RAM_BASE   0x08004000
-#endif
-#ifndef ARCS_RAM_SIZE
-#define ARCS_RAM_SIZE   0x07ffc000      /* 128 MiB - 16 KiB low-reserved */
-#endif
+#include "henry_arcs.h"          /* ARCS_RAM_BASE / SIZE, the top-of-RAM stack and blob */
 #define ARCS_RAM_BASE_PG (ARCS_RAM_BASE >> 12)
-#define ARCS_RAM_PAGES   (ARCS_RAM_SIZE >> 12)
+#define ARCS_RAM_PAGES   ((ARCS_RAM_SIZE - ARCS_TOP_RESV) >> 12)   /* minus the top 64 KiB */
 
-    .set    ARCS_BB,   0x88fff000       /* runtime base for the argv/envp blob */
+    .set    ARCS_BB,   ARCS_BB_ADDR     /* runtime base for the argv/envp blob */
     .set    ARCS_KENTRY, 0x88005960     /* default kernel entry; the driver/TB patches @0xBFC00008 */
 
     .set    mips3
@@ -65,10 +57,10 @@ _start:
     sw      $t0, 0xc($t1)
     nop
 
-    /* set up a stack just below the argv blob (0x88ffe000, scratch RAM above the
-     * kernel image) and hand off to the C firmware body, which does not return. */
-    lui     $sp, 0x88ff
-    ori     $sp, $sp, 0xe000
+    /* set up a stack just below the argv blob, in the top 64 KiB of RAM (above any
+     * kernel image, not given to the OS), and hand off to the C firmware body, which
+     * does not return. */
+    li      $sp, ARCS_STACK_TOP
     move    $fp, $sp
     jal     fsbl_main
     nop
@@ -127,7 +119,7 @@ arch_name:
     .asciz  "SGI-IP22"
 
 /* sash argv/envp blob (mirrors pseudo_bios.cc); pointers computed for runtime base
- * ARCS_BB = 0x88fff000.  fsbl_main copies it there and derives argv/envp. */
+ * ARCS_BB (the last page of RAM).  fsbl_main copies it there and derives argv/envp. */
     .align  2
     .globl  arcs_argv_blob
 arcs_argv_blob:
