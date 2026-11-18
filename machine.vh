@@ -222,6 +222,14 @@
  * FP completes on its own ROB port (complete_bundle_2), so no shared wb-bitvec. */
 `define FPU_LAT 4
 `define FP_MAX_LAT `FPU_LAT
+
+/* NO_FPU (off unless defined): a core with no coprocessor 1.  Status.CU1 is
+ * hard-wired 0, so every CP1 op (COP1, LWC1/LDC1/SWC1/SDC1, COP1X) raises CpU
+ * (CE=1) in decode, exactly as with CU1=0 today, and the FP issue queue, FPU and
+ * FP register file are removed.  Software: soft-float userland; Linux needs
+ * CONFIG_MIPS_FP_SUPPORT=n (needs EXPERT=y): the "nofpu" boot arg is parsed after
+ * cpu_probe has already read FIR with cfc1. */
+//`define NO_FPU
 /* renamed FP condition-code (FCR) register file */
 `define LG_FCR_PRF_ENTRIES 2
 /* FP issue queue (in-order, mirrors the int UQ) */

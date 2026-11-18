@@ -436,6 +436,20 @@ static uint32_t cp0_read32(state_t *s, uint32_t rd) {
   return v;
 }
 
+/* NO_FPU (machine.vh): no coprocessor 1.  Status.CU1 is hard-wired 0, as in the RTL
+ * (exec.sv n_sr_cu1), so every CP1 op takes CpU (CE=1) here too. */
+static inline void nofpu_sr_mask(state_t *s, uint32_t rd) {
+#ifdef NO_FPU
+  if(rd == CPR0_SR) {
+    s->cpr0[CPR0_SR] &= ~SR_CU1;
+    s->cpr0_64[CPR0_SR] &= ~static_cast<uint64_t>(SR_CU1);
+  }
+#else
+  (void)s;
+  (void)rd;
+#endif
+}
+
 /* the EntryLo bits the architecture keeps: the R10000's PFN is EntryLo[33:6] (its CP0
  * EntryLo registers, tlbr and dmfc0 return them all, IRIX's software bits above the board's
  * 32 PA bits included: exec.sv ENTRYLO_PFN_WIDTH); the R4x00 model keeps PFN_WIDTH [29:6]
@@ -2964,6 +2978,7 @@ void execMips(state_t *s) {
 	    s->cpr0[rd] = (uint32_t)s->cpr0_64[rd];
 	    entryhi_fill_mask(s, rd);
 	    entrylo_arch_mask(s, rd);
+	    nofpu_sr_mask(s, rd);
 	  }
 	  /* CP0 reg 7 is the simulator putchar port */
 	  if(rd == 7 && !s->silent) {
@@ -2978,6 +2993,7 @@ void execMips(state_t *s) {
 	    s->cpr0[rd] = (uint32_t)s->gpr[rt];
 	    entryhi_fill_mask(s, rd);
 	    entrylo_arch_mask(s, rd);
+	    nofpu_sr_mask(s, rd);
 	  }
 	  if(rd == 7 && !s->silent) {
 	    fputc((int)(s->gpr[rt] & 0xff), stdout);

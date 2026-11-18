@@ -1608,6 +1608,13 @@ module exec(clk,
     * mem_dq exactly as before.  read-before-write on a same-cycle collision is a
     * non-issue: inflight pop-gating never lets a source be read the cycle it is
     * written. */
+`ifdef NO_FPU
+   assign w_fp_srcA = 'd0;
+   assign w_fp_srcB = 'd0;
+   assign w_fp_srcC = 'd0;
+   assign r_fp_rd_srcB = 'd0;
+   assign r_fp_rd_dq = 'd0;
+`else
    fp_regfile #(.WIDTH(`M_WIDTH), .LG_DEPTH(`LG_PRF_ENTRIES))
    fpprf (.clk(clk),
 	  .reset(reset),
@@ -1638,6 +1645,7 @@ module exec(clk,
 	  .rd3(r_fp_rd_dq),
 	  .rd4(w_fp_srcC)
 	  );
+`endif
 
    
    always_comb
@@ -1837,8 +1845,14 @@ module exec(clk,
 			    (r_fp_uq_head_ptr[`LG_FP_UQ_ENTRIES-1:0] == r_fp_uq_next_tail_ptr[`LG_FP_UQ_ENTRIES-1:0]);
 	fp_uq = r_fp_uq[r_fp_uq_head_ptr[`LG_FP_UQ_ENTRIES-1:0]];
 
+`ifdef NO_FPU
+	/* no CP1: CU1 is hard 0, so decode never produces an FP uop */
+	t_push_two_fp = 1'b0;
+	t_push_one_fp = 1'b0;
+`else
 	t_push_two_fp = uq_push && uq_push_two && uq_uop.is_fp && uq_uop_two.is_fp;
 	t_push_one_fp = ((uq_push && uq_uop.is_fp) || (uq_push_two && uq_uop_two.is_fp)) && !t_push_two_fp;
+`endif
 
 	if(t_push_two_fp)
 	  begin
@@ -2004,6 +2018,16 @@ module exec(clk,
    wire [63:0] w_fcmov_out = 64'd0;
 `endif
 
+`ifdef NO_FPU
+   assign w_fpu_result_valid = 1'b0;
+   assign w_fpu_fcr_valid = 1'b0;
+   assign w_fpu_result = 'd0;
+   assign w_fpu_fflags = 'd0;
+   assign w_fpu_denorm = 1'b0;
+   assign w_fpu_rob_ptr = 'd0;
+   assign w_fpu_dst_ptr = 'd0;
+   assign w_fpu_fcr_ptr = 'd0;
+`else
    fpu #(.LG_PRF_WIDTH(`LG_PRF_ENTRIES),
 	 .LG_ROB_WIDTH(`LG_ROB_ENTRIES),
 	 .LG_FCR_WIDTH(`LG_FCR_PRF_ENTRIES),
@@ -2037,6 +2061,7 @@ module exec(clk,
 	.dst_ptr_out(w_fpu_dst_ptr),
 	.fcr_ptr_out(w_fpu_fcr_ptr)
 	);
+`endif
 
    /* single-cycle FP convert: combinational on the issue-stage operand (w_fp_srcA),
     * result registered one cycle -> writes bank0 / completes at pop+2.  TRUNC.W = RZ;
@@ -4757,7 +4782,11 @@ module exec(clk,
 	     n_sr_sx = w_cp0_wr_data[6];
 	     n_sr_kx = w_cp0_wr_data[7];
 	     n_sr_cu0 = w_cp0_wr_data[28];
+`ifdef NO_FPU
+	     n_sr_cu1 = 1'b0;
+`else
 	     n_sr_cu1 = w_cp0_wr_data[29];
+`endif
 	     n_sr_fr  = w_cp0_wr_data[26];
 	     n_sr_bev = w_cp0_wr_data[22];
 	     n_sr_ts = w_cp0_wr_data[21];
@@ -4817,7 +4846,12 @@ module exec(clk,
 	   s12 = loadcp0(12);  c6 = loadcp0(6);  c1 = loadcp0(1);
 	   r_sr_ie  <= s12[0];   r_sr_exl <= s12[1];  r_sr_erl <= s12[2];
 	   r_sr_ksu <= s12[4:3]; r_sr_ux  <= s12[5];  r_sr_sx  <= s12[6];  r_sr_kx <= s12[7];
-	   r_sr_cu0 <= s12[28];  r_sr_cu1 <= s12[29]; r_sr_fr  <= s12[26]; r_sr_bev <= s12[22];
+	   r_sr_cu0 <= s12[28];  r_sr_fr  <= s12[26]; r_sr_bev <= s12[22];
+`ifdef NO_FPU
+	   r_sr_cu1 <= 1'b0;
+`else
+	   r_sr_cu1 <= s12[29];
+`endif
 	   r_sr_ts  <= s12[21];  r_sr_im  <= s12[15:8];
 	   r_wired   <= c6[5:0];     r_random <= c1[5:0];     r_count <= loadcp0(9);  r_toggle <= 1'b0;
 	   r_compare <= loadcp0(11); r_fcsr   <= loadfcsr() & ~FCC_MASK;

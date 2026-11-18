@@ -56,6 +56,11 @@ CXXFLAGS += -DSTORE_CHECK
 VFLAGS_EXTRA += +define+ENABLE_STORE_CHECK
 endif
 
+# NO_FPU (no coprocessor 1): the checker ISS hard-wires Status.CU1 to 0 as the RTL does
+ifneq ($(shell grep -c '^`define NO_FPU' machine.vh)$(findstring +define+NO_FPU,$(VFLAGS_EXTRA)),0)
+CXXFLAGS += -DNO_FPU
+endif
+
 DEP = $(OBJ:.o=.d)
 
 EXE = ooo_core
