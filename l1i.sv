@@ -363,7 +363,12 @@ endfunction
                              FLUSH_CACHE = 'd5,
 			     WAIT_FOR_NOT_FULL = 'd6,
 			     INIT_PHT = 'd7,
-			     WAIT_FOR_TLB = 'd8
+			     WAIT_FOR_TLB = 'd8,
+			     /* an uncached fill is used once, then dropped: see
+			      * NC_TURNAROUND below */
+			     NC_TURNAROUND = 'd9,
+			     NC_USE = 'd10,
+			     NC_REREAD = 'd11
 			    } state_t;
    
    logic [(`M_WIDTH-1):0] r_pc, n_pc, r_miss_pc, n_miss_pc;
@@ -485,7 +490,7 @@ endfunction
 	/* the set of {colour, block offset, line}: a VA with those bits, indexed as fetch does */
 	t_binv_va = {{(32-`LG_PG_SZ){1'b0}}, r_binv_off, r_binv_cnt[2:0], 4'd0} |
 		    (({{(32-BINV_CNT_BITS){1'b0}}, r_binv_cnt} >> 3) << `LG_PG_SZ);
-	t_binv_fire = r_binv_busy && !mem_rsp_valid && (r_state != FLUSH_CACHE);
+	t_binv_fire = r_binv_busy && !mem_rsp_valid && (r_state != FLUSH_CACHE) && (r_state != NC_USE);
 	n_binv_busy = r_binv_busy;
 	n_binv_cnt = r_binv_cnt;
 	n_binv_off = r_binv_off;
@@ -519,6 +524,17 @@ endfunction
 	  end
      end // always_ff
    
+`ifdef VERILATOR
+   /* NC_USE owns the valid arrays' write port: no fill can be outstanding */
+   always_ff@(posedge clk)
+     begin
+	if((r_state == NC_USE) && mem_rsp_valid)
+	  begin
+	     $display("l1i: fill response in NC_USE");
+	     $stop;
+	  end
+     end
+`endif
    assign insn_valid = !fq_empty;
    assign insn_valid_two = !(fq_next_empty || fq_empty);
 
@@ -971,7 +987,7 @@ endfunction
 		    t_clear_fq = 1'b1;
 		 end
 	    end	  
-	  ACTIVE:
+	  ACTIVE, NC_USE:
 	    begin
 	       t_cache_idx = r_pc[IDX_STOP-1:IDX_START];
 	       t_cache_tag = r_pc[(`PA_WIDTH-1):TAG_LSB];
@@ -1200,8 +1216,44 @@ endfunction
 	    begin
 	       if(mem_rsp_valid)
 		 begin
-		    n_state = RELOAD_TURNAROUND;
+		    n_state = r_mem_req_cacheable ? RELOAD_TURNAROUND : NC_TURNAROUND;
 		 end
+	    end
+	  /* An uncached fill (kseg1, or a TLB page that is not cacheable) is used
+	   * once, then dropped.  The L2 does not hold an uncached line, so it has no
+	   * record that the L1I does, and no later store or CACHE op on the line need
+	   * find it -- software writes code through kseg1 and runs it there with no
+	   * Hit_Invalidate_I, since uncached is uncached.  Found on the SPARC fork:
+	   * NetBSD's bootxx, run uncached, memcpy's /boot over itself and /boot ran
+	   * bootxx's stale lines.
+	   *   NC_TURNAROUND  read the line (as RELOAD_TURNAROUND), always on to NC_USE:
+	   *                  a pending restart/flush is NC_USE's to handle, so the
+	   *                  line cannot be left valid behind it
+	   *   NC_USE         ACTIVE's lookup (its arm, below), which uses the array
+	   *                  outputs read in NC_TURNAROUND, while the same cycle clears
+	   *                  the fill's way (r_fill_way at r_miss_pc's set; no fill is
+	   *                  outstanding and block invalidates wait, so the valid
+	   *                  arrays' write port is free).  Then wherever ACTIVE would
+	   *                  go -- through NC_REREAD if that is ACTIVE
+	   *   NC_REREAD      redo NC_USE's array read (it may have collided with the
+	   *                  clear), holding the fetch pipeline, then ACTIVE
+	   * A loop in uncached code refetches each line, as an uncached fetch must. */
+	  NC_TURNAROUND:
+	    begin
+	       t_cache_idx = r_miss_pc[IDX_STOP-1:IDX_START];
+	       t_cache_tag = r_miss_pc[(`PA_WIDTH-1):TAG_LSB];
+	       n_cache_pc = r_miss_pc;
+	       n_req = 1'b1;
+	       n_state = NC_USE;
+	    end
+	  NC_REREAD:
+	    begin
+	       t_cache_idx = r_cache_pc[IDX_STOP-1:IDX_START];
+	       t_cache_tag = r_cache_pc[(`PA_WIDTH-1):TAG_LSB];
+	       n_cache_pc = r_cache_pc;
+	       n_req = r_req;
+	       n_resteer_bubble = r_resteer_bubble;
+	       n_state = ACTIVE;
 	    end
 	  RELOAD_TURNAROUND:
 	    begin
@@ -1347,6 +1399,12 @@ endfunction
 	    begin
 	    end
 	endcase // case (r_state)
+	/* NC_USE ran ACTIVE's arm: where ACTIVE would carry on fetching (it stays,
+	 * n_state == r_state, or a restart names ACTIVE), redo the array read first */
+	if((r_state == NC_USE) && ((n_state == NC_USE) || (n_state == ACTIVE)))
+	  begin
+	     n_state = NC_REREAD;
+	  end
      end // always_comb
 
    always_comb
@@ -1446,10 +1504,14 @@ endfunction
    
    always_comb
      begin
-	t_wr_valid_ram_en0 = (mem_rsp_valid && !r_fill_way) || r_state == FLUSH_CACHE || t_binv_fire;
-	t_wr_valid_ram_en1 = (mem_rsp_valid && r_fill_way) || r_state == FLUSH_CACHE || t_binv_fire;
-	t_valid_ram_value = (r_state != FLUSH_CACHE) && !t_binv_fire;
+	/* NC_USE clears the uncached fill's way (NC_TURNAROUND above) */
+	t_wr_valid_ram_en0 = (mem_rsp_valid && !r_fill_way) || r_state == FLUSH_CACHE || t_binv_fire ||
+			     (r_state == NC_USE && !r_fill_way);
+	t_wr_valid_ram_en1 = (mem_rsp_valid && r_fill_way) || r_state == FLUSH_CACHE || t_binv_fire ||
+			     (r_state == NC_USE && r_fill_way);
+	t_valid_ram_value = (r_state != FLUSH_CACHE) && !t_binv_fire && (r_state != NC_USE);
 	t_valid_ram_idx = mem_rsp_valid ? r_miss_pc[IDX_STOP-1:IDX_START] :
+			  (r_state == NC_USE) ? r_miss_pc[IDX_STOP-1:IDX_START] :
 			  t_binv_fire ? t_binv_va[IDX_STOP-1:IDX_START] : r_cache_idx;
      end
 
@@ -1717,7 +1779,7 @@ endfunction
      begin
 	t_td_n = t_push_insn2 ? 3'd2 : t_push_insn ? 3'd1 : 3'd0;
 	t_td_why = 4'd7;
-	if(r_state != ACTIVE)
+	if((r_state != ACTIVE) && (r_state != NC_USE))
 	  begin
 	     t_td_why = 4'd7;
 	  end
