@@ -452,6 +452,12 @@ module exec(clk,
 
    /* divider */
    logic 	t_div_ready, t_signed_div, t_start_div32, t_start_div64;
+   /* w_div_ok = the divider's `ready`, flopped (uni_divider div_ok): the ALU select
+    * reads it instead of t_div_ready, so start_div/fp_start leave the select path.
+    * w_div_start_next = an int divide enters the issue stage next cycle (r_start_int's
+    * next state & the picked uop is a divide). */
+   wire 	w_div_ok;
+   logic 	t_div_start_next;
    logic [`LG_ROB_ENTRIES-1:0] t_div_rob_ptr_out;
    logic [(`M_WIDTH*2)-1:0] 	       t_div_result;
    logic [`LG_HILO_PRF_ENTRIES-1:0] t_div_hilo_prf_ptr_out;
@@ -931,6 +937,18 @@ module exec(clk,
 
    
    logic [N_INT_SCHED_ENTRIES-1:0] t_alu_entry_rdy;
+   /* t_alu_srcs_rdy = an entry's operand/ordering readiness (t_alu_entry_rdy without the
+    * unit-availability gate); t_alu_div_req = a valid divide that is srcs-ready, i.e. the
+    * int side WANTS the divider (feeds only the divider-turn flop below) */
+   logic [N_INT_SCHED_ENTRIES-1:0] t_alu_srcs_rdy, t_alu_div_req;
+   /* the int and FP divides share d0, one op in flight.  r_div_turn says which side may
+    * START a divide this cycle -- exclusive, so the two never collide -- and it is a flop,
+    * so neither side's select waits on the other's same-cycle wakeup (the FP side's
+    * t_fdiv_pop used to be in every int ALU entry's ready).  See the update after the
+    * FP-queue pop logic. */
+   localparam logic DIV_TURN_INT = 1'b0;
+   localparam logic DIV_TURN_FP = 1'b1;
+   logic r_div_turn, n_div_turn;
    logic [`LG_INT_SCHED_ENTRIES:0]  t_alu_sched_select_ptr;
    
 	
@@ -1001,6 +1019,8 @@ module exec(clk,
    always_comb
      begin
 	t_picked_uop = t_uq_bypass ? uq : r_alu_sched_uops[t_alu_sched_select_ptr[`LG_INT_SCHED_ENTRIES-1:0]];
+	/* r_start_int's next state (see its always_ff) and the picked uop is a divide */
+	t_div_start_next = (((t_alu_entry_rdy != 'd0) | t_uq_bypass) & !ds_done) & is_div(t_picked_uop.op);
      end
    
    always_ff@(posedge clk)
@@ -1218,9 +1238,7 @@ module exec(clk,
 
 		//is_mult(r_alu_sched_uops[i].op);
 		
-		t_alu_entry_rdy[i] = r_alu_sched_valid[i] &&
-				     (is_div(r_alu_sched_uops[i].op) ?  (t_div_ready & !t_fdiv_pop) :  (is_mult(r_alu_sched_uops[i].op) ?  !r_wb_bitvec[`MUL_LAT+2] : !r_wb_bitvec[1]))
-				     ? (
+		t_alu_srcs_rdy[i] = (
 					(t_alu_srcA_match[i] |r_alu_srcA_rdy[i]) &
 					(t_alu_srcB_match[i] |r_alu_srcB_rdy[i]) &
 					(t_alu_hilo_match[i] |r_alu_hilo_rdy[i]) &
@@ -1239,7 +1257,11 @@ module exec(clk,
 					  * complete while the delay slot waits to be oldest -> deadlock
 					  * (IRIX boot: faulted beqz + mfc0 c0_cause delay slot). */
 					 (head_of_rob_ds_committable &&
-					  (r_alu_sched_uops[i].rob_ptr == next_head_of_rob_ptr))) ) : 1'b0;
+					  (r_alu_sched_uops[i].rob_ptr == next_head_of_rob_ptr))) );
+		t_alu_div_req[i] = r_alu_sched_valid[i] & is_div(r_alu_sched_uops[i].op) & t_alu_srcs_rdy[i];
+		t_alu_entry_rdy[i] = r_alu_sched_valid[i] &&
+				     (is_div(r_alu_sched_uops[i].op) ?  (w_div_ok & (r_div_turn == DIV_TURN_INT)) :  (is_mult(r_alu_sched_uops[i].op) ?  !r_wb_bitvec[`MUL_LAT+2] : !r_wb_bitvec[1]))
+				     ? t_alu_srcs_rdy[i] : 1'b0;
 	     end // always_comb
 	   
 	   always_ff@(posedge clk)
@@ -1461,11 +1483,14 @@ module exec(clk,
        .hilo_prf_ptr_in(int_uop.hilo_dst),
        .is_signed_div(t_signed_div),
        .start_div(t_start_div32 | t_start_div64),
+       .start_div_next(t_div_start_next),
+       .fp_start_next(t_fdiv_pop),
        .y(t_div_result),
        .rob_ptr_out(t_div_rob_ptr_out),
        .hilo_prf_ptr_out(t_div_hilo_prf_ptr_out),
        .complete(t_div_complete),
        .ready(t_div_ready),
+       .div_ok(w_div_ok),
        .fp_opcode(r_fp_iss_uop.op),
        .fp_start(t_fdiv_start),
 `ifdef ENABLE_MIPS4
@@ -1491,6 +1516,24 @@ module exec(clk,
        );
    
    assign divide_ready = t_div_ready;
+`ifdef VERILATOR
+   /* div_ok must be the divider's `ready` exactly (the select's issue timing is unchanged);
+    * a flush cycle is the one allowed difference, and nothing issues in it */
+   always_ff@(posedge clk)
+     begin
+	if(!reset && !ds_done && (w_div_ok != t_div_ready))
+	  begin
+	     $display("exec: div_ok %b != divider ready %b", w_div_ok, t_div_ready);
+	     $stop;
+	  end
+	/* r_div_turn is exclusive: an int and a FP divide never both start next cycle */
+	if(!reset && t_div_start_next && t_fdiv_pop)
+	  begin
+	     $display("exec: int and FP divide picked for d0 in the same cycle (turn %b)", r_div_turn);
+	     $stop;
+	  end
+     end
+`endif
 
 
 
@@ -1908,7 +1951,7 @@ module exec(clk,
 	 * in the first cycle neither fpu0 nor the convert path is using them -- so it
 	 * takes no r_fp_wb_bitvec reservation. */
 	t_pop_fp_uq = !t_fp_uq_empty && !t_flash_clear && t_fpu_srcs_rdy &&
-		      (w_head_is_ds ? w_fdiv_ready
+		      (w_head_is_ds ? (w_fdiv_ready & (r_div_turn == DIV_TURN_FP))
 				    : !r_fp_wb_bitvec[w_head_wb_dist]);
 `ifdef ENABLE_MIPS4
 	/* an fpu op (not convert/signop/cmov, not divider) starts fpu0 next cycle: not in
@@ -1922,6 +1965,37 @@ module exec(clk,
 	t_fdiv_start   = r_fp_iss_valid & w_iss_is_ds;
 	t_fdiv_wb_used = w_fpu_result_valid | w_fpu_fcr_valid | r_cvt_valid;
      end
+
+   /* divider turn (see r_div_turn): the side holding it keeps it while it has a srcs-ready
+    * divide that has not started; it passes to the other side once that side wants the
+    * divider and the holder either just started one or has none ready.  Requests are
+    * READINESS, not presence: an int divide waiting on a FP divide's result (via mfc1)
+    * must not hold the turn.  A collision costs the loser about a cycle; an uncontended
+    * divide keeps the turn from its side's last divide, or gets it the next cycle. */
+   logic t_fp_div_req;
+   always_comb
+     begin
+	t_fp_div_req = !t_fp_uq_empty && !t_flash_clear && t_fpu_srcs_rdy && w_head_is_ds;
+	n_div_turn = r_div_turn;
+	if(r_div_turn == DIV_TURN_INT)
+	  begin
+	     if(t_fp_div_req && (t_div_start_next || (t_alu_div_req == 'd0)))
+	       begin
+		  n_div_turn = DIV_TURN_FP;
+	       end
+	  end
+	else
+	  begin
+	     if((t_alu_div_req != 'd0) && (t_fdiv_pop || !t_fp_div_req))
+	       begin
+		  n_div_turn = DIV_TURN_INT;
+	       end
+	  end
+     end // always_comb
+   always_ff@(posedge clk)
+     begin
+	r_div_turn <= reset ? DIV_TURN_INT : n_div_turn;
+     end // always_ff
 
    /* FP writeback reservation: shift down each cycle; on pop, reserve dist-1 (next-cycle
     * frame). gate above reads [dist]. arith/compare fpu dist=FPU_LAT+1, convert dist=2. */
