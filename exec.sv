@@ -474,8 +474,19 @@ module exec(clk,
    logic [N_ROB_ENTRIES-1:0] 	    r_uq_wait, r_mq_wait, r_fp_uq_wait;
    /* DEBUG mem-op PC shadow, ROB-indexed (see dbg_memop_pc port). */
    logic [31:0] 		    r_memop_pc [N_ROB_ENTRIES-1:0];
-   /* non mem uop queue */
-   uop_t r_uq[N_UQ_ENTRIES];
+   /* non mem uop queue: banked by entry parity into LUTRAM.  The two pushes go to
+    * tail/tail+1 and the two reads to head/head+1, which always differ in parity, so
+    * each bank needs only one write and one read port (same trick as r_rob_even/odd).
+    * The queue holds full uops (~180 bits), so as flops it cost a 2-write-port data
+    * mux per bit plus an 8:1 read mux; as LUTRAM it is ~0.6 LUT per bit-column. */
+   localparam N_UQ_BANK = N_UQ_ENTRIES/2;
+   (* ram_style = "distributed" *) uop_t r_uq_even[N_UQ_BANK];
+   (* ram_style = "distributed" *) uop_t r_uq_odd[N_UQ_BANK];
+   logic [`LG_UQ_ENTRIES-2:0] r_uq_even_raddr, r_uq_odd_raddr;
+   logic [`LG_UQ_ENTRIES-2:0] t_uq_even_waddr, t_uq_odd_waddr;
+   logic t_uq_even_we, t_uq_odd_we;
+   uop_t t_uq_even_wdata, t_uq_odd_wdata;
+   uop_t t_uq_even_rdata, t_uq_odd_rdata;
    uop_t uq, int_uop;
    /* ENABLE_UQ_DUAL_POP: second uq entry written into a second free entry */
    uop_t uq2;
@@ -780,8 +791,10 @@ module exec(clk,
 	t_push_two_int = uq_push && uq_push_two && uq_uop.is_int && uq_uop_two.is_int;
 	t_push_one_int = ((uq_push && uq_uop.is_int) || (uq_push_two && uq_uop_two.is_int)) && !t_push_two_int;
 	
-	uq = r_uq[r_uq_head_ptr[`LG_UQ_ENTRIES-1:0]];
-	uq2 = r_uq[r_uq_next_head_ptr[`LG_UQ_ENTRIES-1:0]];
+	t_uq_even_rdata = r_uq_even[r_uq_even_raddr];
+	t_uq_odd_rdata = r_uq_odd[r_uq_odd_raddr];
+	uq = r_uq_head_ptr[0] ? t_uq_odd_rdata : t_uq_even_rdata;
+	uq2 = r_uq_head_ptr[0] ? t_uq_even_rdata : t_uq_odd_rdata;
 	
 	if(t_push_two_int)
 	  begin	     
@@ -807,19 +820,58 @@ module exec(clk,
 	  end
      end // always_comb
 
+   /* bank write ports: a push-two writes uq_uop at tail and uq_uop_two at tail+1;
+    * a push-one writes whichever of the two is the int op at tail. */
+   always_comb
+     begin
+	t_uq_even_waddr = r_uq_tail_ptr[0] ? r_uq_next_tail_ptr[`LG_UQ_ENTRIES-1:1] : r_uq_tail_ptr[`LG_UQ_ENTRIES-1:1];
+	t_uq_odd_waddr = r_uq_tail_ptr[0] ? r_uq_tail_ptr[`LG_UQ_ENTRIES-1:1] : r_uq_next_tail_ptr[`LG_UQ_ENTRIES-1:1];
+	t_uq_even_we = t_push_two_int | (t_push_one_int & !r_uq_tail_ptr[0]);
+	t_uq_odd_we = t_push_two_int | (t_push_one_int & r_uq_tail_ptr[0]);
+	t_uq_even_wdata = ((t_push_two_int & r_uq_tail_ptr[0]) | (t_push_one_int & !uq_uop.is_int)) ? uq_uop_two : uq_uop;
+	t_uq_odd_wdata = ((t_push_two_int & !r_uq_tail_ptr[0]) | (t_push_one_int & !uq_uop.is_int)) ? uq_uop_two : uq_uop;
+     end // always_comb
+
    always_ff@(posedge clk)
      begin
-	if(t_push_two_int)
+	if(t_uq_even_we)
 	  begin
-	     r_uq[r_uq_tail_ptr[`LG_UQ_ENTRIES-1:0]] <= uq_uop;
-	     r_uq[r_uq_next_tail_ptr[`LG_UQ_ENTRIES-1:0]] <= uq_uop_two;	     
+	     r_uq_even[t_uq_even_waddr] <= t_uq_even_wdata;
 	  end
-	else if(t_push_one_int)
+	if(t_uq_odd_we)
 	  begin
-	     r_uq[r_uq_tail_ptr[`LG_UQ_ENTRIES-1:0]] <= uq_uop.is_int ? uq_uop : uq_uop_two;
+	     r_uq_odd[t_uq_odd_waddr] <= t_uq_odd_wdata;
 	  end
-	
      end // always_ff@ (posedge clk)
+
+   /* bank read addresses are registered from the next head pointers so the LUTRAM
+    * address comes straight from a flop (no parity mux in front of the read) */
+   always_ff@(posedge clk)
+     begin
+	if(reset || t_flash_clear)
+	  begin
+	     r_uq_even_raddr <= 'd0;
+	     r_uq_odd_raddr <= 'd0;
+	  end
+	else
+	  begin
+	     r_uq_even_raddr <= n_uq_head_ptr[0] ? n_uq_next_head_ptr[`LG_UQ_ENTRIES-1:1] : n_uq_head_ptr[`LG_UQ_ENTRIES-1:1];
+	     r_uq_odd_raddr <= n_uq_head_ptr[0] ? n_uq_head_ptr[`LG_UQ_ENTRIES-1:1] : n_uq_next_head_ptr[`LG_UQ_ENTRIES-1:1];
+	  end
+     end // always_ff@ (posedge clk)
+
+`ifdef VERILATOR
+   always_ff@(negedge clk)
+     begin
+	if(!reset)
+	  begin
+	     assert(r_uq_next_head_ptr == r_uq_head_ptr + 'd1);
+	     assert(r_uq_next_tail_ptr == r_uq_tail_ptr + 'd1);
+	     assert(r_uq_even_raddr == (r_uq_head_ptr[0] ? r_uq_next_head_ptr[`LG_UQ_ENTRIES-1:1] : r_uq_head_ptr[`LG_UQ_ENTRIES-1:1]));
+	     assert(r_uq_odd_raddr == (r_uq_head_ptr[0] ? r_uq_head_ptr[`LG_UQ_ENTRIES-1:1] : r_uq_next_head_ptr[`LG_UQ_ENTRIES-1:1]));
+	  end
+     end
+`endif
    
    /* 64-bit: as 32-bit these wrap in ~43s at 100MHz (and r_retired_insns sooner
     * under dual retire), which makes any long measurement useless.  MFC0 still
@@ -1027,6 +1079,72 @@ module exec(clk,
      begin
 	int_uop <= t_picked_uop;
      end
+
+   /* Wide-immediate table: the ALU's 64b pc and the 48b jmp_imm (upper bits of the
+    * JR/JALR predicted target) live in a ROB-indexed LUTRAM instead of riding in
+    * every uop-queue and scheduler entry.  Written when the uop is pushed to the
+    * issue queues; read with the picked uop's rob_ptr into r_int_pc/r_int_jmp_imm,
+    * which line up with int_uop.  The two uops pushed in one cycle hold adjacent ROB
+    * slots, so banking by rob_ptr[0] gives each bank one write port.  uop_t is
+    * unchanged: synthesis drops the now-unread pc/jmp_imm bits from the queues. */
+   localparam N_WIT_BANK = N_ROB_ENTRIES/2;
+   (* ram_style = "distributed" *) logic [`M_WIDTH-1:0] r_wit_pc_even[N_WIT_BANK];
+   (* ram_style = "distributed" *) logic [`M_WIDTH-1:0] r_wit_pc_odd[N_WIT_BANK];
+   (* ram_style = "distributed" *) logic [`M_WIDTH-17:0] r_wit_jmp_even[N_WIT_BANK];
+   (* ram_style = "distributed" *) logic [`M_WIDTH-17:0] r_wit_jmp_odd[N_WIT_BANK];
+   logic [`M_WIDTH-1:0]  r_int_pc;
+   logic [`M_WIDTH-17:0] r_int_jmp_imm;
+   logic t_wit_even_we, t_wit_odd_we, t_wit_even_two, t_wit_odd_two;
+   uop_t t_wit_even_uop, t_wit_odd_uop;
+   logic [`LG_ROB_ENTRIES-2:0] t_wit_raddr;
+
+   always_comb
+     begin
+	t_wit_even_two = uq_push_two & !uq_uop_two.rob_ptr[0];
+	t_wit_odd_two = uq_push_two & uq_uop_two.rob_ptr[0];
+	t_wit_even_we = (uq_push & !uq_uop.rob_ptr[0]) | t_wit_even_two;
+	t_wit_odd_we = (uq_push & uq_uop.rob_ptr[0]) | t_wit_odd_two;
+	t_wit_even_uop = t_wit_even_two ? uq_uop_two : uq_uop;
+	t_wit_odd_uop = t_wit_odd_two ? uq_uop_two : uq_uop;
+	t_wit_raddr = t_picked_uop.rob_ptr[`LG_ROB_ENTRIES-1:1];
+     end // always_comb
+
+   always_ff@(posedge clk)
+     begin
+	if(t_wit_even_we)
+	  begin
+	     r_wit_pc_even[t_wit_even_uop.rob_ptr[`LG_ROB_ENTRIES-1:1]] <= t_wit_even_uop.pc;
+	     r_wit_jmp_even[t_wit_even_uop.rob_ptr[`LG_ROB_ENTRIES-1:1]] <= t_wit_even_uop.jmp_imm;
+	  end
+	if(t_wit_odd_we)
+	  begin
+	     r_wit_pc_odd[t_wit_odd_uop.rob_ptr[`LG_ROB_ENTRIES-1:1]] <= t_wit_odd_uop.pc;
+	     r_wit_jmp_odd[t_wit_odd_uop.rob_ptr[`LG_ROB_ENTRIES-1:1]] <= t_wit_odd_uop.jmp_imm;
+	  end
+     end // always_ff@ (posedge clk)
+
+   always_ff@(posedge clk)
+     begin
+	r_int_pc <= t_picked_uop.rob_ptr[0] ? r_wit_pc_odd[t_wit_raddr] : r_wit_pc_even[t_wit_raddr];
+	r_int_jmp_imm <= t_picked_uop.rob_ptr[0] ? r_wit_jmp_odd[t_wit_raddr] : r_wit_jmp_even[t_wit_raddr];
+     end // always_ff@ (posedge clk)
+
+`ifdef VERILATOR
+   always_ff@(posedge clk)
+     begin
+	if(!reset && uq_push && uq_push_two && (uq_uop.rob_ptr[0] == uq_uop_two.rob_ptr[0]))
+	  begin
+	     $display("WIT: two pushes to the same bank, rob_ptr %d and %d", uq_uop.rob_ptr, uq_uop_two.rob_ptr);
+	     $stop;
+	  end
+	if(!reset && r_start_int && ((r_int_pc != int_uop.pc) || (r_int_jmp_imm != int_uop.jmp_imm)))
+	  begin
+	     $display("WIT: table mismatch at rob_ptr %d: pc %x vs %x, jmp_imm %x vs %x",
+		      int_uop.rob_ptr, r_int_pc, int_uop.pc, r_int_jmp_imm, int_uop.jmp_imm);
+	     $stop;
+	  end
+     end // always_ff@ (posedge clk)
+`endif
 
 `ifdef TOPDOWN
    /* per-uop stage stamps (see core.sv TOPDOWN): 1 = enters the ALU scheduler,
@@ -2370,9 +2488,9 @@ module exec(clk,
    
    always_comb
      begin
-	t_pc = int_uop.pc + zero_extend32(32'd4);  /* default restart = pc+4 */
-	t_pc4 = int_uop.pc + zero_extend32(32'd4);
-	t_pc8 = int_uop.pc + zero_extend32(32'd8);
+	t_pc = r_int_pc + zero_extend32(32'd4);  /* default restart = pc+4 */
+	t_pc4 = r_int_pc + zero_extend32(32'd4);
+	t_pc8 = r_int_pc + zero_extend32(32'd8);
 	t_result = zero_extend32(32'd0);
 	t_cpr0_result = zero_extend32(32'd0);
 	t_unimp_op = 1'b0;
@@ -2384,7 +2502,7 @@ module exec(clk,
 	t_wr_fcsr = 1'b0;
 	t_take_br = 1'b0;
 	t_mispred_br = 1'b0;
-	t_jaddr = {int_uop.jmp_imm[9:0],int_uop.imm,2'd0};
+	t_jaddr = {r_int_jmp_imm[9:0],int_uop.imm,2'd0};
 	t_alu_valid = 1'b0;
 	t_hilo_result = 'd0;
 	t_wr_hilo = 1'b0;
@@ -2913,7 +3031,7 @@ module exec(clk,
 	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-     	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
+     	       t_result = r_int_pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end // case: BGEZAL
@@ -2922,7 +3040,7 @@ module exec(clk,
 	       t_take_br = 1'b1;
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;
+	       t_result = r_int_pc[`M_WIDTH-1:0] + 'd8;
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -2999,7 +3117,7 @@ module exec(clk,
 	       t_take_br = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}}));
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
+	       t_result = r_int_pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -3008,7 +3126,7 @@ module exec(clk,
 	       t_take_br = ($signed(t_srcA) < $signed({`M_WIDTH{1'b0}}));
 	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
+	       t_result = r_int_pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -3017,7 +3135,7 @@ module exec(clk,
 	       t_take_br = (t_srcA[`M_WIDTH-1] == 1'b0);
 	       t_mispred_br = (int_uop.br_pred != t_take_br) || !t_take_br;
 	       t_pc = t_take_br ? (t_pc4 + {t_simm[`M_WIDTH-3:0], 2'd0}) : t_pc8;
-	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
+	       t_result = r_int_pc[`M_WIDTH-1:0] + 'd8;   /* *al: link UNCONDITIONALLY */
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
@@ -3034,24 +3152,24 @@ module exec(clk,
 	       t_take_br = 1'b1;
 	       t_mispred_br = int_uop.br_pred != t_take_br;
 	       t_pc = {t_pc4[`M_WIDTH-1:28], t_jaddr};
-	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;
+	       t_result = r_int_pc[`M_WIDTH-1:0] + 'd8;
 	       t_alu_valid = 1'b1;
 	       t_wr_int_prf = 1'b1;
 	    end
 	  JR:
 	    begin
 	       t_take_br = 1'b1;
-	       t_mispred_br = (t_srcA != {int_uop.jmp_imm,int_uop.imm});
+	       t_mispred_br = (t_srcA != {r_int_jmp_imm,int_uop.imm});
 	       t_pc = t_srcA;
 	       t_alu_valid = 1'b1;
 	    end
 	  JALR:
 	    begin
 	       t_take_br = 1'b1;
-	       t_mispred_br = (t_srcA != {int_uop.jmp_imm,int_uop.imm});
+	       t_mispred_br = (t_srcA != {r_int_jmp_imm,int_uop.imm});
 	       t_pc = t_srcA;
 	       t_alu_valid = 1'b1;
-	       t_result = int_uop.pc[`M_WIDTH-1:0] + 'd8;
+	       t_result = r_int_pc[`M_WIDTH-1:0] + 'd8;
 	       t_wr_int_prf = 1'b1;
 	    end
 	  ANDI:
