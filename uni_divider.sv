@@ -45,10 +45,13 @@ module uni_divider(clk,
 		   hilo_prf_ptr_in,
 		   is_signed_div,
 		   start_div,
+		   start_div_next,
+		   fp_start_next,
 		   y,
 		   rob_ptr_out,
 		   hilo_prf_ptr_out,
 		   ready,
+		   div_ok,
 		   complete,
 		   fp_opcode,
 		   fp_start,
@@ -90,10 +93,19 @@ module uni_divider(clk,
    input logic [`LG_HILO_PRF_ENTRIES-1:0] hilo_prf_ptr_in;
    input logic 	      is_signed_div;
    input logic 	      start_div;
+   /* div_ok: `ready` one cycle early, as a FLOP, so the core's ALU select does not see
+    * start_div/fp_start combinationally.  The caller says what starts NEXT cycle:
+    * start_div_next = an int divide enters the issue stage (its start_div next cycle),
+    * fp_start_next = an FP div/sqrt pops (its fp_start next cycle).  Then
+    * r_div_ok(t) = (r_state(t) == IDLE) & !start_div(t) & !fp_start(t) = ready(t), except
+    * in a flush cycle, where start_div is squashed and nothing issues anyway. */
+   input logic 	      start_div_next;
+   input logic 	      fp_start_next;
    output logic [W2-1:0] y;
    output logic [`LG_ROB_ENTRIES-1:0] rob_ptr_out;
    output logic [`LG_HILO_PRF_ENTRIES-1:0] hilo_prf_ptr_out;
    output logic        ready;
+   output logic        div_ok;
    output logic        complete;
    /* ---- FP side (== fpu_iter minus multiply) ---- */
    input opcode_t      fp_opcode;
@@ -125,6 +137,16 @@ module uni_divider(clk,
 			     FP_RSQRT2 = 'd7	/* rsqrt: restart as 1.0 / the rounded root */
 			     } state_t;
    state_t r_state, n_state;
+   logic r_div_ok, n_div_ok;
+   assign div_ok = r_div_ok;
+   always_comb
+     begin
+	n_div_ok = (n_state == IDLE) & !start_div_next & !fp_start_next;
+     end
+   always_ff@(posedge clk)
+     begin
+	r_div_ok <= reset ? 1'b1 : n_div_ok;
+     end // always_ff
 
    /* ---- shared recurrence state ---- */
    logic [RW-1:0] 		     r_rem, n_rem;	/* partial remainder (the step's lhs) */

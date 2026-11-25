@@ -666,6 +666,12 @@ module l2(clk,
 		  (w_pres[N_PIDX-1:0] != w_req_pidx) &&
 		  ((r_opcode == 6'd4) || (r_opcode == MEM_INVL) || (r_opcode == MEM_PGDROP));
 `endif
+   /* an L1I fill of a line the L1D may hold (pd): probe it out of the L1D first, so a
+    * dirty copy -- code just written with cached stores -- is what the L1I gets
+    * (superdupersparc's w_ifill_pd).  The architecture wants a D writeback first; the
+    * real IP24 PROM's D-Index-WB-Inv sweep is sized from Config (16 KB) and so misses
+    * 3/4 of a 64 KB L1D before it runs the code it copied (tests/cache/test_smc_nowb.S). */
+   wire w_ifill_pd = !r_from_d && !r_is_uncache && w_hit && w_pres[N_PIDX] && (r_opcode == 6'd4);
    wire 		w_need_wb = w_valid ? w_dirty : 1'b0;
    /* the block op's current line; the index form takes whatever line sits at the set */
    wire [`PA_WIDTH-1:0] w_blk_line = {r_blk_addr, r_blk_cnt[2:0], 4'd0};
@@ -1314,15 +1320,16 @@ module l2(clk,
 			 n_state = (r_opcode == 6'd7) ? UNCACHE_STORE : UNCACHE_LOAD;
 		      end
 		 end
-	       else if(w_alias && !r_probed)
+	       else if((w_alias || w_ifill_pd) && !r_probed)
 		 begin
-		    /* stage C2: probe the other-colour copy out of the L1D; the arms below
-		     * then run with r_probed set and use r_probe_data if it was dirty.
+		    /* stage C2: probe the other-colour copy (or, for an L1I fill, the L1D's
+		     * copy) out of the L1D; the arms below then run with r_probed set and use
+		     * r_probe_data if it was dirty.
 		     * Stay in CHECK_VALID_AND_TAG (t_idx holds, so w_* stay put). */
 		    n_probe_req = 1'b1;
 		    n_probe_addr = {w_tag, t_idx, 4'd0};
 		    n_probe_colour = w_pres[N_PIDX-1:0];
-		    n_probe_reason = (r_opcode == 6'd4) ? 4'd2 : (r_opcode == MEM_INVL) ? 4'd3 : 4'd4;
+		    n_probe_reason = w_ifill_pd ? 4'd9 : (r_opcode == 6'd4) ? 4'd2 : (r_opcode == MEM_INVL) ? 4'd3 : 4'd4;
 		    if(r_probe_req && probe_ack)
 		      begin
 			 n_probe_req = 1'b0;
@@ -1568,14 +1575,12 @@ module l2(clk,
 			      t_wr_pres = 1'b1;
 			      t_pres = {1'b1, w_req_pidx};
 			   end
-`ifdef ENABLE_COHERENT_L1I
 			 else if(r_probed)
 			   begin
-			      /* the probe took it out of the L1D */
+			      /* an L1I fill whose probe (w_ifill_pd) took it out of the L1D */
 			      t_wr_pres = 1'b1;
 			      t_pres = 'd0;
 			   end
-`endif
 			 n_rsp_data =  w_d0;
 			 if(r_probe_dirty)
 			   begin
