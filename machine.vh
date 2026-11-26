@@ -21,6 +21,11 @@
 `define ENABLE_TRACE_BUFFER 1
 `endif
 
+/* HW_TOPDOWN: synthesizable top-down counters (core.sv), read one at a time through
+ * core_l1d_l1i's pmu_sel / pmu_value (henry: AXI write 0x25 {high half, sel}, read 0x2C).
+ * Comment out to remove them. */
+`define HW_TOPDOWN 1
+
 // On-silicon HW breakpoint/value-watchpoint in core.sv (freeze the pipe at an offending
 // instruction; read GPRs/DRAM coherently over AXI).  OFF by default -- uncomment to
 // re-enable the on-silicon watchpoint (see docs/methodology.md "Chasing a bug on silicon").

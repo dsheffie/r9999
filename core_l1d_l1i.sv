@@ -16,6 +16,8 @@ module core_l1d_l1i(clk,
 		    putchar_fifo_wptr,
 		    putchar_fifo_rptr,
 		    single_step,
+		    pmu_sel,
+		    pmu_value,
 		    bp_enable,
 		    fault_clear,
 		    bp_pc,
@@ -152,6 +154,10 @@ module core_l1d_l1i(clk,
    output logic [3:0] putchar_fifo_rptr;
    
    input logic single_step;
+   /* HW_TOPDOWN counters: 0-15 the core's (core.sv), 16-21 the L1I/L1D/L2
+    * access and hit counts; pmu_value follows pmu_sel two cycles later */
+   input logic [4:0] pmu_sel;
+   output logic [47:0] pmu_value;
    input logic bp_enable;
    input logic fault_clear;
    input logic [31:0] bp_pc;
@@ -1086,6 +1092,24 @@ module core_l1d_l1i(clk,
 	      .tlb_entry_in(tlb_entry_out)
 	      );
 
+   /* two stages on both sides: the core registers its pick, this side registers
+    * the cache counters' pick, then the final select (pmu_sel[4] a cycle late) */
+   wire [47:0] w_core_pmu_value;
+   logic [47:0] r_cache_pmu, r_pmu_value;
+   logic 	r_pmu_sel4;
+   assign pmu_value = r_pmu_value;
+   always_ff@(posedge clk)
+     begin
+	r_pmu_sel4 <= pmu_sel[4];
+	r_cache_pmu <= (pmu_sel[3:0] == 4'd0) ? l1i_cache_accesses[47:0] :
+		       (pmu_sel[3:0] == 4'd1) ? l1i_cache_hits[47:0] :
+		       (pmu_sel[3:0] == 4'd2) ? l1d_cache_accesses[47:0] :
+		       (pmu_sel[3:0] == 4'd3) ? l1d_cache_hits[47:0] :
+		       (pmu_sel[3:0] == 4'd4) ? l2_cache_accesses[47:0] :
+		       (pmu_sel[3:0] == 4'd5) ? l2_cache_hits[47:0] : 48'd0;
+	r_pmu_value <= r_pmu_sel4 ? r_cache_pmu : w_core_pmu_value;
+     end // always_ff
+
    core cpu (
 	     .clk(clk),
 	     .reset(reset),
@@ -1106,6 +1130,8 @@ module core_l1d_l1i(clk,
 	     .putchar_fifo_wptr(putchar_fifo_wptr),
 	     .putchar_fifo_rptr(putchar_fifo_rptr),
 	     .single_step(single_step),
+	     .pmu_sel(pmu_sel[3:0]),
+	     .pmu_value(w_core_pmu_value),
 	     .bp_enable(bp_enable),
 	     .fault_clear(fault_clear),
 	     .bp_pc(bp_pc),

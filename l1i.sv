@@ -423,6 +423,8 @@ endfunction
    logic 		  t_lru_wr, t_lru_val;
    logic [`LG_L1I_NUM_SETS-1:0] t_lru_idx;
    logic 		  t_miss, t_hit;
+   /* the access counters: a lookup that starts a fill, or a hit that pushes */
+   logic 		  t_cnt_acc, t_cnt_hit;
    logic 		  t_push_insn, t_push_insn2;
    
    logic 		  t_clear_fq;
@@ -849,6 +851,8 @@ endfunction
 	t_cache_idx = 'd0;
 	t_cache_tag = 'd0;
 	n_req = 1'b0;
+	t_cnt_acc = 1'b0;
+	t_cnt_hit = 1'b0;
 	n_mem_req_valid = 1'b0;
 	n_mem_req_addr = r_mem_req_addr;
 	n_mem_req_cacheable = r_mem_req_cacheable;
@@ -1061,6 +1065,7 @@ endfunction
 		 end
 	       else if(t_miss)
 		 begin
+		    t_cnt_acc = 1'b1;
 		    n_state = INJECT_RELOAD;
 		    n_mem_req_addr = {w_tlb_pc[`PA_WIDTH-1:`LG_L1D_CL_LEN],
 				      {`LG_L1D_CL_LEN{1'b0}}};
@@ -1073,6 +1078,8 @@ endfunction
 		 end
 	       else if(t_hit && !fq_full)
 		 begin
+		    t_cnt_acc = 1'b1;
+		    t_cnt_hit = 1'b1;
 		    t_update_spec_hist = (t_pd != 4'd0);
 		    if(t_pd == 4'd5 || t_pd == 4'd3)
 		      begin
@@ -1411,11 +1418,11 @@ endfunction
      begin
 	n_cache_accesses = r_cache_accesses;
 	n_cache_hits = r_cache_hits;	
-	if(t_hit)
+	if(t_cnt_hit)
 	  begin
 	     n_cache_hits = r_cache_hits + 'd1;
 	  end
-	if(r_req)
+	if(t_cnt_acc)
 	  begin
 	     n_cache_accesses = r_cache_accesses + 'd1;
 	  end

@@ -3030,7 +3030,11 @@ endfunction
 			 n_core_mem_rsp.fp_merge = r_req2.fp_merge;   /* FR=0 lwc1 merge */
 			 n_core_mem_rsp.fp_hi = r_req2.fp_hi;
 			 n_core_mem_rsp.fp_pres = r_req2.fp_pres;
-                         n_cache_hits = r_cache_hits + 'd1;
+			 if(!r_req2.is_store)
+			   begin
+			      n_cache_hits = r_cache_hits + 'd1;
+			      n_cache_accesses = r_cache_accesses + 'd1;
+			   end
                          n_core_mem_rsp_valid = 1'b1;
 			 n_core_mem_rsp.bad_addr = r_req2.bad_addr;
 			 n_core_mem_rsp.tlb_hit = w_tlb_hit;
@@ -3062,9 +3066,12 @@ endfunction
 			   begin
 			      t_push_miss = 1'b1;
 			   end
-			 if(t_port2_hit_cache)
+			 /* the access counters count load lookups: a fast hit (above) or a
+			  * tag miss here.  A load whose line is present but busy replays
+			  * and is counted then; stores are not counted */
+			 if(!t_port2_hit_cache && !r_req2.is_store)
 			   begin
-			      n_cache_hits = r_cache_hits + 'd1;
+			      n_cache_accesses = r_cache_accesses + 'd1;
 			   end
 			 t_pt2 = r_req2.is_store ? 8'd0 : "M";
 			 /* cacheable simple load: hand it back to the LSU with a block
@@ -3857,8 +3864,6 @@ endfunction
 		  
 		  n_last_wr2 = core_mem_req.is_store && !core_mem_req.commit;
 		  n_last_rd2 = !core_mem_req.is_store;
-		  
-		  n_cache_accesses =  r_cache_accesses + 'd1;
 	  end
      end // always_comb
 

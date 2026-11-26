@@ -812,6 +812,25 @@ int check_insn_bytes(long long pc, int data) {
 static long long lrc = -1;
 static uint64_t record_insns_retired = 0;
 
+/* HW_TOPDOWN counters (core.sv, core_l1d_l1i.sv): the main loop sweeps pmu_sel
+ * over 0..31 and keeps the latest value of each, as the board reads them over AXI */
+static bool g_pmu_report = false;
+static uint64_t g_pmu_val[32] = {0};
+static void pmu_report() {
+  static const char *names[22] = {
+    "cycles", "retired", "allocated", "fe_lat_slots", "fe_bw_slots",
+    "be_rob_full", "be_uq_full", "be_freelist", "be_oldest_first", "be_pending_fault",
+    "be_other", "be_pairing", "not_active_cyc", "-", "-", "-",
+    "l1i_acc", "l1i_hit", "l1d_acc", "l1d_hit", "l2_acc", "l2_hit"
+  };
+  for(int i = 0; i < 22; i++) {
+    if(names[i][0] == '-') {
+      continue;
+    }
+    std::cout << "[pmu] " << i << " " << names[i] << " = " << g_pmu_val[i] << "\n";
+  }
+}
+
 /* TOP-DOWN accounting (core.sv `ifdef TOPDOWN, --topdown).  core.sv reports, every
  * cycle, the state, how many uops the decode queue offered (0/1/2), how many
  * allocated and retired, and why an offered slot did not allocate.  Accumulated
@@ -1267,6 +1286,7 @@ int main(int argc, char **argv) {
       ("pipelog,p", po::value<std::string>(&pipelog), "log for pipeline tracing")
       ("pipestart", po::value<uint64_t>(&pipestart)->default_value(0), "when to start logging")
       ("pipeend", po::value<uint64_t>(&pipeend)->default_value(~0UL), "when to stop logging")      
+      ("pmu", po::value<bool>(&g_pmu_report)->default_value(false), "print the HW_TOPDOWN counters (read through pmu_sel/pmu_value) at exit")
       ("topdown", po::value<bool>(&topdown::enabled)->default_value(false), "top-down slot accounting over the pipestart..pipeend window (build with +define+TOPDOWN)")
       ("maxcycle", po::value<uint64_t>(&max_cycle)->default_value(1UL<<34), "maximum cycles")
       ("maxicnt", po::value<uint64_t>(&max_icnt)->default_value(1UL<<50), "maximum icnt")
@@ -2206,6 +2226,9 @@ int main(int argc, char **argv) {
       got_putchar = false;
     }    
     ++globals::cycle;
+    /* HW_TOPDOWN: sweep the select; pmu_value is the select of two cycles ago */
+    g_pmu_val[(globals::cycle - 2) & 31] = tb->pmu_value;
+    tb->pmu_sel = globals::cycle & 31;
   }
 
   // ---- dump trace buffer (validate the cycle-accounting buffer) ----
@@ -2503,6 +2526,9 @@ int main(int argc, char **argv) {
             << "  l1i_hits = " << tb->l1i_cache_hits << "\n";
   std::cout << "[ctr] l2_accesses  = " << tb->l2_cache_accesses
             << "  l2_hits  = " << tb->l2_cache_hits << "\n";
+  }
+  if(g_pmu_report) {
+    pmu_report();
   }
   
   std::cout << "simulation took " << t0 << " seconds, " << (insns_retired/t0)

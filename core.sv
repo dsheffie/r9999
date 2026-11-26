@@ -54,6 +54,8 @@ module core(clk,
 	    fml_ret_badv,
 `endif
 	    single_step,
+	    pmu_sel,
+	    pmu_value,
 	    step,
 	    bp_enable,
 	    fault_clear,
@@ -240,6 +242,9 @@ module core(clk,
    output logic			      head_of_rob_ds_committable;
    input logic resume;
    input logic single_step;
+   /* HW_TOPDOWN counter select / value (registered; see the counter bank) */
+   input logic [3:0] pmu_sel;
+   output logic [47:0] pmu_value;
    input logic step;
    input logic bp_enable;   /* debug: freeze core after retiring bp_pc (also arms the fault-trap) */
    input logic fault_clear; /* debug: clear the fault-trap latch + re-arm + un-freeze (resettable) */
@@ -4987,17 +4992,8 @@ module core(clk,
      end // always_ff@ (negedge clk)
 `endif
 
-`ifdef TOPDOWN
-   /* TOP-DOWN accounting (Verilator-only; +define+TOPDOWN, top.cc --topdown).  The
-    * allocation stage is the dispatch point: 2 slots per cycle.  Each cycle report
-    * the state, how many uops the decode queue OFFERS (0/1/2), how many allocated
-    * and retired, and WHY an offered slot did not allocate:
-    *   1 ROB full  2 uop queue full  3 PRF/HILO/FP/FCR free list short
-    *   4 oldest-first pending  5 pending fault  6 other  7 pairing rule (slot 1 only:
-    *   two branches, oldest-first or serializing second uop)
-    * top.cc turns that into retiring / bad speculation / frontend / backend. */
-   import "DPI-C" function void topdown_cycle(input int st, input int avail, input int nalloc,
-					      input int nret, input int be0, input int be1);
+   /* top-down slot classification, shared by the TOPDOWN DPI and the HW_TOPDOWN
+    * counters (reason codes in the TOPDOWN comment below) */
    wire [1:0] w_td_avail = t_dq_empty ? 2'd0 : (t_dq_next_empty ? 2'd1 : 2'd2);
    logic [2:0] t_td_be0, t_td_be1;
    always_comb
@@ -5020,6 +5016,17 @@ module core(clk,
 			((t_uop.is_br & t_uop2.is_br) | t_uop.oldest_first | t_uop2.oldest_first | t_uop2.serializing_op) ? 3'd7 : 3'd6;
 	  end
      end // always_comb
+`ifdef TOPDOWN
+   /* TOP-DOWN accounting (Verilator-only; +define+TOPDOWN, top.cc --topdown).  The
+    * allocation stage is the dispatch point: 2 slots per cycle.  Each cycle report
+    * the state, how many uops the decode queue OFFERS (0/1/2), how many allocated
+    * and retired, and WHY an offered slot did not allocate:
+    *   1 ROB full  2 uop queue full  3 PRF/HILO/FP/FCR free list short
+    *   4 oldest-first pending  5 pending fault  6 other  7 pairing rule (slot 1 only:
+    *   two branches, oldest-first or serializing second uop)
+    * top.cc turns that into retiring / bad speculation / frontend / backend. */
+   import "DPI-C" function void topdown_cycle(input int st, input int avail, input int nalloc,
+					      input int nret, input int be0, input int be1);
    /* per-uop stage stamps: allocation here, scheduler entry / issue in exec.sv,
     * joined in top.cc by rob index at retirement */
    import "DPI-C" function void topdown_uop(input int ev, input int rob_ptr);
@@ -5062,6 +5069,66 @@ module core(clk,
 			   {29'd0, t_td_be0}, {29'd0, t_td_be1});
 	  end
      end // always_ff
+`endif
+
+`ifdef HW_TOPDOWN
+   /* HW_TOPDOWN: the TOPDOWN accounting above as synthesizable counters, so the
+    * board can measure it (Kodiak reads them over AXI).  pmu_sel picks one,
+    * pmu_value is that counter one cycle later (core_l1d_l1i adds a stage).
+    * The events are flopped first (r_td_*) so each 48-bit adder sees only
+    * flops, not the allocation logic.
+    *   0 cycles                     1 uops retired        2 uops allocated
+    *   3 frontend-latency slots (ACTIVE, nothing offered: 2 per cycle)
+    *   4 frontend-bandwidth slots (ACTIVE, one offered: 1 per cycle)
+    *   5..11 offered-but-not-allocated slots by reason 1..7 (ROB full, uop queue
+    *         full, free list short, oldest-first pending, pending fault, other,
+    *         pairing rule)
+    *   12 cycles outside ACTIVE (restart, drain, traps, serialization)
+    *   13..15 read 0 */
+   localparam N_PMU = 13;
+   logic [47:0] r_pmu[N_PMU-1:0];
+   logic [1:0] 	r_td_avail, r_td_nalloc, r_td_nret;
+   logic [2:0] 	r_td_be0, r_td_be1;
+   logic 	r_td_active;
+   logic [1:0] 	t_pmu_inc[N_PMU-1:0];
+   logic [47:0] r_pmu_value;
+   assign pmu_value = r_pmu_value;
+   always_ff@(posedge clk)
+     begin
+	r_td_active <= (r_state == ACTIVE);
+	r_td_avail <= w_td_avail;
+	r_td_nalloc <= t_alloc ? (t_alloc_two ? 2'd2 : 2'd1) : 2'd0;
+	r_td_nret <= t_retire ? (t_retire_two ? 2'd2 : 2'd1) : 2'd0;
+	r_td_be0 <= t_td_be0;
+	r_td_be1 <= t_td_be1;
+     end // always_ff
+   always_comb
+     begin
+	t_pmu_inc[0] = 2'd1;
+	t_pmu_inc[1] = r_td_nret;
+	t_pmu_inc[2] = r_td_nalloc;
+	t_pmu_inc[3] = (r_td_active & (r_td_avail == 2'd0)) ? 2'd2 : 2'd0;
+	t_pmu_inc[4] = (r_td_active & (r_td_avail == 2'd1)) ? 2'd1 : 2'd0;
+	for(integer k = 1; k < 8; k = k + 1)
+	  begin
+	     /* be0 is set only when nothing allocated, be1 only when one did: at
+	      * most one of them names a reason in a cycle */
+	     t_pmu_inc[4 + k] = !r_td_active ? 2'd0 :
+				(r_td_be0 == k[2:0]) ? r_td_avail :
+				(r_td_be1 == k[2:0]) ? 2'd1 : 2'd0;
+	  end
+	t_pmu_inc[12] = r_td_active ? 2'd0 : 2'd1;
+     end // always_comb
+   always_ff@(posedge clk)
+     begin
+	for(integer k = 0; k < N_PMU; k = k + 1)
+	  begin
+	     r_pmu[k] <= reset ? 48'd0 : (r_pmu[k] + {46'd0, t_pmu_inc[k]});
+	  end
+	r_pmu_value <= (pmu_sel < N_PMU) ? r_pmu[pmu_sel] : 48'd0;
+     end // always_ff
+`else
+   assign pmu_value = 48'd0;
 `endif
 
    /* Case 2: latch the resolved target of the most-recently-retired branch.
